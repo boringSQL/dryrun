@@ -1,0 +1,7 @@
+[package]
+name = "dry_run_cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dry_run_core.workspace = true

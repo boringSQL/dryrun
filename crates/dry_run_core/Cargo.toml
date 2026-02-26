@@ -1,0 +1,4 @@
+[package]
+name = "dry_run_core"
+version.workspace = true
+edition.workspace = true
