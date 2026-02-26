@@ -2,3 +2,21 @@
 name = "dry_run_core"
 version.workspace = true
 edition.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+pg_query = { workspace = true }
+regex = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["macros"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"
