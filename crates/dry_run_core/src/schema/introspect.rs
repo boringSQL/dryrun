@@ -677,13 +677,12 @@ async fn fetch_column_stats(pool: &PgPool) -> Result<Vec<RawColumnStats>> {
                s.most_common_freqs::text       AS most_common_freqs,
                s.histogram_bounds::text        AS histogram_bounds,
                s.correlation::float8           AS correlation
-          FROM pg_catalog.pg_stats s
-          JOIN pg_catalog.pg_class c
-            ON c.relname = s.tablename
-          JOIN pg_catalog.pg_namespace n
-            ON n.oid = c.relnamespace AND n.nspname = s.schemaname
-         WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-           AND c.relkind IN ('r', 'p')
+          FROM pg_catalog.pg_class c
+          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_catalog.pg_stats s
+            ON s.schemaname = n.nspname AND s.tablename = c.relname
+         WHERE c.relkind IN ('r', 'p')
+           AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
         "#,
     )
     .fetch_all(pool)
