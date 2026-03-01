@@ -191,7 +191,7 @@ pub struct DomainType {
     pub base_type: String,
     pub nullable: bool,
     pub default: Option<String>,
-    pub check_constraint: Option<String>,
+    pub check_constraints: Vec<String>,
 }
 
 /// A PostgreSQL composite type.

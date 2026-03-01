@@ -471,11 +471,10 @@ async fn fetch_domains(pool: &PgPool) -> Result<Vec<DomainType>> {
                pg_catalog.format_type(t.typbasetype, t.typtypmod) AS base_type,
                t.typnotnull AS notnull,
                pg_catalog.pg_get_expr(t.typdefaultbin, 0) AS default_expr,
-               (SELECT pg_catalog.pg_get_constraintdef(con.oid)
+               (SELECT array_agg(pg_catalog.pg_get_constraintdef(con.oid) ORDER BY con.conname)
                   FROM pg_catalog.pg_constraint con
                  WHERE con.contypid = t.oid
-                 LIMIT 1
-               ) AS check_constraint
+               ) AS check_constraints
           FROM pg_catalog.pg_type t
           JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
          WHERE t.typtype = 'd'
@@ -494,7 +493,9 @@ async fn fetch_domains(pool: &PgPool) -> Result<Vec<DomainType>> {
             base_type: r.get("base_type"),
             nullable: !r.get::<bool, _>("notnull"),
             default: r.get("default_expr"),
-            check_constraint: r.get("check_constraint"),
+            check_constraints: r
+                .get::<Option<Vec<String>>, _>("check_constraints")
+                .unwrap_or_default(),
         })
         .collect())
 }
