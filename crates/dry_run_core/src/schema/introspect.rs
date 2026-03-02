@@ -748,6 +748,8 @@ async fn fetch_partition_children(pool: &PgPool) -> Result<Vec<RawPartitionChild
           JOIN pg_catalog.pg_class c ON c.oid = inh.inhrelid
           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
          WHERE c.relispartition
+           AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+           AND n.nspname NOT LIKE 'pg_temp_%'
          ORDER BY inh.inhparent, c.relname
         "#,
     )
