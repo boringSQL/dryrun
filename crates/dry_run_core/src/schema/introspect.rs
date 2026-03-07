@@ -144,6 +144,7 @@ struct RawConstraint {
     definition: Option<String>,
     fk_table: Option<String>,
     fk_columns: Vec<String>,
+    comment: Option<String>,
 }
 
 struct RawTableComment {
@@ -330,10 +331,13 @@ async fn fetch_constraints(pool: &PgPool) -> Result<Vec<RawConstraint>> {
                       JOIN pg_catalog.pg_attribute a
                         ON a.attrelid = con.confrelid AND a.attnum = ord.attnum
                    )
-               END AS fk_col_names
+               END AS fk_col_names,
+               d.description AS comment
           FROM pg_catalog.pg_constraint con
           JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          LEFT JOIN pg_catalog.pg_description d
+            ON d.objoid = con.oid AND d.objsubid = 0
          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
            AND n.nspname NOT LIKE 'pg_temp_%'
          ORDER BY con.conrelid, con.conname
@@ -356,6 +360,7 @@ async fn fetch_constraints(pool: &PgPool) -> Result<Vec<RawConstraint>> {
             fk_columns: r
                 .get::<Option<Vec<String>>, _>("fk_col_names")
                 .unwrap_or_default(),
+            comment: r.get("comment"),
         })
         .collect())
 }
@@ -1045,6 +1050,7 @@ fn assemble_tables(
                 definition: rc.definition,
                 fk_table: rc.fk_table,
                 fk_columns: rc.fk_columns,
+                comment: rc.comment,
             });
     }
 

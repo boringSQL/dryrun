@@ -172,6 +172,12 @@ fn diff_table_details(old: &Table, new: &Table) -> Vec<String> {
                     old_col.default, new_col.default
                 ));
             }
+            if old_col.comment != new_col.comment {
+                details.push(format!(
+                    "column {name}: comment changed {:?} -> {:?}",
+                    old_col.comment, new_col.comment
+                ));
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 pub mod connection;
 pub mod diff;
 pub mod error;
+pub mod knowledge;
 pub mod schema;
 pub mod version;
 

@@ -57,6 +57,7 @@ pub struct Constraint {
     pub definition: Option<String>,
     pub fk_table: Option<String>,
     pub fk_columns: Vec<String>,
+    pub comment: Option<String>,
 }
 
 /// The kind of a table constraint.
