@@ -47,11 +47,11 @@ impl LintReport {
                 .count(),
             warnings: violations
                 .iter()
-                .filter(|v| v.severity == Severity::Info)
+                .filter(|v| v.severity == Severity::Warning)
                 .count(),
             info: violations
                 .iter()
-                .filter(|v| v.severity == Severity::Warning)
+                .filter(|v| v.severity == Severity::Info)
                 .count(),
         };
         Self {
