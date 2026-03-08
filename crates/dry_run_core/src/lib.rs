@@ -4,6 +4,7 @@ pub mod diff;
 pub mod error;
 pub mod knowledge;
 pub mod lint;
+pub mod query;
 pub mod schema;
 pub mod version;
 
