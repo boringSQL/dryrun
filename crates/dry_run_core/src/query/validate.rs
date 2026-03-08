@@ -127,3 +127,184 @@ fn validate_filter_columns(
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::schema::*;
+
+    fn test_schema() -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "test".into(),
+            timestamp: Utc::now(),
+            content_hash: "test".into(),
+            tables: vec![
+                Table {
+                    oid: 1,
+                    schema: "public".into(),
+                    name: "users".into(),
+                    columns: vec![
+                        Column {
+                            name: "id".into(),
+                            ordinal: 1,
+                            type_name: "bigint".into(),
+                            nullable: false,
+                            default: None,
+                            identity: None,
+                            comment: None,
+                            stats: None,
+                        },
+                        Column {
+                            name: "email".into(),
+                            ordinal: 2,
+                            type_name: "text".into(),
+                            nullable: false,
+                            default: None,
+                            identity: None,
+                            comment: None,
+                            stats: None,
+                        },
+                    ],
+                    constraints: vec![],
+                    indexes: vec![],
+                    comment: None,
+                    stats: Some(TableStats {
+                        reltuples: 1_000_000.0,
+                        dead_tuples: 0,
+                        last_vacuum: None,
+                        last_autovacuum: None,
+                        last_analyze: None,
+                        last_autoanalyze: None,
+                        seq_scan: 0,
+                        idx_scan: 0,
+                        table_size: 100_000_000,
+                    }),
+                    partition_info: None,
+                    policies: vec![],
+                    triggers: vec![],
+                    rls_enabled: false,
+                },
+                Table {
+                    oid: 2,
+                    schema: "public".into(),
+                    name: "orders".into(),
+                    columns: vec![
+                        Column {
+                            name: "id".into(),
+                            ordinal: 1,
+                            type_name: "bigint".into(),
+                            nullable: false,
+                            default: None,
+                            identity: None,
+                            comment: None,
+                            stats: None,
+                        },
+                        Column {
+                            name: "user_id".into(),
+                            ordinal: 2,
+                            type_name: "bigint".into(),
+                            nullable: false,
+                            default: None,
+                            identity: None,
+                            comment: None,
+                            stats: None,
+                        },
+                    ],
+                    constraints: vec![],
+                    indexes: vec![],
+                    comment: None,
+                    stats: Some(TableStats {
+                        reltuples: 50.0,
+                        dead_tuples: 0,
+                        last_vacuum: None,
+                        last_autovacuum: None,
+                        last_analyze: None,
+                        last_autoanalyze: None,
+                        seq_scan: 0,
+                        idx_scan: 0,
+                        table_size: 8192,
+                    }),
+                    partition_info: None,
+                    policies: vec![],
+                    triggers: vec![],
+                    rls_enabled: false,
+                },
+            ],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
+        }
+    }
+
+    #[test]
+    fn valid_query() {
+        let schema = test_schema();
+        let result = validate_query("SELECT id, email FROM users WHERE id = 1", &schema).unwrap();
+        assert!(result.valid);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn nonexistent_table() {
+        let schema = test_schema();
+        let result = validate_query("SELECT * FROM nonexistent", &schema).unwrap();
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.contains("does not exist")));
+    }
+
+    #[test]
+    fn nonexistent_column_in_where() {
+        let schema = test_schema();
+        let result =
+            validate_query("SELECT id FROM users u WHERE u.fake_col = 1", &schema).unwrap();
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.contains("fake_col")));
+    }
+
+    #[test]
+    fn select_star_resolved() {
+        let schema = test_schema();
+        let result = validate_query("SELECT * FROM users", &schema).unwrap();
+        assert!(result.valid);
+        assert!(!result.resolved_star_columns.is_empty());
+        assert_eq!(result.resolved_star_columns[0].columns.len(), 2);
+    }
+
+    #[test]
+    fn select_star_warning() {
+        let schema = test_schema();
+        let result = validate_query("SELECT * FROM users", &schema).unwrap();
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("SELECT *")));
+    }
+
+    #[test]
+    fn unbounded_query_warning() {
+        let schema = test_schema();
+        let result = validate_query("SELECT id FROM users", &schema).unwrap();
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("unbounded")));
+    }
+
+    #[test]
+    fn cartesian_join_warning() {
+        let schema = test_schema();
+        let result = validate_query("SELECT * FROM users, orders", &schema).unwrap();
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("cartesian") || w.message.contains("Cartesian")));
+    }
+}

@@ -148,3 +148,65 @@ fn split_qualified(name: &str) -> (Option<String>, String) {
         (None, name.to_string())
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_simple_select() {
+        let q = parse_sql("SELECT id, name FROM users WHERE id = 1").unwrap();
+        assert_eq!(q.info.statement_type, "SELECT");
+        assert!(q.info.has_where);
+        assert!(!q.info.has_select_star);
+        assert!(!q.info.has_join);
+        assert_eq!(q.info.tables.len(), 1);
+        assert_eq!(q.info.tables[0].name, "users");
+    }
+
+    #[test]
+    fn detect_select_star() {
+        let q = parse_sql("SELECT * FROM orders").unwrap();
+        assert!(q.info.has_select_star);
+        assert!(!q.info.has_where);
+        assert!(!q.info.has_limit);
+    }
+
+    #[test]
+    fn detect_join() {
+        let q = parse_sql(
+            "SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id WHERE o.total > 100",
+        )
+        .unwrap();
+        assert!(q.info.has_join);
+        assert!(q.info.has_where);
+        assert_eq!(q.info.tables.len(), 2);
+    }
+
+    #[test]
+    fn detect_limit() {
+        let q = parse_sql("SELECT * FROM users LIMIT 10").unwrap();
+        assert!(q.info.has_limit);
+    }
+
+    #[test]
+    fn parse_error() {
+        let result = parse_sql("SELEC broken");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn detect_update_without_where() {
+        let q = parse_sql("UPDATE users SET name = 'test'").unwrap();
+        assert_eq!(q.info.statement_type, "UPDATE");
+        assert!(!q.info.has_where);
+    }
+
+    #[test]
+    fn detect_delete_with_where() {
+        let q = parse_sql("DELETE FROM users WHERE id = 1").unwrap();
+        assert_eq!(q.info.statement_type, "DELETE");
+        assert!(q.info.has_where);
+    }
+}
