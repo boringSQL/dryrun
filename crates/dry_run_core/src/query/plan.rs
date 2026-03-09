@@ -100,3 +100,67 @@ fn get_i64(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> i64 {
 fn get_opt_i64(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<i64> {
     obj.get(key).and_then(|v| v.as_i64())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_simple_plan() {
+        let json = serde_json::json!({
+            "Node Type": "Seq Scan",
+            "Relation Name": "users",
+            "Schema": "public",
+            "Alias": "users",
+            "Startup Cost": 0.0,
+            "Total Cost": 35.5,
+            "Plan Rows": 2550,
+            "Plan Width": 64
+        });
+        let plan = parse_plan_json(&json).unwrap();
+        assert_eq!(plan.node_type, "Seq Scan");
+        assert_eq!(plan.relation_name.as_deref(), Some("users"));
+        assert_eq!(plan.total_cost, 35.5);
+        assert_eq!(plan.plan_rows, 2550.0);
+        assert!(plan.children.is_empty());
+    }
+
+    #[test]
+    fn parse_nested_plan() {
+        let json = serde_json::json!({
+            "Node Type": "Nested Loop",
+            "Join Type": "Inner",
+            "Startup Cost": 0.0,
+            "Total Cost": 100.0,
+            "Plan Rows": 10,
+            "Plan Width": 128,
+            "Plans": [
+                {
+                    "Node Type": "Index Scan",
+                    "Relation Name": "users",
+                    "Schema": "public",
+                    "Index Name": "users_pkey",
+                    "Startup Cost": 0.0,
+                    "Total Cost": 8.0,
+                    "Plan Rows": 1,
+                    "Plan Width": 64
+                },
+                {
+                    "Node Type": "Seq Scan",
+                    "Relation Name": "orders",
+                    "Schema": "public",
+                    "Startup Cost": 0.0,
+                    "Total Cost": 50.0,
+                    "Plan Rows": 100,
+                    "Plan Width": 64
+                }
+            ]
+        });
+        let plan = parse_plan_json(&json).unwrap();
+        assert_eq!(plan.node_type, "Nested Loop");
+        assert_eq!(plan.join_type.as_deref(), Some("Inner"));
+        assert_eq!(plan.children.len(), 2);
+        assert_eq!(plan.children[0].node_type, "Index Scan");
+        assert_eq!(plan.children[1].node_type, "Seq Scan");
+    }
+}
