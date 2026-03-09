@@ -1,0 +1,104 @@
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+
+use super::plan::{parse_plan_json, PlanNode};
+use super::plan_warnings::detect_plan_warnings;
+use crate::error::{Error, Result};
+use crate::schema::SchemaSnapshot;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplainResult {
+    pub plan: PlanNode,
+    pub total_cost: f64,
+    pub estimated_rows: f64,
+    pub warnings: Vec<PlanWarning>,
+    pub execution: Option<ExecutionStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanWarning {
+    pub severity: String,
+    pub message: String,
+    pub node_type: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionStats {
+    pub execution_time_ms: f64,
+    pub planning_time_ms: f64,
+}
+
+pub async fn explain_query(
+    pool: &PgPool,
+    sql: &str,
+    analyze: bool,
+    schema: Option<&SchemaSnapshot>,
+) -> Result<ExplainResult> {
+    let explain_sql = if analyze {
+        format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql}")
+    } else {
+        format!("EXPLAIN (FORMAT JSON) {sql}")
+    };
+
+    let json_str: String = if analyze {
+        let mut tx = pool.begin().await?;
+
+        let result: String = sqlx::query_scalar(&explain_sql)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| Error::Introspection(format!("EXPLAIN ANALYZE failed: {e}")))?;
+
+        tx.rollback().await.ok();
+        result
+    } else {
+        sqlx::query_scalar(&explain_sql)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| Error::Introspection(format!("EXPLAIN failed: {e}")))?
+    };
+
+    let plan_json: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| Error::Introspection(format!("failed to parse EXPLAIN JSON: {e}")))?;
+
+    let plan_obj = plan_json
+        .as_array()
+        .and_then(|a| a.first())
+        .ok_or_else(|| Error::Introspection("empty EXPLAIN result".into()))?;
+
+    let plan_node_json = plan_obj
+        .get("Plan")
+        .ok_or_else(|| Error::Introspection("no Plan in EXPLAIN output".into()))?;
+
+    let plan = parse_plan_json(plan_node_json)?;
+
+    let total_cost = plan.total_cost;
+    let estimated_rows = plan.plan_rows;
+
+    let execution = if analyze {
+        let exec_time = plan_obj
+            .get("Execution Time")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let plan_time = plan_obj
+            .get("Planning Time")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        Some(ExecutionStats {
+            execution_time_ms: exec_time,
+            planning_time_ms: plan_time,
+        })
+    } else {
+        None
+    };
+
+    let warnings = detect_plan_warnings(&plan, schema);
+
+    Ok(ExplainResult {
+        plan,
+        total_cost,
+        estimated_rows,
+        warnings,
+        execution,
+    })
+}

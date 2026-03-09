@@ -419,11 +419,10 @@ fn check_fk_has_index(
             if idx.columns.len() < constraint.columns.len() {
                 return false;
             }
-            constraint
-                .columns
+            idx.columns
                 .iter()
-                .zip(idx.columns.iter())
-                .all(|(fk_col, idx_col)| fk_col == idx_col)
+                .zip(constraint.columns.iter())
+                .all(|(idx_col, fk_col)| fk_col == idx_col)
         });
 
         if !has_covering_index {

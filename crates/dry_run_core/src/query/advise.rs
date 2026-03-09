@@ -1,0 +1,296 @@
+use serde::{Deserialize, Serialize};
+
+use super::plan::PlanNode;
+use crate::knowledge;
+use crate::schema::SchemaSnapshot;
+use crate::version::PgVersion;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Advice {
+    pub issue: String,
+    pub severity: String,
+    pub table: Option<String>,
+    pub recommendation: String,
+    pub ddl: Option<String>,
+    pub knowledge_doc: Option<String>,
+    pub version_note: Option<String>,
+}
+
+pub fn advise(
+    plan: &PlanNode,
+    schema: &SchemaSnapshot,
+    pg_version: Option<&PgVersion>,
+) -> Vec<Advice> {
+    let mut advice = Vec::new();
+    walk_for_advice(plan, schema, pg_version, &mut advice);
+    advice
+}
+
+fn walk_for_advice(
+    node: &PlanNode,
+    schema: &SchemaSnapshot,
+    pg_version: Option<&PgVersion>,
+    advice: &mut Vec<Advice>,
+) {
+    advise_seq_scan(node, schema, pg_version, advice);
+    advise_nested_loop_seq_scan(node, pg_version, advice);
+    advise_sort(node, schema, pg_version, advice);
+
+    for child in &node.children {
+        walk_for_advice(child, schema, pg_version, advice);
+    }
+}
+
+fn advise_seq_scan(
+    node: &PlanNode,
+    schema: &SchemaSnapshot,
+    pg_version: Option<&PgVersion>,
+    advice: &mut Vec<Advice>,
+) {
+    if node.node_type != "Seq Scan" {
+        return;
+    }
+    let table_name = match &node.relation_name {
+        Some(n) => n,
+        None => return,
+    };
+    if node.plan_rows < 10_000.0 {
+        return;
+    }
+
+    let schema_name = node.schema.as_deref().unwrap_or("public");
+    let qualified = format!("{schema_name}.{table_name}");
+
+    let table = schema
+        .tables
+        .iter()
+        .find(|t| t.name == *table_name && t.schema == schema_name);
+
+    let filter_col = node
+        .filter
+        .as_ref()
+        .and_then(|f| extract_column_from_filter(f));
+
+    let has_index = if let (Some(table), Some(col)) = (&table, &filter_col) {
+        table
+            .indexes
+            .iter()
+            .any(|idx| idx.columns.first().map(|c| c.as_str()) == Some(col.as_str()))
+    } else {
+        false
+    };
+
+    if has_index {
+        advice.push(Advice {
+            issue: format!(
+                "sequential scan on '{qualified}' (~{} rows) despite existing index",
+                node.plan_rows as i64
+            ),
+            severity: "info".into(),
+            table: Some(qualified),
+            recommendation:
+                "Run ANALYZE to update statistics. The planner may correctly prefer a seq scan if selectivity is low."
+                    .into(),
+            ddl: Some(format!("ANALYZE {schema_name}.{table_name};")),
+            knowledge_doc: None,
+            version_note: None,
+        });
+        return;
+    }
+
+    let index_docs = knowledge::lookup_index_decisions("btree index", pg_version);
+    let doc_ref = index_docs.first().map(|d| d.name.clone());
+
+    let (ddl, recommendation) = if let Some(col) = &filter_col {
+        let col_type = table
+            .and_then(|t| t.columns.iter().find(|c| c.name == *col))
+            .map(|c| c.type_name.as_str())
+            .unwrap_or("unknown");
+
+        let (idx_type, rec) = suggest_index_type(col_type, col);
+        let idx_name = format!("idx_{table_name}_{col}");
+        let ddl = format!(
+            "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({col});"
+        );
+        (Some(ddl), rec)
+    } else {
+        (
+            None,
+            "Add an index on the filtered column(s) to avoid sequential scan.".into(),
+        )
+    };
+
+    advice.push(Advice {
+        issue: format!(
+            "sequential scan on '{qualified}' (~{} rows)",
+            node.plan_rows as i64
+        ),
+        severity: "warning".into(),
+        table: Some(qualified),
+        recommendation,
+        ddl,
+        knowledge_doc: doc_ref,
+        version_note: version_note_for_index(pg_version),
+    });
+}
+
+fn advise_nested_loop_seq_scan(
+    node: &PlanNode,
+    pg_version: Option<&PgVersion>,
+    advice: &mut Vec<Advice>,
+) {
+    if node.node_type != "Nested Loop" {
+        return;
+    }
+
+    let inner = match node.children.get(1) {
+        Some(child) if child.node_type == "Seq Scan" && child.plan_rows > 100.0 => child,
+        _ => return,
+    };
+
+    let table_name = inner.relation_name.as_deref().unwrap_or("unknown");
+    let schema_name = inner.schema.as_deref().unwrap_or("public");
+    let qualified = format!("{schema_name}.{table_name}");
+
+    let filter_col = inner
+        .filter
+        .as_ref()
+        .and_then(|f| extract_column_from_filter(f));
+
+    let ddl = filter_col.as_ref().map(|col| {
+        format!(
+            "CREATE INDEX CONCURRENTLY idx_{table_name}_{col} ON {schema_name}.{table_name}({col});"
+        )
+    });
+
+    advice.push(Advice {
+        issue: format!(
+            "nested loop with sequential scan on inner side '{qualified}' (~{} rows per loop)",
+            inner.plan_rows as i64
+        ),
+        severity: "warning".into(),
+        table: Some(qualified),
+        recommendation:
+            "Add an index on the join/filter column of the inner table to convert the seq scan to an index scan."
+                .into(),
+        ddl,
+        knowledge_doc: Some("btree".into()),
+        version_note: version_note_for_index(pg_version),
+    });
+}
+
+fn advise_sort(
+    node: &PlanNode,
+    _schema: &SchemaSnapshot,
+    pg_version: Option<&PgVersion>,
+    advice: &mut Vec<Advice>,
+) {
+    if node.node_type != "Sort" || node.plan_rows < 10_000.0 {
+        return;
+    }
+
+    let sort_keys = match &node.sort_key {
+        Some(keys) if !keys.is_empty() => keys,
+        _ => return,
+    };
+
+    let table_info = find_table_in_subtree(node);
+    let (schema_name, table_name) = match &table_info {
+        Some((s, t)) => (s.as_str(), t.as_str()),
+        None => return,
+    };
+    let qualified = format!("{schema_name}.{table_name}");
+
+    let first_key = sort_keys[0]
+        .split_whitespace()
+        .next()
+        .unwrap_or(&sort_keys[0]);
+
+    let ddl = format!(
+        "CREATE INDEX CONCURRENTLY idx_{table_name}_{first_key} ON {schema_name}.{table_name}({});",
+        sort_keys.join(", ")
+    );
+
+    advice.push(Advice {
+        issue: format!(
+            "sort on ~{} rows (keys: {})",
+            node.plan_rows as i64,
+            sort_keys.join(", ")
+        ),
+        severity: "info".into(),
+        table: Some(qualified),
+        recommendation: "Consider an index matching the sort order to avoid an explicit sort step."
+            .into(),
+        ddl: Some(ddl),
+        knowledge_doc: Some("btree".into()),
+        version_note: version_note_for_index(pg_version),
+    });
+}
+
+// helpers
+
+fn extract_column_from_filter(filter: &str) -> Option<String> {
+    let trimmed = filter.trim().trim_start_matches('(').trim_end_matches(')');
+    let first_token = trimmed.split_whitespace().next()?;
+    let col = first_token.rsplit('.').next().unwrap_or(first_token);
+    if col.chars().all(|c| c.is_alphanumeric() || c == '_') && !col.is_empty() {
+        Some(col.to_string())
+    } else {
+        None
+    }
+}
+
+fn suggest_index_type(col_type: &str, col_name: &str) -> (&'static str, String) {
+    let ct = col_type.to_lowercase();
+    if ct == "jsonb" {
+        return (
+            "gin",
+            format!("Use GIN index for JSONB column '{col_name}' — supports @>, ?, ?& operators."),
+        );
+    }
+    if ct == "tsvector" {
+        return (
+            "gin",
+            format!("Use GIN index for full-text search column '{col_name}'."),
+        );
+    }
+    if ct.contains("geometry") || ct.contains("geography") {
+        return (
+            "gist",
+            format!("Use GiST index for spatial column '{col_name}'."),
+        );
+    }
+    if ct.contains("range") || ct == "tsrange" || ct == "daterange" || ct == "int4range" {
+        return (
+            "gist",
+            format!("Use GiST index for range column '{col_name}' — supports overlap (&&) and containment."),
+        );
+    }
+    (
+        "btree",
+        format!("Add a B-tree index on '{col_name}' for equality/range lookups."),
+    )
+}
+
+fn version_note_for_index(pg_version: Option<&PgVersion>) -> Option<String> {
+    let ver = pg_version?;
+    if ver.major >= 13 {
+        Some("PG 13+: B-tree deduplication is enabled by default, reducing index size for low-cardinality columns.".into())
+    } else if ver.major >= 11 {
+        Some("PG 11+: Use INCLUDE for covering indexes to enable index-only scans.".into())
+    } else {
+        None
+    }
+}
+
+fn find_table_in_subtree(node: &PlanNode) -> Option<(String, String)> {
+    if let (Some(schema), Some(table)) = (&node.schema, &node.relation_name) {
+        return Some((schema.clone(), table.clone()));
+    }
+    for child in &node.children {
+        if let Some(result) = find_table_in_subtree(child) {
+            return Some(result);
+        }
+    }
+    None
+}
