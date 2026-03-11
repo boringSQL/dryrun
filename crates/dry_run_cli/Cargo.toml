@@ -3,5 +3,15 @@ name = "dry_run_cli"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "dry-run"
+path = "src/main.rs"
+
 [dependencies]
-dry_run_core.workspace = true
+anyhow = "1"
+clap = { workspace = true }
+dry_run_core = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
