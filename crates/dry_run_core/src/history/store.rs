@@ -240,3 +240,105 @@ fn hash_url(url: &str) -> String {
     });
     hex[..16].to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::schema::SchemaSnapshot;
+
+    fn make_snapshot(hash: &str, database: &str) -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: database.into(),
+            timestamp: Utc::now(),
+            content_hash: hash.into(),
+            tables: vec![], enums: vec![], domains: vec![], composites: vec![],
+            views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+        }
+    }
+
+    fn temp_store() -> (TempDir, HistoryStore) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test_history.db");
+        let store = HistoryStore::open(&path).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn save_and_load() {
+        let (_dir, store) = temp_store();
+        let snap = make_snapshot("abc123", "mydb");
+        let url = "postgres://user@host/mydb";
+
+        assert!(store.save_snapshot(url, &snap).unwrap());
+
+        let loaded = store.load_snapshot("abc123").unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().content_hash, "abc123");
+    }
+
+    #[test]
+    fn skip_duplicate_hash() {
+        let (_dir, store) = temp_store();
+        let url = "postgres://user@host/mydb";
+
+        assert!(store.save_snapshot(url, &make_snapshot("same_hash", "mydb")).unwrap());
+        assert!(!store.save_snapshot(url, &make_snapshot("same_hash", "mydb")).unwrap());
+    }
+
+    #[test]
+    fn list_snapshots_order() {
+        let (_dir, store) = temp_store();
+        let url = "postgres://user@host/mydb";
+
+        let mut s1 = make_snapshot("hash1", "mydb");
+        s1.timestamp = Utc::now() - chrono::Duration::hours(2);
+        store.save_snapshot(url, &s1).unwrap();
+
+        let mut s2 = make_snapshot("hash2", "mydb");
+        s2.timestamp = Utc::now() - chrono::Duration::hours(1);
+        store.save_snapshot(url, &s2).unwrap();
+
+        let list = store.list_snapshots(url).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].content_hash, "hash2"); // newest first
+        assert_eq!(list[1].content_hash, "hash1");
+    }
+
+    #[test]
+    fn latest_snapshot() {
+        let (_dir, store) = temp_store();
+        let url = "postgres://user@host/mydb";
+
+        let mut s1 = make_snapshot("old", "mydb");
+        s1.timestamp = Utc::now() - chrono::Duration::hours(1);
+        store.save_snapshot(url, &s1).unwrap();
+
+        let s2 = make_snapshot("new", "mydb");
+        store.save_snapshot(url, &s2).unwrap();
+
+        let latest = store.latest_snapshot(url).unwrap().unwrap();
+        assert_eq!(latest.content_hash, "new");
+    }
+
+    #[test]
+    fn different_urls_isolated() {
+        let (_dir, store) = temp_store();
+        let url1 = "postgres://user@host/db1";
+        let url2 = "postgres://user@host/db2";
+
+        store.save_snapshot(url1, &make_snapshot("h1", "db1")).unwrap();
+        store.save_snapshot(url2, &make_snapshot("h2", "db2")).unwrap();
+
+        let list1 = store.list_snapshots(url1).unwrap();
+        assert_eq!(list1.len(), 1);
+        assert_eq!(list1[0].content_hash, "h1");
+
+        let list2 = store.list_snapshots(url2).unwrap();
+        assert_eq!(list2.len(), 1);
+        assert_eq!(list2[0].content_hash, "h2");
+    }
+}
