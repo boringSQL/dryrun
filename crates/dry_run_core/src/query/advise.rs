@@ -294,3 +294,87 @@ fn find_table_in_subtree(node: &PlanNode) -> Option<(String, String)> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::schema::*;
+
+    fn empty_schema() -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "test".into(),
+            timestamp: Utc::now(),
+            content_hash: "test".into(),
+            tables: vec![Table {
+                oid: 1, schema: "public".into(), name: "orders".into(),
+                columns: vec![
+                    Column { name: "id".into(), ordinal: 1, type_name: "bigint".into(), nullable: false, default: None, identity: None, comment: None, stats: None },
+                    Column { name: "customer_id".into(), ordinal: 2, type_name: "bigint".into(), nullable: false, default: None, identity: None, comment: None, stats: None },
+                    Column { name: "data".into(), ordinal: 3, type_name: "jsonb".into(), nullable: true, default: None, identity: None, comment: None, stats: None },
+                ],
+                constraints: vec![], indexes: vec![], comment: None, stats: None,
+                partition_info: None, policies: vec![], triggers: vec![], rls_enabled: false,
+            }],
+            enums: vec![], domains: vec![], composites: vec![], views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+        }
+    }
+
+    fn make_seq_scan(table: &str, rows: f64, filter: Option<&str>) -> PlanNode {
+        PlanNode {
+            node_type: "Seq Scan".into(), relation_name: Some(table.into()), schema: Some("public".into()),
+            alias: None, startup_cost: 0.0, total_cost: rows * 0.01, plan_rows: rows, plan_width: 64,
+            actual_rows: None, actual_loops: None, actual_startup_time: None, actual_total_time: None,
+            shared_hit_blocks: None, shared_read_blocks: None, index_name: None, index_cond: None,
+            filter: filter.map(String::from), rows_removed_by_filter: None,
+            sort_key: None, sort_method: None, hash_cond: None, join_type: None, children: vec![],
+        }
+    }
+
+    #[test]
+    fn advise_seq_scan_suggests_btree() {
+        let schema = empty_schema();
+        let plan = make_seq_scan("orders", 100_000.0, Some("(customer_id = 42)"));
+        let advice = advise(&plan, &schema, None);
+        assert!(!advice.is_empty());
+        assert!(advice[0].ddl.as_ref().unwrap().contains("btree"));
+        assert!(advice[0].ddl.as_ref().unwrap().contains("customer_id"));
+        assert!(advice[0].ddl.as_ref().unwrap().contains("CONCURRENTLY"));
+    }
+
+    #[test]
+    fn advise_seq_scan_jsonb_suggests_gin() {
+        let schema = empty_schema();
+        let plan = make_seq_scan("orders", 100_000.0, Some("(data @> '{}'::jsonb)"));
+        let advice = advise(&plan, &schema, None);
+        assert!(!advice.is_empty());
+        assert!(advice[0].ddl.as_ref().unwrap().contains("gin"));
+    }
+
+    #[test]
+    fn advise_small_table_no_advice() {
+        let schema = empty_schema();
+        let plan = make_seq_scan("orders", 50.0, Some("(id = 1)"));
+        let advice = advise(&plan, &schema, None);
+        assert!(advice.is_empty());
+    }
+
+    #[test]
+    fn advise_includes_version_note() {
+        let schema = empty_schema();
+        let plan = make_seq_scan("orders", 100_000.0, Some("(customer_id = 42)"));
+        let pg14 = PgVersion { major: 14, minor: 0, patch: 0 };
+        let advice = advise(&plan, &schema, Some(&pg14));
+        assert!(!advice.is_empty());
+        assert!(advice[0].version_note.is_some());
+    }
+
+    #[test]
+    fn extract_column_simple() {
+        assert_eq!(extract_column_from_filter("(customer_id = 42)"), Some("customer_id".into()));
+        assert_eq!(extract_column_from_filter("(status IS NOT NULL)"), Some("status".into()));
+        assert_eq!(extract_column_from_filter("(t.name = 'foo')"), Some("name".into()));
+    }
+}

@@ -472,3 +472,106 @@ fn version_behavior_add_column(pg_version: Option<&PgVersion>) -> Option<String>
         Some("PG <11: Any DEFAULT triggers a full table rewrite.".into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::schema::*;
+
+    fn empty_schema() -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "test".into(),
+            timestamp: Utc::now(),
+            content_hash: "test".into(),
+            tables: vec![Table {
+                oid: 1, schema: "public".into(), name: "orders".into(),
+                columns: vec![], constraints: vec![], indexes: vec![],
+                comment: None,
+                stats: Some(TableStats {
+                    reltuples: 5_000_000.0, dead_tuples: 0,
+                    last_vacuum: None, last_autovacuum: None,
+                    last_analyze: None, last_autoanalyze: None,
+                    seq_scan: 0, idx_scan: 0, table_size: 2_147_483_648,
+                }),
+                partition_info: None, policies: vec![], triggers: vec![], rls_enabled: false,
+            }],
+            enums: vec![], domains: vec![], composites: vec![], views: vec![],
+            functions: vec![], extensions: vec![], gucs: vec![],
+        }
+    }
+
+    fn pg17() -> PgVersion {
+        PgVersion { major: 17, minor: 0, patch: 0 }
+    }
+
+    #[test]
+    fn add_column_no_default_safe() {
+        let checks = check_migration("ALTER TABLE orders ADD COLUMN notes text", &empty_schema(), Some(&pg17())).unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].operation, "ADD COLUMN");
+        assert_eq!(checks[0].safety, SafetyRating::Safe);
+    }
+
+    #[test]
+    fn add_column_with_default() {
+        let checks = check_migration("ALTER TABLE orders ADD COLUMN status text DEFAULT 'pending'", &empty_schema(), Some(&pg17())).unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].safety, SafetyRating::Caution);
+        assert!(checks[0].recommendation.contains("immutable"));
+    }
+
+    #[test]
+    fn create_index_without_concurrently() {
+        let checks = check_migration("CREATE INDEX idx_orders_status ON orders(status)", &empty_schema(), Some(&pg17())).unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].safety, SafetyRating::Dangerous);
+        assert!(checks[0].recommendation.contains("CONCURRENTLY"));
+    }
+
+    #[test]
+    fn create_index_concurrently_safe() {
+        let checks = check_migration("CREATE INDEX CONCURRENTLY idx_orders_status ON orders(status)", &empty_schema(), Some(&pg17())).unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].safety, SafetyRating::Safe);
+    }
+
+    #[test]
+    fn set_not_null_caution_pg12() {
+        let pg12 = PgVersion { major: 12, minor: 0, patch: 0 };
+        let checks = check_migration("ALTER TABLE orders ALTER COLUMN status SET NOT NULL", &empty_schema(), Some(&pg12)).unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].operation, "SET NOT NULL");
+        assert_eq!(checks[0].safety, SafetyRating::Caution);
+        assert!(checks[0].recommendation.contains("CHECK"));
+    }
+
+    #[test]
+    fn alter_column_type_dangerous() {
+        let checks = check_migration("ALTER TABLE orders ALTER COLUMN id TYPE bigint", &empty_schema(), Some(&pg17())).unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].safety, SafetyRating::Dangerous);
+    }
+
+    #[test]
+    fn drop_column_safe() {
+        let checks = check_migration("ALTER TABLE orders DROP COLUMN legacy", &empty_schema(), Some(&pg17())).unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].safety, SafetyRating::Safe);
+    }
+
+    #[test]
+    fn includes_table_size() {
+        let checks = check_migration("ALTER TABLE orders ADD COLUMN x text", &empty_schema(), Some(&pg17())).unwrap();
+        assert!(checks[0].table_size.as_ref().unwrap().contains("GB"));
+        assert_eq!(checks[0].row_estimate, Some(5_000_000.0));
+    }
+
+    #[test]
+    fn includes_knowledge_doc() {
+        let checks = check_migration("ALTER TABLE orders ADD COLUMN x text", &empty_schema(), Some(&pg17())).unwrap();
+        assert!(checks[0].knowledge_doc.is_some());
+    }
+}
