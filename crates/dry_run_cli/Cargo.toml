@@ -11,6 +11,9 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { workspace = true }
 dry_run_core = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

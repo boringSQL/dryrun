@@ -1,7 +1,10 @@
+mod mcp;
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
+use rmcp::ServiceExt;
 
 #[derive(Parser)]
 #[command(name = "dry-run", version, about = "PostgreSQL schema intelligence")]
@@ -44,6 +47,14 @@ enum Command {
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
+    },
+    McpServe {
+        #[arg(long, env = "DRY_RUN_SCHEMA_FILE")]
+        schema: Option<PathBuf>,
+        #[arg(long, default_value = "stdio")]
+        transport: String,
+        #[arg(long, default_value = "3000")]
+        port: u16,
     },
 }
 
@@ -107,6 +118,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => cmd_lint(&cli, schema.as_deref(), pretty, json).await,
         Command::Snapshot { ref action } => cmd_snapshot(&cli, action).await,
         Command::Profile { ref action } => cmd_profile(&cli, action),
+        Command::McpServe { ref schema, ref transport, port } => {
+            cmd_mcp_serve(&cli, schema.as_deref(), transport, port).await
+        }
     }
 }
 
@@ -442,4 +456,87 @@ fn open_history_store(path: Option<&std::path::Path>) -> anyhow::Result<HistoryS
         HistoryStore::open_default()?
     };
     Ok(store)
+}
+
+async fn cmd_mcp_serve(
+    cli: &Cli,
+    schema_path: Option<&std::path::Path>,
+    transport: &str,
+    port: u16,
+) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let project_config = load_project_config(cli, &cwd);
+
+    let lint_config = project_config
+        .as_ref()
+        .map(|c| c.lint_config())
+        .unwrap_or_default();
+
+    // resolve schema source
+    let auto_schema = schema_path.map(|p| p.to_path_buf()).or_else(|| {
+        if let Some(ref config) = project_config {
+            if let Ok(resolved) = config.resolve_profile(
+                cli.db.as_deref(), None, cli.profile.as_deref(), &cwd,
+            ) {
+                if let Some(sf) = resolved.schema_file {
+                    if sf.exists() { return Some(sf); }
+                }
+            }
+        }
+        let candidate = dry_run_core::history::default_data_dir().ok()?.join("schema.json");
+        candidate.exists().then_some(candidate)
+    });
+
+    // resolve db_url from profile if not set via CLI
+    let effective_db = cli.db.clone().or_else(|| {
+        if let Some(ref config) = project_config {
+            if let Ok(resolved) = config.resolve_profile(None, None, cli.profile.as_deref(), &cwd) {
+                return resolved.db_url;
+            }
+        }
+        None
+    });
+
+    let server = if let Some(schema_file) = &auto_schema {
+        let json = std::fs::read_to_string(schema_file)?;
+        let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)?;
+        eprintln!(
+            "dry-run: loaded schema from {} ({} tables, offline mode)",
+            schema_file.display(), snapshot.tables.len()
+        );
+        mcp::DryRunServer::from_snapshot_with_config(snapshot, lint_config)
+    } else if let Some(db_url) = &effective_db {
+        let ctx = DryRun::connect(db_url).await?;
+        let history = HistoryStore::open_default().ok();
+        mcp::DryRunServer::new(ctx, db_url.clone(), history, lint_config).await?
+    } else {
+        anyhow::bail!(
+            "no schema source found. Either:\n\
+             1. Run 'dry-run --db <url> init' to create .dry_run/schema.json\n\
+             2. Pass --schema <path> to a schema JSON file\n\
+             3. Pass --db <url> for live database mode\n\
+             4. Configure a profile in dry_run.toml"
+        );
+    };
+
+    match transport {
+        "stdio" => {
+            eprintln!("dry-run: starting MCP server on stdio");
+            let service = server.serve(rmcp::transport::stdio()).await?;
+            service.waiting().await?;
+        }
+        "sse" => {
+            let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse()?;
+            let sse_server = rmcp::transport::sse_server::SseServer::serve(bind_addr).await?;
+            eprintln!("dry-run: SSE server listening on http://{bind_addr}/sse");
+            let ct = sse_server.config.ct.clone();
+            sse_server.with_service(move || server.clone());
+            ct.cancelled().await;
+        }
+        other => {
+            anyhow::bail!("unknown transport '{other}' (expected: stdio, sse)");
+        }
+    }
+
+    Ok(())
 }
