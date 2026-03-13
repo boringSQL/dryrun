@@ -293,7 +293,7 @@ mod tests {
                 constraints: vec![],
                 indexes: vec![],
                 comment: None,
-                stats: Some(TableStats { reltuples: 500_000.0, dead_tuples: 0, last_vacuum: None, last_autovacuum: None, last_analyze: None, last_autoanalyze: None, seq_scan: 0, idx_scan: 0, table_size: 50_000_000 }),
+                stats: Some(TableStats { reltuples: 500_000.0, relpages: 6250, dead_tuples: 0, last_vacuum: None, last_autovacuum: None, last_analyze: None, last_autoanalyze: None, seq_scan: 0, idx_scan: 0, table_size: 50_000_000 }),
                 partition_info: None,
                 policies: vec![],
                 triggers: vec![],

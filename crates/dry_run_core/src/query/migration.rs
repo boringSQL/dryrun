@@ -492,7 +492,7 @@ mod tests {
                 columns: vec![], constraints: vec![], indexes: vec![],
                 comment: None,
                 stats: Some(TableStats {
-                    reltuples: 5_000_000.0, dead_tuples: 0,
+                    reltuples: 5_000_000.0, relpages: 262144, dead_tuples: 0,
                     last_vacuum: None, last_autovacuum: None,
                     last_analyze: None, last_autoanalyze: None,
                     seq_scan: 0, idx_scan: 0, table_size: 2_147_483_648,

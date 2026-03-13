@@ -103,11 +103,17 @@ pub struct IndexStats {
     pub idx_tup_read: i64,
     pub idx_tup_fetch: i64,
     pub size: i64,
+    #[serde(default)]
+    pub relpages: i64,
+    #[serde(default)]
+    pub reltuples: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableStats {
     pub reltuples: f64,
+    #[serde(default)]
+    pub relpages: i64,
     pub dead_tuples: i64,
     pub last_vacuum: Option<DateTime<Utc>>,
     pub last_autovacuum: Option<DateTime<Utc>>,
@@ -279,6 +285,7 @@ pub fn aggregate_table_stats(
 
     // max reltuples (all replicas should be close, take max for safety)
     let reltuples = matching.iter().map(|s| s.reltuples).fold(0.0_f64, f64::max);
+    let relpages = matching.iter().map(|s| s.relpages).max().unwrap_or(0);
     let dead_tuples = matching.iter().map(|s| s.dead_tuples).max().unwrap_or(0);
     let seq_scan: i64 = matching.iter().map(|s| s.seq_scan).sum();
     let idx_scan: i64 = matching.iter().map(|s| s.idx_scan).sum();
@@ -286,6 +293,7 @@ pub fn aggregate_table_stats(
 
     Some(TableStats {
         reltuples,
+        relpages,
         dead_tuples,
         last_vacuum: None,
         last_autovacuum: None,
@@ -303,6 +311,8 @@ pub struct NodeStats {
     pub timestamp: DateTime<Utc>,
     pub table_stats: Vec<NodeTableStats>,
     pub index_stats: Vec<NodeIndexStats>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column_stats: Vec<NodeColumnStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,4 +328,12 @@ pub struct NodeIndexStats {
     pub table: String,
     pub index_name: String,
     pub stats: IndexStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeColumnStats {
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+    pub stats: ColumnStats,
 }

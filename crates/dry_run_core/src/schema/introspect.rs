@@ -120,14 +120,18 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
 }
 
 pub async fn fetch_stats_only(pool: &PgPool, source: &str) -> Result<NodeStats> {
-    let (raw_table_stats, raw_index_stats) =
-        tokio::try_join!(fetch_named_table_stats(pool), fetch_named_index_stats(pool))?;
+    let (raw_table_stats, raw_index_stats, raw_column_stats) = tokio::try_join!(
+        fetch_named_table_stats(pool),
+        fetch_named_index_stats(pool),
+        fetch_named_column_stats(pool),
+    )?;
 
     Ok(NodeStats {
         source: source.to_string(),
         timestamp: Utc::now(),
         table_stats: raw_table_stats,
         index_stats: raw_index_stats,
+        column_stats: raw_column_stats,
     })
 }
 
@@ -137,6 +141,7 @@ async fn fetch_named_table_stats(pool: &PgPool) -> Result<Vec<NodeTableStats>> {
         SELECT n.nspname                AS schema_name,
                c.relname                AS table_name,
                c.reltuples::float8      AS reltuples,
+               c.relpages::int8         AS relpages,
                COALESCE(s.n_dead_tup, 0)::int8 AS dead_tuples,
                s.last_vacuum,
                s.last_autovacuum,
@@ -163,6 +168,7 @@ async fn fetch_named_table_stats(pool: &PgPool) -> Result<Vec<NodeTableStats>> {
             table: r.get("table_name"),
             stats: TableStats {
                 reltuples: r.get("reltuples"),
+                relpages: r.get("relpages"),
                 dead_tuples: r.get("dead_tuples"),
                 last_vacuum: r.get("last_vacuum"),
                 last_autovacuum: r.get("last_autovacuum"),
@@ -185,9 +191,12 @@ async fn fetch_named_index_stats(pool: &PgPool) -> Result<Vec<NodeIndexStats>> {
                COALESCE(s.idx_scan, 0)::int8      AS idx_scan,
                COALESCE(s.idx_tup_read, 0)::int8  AS idx_tup_read,
                COALESCE(s.idx_tup_fetch, 0)::int8 AS idx_tup_fetch,
-               pg_catalog.pg_relation_size(s.indexrelid)::int8 AS index_size
+               pg_catalog.pg_relation_size(s.indexrelid)::int8 AS index_size,
+               ci.relpages::int8     AS index_relpages,
+               ci.reltuples::float8  AS index_reltuples
           FROM pg_catalog.pg_stat_user_indexes s
           JOIN pg_catalog.pg_namespace n ON n.oid = s.schemaoid
+          JOIN pg_catalog.pg_class ci ON ci.oid = s.indexrelid
          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
            AND n.nspname NOT LIKE 'pg_temp_%'
          ORDER BY n.nspname, s.relname, s.indexrelname
@@ -207,6 +216,47 @@ async fn fetch_named_index_stats(pool: &PgPool) -> Result<Vec<NodeIndexStats>> {
                 idx_tup_read: r.get("idx_tup_read"),
                 idx_tup_fetch: r.get("idx_tup_fetch"),
                 size: r.get("index_size"),
+                relpages: r.get("index_relpages"),
+                reltuples: r.get("index_reltuples"),
+            },
+        })
+        .collect())
+}
+
+async fn fetch_named_column_stats(pool: &PgPool) -> Result<Vec<NodeColumnStats>> {
+    let rows: Vec<PgRow> = sqlx::query(
+        r#"
+        SELECT s.schemaname              AS schema_name,
+               s.tablename               AS table_name,
+               s.attname                  AS column_name,
+               s.null_frac::float8        AS null_frac,
+               s.n_distinct::float8       AS n_distinct,
+               s.most_common_vals::text   AS most_common_vals,
+               s.most_common_freqs::text  AS most_common_freqs,
+               s.histogram_bounds::text   AS histogram_bounds,
+               s.correlation::float8      AS correlation
+          FROM pg_catalog.pg_stats s
+         WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+           AND s.schemaname NOT LIKE 'pg_temp_%'
+         ORDER BY s.schemaname, s.tablename, s.attname
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| NodeColumnStats {
+            schema: r.get("schema_name"),
+            table: r.get("table_name"),
+            column: r.get("column_name"),
+            stats: ColumnStats {
+                null_frac: r.get::<Option<f64>, _>("null_frac"),
+                n_distinct: r.get::<Option<f64>, _>("n_distinct"),
+                most_common_vals: r.get("most_common_vals"),
+                most_common_freqs: r.get("most_common_freqs"),
+                histogram_bounds: r.get("histogram_bounds"),
+                correlation: r.get::<Option<f64>, _>("correlation"),
             },
         })
         .collect())
@@ -270,6 +320,7 @@ struct RawIndex {
 struct RawTableStats {
     table_oid: u32,
     reltuples: f64,
+    relpages: i64,
     dead_tuples: i64,
     last_vacuum: Option<DateTime<Utc>>,
     last_autovacuum: Option<DateTime<Utc>>,
@@ -327,6 +378,8 @@ struct RawIndexStats {
     idx_tup_read: i64,
     idx_tup_fetch: i64,
     size: i64,
+    relpages: i64,
+    reltuples: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +790,7 @@ async fn fetch_table_stats(pool: &PgPool) -> Result<Vec<RawTableStats>> {
         r#"
         SELECT c.oid::int4            AS table_oid,
                c.reltuples::float8     AS reltuples,
+               c.relpages::int8        AS relpages,
                COALESCE(s.n_dead_tup, 0)::int8 AS dead_tuples,
                s.last_vacuum           AS last_vacuum,
                s.last_autovacuum       AS last_autovacuum,
@@ -762,6 +816,7 @@ async fn fetch_table_stats(pool: &PgPool) -> Result<Vec<RawTableStats>> {
         .map(|r| RawTableStats {
             table_oid: r.get::<i32, _>("table_oid") as u32,
             reltuples: r.get("reltuples"),
+            relpages: r.get("relpages"),
             dead_tuples: r.get("dead_tuples"),
             last_vacuum: r.get("last_vacuum"),
             last_autovacuum: r.get("last_autovacuum"),
@@ -969,9 +1024,12 @@ async fn fetch_index_stats(pool: &PgPool) -> Result<Vec<RawIndexStats>> {
                COALESCE(s.idx_scan, 0)::int8      AS idx_scan,
                COALESCE(s.idx_tup_read, 0)::int8  AS idx_tup_read,
                COALESCE(s.idx_tup_fetch, 0)::int8 AS idx_tup_fetch,
-               pg_catalog.pg_relation_size(s.indexrelid)::int8 AS index_size
+               pg_catalog.pg_relation_size(s.indexrelid)::int8 AS index_size,
+               ci.relpages::int8     AS index_relpages,
+               ci.reltuples::float8  AS index_reltuples
           FROM pg_catalog.pg_stat_user_indexes s
           JOIN pg_catalog.pg_namespace n ON n.oid = s.schemaoid
+          JOIN pg_catalog.pg_class ci ON ci.oid = s.indexrelid
          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
            AND n.nspname NOT LIKE 'pg_temp_%'
          ORDER BY s.relid, s.indexrelname
@@ -989,6 +1047,8 @@ async fn fetch_index_stats(pool: &PgPool) -> Result<Vec<RawIndexStats>> {
             idx_tup_read: r.get("idx_tup_read"),
             idx_tup_fetch: r.get("idx_tup_fetch"),
             size: r.get("index_size"),
+            relpages: r.get("index_relpages"),
+            reltuples: r.get("index_reltuples"),
         })
         .collect())
 }
@@ -1251,6 +1311,8 @@ fn assemble_tables(
                 idx_tup_read: ris.idx_tup_read,
                 idx_tup_fetch: ris.idx_tup_fetch,
                 size: ris.size,
+                relpages: ris.relpages,
+                reltuples: ris.reltuples,
             },
         );
     }
@@ -1280,6 +1342,7 @@ fn assemble_tables(
                 s.table_oid,
                 TableStats {
                     reltuples: s.reltuples,
+                    relpages: s.relpages,
                     dead_tuples: s.dead_tuples,
                     last_vacuum: s.last_vacuum,
                     last_autovacuum: s.last_autovacuum,
