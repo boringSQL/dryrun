@@ -1,13 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// A point-in-time snapshot of a PostgreSQL database schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaSnapshot {
     pub pg_version: String,
     pub database: String,
     pub timestamp: DateTime<Utc>,
     pub content_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub tables: Vec<Table>,
     pub enums: Vec<EnumType>,
     pub domains: Vec<DomainType>,
@@ -16,9 +17,10 @@ pub struct SchemaSnapshot {
     pub functions: Vec<Function>,
     pub extensions: Vec<Extension>,
     pub gucs: Vec<GucSetting>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_stats: Vec<NodeStats>,
 }
 
-/// A table (or partitioned table) in the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
     pub oid: u32,
@@ -35,7 +37,6 @@ pub struct Table {
     pub rls_enabled: bool,
 }
 
-/// A single column within a table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Column {
     pub name: String,
@@ -48,7 +49,6 @@ pub struct Column {
     pub stats: Option<ColumnStats>,
 }
 
-/// A table constraint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Constraint {
     pub name: String,
@@ -60,7 +60,6 @@ pub struct Constraint {
     pub comment: Option<String>,
 }
 
-/// The kind of a table constraint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstraintKind {
@@ -84,7 +83,6 @@ impl ConstraintKind {
     }
 }
 
-/// An index on a table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     pub name: String,
@@ -95,9 +93,18 @@ pub struct Index {
     pub is_primary: bool,
     pub predicate: Option<String>,
     pub definition: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<IndexStats>,
 }
 
-/// Table-level statistics from pg_stat_user_tables.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexStats {
+    pub idx_scan: i64,
+    pub idx_tup_read: i64,
+    pub idx_tup_fetch: i64,
+    pub size: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableStats {
     pub reltuples: f64,
@@ -111,7 +118,6 @@ pub struct TableStats {
     pub table_size: i64,
 }
 
-/// Column-level statistics from pg_stats.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnStats {
     pub null_frac: Option<f64>,
@@ -122,7 +128,6 @@ pub struct ColumnStats {
     pub correlation: Option<f64>,
 }
 
-/// Partition information for a partitioned table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionInfo {
     pub strategy: PartitionStrategy,
@@ -130,7 +135,6 @@ pub struct PartitionInfo {
     pub children: Vec<PartitionChild>,
 }
 
-/// Partition strategy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartitionStrategy {
@@ -150,7 +154,6 @@ impl PartitionStrategy {
     }
 }
 
-/// A child partition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionChild {
     pub schema: String,
@@ -158,7 +161,6 @@ pub struct PartitionChild {
     pub bound: String,
 }
 
-/// A row-level security policy on a table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RlsPolicy {
     pub name: String,
@@ -169,14 +171,12 @@ pub struct RlsPolicy {
     pub with_check_expr: Option<String>,
 }
 
-/// A trigger on a table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trigger {
     pub name: String,
     pub definition: String,
 }
 
-/// A PostgreSQL enum type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnumType {
     pub schema: String,
@@ -184,7 +184,6 @@ pub struct EnumType {
     pub labels: Vec<String>,
 }
 
-/// A PostgreSQL domain type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DomainType {
     pub schema: String,
@@ -195,7 +194,6 @@ pub struct DomainType {
     pub check_constraints: Vec<String>,
 }
 
-/// A PostgreSQL composite type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompositeType {
     pub schema: String,
@@ -203,14 +201,12 @@ pub struct CompositeType {
     pub fields: Vec<CompositeField>,
 }
 
-/// A field within a composite type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompositeField {
     pub name: String,
     pub type_name: String,
 }
 
-/// A view or materialized view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct View {
     pub schema: String,
@@ -220,7 +216,6 @@ pub struct View {
     pub comment: Option<String>,
 }
 
-/// A function or procedure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Function {
     pub schema: String,
@@ -233,7 +228,6 @@ pub struct Function {
     pub comment: Option<String>,
 }
 
-/// Function volatility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Volatility {
@@ -253,7 +247,6 @@ impl Volatility {
     }
 }
 
-/// An installed extension.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Extension {
     pub name: String,
@@ -261,10 +254,68 @@ pub struct Extension {
     pub schema: String,
 }
 
-/// A runtime GUC setting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GucSetting {
     pub name: String,
     pub setting: String,
     pub unit: Option<String>,
+}
+
+pub fn aggregate_table_stats(
+    node_stats: &[NodeStats],
+    schema: &str,
+    table: &str,
+) -> Option<TableStats> {
+    let matching: Vec<&TableStats> = node_stats
+        .iter()
+        .flat_map(|ns| &ns.table_stats)
+        .filter(|nts| nts.schema == schema && nts.table == table)
+        .map(|nts| &nts.stats)
+        .collect();
+
+    if matching.is_empty() {
+        return None;
+    }
+
+    // max reltuples (all replicas should be close, take max for safety)
+    let reltuples = matching.iter().map(|s| s.reltuples).fold(0.0_f64, f64::max);
+    let dead_tuples = matching.iter().map(|s| s.dead_tuples).max().unwrap_or(0);
+    let seq_scan: i64 = matching.iter().map(|s| s.seq_scan).sum();
+    let idx_scan: i64 = matching.iter().map(|s| s.idx_scan).sum();
+    let table_size = matching.iter().map(|s| s.table_size).max().unwrap_or(0);
+
+    Some(TableStats {
+        reltuples,
+        dead_tuples,
+        last_vacuum: None,
+        last_autovacuum: None,
+        last_analyze: None,
+        last_autoanalyze: None,
+        seq_scan,
+        idx_scan,
+        table_size,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeStats {
+    pub source: String,
+    pub timestamp: DateTime<Utc>,
+    pub table_stats: Vec<NodeTableStats>,
+    pub index_stats: Vec<NodeIndexStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeTableStats {
+    pub schema: String,
+    pub table: String,
+    pub stats: TableStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeIndexStats {
+    pub schema: String,
+    pub table: String,
+    pub index_name: String,
+    pub stats: IndexStats,
 }

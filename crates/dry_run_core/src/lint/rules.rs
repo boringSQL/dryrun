@@ -610,6 +610,7 @@ mod tests {
             include_columns: vec![], index_type: "btree".into(),
             is_unique: false, is_primary: false, predicate: None,
             definition: format!("CREATE INDEX {name} ON ..."),
+            stats: None,
         }
     }
 
@@ -630,9 +631,10 @@ mod tests {
     fn schema_with(tables: Vec<Table>) -> SchemaSnapshot {
         SchemaSnapshot {
             pg_version: "PostgreSQL 17.0".into(), database: "test".into(),
-            timestamp: Utc::now(), content_hash: "abc".into(),
+            timestamp: Utc::now(), content_hash: "abc".into(), source: None,
             tables, enums: vec![], domains: vec![], composites: vec![],
             views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            node_stats: vec![],
         }
     }
 

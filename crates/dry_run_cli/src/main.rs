@@ -25,6 +25,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Init,
+    Import {
+        file: PathBuf,
+        #[arg(long, num_args = 1..)]
+        stats: Vec<PathBuf>,
+    },
     Probe,
     Lint {
         #[arg(long)]
@@ -39,6 +44,10 @@ enum Command {
         pretty: bool,
         #[arg(short, long)]
         output: Option<PathBuf>,
+        #[arg(long)]
+        stats_only: bool,
+        #[arg(long)]
+        name: Option<String>,
     },
     Snapshot {
         #[command(subcommand)]
@@ -109,8 +118,11 @@ async fn main() {
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Probe => cmd_probe(&cli).await,
-        Command::DumpSchema { pretty, ref output } => cmd_dump_schema(&cli, pretty, output.clone()).await,
+        Command::DumpSchema { pretty, ref output, stats_only, ref name } => {
+            cmd_dump_schema(&cli, pretty, output.clone(), stats_only, name.clone()).await
+        }
         Command::Init => cmd_init(&cli).await,
+        Command::Import { ref file, ref stats } => cmd_import(file, stats).await,
         Command::Lint {
             ref schema,
             pretty,
@@ -144,10 +156,40 @@ async fn cmd_dump_schema(
     cli: &Cli,
     pretty: bool,
     output: Option<PathBuf>,
+    stats_only: bool,
+    name: Option<String>,
 ) -> anyhow::Result<()> {
     let db_url = require_db(cli)?;
     let ctx = DryRun::connect(&db_url).await?;
-    let snapshot = ctx.introspect_schema().await?;
+
+    if stats_only {
+        let source = name.ok_or_else(|| {
+            anyhow::anyhow!("--name is required when using --stats-only")
+        })?;
+        let node_stats = ctx.introspect_stats_only(&source).await?;
+
+        let json = if pretty {
+            serde_json::to_string_pretty(&node_stats)?
+        } else {
+            serde_json::to_string(&node_stats)?
+        };
+
+        if let Some(path) = &output {
+            std::fs::write(path, &json)?;
+            eprintln!(
+                "Stats written to {} ({} tables, {} indexes)",
+                path.display(),
+                node_stats.table_stats.len(),
+                node_stats.index_stats.len()
+            );
+        } else {
+            println!("{json}");
+        }
+        return Ok(());
+    }
+
+    let mut snapshot = ctx.introspect_schema().await?;
+    snapshot.source = name;
 
     let json = if pretty {
         serde_json::to_string_pretty(&snapshot)?
@@ -386,6 +428,49 @@ fn cmd_profile(cli: &Cli, action: &ProfileAction) -> anyhow::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::Result<()> {
+    let json = std::fs::read_to_string(file)?;
+    let mut snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("invalid schema JSON in '{}': {e}", file.display()))?;
+
+    if !stats_files.is_empty() {
+        for stats_path in stats_files {
+            let stats_json = std::fs::read_to_string(stats_path)?;
+            let node_stats: dry_run_core::NodeStats = serde_json::from_str(&stats_json)
+                .map_err(|e| anyhow::anyhow!(
+                    "invalid stats JSON in '{}': {e}",
+                    stats_path.display()
+                ))?;
+            eprintln!(
+                "  merging stats from '{}' ({} tables, {} indexes)",
+                node_stats.source,
+                node_stats.table_stats.len(),
+                node_stats.index_stats.len()
+            );
+            snapshot.node_stats.push(node_stats);
+        }
+    }
+
+    let data_dir = dry_run_core::history::default_data_dir()?;
+    std::fs::create_dir_all(&data_dir)?;
+
+    let out_path = data_dir.join("schema.json");
+    let out_json = serde_json::to_string_pretty(&snapshot)?;
+    std::fs::write(&out_path, &out_json)?;
+
+    eprintln!(
+        "Imported {} tables to {}{}",
+        snapshot.tables.len(),
+        out_path.display(),
+        if snapshot.node_stats.is_empty() {
+            String::new()
+        } else {
+            format!(" (with {} node stats)", snapshot.node_stats.len())
+        }
+    );
     Ok(())
 }
 

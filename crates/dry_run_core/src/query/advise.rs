@@ -308,6 +308,7 @@ mod tests {
             database: "test".into(),
             timestamp: Utc::now(),
             content_hash: "test".into(),
+            source: None,
             tables: vec![Table {
                 oid: 1, schema: "public".into(), name: "orders".into(),
                 columns: vec![
@@ -319,6 +320,7 @@ mod tests {
                 partition_info: None, policies: vec![], triggers: vec![], rls_enabled: false,
             }],
             enums: vec![], domains: vec![], composites: vec![], views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            node_stats: vec![],
         }
     }
 

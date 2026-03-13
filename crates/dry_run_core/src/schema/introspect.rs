@@ -9,7 +9,6 @@ use super::hash::{compute_content_hash, HashInput};
 use super::types::*;
 use crate::error::Result;
 
-/// Introspect the full schema of the connected database.
 pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
     let pg_version: String = sqlx::query_scalar("SELECT version()")
         .fetch_one(pool)
@@ -33,6 +32,7 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         raw_partition_children,
         raw_policies,
         raw_triggers,
+        raw_index_stats,
     ) = tokio::try_join!(
         fetch_tables(pool),
         fetch_columns(pool),
@@ -46,6 +46,7 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         fetch_partition_children(pool),
         fetch_policies(pool),
         fetch_triggers(pool),
+        fetch_index_stats(pool),
     )?;
 
     // Group 2: top-level objects.
@@ -72,6 +73,7 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         raw_partition_children,
         raw_policies,
         raw_triggers,
+        raw_index_stats,
     );
 
     let content_hash = compute_content_hash(&HashInput {
@@ -90,6 +92,7 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         database,
         timestamp: Utc::now(),
         content_hash,
+        source: None,
         tables,
         enums,
         domains,
@@ -98,6 +101,7 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         functions,
         extensions,
         gucs,
+        node_stats: vec![],
     };
 
     info!(
@@ -113,6 +117,99 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
     );
 
     Ok(snapshot)
+}
+
+pub async fn fetch_stats_only(pool: &PgPool, source: &str) -> Result<NodeStats> {
+    let (raw_table_stats, raw_index_stats) =
+        tokio::try_join!(fetch_named_table_stats(pool), fetch_named_index_stats(pool))?;
+
+    Ok(NodeStats {
+        source: source.to_string(),
+        timestamp: Utc::now(),
+        table_stats: raw_table_stats,
+        index_stats: raw_index_stats,
+    })
+}
+
+async fn fetch_named_table_stats(pool: &PgPool) -> Result<Vec<NodeTableStats>> {
+    let rows: Vec<PgRow> = sqlx::query(
+        r#"
+        SELECT n.nspname                AS schema_name,
+               c.relname                AS table_name,
+               c.reltuples::float8      AS reltuples,
+               COALESCE(s.n_dead_tup, 0)::int8 AS dead_tuples,
+               s.last_vacuum,
+               s.last_autovacuum,
+               s.last_analyze,
+               s.last_autoanalyze,
+               COALESCE(s.seq_scan, 0)::int8  AS seq_scan,
+               COALESCE(s.idx_scan, 0)::int8  AS idx_scan,
+               pg_catalog.pg_total_relation_size(c.oid)::int8 AS table_size
+          FROM pg_catalog.pg_class c
+          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          LEFT JOIN pg_catalog.pg_stat_user_tables s ON s.relid = c.oid
+         WHERE c.relkind IN ('r', 'p')
+           AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+           AND n.nspname NOT LIKE 'pg_temp_%'
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| NodeTableStats {
+            schema: r.get("schema_name"),
+            table: r.get("table_name"),
+            stats: TableStats {
+                reltuples: r.get("reltuples"),
+                dead_tuples: r.get("dead_tuples"),
+                last_vacuum: r.get("last_vacuum"),
+                last_autovacuum: r.get("last_autovacuum"),
+                last_analyze: r.get("last_analyze"),
+                last_autoanalyze: r.get("last_autoanalyze"),
+                seq_scan: r.get("seq_scan"),
+                idx_scan: r.get("idx_scan"),
+                table_size: r.get("table_size"),
+            },
+        })
+        .collect())
+}
+
+async fn fetch_named_index_stats(pool: &PgPool) -> Result<Vec<NodeIndexStats>> {
+    let rows: Vec<PgRow> = sqlx::query(
+        r#"
+        SELECT n.nspname            AS schema_name,
+               s.relname             AS table_name,
+               s.indexrelname        AS index_name,
+               COALESCE(s.idx_scan, 0)::int8      AS idx_scan,
+               COALESCE(s.idx_tup_read, 0)::int8  AS idx_tup_read,
+               COALESCE(s.idx_tup_fetch, 0)::int8 AS idx_tup_fetch,
+               pg_catalog.pg_relation_size(s.indexrelid)::int8 AS index_size
+          FROM pg_catalog.pg_stat_user_indexes s
+          JOIN pg_catalog.pg_namespace n ON n.oid = s.schemaoid
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+           AND n.nspname NOT LIKE 'pg_temp_%'
+         ORDER BY n.nspname, s.relname, s.indexrelname
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| NodeIndexStats {
+            schema: r.get("schema_name"),
+            table: r.get("table_name"),
+            index_name: r.get("index_name"),
+            stats: IndexStats {
+                idx_scan: r.get("idx_scan"),
+                idx_tup_read: r.get("idx_tup_read"),
+                idx_tup_fetch: r.get("idx_tup_fetch"),
+                size: r.get("index_size"),
+            },
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +318,15 @@ struct RawTrigger {
     table_oid: u32,
     name: String,
     definition: String,
+}
+
+struct RawIndexStats {
+    table_oid: u32,
+    index_name: String,
+    idx_scan: i64,
+    idx_tup_read: i64,
+    idx_tup_fetch: i64,
+    size: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -852,7 +958,43 @@ async fn fetch_triggers(pool: &PgPool) -> Result<Vec<RawTrigger>> {
 }
 
 // ---------------------------------------------------------------------------
-// Query 16: Views and materialized views
+// Query 16: Index statistics from pg_stat_user_indexes
+// ---------------------------------------------------------------------------
+
+async fn fetch_index_stats(pool: &PgPool) -> Result<Vec<RawIndexStats>> {
+    let rows: Vec<PgRow> = sqlx::query(
+        r#"
+        SELECT s.relid::int4        AS table_oid,
+               s.indexrelname        AS index_name,
+               COALESCE(s.idx_scan, 0)::int8      AS idx_scan,
+               COALESCE(s.idx_tup_read, 0)::int8  AS idx_tup_read,
+               COALESCE(s.idx_tup_fetch, 0)::int8 AS idx_tup_fetch,
+               pg_catalog.pg_relation_size(s.indexrelid)::int8 AS index_size
+          FROM pg_catalog.pg_stat_user_indexes s
+          JOIN pg_catalog.pg_namespace n ON n.oid = s.schemaoid
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+           AND n.nspname NOT LIKE 'pg_temp_%'
+         ORDER BY s.relid, s.indexrelname
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| RawIndexStats {
+            table_oid: r.get::<i32, _>("table_oid") as u32,
+            index_name: r.get("index_name"),
+            idx_scan: r.get("idx_scan"),
+            idx_tup_read: r.get("idx_tup_read"),
+            idx_tup_fetch: r.get("idx_tup_fetch"),
+            size: r.get("index_size"),
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Query 17: Views and materialized views
 // ---------------------------------------------------------------------------
 
 async fn fetch_views(pool: &PgPool) -> Result<Vec<View>> {
@@ -1014,6 +1156,7 @@ fn assemble_tables(
     raw_partition_children: Vec<RawPartitionChild>,
     raw_policies: Vec<RawPolicy>,
     raw_triggers: Vec<RawTrigger>,
+    raw_index_stats: Vec<RawIndexStats>,
 ) -> Vec<Table> {
     // --- Columns ---
     let mut columns_by_oid: HashMap<u32, Vec<Column>> = HashMap::new();
@@ -1098,9 +1241,24 @@ fn assemble_tables(
         }
     }
 
+    // --- Index stats ---
+    let mut idx_stats_map: HashMap<(u32, String), IndexStats> = HashMap::new();
+    for ris in raw_index_stats {
+        idx_stats_map.insert(
+            (ris.table_oid, ris.index_name),
+            IndexStats {
+                idx_scan: ris.idx_scan,
+                idx_tup_read: ris.idx_tup_read,
+                idx_tup_fetch: ris.idx_tup_fetch,
+                size: ris.size,
+            },
+        );
+    }
+
     // --- Indexes ---
     let mut indexes_by_oid: HashMap<u32, Vec<Index>> = HashMap::new();
     for ri in raw_indexes {
+        let stats = idx_stats_map.remove(&(ri.table_oid, ri.name.clone()));
         indexes_by_oid.entry(ri.table_oid).or_default().push(Index {
             name: ri.name,
             columns: ri.columns,
@@ -1110,6 +1268,7 @@ fn assemble_tables(
             is_primary: ri.is_primary,
             predicate: ri.predicate,
             definition: ri.definition,
+            stats,
         });
     }
 

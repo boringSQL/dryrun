@@ -395,7 +395,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Parse and validate a SQL query against the schema — checks table/column existence, detects anti-patterns")]
+    #[tool(description = "Parse and validate a SQL query against the schema — checks table/column existence, detects anti-patterns. Uses aggregated multi-node stats when available.")]
     async fn validate_query(
         &self,
         Parameters(params): Parameters<ValidateQueryParams>,
@@ -485,7 +485,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Suggest indexes for a SQL query based on WHERE, JOIN, ORDER BY columns and optional EXPLAIN plan")]
+    #[tool(description = "Suggest indexes for a SQL query based on WHERE, JOIN, ORDER BY columns and optional EXPLAIN plan. When multi-node stats are available, uses aggregated values across all nodes.")]
     async fn suggest_index(
         &self,
         Parameters(params): Parameters<SuggestIndexParams>,

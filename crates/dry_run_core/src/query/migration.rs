@@ -486,6 +486,7 @@ mod tests {
             database: "test".into(),
             timestamp: Utc::now(),
             content_hash: "test".into(),
+            source: None,
             tables: vec![Table {
                 oid: 1, schema: "public".into(), name: "orders".into(),
                 columns: vec![], constraints: vec![], indexes: vec![],
@@ -500,6 +501,7 @@ mod tests {
             }],
             enums: vec![], domains: vec![], composites: vec![], views: vec![],
             functions: vec![], extensions: vec![], gucs: vec![],
+            node_stats: vec![],
         }
     }
 

@@ -1,6 +1,8 @@
 use sha2::{Digest, Sha256};
 
-use super::types::{Column, CompositeType, DomainType, EnumType, Extension, Function, Table, View};
+use super::types::{
+    Column, CompositeType, DomainType, EnumType, Extension, Function, Index, Table, View,
+};
 
 // content for schema content hash.
 pub struct HashInput<'a> {
@@ -37,18 +39,32 @@ pub fn compute_content_hash(input: &HashInput<'_>) -> String {
 
 fn table_to_structural(t: &Table) -> serde_json::Value {
     let columns: Vec<serde_json::Value> = t.columns.iter().map(column_to_structural).collect();
+    let indexes: Vec<serde_json::Value> = t.indexes.iter().map(index_to_structural).collect();
 
     serde_json::json!({
         "schema": t.schema,
         "name": t.name,
         "columns": columns,
         "constraints": t.constraints,
-        "indexes": t.indexes,
+        "indexes": indexes,
         "comment": t.comment,
         "partition_info": t.partition_info,
         "policies": t.policies,
         "triggers": t.triggers,
         "rls_enabled": t.rls_enabled,
+    })
+}
+
+fn index_to_structural(idx: &Index) -> serde_json::Value {
+    serde_json::json!({
+        "name": idx.name,
+        "columns": idx.columns,
+        "include_columns": idx.include_columns,
+        "index_type": idx.index_type,
+        "is_unique": idx.is_unique,
+        "is_primary": idx.is_primary,
+        "predicate": idx.predicate,
+        "definition": idx.definition,
     })
 }
 

@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
-use crate::schema::SchemaSnapshot;
+use crate::schema::{NodeStats, SchemaSnapshot};
 use crate::version::PgVersion;
 
 pub struct DryRun {
@@ -79,6 +79,10 @@ impl DryRun {
 
     pub async fn introspect_schema(&self) -> Result<SchemaSnapshot> {
         crate::schema::introspect_schema(&self.pool).await
+    }
+
+    pub async fn introspect_stats_only(&self, source: &str) -> Result<NodeStats> {
+        crate::schema::fetch_stats_only(&self.pool, source).await
     }
 
     pub fn pool(&self) -> &PgPool {

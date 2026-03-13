@@ -255,8 +255,10 @@ mod tests {
             database: database.into(),
             timestamp: Utc::now(),
             content_hash: hash.into(),
+            source: None,
             tables: vec![], enums: vec![], domains: vec![], composites: vec![],
             views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            node_stats: vec![],
         }
     }
 

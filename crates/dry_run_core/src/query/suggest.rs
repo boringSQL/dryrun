@@ -4,7 +4,7 @@ use super::parse::parse_sql;
 use super::plan::PlanNode;
 use crate::error::Result;
 use crate::knowledge;
-use crate::schema::{SchemaSnapshot, Table};
+use crate::schema::{SchemaSnapshot, Table, TableStats, aggregate_table_stats};
 use crate::version::PgVersion;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,12 +151,19 @@ fn suggest_from_query_structure(
                 .find(|t| t.name == table_ref.name && t.schema == schema_name);
 
             if let Some(table) = table {
-                let is_large = table.stats.as_ref().is_some_and(|s| s.reltuples >= 1000.0);
+                let effective_stats = effective_table_stats(table, schema);
+                let is_large = effective_stats
+                    .as_ref()
+                    .is_some_and(|s| s.reltuples >= 1000.0);
 
                 if is_large && !has_leading_index(Some(table), col_name) {
                     let idx_type = choose_index_type(Some(table), col_name);
                     let qualified = format!("{}.{}", table.schema, table.name);
                     let idx_name = format!("idx_{}_{col_name}", table.name);
+                    let reltuples = effective_stats
+                        .as_ref()
+                        .map(|s| s.reltuples)
+                        .unwrap_or(0.0);
 
                     suggestions.push(IndexSuggestion {
                         table: qualified.clone(),
@@ -169,12 +176,10 @@ fn suggest_from_query_structure(
                         ),
                         rationale: format!(
                             "WHERE clause filters on '{col_name}' on table '{qualified}' (~{} rows)",
-                            table.stats.as_ref().map(|s| s.reltuples as i64).unwrap_or(0)
+                            reltuples as i64
                         ),
                         knowledge_doc: doc_for_type(idx_type, pg_version),
-                        estimated_impact: estimate_impact(
-                            table.stats.as_ref().map(|s| s.reltuples).unwrap_or(0.0),
-                        ),
+                        estimated_impact: estimate_impact(reltuples),
                     });
                 }
             }
@@ -183,6 +188,15 @@ fn suggest_from_query_structure(
 }
 
 // helpers
+
+fn effective_table_stats<'a>(table: &'a Table, schema: &'a SchemaSnapshot) -> Option<TableStats> {
+    if !schema.node_stats.is_empty() {
+        if let Some(agg) = aggregate_table_stats(&schema.node_stats, &table.schema, &table.name) {
+            return Some(agg);
+        }
+    }
+    table.stats.clone()
+}
 
 fn extract_filter_column(filter: &str) -> Option<String> {
     let trimmed = filter.trim().trim_start_matches('(').trim_end_matches(')');
@@ -266,6 +280,7 @@ mod tests {
             database: "test".into(),
             timestamp: Utc::now(),
             content_hash: "test".into(),
+            source: None,
             tables: vec![Table {
                 oid: 1,
                 schema: "public".into(),
@@ -285,6 +300,7 @@ mod tests {
                 rls_enabled: false,
             }],
             enums: vec![], domains: vec![], composites: vec![], views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            node_stats: vec![],
         }
     }
 
