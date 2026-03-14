@@ -148,6 +148,13 @@ pub struct LintSchemaParams {
     pub schema: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CompareNodesParams {
+    pub table: String,
+    #[serde(default)]
+    pub schema: Option<String>,
+}
+
 // tool implementations
 
 #[tool_router]
@@ -538,6 +545,206 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Overview of stats health across all nodes — tables sorted by total seq_scans, highlighting missing indexes, node routing imbalances, and stale stats. Works offline.")]
+    async fn stats_summary(&self) -> Result<CallToolResult, McpError> {
+        let snapshot = self.get_schema().await?;
+
+        if snapshot.node_stats.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No per-node stats available. Import stats with:\n  \
+                 dry-run import schema.json --stats r1.json r2.json"
+                    .to_string(),
+            )]));
+        }
+
+        // aggregate per-table stats across nodes
+        struct TableAgg {
+            qualified: String,
+            total_seq_scan: i64,
+            total_idx_scan: i64,
+            per_node_seq: Vec<(String, i64)>,
+        }
+
+        let mut agg: std::collections::BTreeMap<String, TableAgg> =
+            std::collections::BTreeMap::new();
+
+        for ns in &snapshot.node_stats {
+            for ts in &ns.table_stats {
+                let key = format!("{}.{}", ts.schema, ts.table);
+                let entry = agg.entry(key.clone()).or_insert_with(|| TableAgg {
+                    qualified: key,
+                    total_seq_scan: 0,
+                    total_idx_scan: 0,
+                    per_node_seq: Vec::new(),
+                });
+                entry.total_seq_scan += ts.stats.seq_scan;
+                entry.total_idx_scan += ts.stats.idx_scan;
+                entry.per_node_seq.push((ns.source.clone(), ts.stats.seq_scan));
+            }
+        }
+
+        let mut sorted: Vec<TableAgg> = agg.into_values().collect();
+        sorted.sort_by(|a, b| b.total_seq_scan.cmp(&a.total_seq_scan));
+
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!(
+            "Stats summary across {} node(s), {} table(s):\n",
+            snapshot.node_stats.len(),
+            sorted.len()
+        ));
+
+        lines.push(format!(
+            "{:<40} {:>12} {:>12}  {}",
+            "table", "seq_scan", "idx_scan", "flags"
+        ));
+        lines.push("-".repeat(90));
+
+        for ta in sorted.iter().take(30) {
+            let mut flags = Vec::new();
+
+            // high seq_scan / low idx_scan ratio
+            if ta.total_seq_scan > 100 && ta.total_idx_scan > 0 {
+                let ratio = ta.total_seq_scan as f64 / ta.total_idx_scan as f64;
+                if ratio > 0.5 {
+                    flags.push("⚠ high seq/idx ratio".to_string());
+                }
+            } else if ta.total_seq_scan > 100 && ta.total_idx_scan == 0 {
+                flags.push("⚠ seq_scan only (no idx_scan)".to_string());
+            }
+
+            // node imbalance: seq_scan differs >5x across nodes
+            if ta.per_node_seq.len() >= 2 {
+                let nonzero: Vec<i64> = ta.per_node_seq.iter().map(|(_, v)| *v).filter(|v| *v > 0).collect();
+                if nonzero.len() >= 2 {
+                    let min = *nonzero.iter().min().unwrap_or(&1);
+                    let max = *nonzero.iter().max().unwrap_or(&1);
+                    if min > 0 && max / min >= 5 {
+                        flags.push("⚠ node imbalance".to_string());
+                    }
+                }
+            }
+
+            let flag_str = if flags.is_empty() {
+                String::new()
+            } else {
+                flags.join(", ")
+            };
+
+            lines.push(format!(
+                "{:<40} {:>12} {:>12}  {}",
+                ta.qualified,
+                format_number(ta.total_seq_scan),
+                format_number(ta.total_idx_scan),
+                flag_str,
+            ));
+        }
+
+        if sorted.len() > 30 {
+            lines.push(format!("... and {} more tables", sorted.len() - 30));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
+    }
+
+    #[tool(description = "Compare per-node stats for a table across all nodes — shows reltuples, relpages, seq/idx scans, table size, and per-index breakdowns. Works offline from imported node_stats.")]
+    async fn compare_nodes(
+        &self,
+        Parameters(params): Parameters<CompareNodesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let snapshot = self.get_schema().await?;
+        let schema_name = params.schema.as_deref().unwrap_or("public");
+        let qualified = format!("{schema_name}.{}", params.table);
+
+        if snapshot.node_stats.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No per-node stats available. Import stats with:\n  \
+                 dry-run import schema.json --stats r1.json r2.json"
+                    .to_string(),
+            )]));
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!(
+            "Stats for {qualified} across {} node(s):\n",
+            snapshot.node_stats.len()
+        ));
+
+        // header
+        lines.push(format!(
+            "{:<16} {:>12} {:>10} {:>10} {:>10} {:>12}",
+            "", "reltuples", "relpages", "seq_scan", "idx_scan", "table_size"
+        ));
+
+        let mut seq_scans: Vec<(&str, i64)> = Vec::new();
+
+        for ns in &snapshot.node_stats {
+            let ts = ns
+                .table_stats
+                .iter()
+                .find(|t| t.table == params.table && t.schema == schema_name);
+
+            if let Some(ts) = ts {
+                let size_mb = ts.stats.table_size / (1024 * 1024);
+                lines.push(format!(
+                    "{:<16} {:>12} {:>10} {:>10} {:>10} {:>9} MB",
+                    ns.source,
+                    format_number(ts.stats.reltuples as i64),
+                    format_number(ts.stats.relpages),
+                    format_number(ts.stats.seq_scan),
+                    format_number(ts.stats.idx_scan),
+                    format_number(size_mb),
+                ));
+                seq_scans.push((&ns.source, ts.stats.seq_scan));
+            } else {
+                lines.push(format!("{:<16} (no data for this table)", ns.source));
+            }
+        }
+
+        // anomaly detection: seq_scan imbalance
+        if seq_scans.len() >= 2 {
+            let min_seq = seq_scans.iter().map(|(_, v)| *v).filter(|v| *v > 0).min();
+            let max_entry = seq_scans.iter().max_by_key(|(_, v)| *v);
+            if let (Some(min), Some((name, max))) = (min_seq, max_entry) {
+                if min > 0 && *max / min >= 5 {
+                    lines.push(String::new());
+                    lines.push(format!(
+                        "⚠ {name} has {}x more seq_scans than the lowest node — \
+                         likely serving unindexed query patterns. Check application routing.",
+                        max / min
+                    ));
+                }
+            }
+        }
+
+        // per-index breakdown
+        let mut index_data: std::collections::BTreeMap<String, Vec<(String, i64)>> =
+            std::collections::BTreeMap::new();
+        for ns in &snapshot.node_stats {
+            for is in &ns.index_stats {
+                if is.table == params.table && is.schema == schema_name {
+                    index_data
+                        .entry(is.index_name.clone())
+                        .or_default()
+                        .push((ns.source.clone(), is.stats.idx_scan));
+                }
+            }
+        }
+
+        if !index_data.is_empty() {
+            lines.push(String::new());
+            lines.push("Index stats:".into());
+            for (idx_name, nodes) in &index_data {
+                let parts: Vec<String> = nodes
+                    .iter()
+                    .map(|(src, scans)| format!("{src}: {}", format_number(*scans)))
+                    .collect();
+                lines.push(format!("  {idx_name}: {}", parts.join(" | ")));
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
+    }
+
     #[tool(description = "Force re-introspection of the database schema (requires live DB)")]
     async fn refresh_schema(&self) -> Result<CallToolResult, McpError> {
         let ctx = self.require_live_db()?;
@@ -560,6 +767,24 @@ fn to_mcp_err(e: dry_run_core::Error) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
 
+fn format_number(n: i64) -> String {
+    if n.abs() < 1_000 {
+        return n.to_string();
+    }
+    let s = n.abs().to_string();
+    let mut result = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    if n < 0 {
+        result.push('-');
+    }
+    result.chars().rev().collect()
+}
+
 #[tool_handler]
 impl ServerHandler for DryRunServer {
     fn get_info(&self) -> ServerInfo {
@@ -568,7 +793,8 @@ impl ServerHandler for DryRunServer {
                 "PostgreSQL schema intelligence server. \
                  Tools: list_tables, describe_table, search_schema, find_related, \
                  schema_diff, validate_query, explain_query, advise, \
-                 check_migration, suggest_index, lint_schema, refresh_schema."
+                 check_migration, suggest_index, lint_schema, \
+                 stats_summary, compare_nodes, refresh_schema."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
