@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use dry_run_core::lint::LintConfig;
-use dry_run_core::schema::{ConstraintKind, effective_table_stats};
+use dry_run_core::schema::{ConstraintKind, NodeStats, effective_table_stats};
 use dry_run_core::{DryRun, HistoryStore, SchemaSnapshot};
 
 #[derive(Clone)]
@@ -222,10 +222,14 @@ impl DryRunServer {
                 )
             })?;
 
-        let json = serde_json::to_string_pretty(table)
+        let mut text = serde_json::to_string_pretty(table)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        if let Some(breakdown) = format_node_table_breakdown(&snapshot.node_stats, schema_name, &params.table) {
+            text.push_str(&breakdown);
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(description = "Search across table names, column names, comments, and constraint definitions")]
@@ -673,39 +677,16 @@ impl DryRunServer {
         }
 
         let mut lines: Vec<String> = Vec::new();
-        lines.push(format!(
-            "Stats for {qualified} across {} node(s):\n",
-            snapshot.node_stats.len()
-        ));
+        lines.push(format!("Stats for {qualified} across {} node(s):", snapshot.node_stats.len()));
 
-        // header
-        lines.push(format!(
-            "{:<16} {:>12} {:>10} {:>10} {:>10} {:>12}",
-            "", "reltuples", "relpages", "seq_scan", "idx_scan", "table_size"
-        ));
+        if let Some(breakdown) = format_node_table_breakdown(&snapshot.node_stats, schema_name, &params.table) {
+            lines.push(breakdown);
+        }
 
         let mut seq_scans: Vec<(&str, i64)> = Vec::new();
-
         for ns in &snapshot.node_stats {
-            let ts = ns
-                .table_stats
-                .iter()
-                .find(|t| t.table == params.table && t.schema == schema_name);
-
-            if let Some(ts) = ts {
-                let size_mb = ts.stats.table_size / (1024 * 1024);
-                lines.push(format!(
-                    "{:<16} {:>12} {:>10} {:>10} {:>10} {:>9} MB",
-                    ns.source,
-                    format_number(ts.stats.reltuples as i64),
-                    format_number(ts.stats.relpages),
-                    format_number(ts.stats.seq_scan),
-                    format_number(ts.stats.idx_scan),
-                    format_number(size_mb),
-                ));
+            if let Some(ts) = ns.table_stats.iter().find(|t| t.table == params.table && t.schema == schema_name) {
                 seq_scans.push((&ns.source, ts.stats.seq_scan));
-            } else {
-                lines.push(format!("{:<16} (no data for this table)", ns.source));
             }
         }
 
@@ -792,6 +773,48 @@ fn format_number(n: i64) -> String {
         result.push('-');
     }
     result.chars().rev().collect()
+}
+
+fn format_node_table_breakdown(node_stats: &[NodeStats], schema: &str, table: &str) -> Option<String> {
+    if node_stats.is_empty() {
+        return None;
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "\nPer-node breakdown ({} node(s)):\n",
+        node_stats.len()
+    ));
+    lines.push(format!(
+        "{:<16} {:>12} {:>10} {:>10} {:>10} {:>12}  {}",
+        "", "reltuples", "relpages", "seq_scan", "idx_scan", "table_size", "collected"
+    ));
+
+    for ns in node_stats {
+        let ts = ns
+            .table_stats
+            .iter()
+            .find(|t| t.table == table && t.schema == schema);
+
+        if let Some(ts) = ts {
+            let size_mb = ts.stats.table_size / (1024 * 1024);
+            let collected = ns.timestamp.format("%Y-%m-%d %H:%M");
+            lines.push(format!(
+                "{:<16} {:>12} {:>10} {:>10} {:>10} {:>9} MB  {}",
+                ns.source,
+                format_number(ts.stats.reltuples as i64),
+                format_number(ts.stats.relpages),
+                format_number(ts.stats.seq_scan),
+                format_number(ts.stats.idx_scan),
+                format_number(size_mb),
+                collected,
+            ));
+        } else {
+            lines.push(format!("{:<16} (no data for this table)", ns.source));
+        }
+    }
+
+    Some(lines.join("\n"))
 }
 
 #[tool_handler]
