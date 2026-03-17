@@ -120,6 +120,35 @@ fn advise_seq_scan(
         )
     };
 
+    let mut full_recommendation = recommendation;
+
+    // enrich with per-node context when available
+    let node_seq_scans: Vec<(&str, i64)> = schema
+        .node_stats
+        .iter()
+        .filter_map(|ns| {
+            ns.table_stats
+                .iter()
+                .find(|ts| ts.table == *table_name && ts.schema == schema_name)
+                .map(|ts| (ns.source.as_str(), ts.stats.seq_scan))
+        })
+        .collect();
+
+    if node_seq_scans.len() >= 2 {
+        let total: i64 = node_seq_scans.iter().map(|(_, v)| *v).sum();
+        let parts: Vec<String> = node_seq_scans
+            .iter()
+            .map(|(src, v)| format!("{src}: {v}"))
+            .collect();
+        full_recommendation.push_str(&format!(
+            "\n\nNote: across {} nodes, seq_scan totals {} ({}). \
+             Check if specific replicas are serving unindexed query patterns.",
+            node_seq_scans.len(),
+            total,
+            parts.join(", ")
+        ));
+    }
+
     advice.push(Advice {
         issue: format!(
             "sequential scan on '{qualified}' (~{} rows)",
@@ -127,7 +156,7 @@ fn advise_seq_scan(
         ),
         severity: "warning".into(),
         table: Some(qualified),
-        recommendation,
+        recommendation: full_recommendation,
         ddl,
         knowledge_doc: doc_ref,
         version_note: version_note_for_index(pg_version),
@@ -371,6 +400,51 @@ mod tests {
         let advice = advise(&plan, &schema, Some(&pg14));
         assert!(!advice.is_empty());
         assert!(advice[0].version_note.is_some());
+    }
+
+    #[test]
+    fn advise_seq_scan_includes_node_context() {
+        let mut schema = empty_schema();
+        schema.node_stats = vec![
+            NodeStats {
+                source: "master".into(),
+                timestamp: Utc::now(),
+                table_stats: vec![NodeTableStats {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    stats: TableStats {
+                        reltuples: 100_000.0, relpages: 1250, dead_tuples: 0,
+                        last_vacuum: None, last_autovacuum: None,
+                        last_analyze: None, last_autoanalyze: None,
+                        seq_scan: 100, idx_scan: 5000, table_size: 10_000_000,
+                    },
+                }],
+                index_stats: vec![],
+                column_stats: vec![],
+            },
+            NodeStats {
+                source: "replica-1".into(),
+                timestamp: Utc::now(),
+                table_stats: vec![NodeTableStats {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    stats: TableStats {
+                        reltuples: 100_000.0, relpages: 1250, dead_tuples: 0,
+                        last_vacuum: None, last_autovacuum: None,
+                        last_analyze: None, last_autoanalyze: None,
+                        seq_scan: 42000, idx_scan: 1000, table_size: 10_000_000,
+                    },
+                }],
+                index_stats: vec![],
+                column_stats: vec![],
+            },
+        ];
+        let plan = make_seq_scan("orders", 100_000.0, Some("(customer_id = 42)"));
+        let advice = advise(&plan, &schema, None);
+        assert!(!advice.is_empty());
+        assert!(advice[0].recommendation.contains("across 2 nodes"));
+        assert!(advice[0].recommendation.contains("master: 100"));
+        assert!(advice[0].recommendation.contains("replica-1: 42000"));
     }
 
     #[test]
