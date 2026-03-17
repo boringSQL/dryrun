@@ -10,7 +10,10 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use dry_run_core::lint::LintConfig;
-use dry_run_core::schema::{ConstraintKind, NodeStats, effective_table_stats};
+use dry_run_core::schema::{
+    ConstraintKind, NodeStats, detect_seq_scan_imbalance, effective_table_stats,
+    summarize_table_stats,
+};
 use dry_run_core::{DryRun, HistoryStore, SchemaSnapshot};
 
 #[derive(Clone)]
@@ -562,33 +565,7 @@ impl DryRunServer {
             )]));
         }
 
-        // aggregate per-table stats across nodes
-        struct TableAgg {
-            qualified: String,
-            total_seq_scan: i64,
-            total_idx_scan: i64,
-            per_node_seq: Vec<(String, i64)>,
-        }
-
-        let mut agg: std::collections::BTreeMap<String, TableAgg> =
-            std::collections::BTreeMap::new();
-
-        for ns in &snapshot.node_stats {
-            for ts in &ns.table_stats {
-                let key = format!("{}.{}", ts.schema, ts.table);
-                let entry = agg.entry(key.clone()).or_insert_with(|| TableAgg {
-                    qualified: key,
-                    total_seq_scan: 0,
-                    total_idx_scan: 0,
-                    per_node_seq: Vec::new(),
-                });
-                entry.total_seq_scan += ts.stats.seq_scan;
-                entry.total_idx_scan += ts.stats.idx_scan;
-                entry.per_node_seq.push((ns.source.clone(), ts.stats.seq_scan));
-            }
-        }
-
-        let mut sorted: Vec<TableAgg> = agg.into_values().collect();
+        let mut sorted = summarize_table_stats(&snapshot.node_stats);
         sorted.sort_by(|a, b| b.total_seq_scan.cmp(&a.total_seq_scan));
 
         let mut lines: Vec<String> = Vec::new();
@@ -617,16 +594,8 @@ impl DryRunServer {
                 flags.push("⚠ seq_scan only (no idx_scan)".to_string());
             }
 
-            // node imbalance: seq_scan differs >5x across nodes
-            if ta.per_node_seq.len() >= 2 {
-                let nonzero: Vec<i64> = ta.per_node_seq.iter().map(|(_, v)| *v).filter(|v| *v > 0).collect();
-                if nonzero.len() >= 2 {
-                    let min = *nonzero.iter().min().unwrap_or(&1);
-                    let max = *nonzero.iter().max().unwrap_or(&1);
-                    if min > 0 && max / min >= 5 {
-                        flags.push("⚠ node imbalance".to_string());
-                    }
-                }
+            if detect_seq_scan_imbalance(&snapshot.node_stats, &ta.schema, &ta.table).is_some() {
+                flags.push("⚠ node imbalance".to_string());
             }
 
             let flag_str = if flags.is_empty() {
@@ -635,9 +604,10 @@ impl DryRunServer {
                 flags.join(", ")
             };
 
+            let qualified = format!("{}.{}", ta.schema, ta.table);
             lines.push(format!(
                 "{:<40} {:>12} {:>12}  {}",
-                ta.qualified,
+                qualified,
                 format_number(ta.total_seq_scan),
                 format_number(ta.total_idx_scan),
                 flag_str,
@@ -715,27 +685,14 @@ impl DryRunServer {
             lines.push(breakdown);
         }
 
-        let mut seq_scans: Vec<(&str, i64)> = Vec::new();
-        for ns in &snapshot.node_stats {
-            if let Some(ts) = ns.table_stats.iter().find(|t| t.table == params.table && t.schema == schema_name) {
-                seq_scans.push((&ns.source, ts.stats.seq_scan));
-            }
-        }
-
         // anomaly detection: seq_scan imbalance
-        if seq_scans.len() >= 2 {
-            let min_seq = seq_scans.iter().map(|(_, v)| *v).filter(|v| *v > 0).min();
-            let max_entry = seq_scans.iter().max_by_key(|(_, v)| *v);
-            if let (Some(min), Some((name, max))) = (min_seq, max_entry) {
-                if min > 0 && *max / min >= 5 {
-                    lines.push(String::new());
-                    lines.push(format!(
-                        "⚠ {name} has {}x more seq_scans than the lowest node — \
-                         likely serving unindexed query patterns. Check application routing.",
-                        max / min
-                    ));
-                }
-            }
+        if let Some(imb) = detect_seq_scan_imbalance(&snapshot.node_stats, schema_name, &params.table) {
+            lines.push(String::new());
+            lines.push(format!(
+                "⚠ {} has {}x more seq_scans than the lowest node — \
+                 likely serving unindexed query patterns. Check application routing.",
+                imb.hot_node, imb.multiplier,
+            ));
         }
 
         // per-index breakdown

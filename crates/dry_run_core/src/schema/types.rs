@@ -305,6 +305,88 @@ pub fn aggregate_table_stats(
     })
 }
 
+// Per-table summary aggregated across all nodes.
+#[derive(Debug, Clone)]
+pub struct TableSummary {
+    pub schema: String,
+    pub table: String,
+    pub total_seq_scan: i64,
+    pub total_idx_scan: i64,
+    /// (node source, seq_scan) for each node that has stats for this table.
+    pub per_node_seq: Vec<(String, i64)>,
+}
+
+// Detected seq_scan imbalance across nodes.
+#[derive(Debug, Clone)]
+pub struct NodeImbalance {
+    pub hot_node: String,
+    pub multiplier: i64,
+}
+
+// Aggregate per-table stats across all nodes, preserving per-node seq_scan breakdown.
+pub fn summarize_table_stats(node_stats: &[NodeStats]) -> Vec<TableSummary> {
+    use std::collections::BTreeMap;
+
+    let mut agg: BTreeMap<String, TableSummary> = BTreeMap::new();
+
+    for ns in node_stats {
+        for ts in &ns.table_stats {
+            let key = format!("{}.{}", ts.schema, ts.table);
+            let entry = agg.entry(key).or_insert_with(|| TableSummary {
+                schema: ts.schema.clone(),
+                table: ts.table.clone(),
+                total_seq_scan: 0,
+                total_idx_scan: 0,
+                per_node_seq: Vec::new(),
+            });
+            entry.total_seq_scan += ts.stats.seq_scan;
+            entry.total_idx_scan += ts.stats.idx_scan;
+            entry.per_node_seq.push((ns.source.clone(), ts.stats.seq_scan));
+        }
+    }
+
+    agg.into_values().collect()
+}
+
+// Detect seq_scan imbalance for a single table across nodes.
+/// Returns `Some` if max/min seq_scan >= 5x among nodes with nonzero scans.
+pub fn detect_seq_scan_imbalance(
+    node_stats: &[NodeStats],
+    schema: &str,
+    table: &str,
+) -> Option<NodeImbalance> {
+    let seq_scans: Vec<(&str, i64)> = node_stats
+        .iter()
+        .filter_map(|ns| {
+            ns.table_stats
+                .iter()
+                .find(|t| t.table == table && t.schema == schema)
+                .map(|t| (ns.source.as_str(), t.stats.seq_scan))
+        })
+        .collect();
+
+    if seq_scans.len() < 2 {
+        return None;
+    }
+
+    let nonzero: Vec<(&str, i64)> = seq_scans.into_iter().filter(|(_, v)| *v > 0).collect();
+    if nonzero.len() < 2 {
+        return None;
+    }
+
+    let min = nonzero.iter().map(|(_, v)| *v).min().unwrap_or(1);
+    let (hot_node, max) = nonzero.iter().max_by_key(|(_, v)| *v).copied().unwrap_or(("", 1));
+
+    if min > 0 && max / min >= 5 {
+        Some(NodeImbalance {
+            hot_node: hot_node.to_string(),
+            multiplier: max / min,
+        })
+    } else {
+        None
+    }
+}
+
 // use aggregated multi-node stats over table-level stats
 pub fn effective_table_stats(table: &Table, schema: &SchemaSnapshot) -> Option<TableStats> {
     if !schema.node_stats.is_empty() {
