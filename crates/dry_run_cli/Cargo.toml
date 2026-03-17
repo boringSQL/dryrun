@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+chrono = { workspace = true }
 clap = { workspace = true }
 dry_run_core = { workspace = true }
 rmcp = { workspace = true }

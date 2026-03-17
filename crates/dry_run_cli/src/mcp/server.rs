@@ -780,6 +780,9 @@ fn format_node_table_breakdown(node_stats: &[NodeStats], schema: &str, table: &s
         return None;
     }
 
+    let newest = node_stats.iter().map(|ns| ns.timestamp).max();
+    let stale_threshold = newest.map(|t| t - chrono::TimeDelta::days(7));
+
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
         "\nPer-node breakdown ({} node(s)):\n",
@@ -799,8 +802,10 @@ fn format_node_table_breakdown(node_stats: &[NodeStats], schema: &str, table: &s
         if let Some(ts) = ts {
             let size_mb = ts.stats.table_size / (1024 * 1024);
             let collected = ns.timestamp.format("%Y-%m-%d %H:%M");
+            let stale = stale_threshold
+                .is_some_and(|threshold| ns.timestamp < threshold);
             lines.push(format!(
-                "{:<16} {:>12} {:>10} {:>10} {:>10} {:>9} MB  {}",
+                "{:<16} {:>12} {:>10} {:>10} {:>10} {:>9} MB  {}{}",
                 ns.source,
                 format_number(ts.stats.reltuples as i64),
                 format_number(ts.stats.relpages),
@@ -808,6 +813,7 @@ fn format_node_table_breakdown(node_stats: &[NodeStats], schema: &str, table: &s
                 format_number(ts.stats.idx_scan),
                 format_number(size_mb),
                 collected,
+                if stale { " (stale)" } else { "" },
             ));
         } else {
             lines.push(format!("{:<16} (no data for this table)", ns.source));

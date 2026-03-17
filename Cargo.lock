@@ -484,6 +484,7 @@ name = "dry_run_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "dry_run_core",
  "rmcp",
