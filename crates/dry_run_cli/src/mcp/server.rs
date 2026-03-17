@@ -130,16 +130,19 @@ pub struct AdviseParams {
     pub sql: String,
     #[serde(default)]
     pub analyze: Option<bool>,
+    // Include index suggestions based on query structure analysis (default: true).
+    // Works even without a live DB connection.
+    #[serde(default = "default_true")]
+    pub include_index_suggestions: Option<bool>,
+}
+
+fn default_true() -> Option<bool> {
+    Some(true)
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CheckMigrationParams {
     pub ddl: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SuggestIndexParams {
-    pub sql: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -448,31 +451,50 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Analyze a query: run EXPLAIN, match plan anti-patterns against the knowledge base, return actionable recommendations")]
+    #[tool(description = "Analyze a query: run EXPLAIN (when live DB available), match plan anti-patterns against the knowledge base, suggest indexes from query structure. Works offline with static SQL analysis.")]
     async fn advise(
         &self,
         Parameters(params): Parameters<AdviseParams>,
     ) -> Result<CallToolResult, McpError> {
         let schema = self.get_schema().await?;
-        let ctx = self.require_live_db()?;
-
-        let explain_result = dry_run_core::query::explain_query(
-            ctx.pool(), &params.sql, params.analyze.unwrap_or(false), Some(&schema),
-        ).await.map_err(|e| McpError::invalid_params(format!("EXPLAIN failed: {e}"), None))?;
-
         let pg_version = dry_run_core::PgVersion::parse_from_version_string(&schema.pg_version).ok();
-        let advice = dry_run_core::query::advise(&explain_result.plan, &schema, pg_version.as_ref());
+        let include_idx = params.include_index_suggestions.unwrap_or(true);
 
-        let result = serde_json::json!({
-            "plan_summary": {
-                "total_cost": explain_result.total_cost,
-                "estimated_rows": explain_result.estimated_rows,
-                "root_node": explain_result.plan.node_type,
-                "warnings": explain_result.warnings,
-                "execution": explain_result.execution,
-            },
-            "advice": advice,
-        });
+        let explain_result = if let Some(ctx) = &self.ctx {
+            dry_run_core::query::explain_query(
+                ctx.pool(), &params.sql, params.analyze.unwrap_or(false), Some(&schema),
+            ).await.ok()
+        } else {
+            None
+        };
+
+        let advise_result = dry_run_core::query::advise_with_index_suggestions(
+            &params.sql,
+            explain_result.as_ref().map(|r| &r.plan),
+            &schema,
+            pg_version.as_ref(),
+            include_idx,
+        ).map_err(|e| McpError::invalid_params(format!("analysis failed: {e}"), None))?;
+
+        let result = if let Some(ref explain) = explain_result {
+            serde_json::json!({
+                "plan_summary": {
+                    "total_cost": explain.total_cost,
+                    "estimated_rows": explain.estimated_rows,
+                    "root_node": explain.plan.node_type,
+                    "warnings": explain.warnings,
+                    "execution": explain.execution,
+                },
+                "advice": advise_result.advice,
+                "index_suggestions": advise_result.index_suggestions,
+            })
+        } else {
+            serde_json::json!({
+                "mode": "offline — no live DB, static SQL analysis only",
+                "advice": advise_result.advice,
+                "index_suggestions": advise_result.index_suggestions,
+            })
+        };
 
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -500,36 +522,6 @@ impl DryRunServer {
         }
 
         let json = serde_json::to_string_pretty(&checks)
-            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
-    }
-
-    #[tool(description = "Suggest indexes for a SQL query based on WHERE, JOIN, ORDER BY columns and optional EXPLAIN plan. When multi-node stats are available, uses aggregated values across all nodes.")]
-    async fn suggest_index(
-        &self,
-        Parameters(params): Parameters<SuggestIndexParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let schema = self.get_schema().await?;
-        let pg_version = dry_run_core::PgVersion::parse_from_version_string(&schema.pg_version).ok();
-
-        let plan = if let Some(ctx) = &self.ctx {
-            dry_run_core::query::explain_query(ctx.pool(), &params.sql, false, Some(&schema)).await.ok()
-        } else {
-            None
-        };
-
-        let suggestions = dry_run_core::query::suggest_index(
-            &params.sql, &schema, plan.as_ref().map(|p| &p.plan), pg_version.as_ref(),
-        ).map_err(|e| McpError::invalid_params(format!("analysis failed: {e}"), None))?;
-
-        if suggestions.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "No index suggestions — existing indexes appear sufficient, or tables are too small to benefit.".to_string(),
-            )]));
-        }
-
-        let json = serde_json::to_string_pretty(&suggestions)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -871,7 +863,7 @@ impl ServerHandler for DryRunServer {
                 "PostgreSQL schema intelligence server. \
                  Tools: list_tables, describe_table, search_schema, find_related, \
                  schema_diff, validate_query, explain_query, advise, \
-                 check_migration, suggest_index, lint_schema, \
+                 check_migration, lint_schema, \
                  stats_summary, compare_nodes, refresh_schema."
                     .into(),
             ),

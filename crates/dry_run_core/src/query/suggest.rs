@@ -20,7 +20,7 @@ pub struct IndexSuggestion {
     pub estimated_impact: String,
 }
 
-pub fn suggest_index(
+pub(crate) fn suggest_index(
     sql: &str,
     schema: &SchemaSnapshot,
     plan: Option<&PlanNode>,

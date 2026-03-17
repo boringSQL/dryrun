@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::plan::PlanNode;
+use super::suggest::{self, IndexSuggestion};
+use crate::error::Result;
 use crate::knowledge;
 use crate::schema::SchemaSnapshot;
 use crate::version::PgVersion;
@@ -16,6 +18,13 @@ pub struct Advice {
     pub version_note: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdviseResult {
+    pub advice: Vec<Advice>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub index_suggestions: Vec<IndexSuggestion>,
+}
+
 pub fn advise(
     plan: &PlanNode,
     schema: &SchemaSnapshot,
@@ -24,6 +33,32 @@ pub fn advise(
     let mut advice = Vec::new();
     walk_for_advice(plan, schema, pg_version, &mut advice);
     advice
+}
+
+// Full advise pass: plan-based advice + optional index suggestions via static SQL analysis.
+// Works without a live DB when `plan` is None — falls back to query-structure analysis only.
+pub fn advise_with_index_suggestions(
+    sql: &str,
+    plan: Option<&PlanNode>,
+    schema: &SchemaSnapshot,
+    pg_version: Option<&PgVersion>,
+    include_index_suggestions: bool,
+) -> Result<AdviseResult> {
+    let advice = match plan {
+        Some(p) => advise(p, schema, pg_version),
+        None => Vec::new(),
+    };
+
+    let index_suggestions = if include_index_suggestions {
+        suggest::suggest_index(sql, schema, plan, pg_version)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(AdviseResult {
+        advice,
+        index_suggestions,
+    })
 }
 
 fn walk_for_advice(
