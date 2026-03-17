@@ -11,8 +11,8 @@ use tracing::info;
 
 use dry_run_core::lint::LintConfig;
 use dry_run_core::schema::{
-    ConstraintKind, NodeStats, detect_seq_scan_imbalance, effective_table_stats,
-    summarize_table_stats,
+    ConstraintKind, NodeStats, TableFlag, detect_seq_scan_imbalance, detect_stale_stats,
+    detect_table_flags, effective_table_stats, summarize_table_stats,
 };
 use dry_run_core::{DryRun, HistoryStore, SchemaSnapshot};
 
@@ -582,27 +582,16 @@ impl DryRunServer {
         lines.push("-".repeat(90));
 
         for ta in sorted.iter().take(30) {
-            let mut flags = Vec::new();
-
-            // high seq_scan / low idx_scan ratio
-            if ta.total_seq_scan > 100 && ta.total_idx_scan > 0 {
-                let ratio = ta.total_seq_scan as f64 / ta.total_idx_scan as f64;
-                if ratio > 0.5 {
-                    flags.push("⚠ high seq/idx ratio".to_string());
-                }
-            } else if ta.total_seq_scan > 100 && ta.total_idx_scan == 0 {
-                flags.push("⚠ seq_scan only (no idx_scan)".to_string());
-            }
-
-            if detect_seq_scan_imbalance(&snapshot.node_stats, &ta.schema, &ta.table).is_some() {
-                flags.push("⚠ node imbalance".to_string());
-            }
-
-            let flag_str = if flags.is_empty() {
-                String::new()
-            } else {
-                flags.join(", ")
-            };
+            let flags = detect_table_flags(ta, &snapshot.node_stats);
+            let flag_str = flags
+                .iter()
+                .map(|f| match f {
+                    TableFlag::HighSeqIdxRatio => "⚠ high seq/idx ratio",
+                    TableFlag::SeqScanOnly => "⚠ seq_scan only (no idx_scan)",
+                    TableFlag::NodeImbalance => "⚠ node imbalance",
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
 
             let qualified = format!("{}.{}", ta.schema, ta.table);
             lines.push(format!(
@@ -618,43 +607,17 @@ impl DryRunServer {
             lines.push(format!("... and {} more tables", sorted.len() - 30));
         }
 
-        // stale stats detection
-        let now = chrono::Utc::now();
-        let stale_threshold = chrono::TimeDelta::days(7);
-        let mut stale_by_node: std::collections::BTreeMap<&str, Vec<String>> =
-            std::collections::BTreeMap::new();
-
-        for ns in &snapshot.node_stats {
-            for ts in &ns.table_stats {
-                let last_analyzed = ts.stats.last_analyze.max(ts.stats.last_autoanalyze);
-                let qualified = format!("{}.{}", ts.schema, ts.table);
-
-                match last_analyzed {
-                    Some(when) if now - when > stale_threshold => {
-                        let days = (now - when).num_days();
-                        stale_by_node
-                            .entry(&ns.source)
-                            .or_default()
-                            .push(format!("{qualified}: last analyzed {days} days ago"));
-                    }
-                    None => {
-                        stale_by_node
-                            .entry(&ns.source)
-                            .or_default()
-                            .push(format!("{qualified}: never analyzed"));
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if !stale_by_node.is_empty() {
+        let stale = detect_stale_stats(&snapshot.node_stats, 7);
+        if !stale.is_empty() {
             lines.push(String::new());
             lines.push("Stale stats (last analyze > 7 days ago):".to_string());
-            for (node, tables) in &stale_by_node {
-                for entry in tables {
-                    lines.push(format!("  {node}/{entry}"));
-                }
+            for entry in &stale {
+                let qualified = format!("{}.{}", entry.schema, entry.table);
+                let detail = match entry.last_analyzed_days_ago {
+                    Some(days) => format!("last analyzed {days} days ago"),
+                    None => "never analyzed".to_string(),
+                };
+                lines.push(format!("  {}/{qualified}: {detail}", entry.node));
             }
         }
 

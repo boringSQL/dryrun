@@ -316,11 +316,31 @@ pub struct TableSummary {
     pub per_node_seq: Vec<(String, i64)>,
 }
 
+// Anomaly flag for a table's stats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableFlag {
+    // seq_scan / idx_scan ratio is suspiciously high.
+    HighSeqIdxRatio,
+    // Table has seq_scans but zero idx_scans.
+    SeqScanOnly,
+    // One node handles disproportionately more seq_scans.
+    NodeImbalance,
+}
+
 // Detected seq_scan imbalance across nodes.
 #[derive(Debug, Clone)]
-pub struct NodeImbalance {
+pub struct NodeImbalanceInfo {
     pub hot_node: String,
     pub multiplier: i64,
+}
+
+// A single table with stale or missing analyze stats.
+#[derive(Debug, Clone)]
+pub struct StaleStatsEntry {
+    pub node: String,
+    pub schema: String,
+    pub table: String,
+    pub last_analyzed_days_ago: Option<i64>,
 }
 
 // Aggregate per-table stats across all nodes, preserving per-node seq_scan breakdown.
@@ -348,13 +368,71 @@ pub fn summarize_table_stats(node_stats: &[NodeStats]) -> Vec<TableSummary> {
     agg.into_values().collect()
 }
 
-// Detect seq_scan imbalance for a single table across nodes.
+// Compute anomaly flags for a single table summary.
+pub fn detect_table_flags(
+    summary: &TableSummary,
+    node_stats: &[NodeStats],
+) -> Vec<TableFlag> {
+    let mut flags = Vec::new();
+
+    if summary.total_seq_scan > 100 && summary.total_idx_scan > 0 {
+        let ratio = summary.total_seq_scan as f64 / summary.total_idx_scan as f64;
+        if ratio > 0.5 {
+            flags.push(TableFlag::HighSeqIdxRatio);
+        }
+    } else if summary.total_seq_scan > 100 && summary.total_idx_scan == 0 {
+        flags.push(TableFlag::SeqScanOnly);
+    }
+
+    if detect_seq_scan_imbalance(node_stats, &summary.schema, &summary.table).is_some() {
+        flags.push(TableFlag::NodeImbalance);
+    }
+
+    flags
+}
+
+// Detect tables with stale or missing analyze stats across nodes.
+pub fn detect_stale_stats(node_stats: &[NodeStats], stale_days: i64) -> Vec<StaleStatsEntry> {
+    let now = chrono::Utc::now();
+    let threshold = chrono::TimeDelta::days(stale_days);
+    let mut entries = Vec::new();
+
+    for ns in node_stats {
+        for ts in &ns.table_stats {
+            let last_analyzed = ts.stats.last_analyze.max(ts.stats.last_autoanalyze);
+
+            match last_analyzed {
+                Some(when) if now - when > threshold => {
+                    entries.push(StaleStatsEntry {
+                        node: ns.source.clone(),
+                        schema: ts.schema.clone(),
+                        table: ts.table.clone(),
+                        last_analyzed_days_ago: Some((now - when).num_days()),
+                    });
+                }
+                None => {
+                    entries.push(StaleStatsEntry {
+                        node: ns.source.clone(),
+                        schema: ts.schema.clone(),
+                        table: ts.table.clone(),
+                        last_analyzed_days_ago: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    entries
+}
+
+/// Detect seq_scan imbalance for a single table across nodes.
 /// Returns `Some` if max/min seq_scan >= 5x among nodes with nonzero scans.
 pub fn detect_seq_scan_imbalance(
     node_stats: &[NodeStats],
     schema: &str,
     table: &str,
-) -> Option<NodeImbalance> {
+) -> Option<NodeImbalanceInfo> {
     let seq_scans: Vec<(&str, i64)> = node_stats
         .iter()
         .filter_map(|ns| {
@@ -378,7 +456,7 @@ pub fn detect_seq_scan_imbalance(
     let (hot_node, max) = nonzero.iter().max_by_key(|(_, v)| *v).copied().unwrap_or(("", 1));
 
     if min > 0 && max / min >= 5 {
-        Some(NodeImbalance {
+        Some(NodeImbalanceInfo {
             hot_node: hot_node.to_string(),
             multiplier: max / min,
         })
