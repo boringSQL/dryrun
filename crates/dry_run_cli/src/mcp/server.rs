@@ -656,6 +656,46 @@ impl DryRunServer {
             lines.push(format!("... and {} more tables", sorted.len() - 30));
         }
 
+        // stale stats detection
+        let now = chrono::Utc::now();
+        let stale_threshold = chrono::TimeDelta::days(7);
+        let mut stale_by_node: std::collections::BTreeMap<&str, Vec<String>> =
+            std::collections::BTreeMap::new();
+
+        for ns in &snapshot.node_stats {
+            for ts in &ns.table_stats {
+                let last_analyzed = ts.stats.last_analyze.max(ts.stats.last_autoanalyze);
+                let qualified = format!("{}.{}", ts.schema, ts.table);
+
+                match last_analyzed {
+                    Some(when) if now - when > stale_threshold => {
+                        let days = (now - when).num_days();
+                        stale_by_node
+                            .entry(&ns.source)
+                            .or_default()
+                            .push(format!("{qualified}: last analyzed {days} days ago"));
+                    }
+                    None => {
+                        stale_by_node
+                            .entry(&ns.source)
+                            .or_default()
+                            .push(format!("{qualified}: never analyzed"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if !stale_by_node.is_empty() {
+            lines.push(String::new());
+            lines.push("Stale stats (last analyze > 7 days ago):".to_string());
+            for (node, tables) in &stale_by_node {
+                for entry in tables {
+                    lines.push(format!("  {node}/{entry}"));
+                }
+            }
+        }
+
         Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
     }
 
