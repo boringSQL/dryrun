@@ -4,7 +4,7 @@ use super::parse::parse_sql;
 use super::plan::PlanNode;
 use crate::error::Result;
 use crate::knowledge;
-use crate::schema::{SchemaSnapshot, Table, TableStats, aggregate_table_stats};
+use crate::schema::{SchemaSnapshot, Table, effective_table_stats};
 use crate::version::PgVersion;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,15 +188,6 @@ fn suggest_from_query_structure(
 }
 
 // helpers
-
-fn effective_table_stats<'a>(table: &'a Table, schema: &'a SchemaSnapshot) -> Option<TableStats> {
-    if !schema.node_stats.is_empty() {
-        if let Some(agg) = aggregate_table_stats(&schema.node_stats, &table.schema, &table.name) {
-            return Some(agg);
-        }
-    }
-    table.stats.clone()
-}
 
 fn extract_filter_column(filter: &str) -> Option<String> {
     let trimmed = filter.trim().trim_start_matches('(').trim_end_matches(')');

@@ -305,6 +305,16 @@ pub fn aggregate_table_stats(
     })
 }
 
+// use aggregated multi-node stats over table-level stats
+pub fn effective_table_stats(table: &Table, schema: &SchemaSnapshot) -> Option<TableStats> {
+    if !schema.node_stats.is_empty() {
+        if let Some(agg) = aggregate_table_stats(&schema.node_stats, &table.schema, &table.name) {
+            return Some(agg);
+        }
+    }
+    table.stats.clone()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStats {
     pub source: String,

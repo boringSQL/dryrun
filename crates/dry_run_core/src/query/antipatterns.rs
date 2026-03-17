@@ -1,6 +1,6 @@
 use super::parse::ParsedQuery;
 use super::validate::{ValidationWarning, WarningSeverity};
-use crate::schema::{SchemaSnapshot, aggregate_table_stats};
+use crate::schema::{SchemaSnapshot, effective_table_stats};
 
 const LARGE_TABLE_THRESHOLD: f64 = 10_000.0;
 
@@ -45,13 +45,7 @@ fn detect_unbounded_query(
             .iter()
             .find(|t| t.name == table_ref.name && t.schema == schema_name)
         {
-            // use aggregated node stats when available, else fall back to table's own
-            let reltuples = if !schema.node_stats.is_empty() {
-                aggregate_table_stats(&schema.node_stats, &table.schema, &table.name)
-                    .map(|s| s.reltuples)
-            } else {
-                table.stats.as_ref().map(|s| s.reltuples)
-            };
+            let reltuples = effective_table_stats(table, schema).map(|s| s.reltuples);
 
             if let Some(rows) = reltuples {
                 if rows > LARGE_TABLE_THRESHOLD {
