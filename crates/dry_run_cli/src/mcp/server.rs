@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use dry_run_core::lint::LintConfig;
-use dry_run_core::schema::ConstraintKind;
+use dry_run_core::schema::{ConstraintKind, effective_table_stats};
 use dry_run_core::{DryRun, HistoryStore, SchemaSnapshot};
 
 #[derive(Clone)]
@@ -171,10 +171,19 @@ impl DryRunServer {
             .iter()
             .filter(|t| params.schema.as_ref().is_none_or(|s| &t.schema == s))
             .map(|t| {
-                let row_est = t
-                    .stats
-                    .as_ref()
-                    .map(|s| format!(" (~{} rows)", s.reltuples as i64))
+                let node_count = if snapshot.node_stats.is_empty() {
+                    0
+                } else {
+                    snapshot.node_stats.len()
+                };
+                let row_est = effective_table_stats(t, &snapshot)
+                    .map(|s| {
+                        if node_count > 0 {
+                            format!(" (~{} rows, {} nodes)", s.reltuples as i64, node_count)
+                        } else {
+                            format!(" (~{} rows)", s.reltuples as i64)
+                        }
+                    })
                     .unwrap_or_default();
                 let comment = t
                     .comment
