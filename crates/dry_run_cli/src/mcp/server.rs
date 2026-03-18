@@ -12,7 +12,7 @@ use tracing::info;
 use dry_run_core::lint::LintConfig;
 use dry_run_core::schema::{
     ConstraintKind, NodeStats, TableFlag, detect_seq_scan_imbalance, detect_stale_stats,
-    detect_table_flags, effective_table_stats, summarize_table_stats,
+    detect_table_flags, detect_unused_indexes, effective_table_stats, summarize_table_stats,
 };
 use dry_run_core::{DryRun, HistoryStore, SchemaSnapshot};
 
@@ -621,6 +621,24 @@ impl DryRunServer {
             }
         }
 
+        let unused = detect_unused_indexes(&snapshot.node_stats, &snapshot.tables);
+        if !unused.is_empty() {
+            lines.push(String::new());
+            lines.push("Unused indexes (idx_scan = 0 across all nodes):".to_string());
+            for entry in &unused {
+                let size_mb = entry.total_size_bytes / (1024 * 1024);
+                let unique_note = if entry.is_unique {
+                    ", unique — kept for constraint?"
+                } else {
+                    ", not unique"
+                };
+                lines.push(format!(
+                    "  {}.{}.{} ({} MB{})",
+                    entry.schema, entry.table, entry.index_name, size_mb, unique_note,
+                ));
+            }
+        }
+
         Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
     }
 
@@ -681,6 +699,18 @@ impl DryRunServer {
                     .map(|(src, scans)| format!("{src}: {}", format_number(*scans)))
                     .collect();
                 lines.push(format!("  {idx_name}: {}", parts.join(" | ")));
+            }
+        }
+
+        // flag unused indexes for this table
+        let unused = detect_unused_indexes(&snapshot.node_stats, &snapshot.tables);
+        for entry in &unused {
+            if entry.schema == schema_name && entry.table == params.table {
+                let size_mb = entry.total_size_bytes / (1024 * 1024);
+                lines.push(format!(
+                    "⚠ {}: zero scans across all nodes — candidate for removal ({} MB)",
+                    entry.index_name, size_mb,
+                ));
             }
         }
 

@@ -465,6 +465,110 @@ pub fn detect_seq_scan_imbalance(
     }
 }
 
+// A single unused index (idx_scan = 0 across all nodes).
+#[derive(Debug, Clone)]
+pub struct UnusedIndexEntry {
+    pub schema: String,
+    pub table: String,
+    pub index_name: String,
+    pub total_idx_scan: i64,
+    pub total_size_bytes: i64,
+    pub is_unique: bool,
+    pub definition: String,
+}
+
+/// Detect indexes with zero scans across all nodes.
+/// Skips primary key indexes — those are never droppable.
+/// When `node_stats` is empty, falls back to `Table.indexes[].stats`.
+pub fn detect_unused_indexes(node_stats: &[NodeStats], tables: &[Table]) -> Vec<UnusedIndexEntry> {
+    use std::collections::BTreeMap;
+
+    let mut entries = Vec::new();
+
+    if node_stats.is_empty() {
+        // single-node fallback: use table-level index stats
+        for t in tables {
+            for idx in &t.indexes {
+                if idx.is_primary {
+                    continue;
+                }
+                if let Some(ref stats) = idx.stats {
+                    if stats.idx_scan == 0 {
+                        entries.push(UnusedIndexEntry {
+                            schema: t.schema.clone(),
+                            table: t.name.clone(),
+                            index_name: idx.name.clone(),
+                            total_idx_scan: 0,
+                            total_size_bytes: stats.size,
+                            is_unique: idx.is_unique,
+                            definition: idx.definition.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    } else {
+        // multi-node: aggregate idx_scan and size by (schema, table, index_name)
+        #[derive(Default)]
+        struct Agg {
+            total_idx_scan: i64,
+            max_size: i64,
+        }
+
+        let mut agg: BTreeMap<(String, String, String), Agg> = BTreeMap::new();
+        for ns in node_stats {
+            for is in &ns.index_stats {
+                let key = (is.schema.clone(), is.table.clone(), is.index_name.clone());
+                let entry = agg.entry(key).or_default();
+                entry.total_idx_scan += is.stats.idx_scan;
+                if is.stats.size > entry.max_size {
+                    entry.max_size = is.stats.size;
+                }
+            }
+        }
+
+        // build index lookup from tables
+        let idx_lookup: BTreeMap<(&str, &str, &str), &Index> = tables
+            .iter()
+            .flat_map(|t| {
+                t.indexes
+                    .iter()
+                    .map(move |idx| (t.schema.as_str(), t.name.as_str(), idx.name.as_str(), idx))
+            })
+            .map(|(s, t, n, idx)| ((s, t, n), idx))
+            .collect();
+
+        for ((schema, table, index_name), a) in &agg {
+            if a.total_idx_scan != 0 {
+                continue;
+            }
+
+            let idx_info = idx_lookup.get(&(schema.as_str(), table.as_str(), index_name.as_str()));
+
+            // skip primary keys
+            if idx_info.is_some_and(|idx| idx.is_primary) {
+                continue;
+            }
+
+            entries.push(UnusedIndexEntry {
+                schema: schema.clone(),
+                table: table.clone(),
+                index_name: index_name.clone(),
+                total_idx_scan: 0,
+                total_size_bytes: a.max_size,
+                is_unique: idx_info.is_some_and(|idx| idx.is_unique),
+                definition: idx_info
+                    .map(|idx| idx.definition.clone())
+                    .unwrap_or_default(),
+            });
+        }
+    }
+
+    // sort by size descending (biggest waste first)
+    entries.sort_by(|a, b| b.total_size_bytes.cmp(&a.total_size_bytes));
+    entries
+}
+
 // use aggregated multi-node stats over table-level stats
 pub fn effective_table_stats(table: &Table, schema: &SchemaSnapshot) -> Option<TableStats> {
     if !schema.node_stats.is_empty() {
