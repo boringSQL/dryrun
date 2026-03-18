@@ -9,6 +9,7 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 use tracing::info;
 
+use dry_run_core::audit::AuditConfig;
 use dry_run_core::lint::LintConfig;
 use dry_run_core::schema::{
     ConstraintKind, NodeStats, TableFlag, detect_seq_scan_imbalance, detect_stale_stats,
@@ -23,6 +24,7 @@ pub struct DryRunServer {
     schema: Arc<RwLock<Option<SchemaSnapshot>>>,
     history: Option<Arc<std::sync::Mutex<HistoryStore>>>,
     lint_config: LintConfig,
+    audit_config: AuditConfig,
     tool_router: ToolRouter<Self>,
 }
 
@@ -42,6 +44,7 @@ impl DryRunServer {
             schema: Arc::new(RwLock::new(Some(snapshot))),
             history: history.map(|h| Arc::new(std::sync::Mutex::new(h))),
             lint_config,
+            audit_config: AuditConfig::default(),
             tool_router: Self::tool_router(),
         })
     }
@@ -59,6 +62,7 @@ impl DryRunServer {
             schema: Arc::new(RwLock::new(Some(snapshot))),
             history: None,
             lint_config,
+            audit_config: AuditConfig::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -157,6 +161,12 @@ pub struct LintSchemaParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CompareNodesParams {
     pub table: String,
+    #[serde(default)]
+    pub schema: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SchemaAuditParams {
     #[serde(default)]
     pub schema: Option<String>,
 }
@@ -553,6 +563,29 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Deep structural audit of the schema — cross-table FK graph analysis, index quality, naming consistency, documentation coverage. Works offline from schema snapshots.")]
+    async fn schema_audit(
+        &self,
+        Parameters(params): Parameters<SchemaAuditParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let snapshot = self.get_schema().await?;
+
+        let target = if let Some(schema_filter) = &params.schema {
+            let mut filtered = snapshot.clone();
+            filtered.tables.retain(|t| &t.schema == schema_filter);
+            filtered
+        } else {
+            snapshot
+        };
+
+        let report = dry_run_core::audit::run_audit(&target, &self.audit_config);
+
+        let json = serde_json::to_string_pretty(&report)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "Overview of stats health across all nodes — tables sorted by total seq_scans, highlighting missing indexes, node routing imbalances, and stale stats. Works offline.")]
     async fn stats_summary(&self) -> Result<CallToolResult, McpError> {
         let snapshot = self.get_schema().await?;
@@ -810,11 +843,21 @@ impl ServerHandler for DryRunServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "PostgreSQL schema intelligence server. \
-                 Tools: list_tables, describe_table, search_schema, find_related, \
-                 schema_diff, validate_query, explain_query, advise, \
-                 check_migration, lint_schema, \
-                 stats_summary, compare_nodes, refresh_schema."
+                "PostgreSQL schema intelligence server. All tools work offline from schema snapshots unless noted.\n\n\
+                 Schema exploration: list_tables, describe_table, search_schema, find_related.\n\
+                 Schema history: schema_diff (compare snapshots).\n\
+                 Query analysis: validate_query (offline), explain_query (live DB), advise (both — prefer this for query help).\n\
+                 Migration safety: check_migration.\n\
+                 Schema quality:\n\
+                 - lint_schema: per-table convention checks (naming style, types, timestamps, constraints). \
+                   Use when user asks about naming conventions, type choices, or missing constraints.\n\
+                 - schema_audit: cross-table structural analysis (FK graph cycles, duplicate/redundant indexes, \
+                   type mismatches, orphan tables, naming inconsistencies across tables, documentation gaps). \
+                   Use when user asks to review the schema, check for structural issues, prepare for production, \
+                   or find problems that span multiple tables. Run both lint_schema and schema_audit together \
+                   when the user asks for a full schema review.\n\
+                 Cluster health: stats_summary (overview), compare_nodes (per-table drill-down).\n\
+                 Admin: refresh_schema (live DB only)."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

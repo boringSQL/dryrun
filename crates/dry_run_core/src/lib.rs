@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod config;
 pub mod connection;
 pub mod diff;
@@ -9,6 +10,7 @@ pub mod query;
 pub mod schema;
 pub mod version;
 
+pub use audit::AuditConfig;
 pub use config::{ConnectionConfig, ProjectConfig};
 pub use connection::{DryRun, PrivilegeReport, ProbeResult};
 pub use diff::SchemaChangeset;
