@@ -90,6 +90,7 @@ impl DryRunServer {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTablesParams {
     #[serde(default)]
+    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
     pub schema: Option<String>,
 }
 
@@ -97,11 +98,13 @@ pub struct ListTablesParams {
 pub struct DescribeTableParams {
     pub table: String,
     #[serde(default)]
+    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
     pub schema: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchSchemaParams {
+    #[schemars(description = "Case-insensitive substring to search for across all schema objects.")]
     pub query: String,
 }
 
@@ -109,14 +112,17 @@ pub struct SearchSchemaParams {
 pub struct FindRelatedParams {
     pub table: String,
     #[serde(default)]
+    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
     pub schema: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SchemaDiffParams {
     #[serde(default)]
+    #[schemars(description = "Content hash of the base snapshot. Omit to use the latest saved snapshot.")]
     pub from: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Content hash of the target snapshot. Omit to compare against current live schema.")]
     pub to: Option<String>,
 }
 
@@ -129,6 +135,7 @@ pub struct ValidateQueryParams {
 pub struct ExplainQueryParams {
     pub sql: String,
     #[serde(default)]
+    #[schemars(description = "Run EXPLAIN ANALYZE (actually executes the query). Default: false.")]
     pub analyze: Option<bool>,
 }
 
@@ -136,9 +143,8 @@ pub struct ExplainQueryParams {
 pub struct AdviseParams {
     pub sql: String,
     #[serde(default)]
+    #[schemars(description = "Run EXPLAIN ANALYZE (actually executes the query). Default: false.")]
     pub analyze: Option<bool>,
-    // Include index suggestions based on query structure analysis (default: true).
-    // Works even without a live DB connection.
     #[serde(default = "default_true")]
     pub include_index_suggestions: Option<bool>,
 }
@@ -155,19 +161,23 @@ pub struct CheckMigrationParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LintSchemaParams {
     #[serde(default)]
+    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
     pub schema: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CompareNodesParams {
+    #[schemars(description = "Table name (without schema prefix).")]
     pub table: String,
     #[serde(default)]
+    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
     pub schema: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SchemaAuditParams {
     #[serde(default)]
+    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
     pub schema: Option<String>,
 }
 
@@ -175,7 +185,7 @@ pub struct SchemaAuditParams {
 
 #[tool_router]
 impl DryRunServer {
-    #[tool(description = "List all tables in the database with row estimates and comments")]
+    #[tool(description = "List all tables with row estimates and comments")]
     async fn list_tables(
         &self,
         Parameters(params): Parameters<ListTablesParams>,
@@ -219,7 +229,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Describe a table in detail: columns, constraints, indexes, stats")]
+    #[tool(description = "Describe a table in detail: columns, types, constraints, indexes, stats. Includes per-node breakdown when multi-node stats are available.")]
     async fn describe_table(
         &self,
         Parameters(params): Parameters<DescribeTableParams>,
@@ -248,7 +258,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Search across table names, column names, comments, and constraint definitions")]
+    #[tool(description = "Search across tables, columns, views, functions, enums, indexes, and comments by substring")]
     async fn search_schema(
         &self,
         Parameters(params): Parameters<SearchSchemaParams>,
@@ -385,7 +395,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
     }
 
-    #[tool(description = "Show schema changes between two snapshots, or between the latest saved snapshot and the current live schema")]
+    #[tool(description = "Show schema changes between two saved snapshots, or between the latest saved snapshot and the current live schema. Requires history store (--history).")]
     async fn schema_diff(
         &self,
         Parameters(params): Parameters<SchemaDiffParams>,
@@ -446,7 +456,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Run EXPLAIN on a SQL query — returns structured plan with cost estimates and performance warnings")]
+    #[tool(description = "Run EXPLAIN on a SQL query — returns structured plan with cost estimates and performance warnings. Requires live DB connection. Set analyze=true to execute the query (EXPLAIN ANALYZE).")]
     async fn explain_query(
         &self,
         Parameters(params): Parameters<ExplainQueryParams>,
@@ -540,7 +550,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Lint the loaded schema against convention rules — naming, types, constraints, timestamps")]
+    #[tool(description = "Lint the loaded schema against convention rules — naming, types, constraints, timestamps. Works offline.")]
     async fn lint_schema(
         &self,
         Parameters(params): Parameters<LintSchemaParams>,
@@ -843,21 +853,20 @@ impl ServerHandler for DryRunServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "PostgreSQL schema intelligence server. All tools work offline from schema snapshots unless noted.\n\n\
+                "PostgreSQL schema intelligence server.\n\n\
+                 MODE REQUIREMENTS:\n\
+                 - Most tools work offline from schema snapshots.\n\
+                 - explain_query and refresh_schema require a live DB connection (--db). analyze=true actually executes the query.\n\
+                 - schema_diff requires the history store (--history).\n\n\
                  Schema exploration: list_tables, describe_table, search_schema, find_related.\n\
-                 Schema history: schema_diff (compare snapshots).\n\
+                 Schema history: schema_diff (compare snapshots by content hash).\n\
                  Query analysis: validate_query (offline), explain_query (live DB), advise (both — prefer this for query help).\n\
                  Migration safety: check_migration.\n\
                  Schema quality:\n\
-                 - lint_schema: per-table convention checks (naming style, types, timestamps, constraints). \
-                   Use when user asks about naming conventions, type choices, or missing constraints.\n\
-                 - schema_audit: cross-table structural analysis (FK graph cycles, duplicate/redundant indexes, \
-                   type mismatches, orphan tables, naming inconsistencies across tables, documentation gaps). \
-                   Use when user asks to review the schema, check for structural issues, prepare for production, \
-                   or find problems that span multiple tables. Run both lint_schema and schema_audit together \
-                   when the user asks for a full schema review.\n\
-                 Cluster health: stats_summary (overview), compare_nodes (per-table drill-down).\n\
-                 Admin: refresh_schema (live DB only)."
+                 - lint_schema: per-table convention checks (naming, types, timestamps, constraints).\n\
+                 - schema_audit: cross-table structural analysis (FK cycles, duplicate indexes, type mismatches, orphan tables, docs gaps). \
+                   Run both together for a full schema review.\n\
+                 Cluster health: stats_summary (overview), compare_nodes (per-table drill-down)."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
