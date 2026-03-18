@@ -569,6 +569,241 @@ pub fn detect_unused_indexes(node_stats: &[NodeStats], tables: &[Table]) -> Vec<
     entries
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_index_stats(idx_scan: i64, size: i64) -> IndexStats {
+        IndexStats {
+            idx_scan,
+            idx_tup_read: 0,
+            idx_tup_fetch: 0,
+            size,
+            relpages: 0,
+            reltuples: 0.0,
+        }
+    }
+
+    fn make_index(name: &str, is_primary: bool, is_unique: bool, stats: Option<IndexStats>) -> Index {
+        Index {
+            name: name.into(),
+            columns: vec!["col".into()],
+            include_columns: vec![],
+            index_type: "btree".into(),
+            is_unique,
+            is_primary,
+            predicate: None,
+            definition: format!("CREATE INDEX {name} ON t (col)"),
+            stats,
+        }
+    }
+
+    fn make_table(name: &str, indexes: Vec<Index>) -> Table {
+        Table {
+            oid: 0,
+            schema: "public".into(),
+            name: name.into(),
+            columns: vec![],
+            constraints: vec![],
+            indexes,
+            comment: None,
+            stats: None,
+            partition_info: None,
+            policies: vec![],
+            triggers: vec![],
+            rls_enabled: false,
+        }
+    }
+
+    fn make_node_stats(source: &str, index_stats: Vec<NodeIndexStats>) -> NodeStats {
+        NodeStats {
+            source: source.into(),
+            timestamp: chrono::Utc::now(),
+            table_stats: vec![],
+            index_stats,
+            column_stats: vec![],
+        }
+    }
+
+    // --- single-node (empty node_stats) tests ---
+
+    #[test]
+    fn test_single_node_unused_index_detected() {
+        let tables = vec![make_table("orders", vec![
+            make_index("idx_unused", false, false, Some(make_index_stats(0, 8192))),
+        ])];
+
+        let result = detect_unused_indexes(&[], &tables);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].index_name, "idx_unused");
+        assert_eq!(result[0].total_size_bytes, 8192);
+    }
+
+    #[test]
+    fn test_single_node_used_index_not_reported() {
+        let tables = vec![make_table("orders", vec![
+            make_index("idx_used", false, false, Some(make_index_stats(42, 8192))),
+        ])];
+
+        let result = detect_unused_indexes(&[], &tables);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_single_node_primary_key_skipped() {
+        let tables = vec![make_table("orders", vec![
+            make_index("orders_pkey", true, true, Some(make_index_stats(0, 8192))),
+        ])];
+
+        let result = detect_unused_indexes(&[], &tables);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_single_node_no_stats_skipped() {
+        let tables = vec![make_table("orders", vec![
+            make_index("idx_no_stats", false, false, None),
+        ])];
+
+        let result = detect_unused_indexes(&[], &tables);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_single_node_unique_flag_preserved() {
+        let tables = vec![make_table("orders", vec![
+            make_index("idx_unique_unused", false, true, Some(make_index_stats(0, 4096))),
+        ])];
+
+        let result = detect_unused_indexes(&[], &tables);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_unique);
+    }
+
+    // --- multi-node tests ---
+
+    #[test]
+    fn test_multi_node_unused_across_all_nodes() {
+        let tables = vec![make_table("orders", vec![
+            make_index("idx_unused", false, false, None),
+        ])];
+
+        let node_stats = vec![
+            make_node_stats("node1", vec![NodeIndexStats {
+                schema: "public".into(), table: "orders".into(),
+                index_name: "idx_unused".into(),
+                stats: make_index_stats(0, 8192),
+            }]),
+            make_node_stats("node2", vec![NodeIndexStats {
+                schema: "public".into(), table: "orders".into(),
+                index_name: "idx_unused".into(),
+                stats: make_index_stats(0, 16384),
+            }]),
+        ];
+
+        let result = detect_unused_indexes(&node_stats, &tables);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].index_name, "idx_unused");
+        // should use max size across nodes
+        assert_eq!(result[0].total_size_bytes, 16384);
+    }
+
+    #[test]
+    fn test_multi_node_used_on_one_node_not_reported() {
+        let tables = vec![make_table("orders", vec![
+            make_index("idx_partial_use", false, false, None),
+        ])];
+
+        let node_stats = vec![
+            make_node_stats("node1", vec![NodeIndexStats {
+                schema: "public".into(), table: "orders".into(),
+                index_name: "idx_partial_use".into(),
+                stats: make_index_stats(0, 8192),
+            }]),
+            make_node_stats("node2", vec![NodeIndexStats {
+                schema: "public".into(), table: "orders".into(),
+                index_name: "idx_partial_use".into(),
+                stats: make_index_stats(5, 8192),
+            }]),
+        ];
+
+        let result = detect_unused_indexes(&node_stats, &tables);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_multi_node_primary_key_skipped() {
+        let tables = vec![make_table("orders", vec![
+            make_index("orders_pkey", true, true, None),
+        ])];
+
+        let node_stats = vec![
+            make_node_stats("node1", vec![NodeIndexStats {
+                schema: "public".into(), table: "orders".into(),
+                index_name: "orders_pkey".into(),
+                stats: make_index_stats(0, 8192),
+            }]),
+        ];
+
+        let result = detect_unused_indexes(&node_stats, &tables);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_multi_node_sorted_by_size_desc() {
+        let tables = vec![make_table("orders", vec![
+            make_index("idx_small", false, false, None),
+            make_index("idx_big", false, false, None),
+        ])];
+
+        let node_stats = vec![
+            make_node_stats("node1", vec![
+                NodeIndexStats {
+                    schema: "public".into(), table: "orders".into(),
+                    index_name: "idx_small".into(),
+                    stats: make_index_stats(0, 1024),
+                },
+                NodeIndexStats {
+                    schema: "public".into(), table: "orders".into(),
+                    index_name: "idx_big".into(),
+                    stats: make_index_stats(0, 999_999),
+                },
+            ]),
+        ];
+
+        let result = detect_unused_indexes(&node_stats, &tables);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].index_name, "idx_big");
+        assert_eq!(result[1].index_name, "idx_small");
+    }
+
+    #[test]
+    fn test_multi_node_unknown_index_still_reported() {
+        // index in node_stats but not in tables — should still appear with defaults
+        let tables: Vec<Table> = vec![];
+
+        let node_stats = vec![
+            make_node_stats("node1", vec![NodeIndexStats {
+                schema: "public".into(), table: "orders".into(),
+                index_name: "idx_ghost".into(),
+                stats: make_index_stats(0, 4096),
+            }]),
+        ];
+
+        let result = detect_unused_indexes(&node_stats, &tables);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].index_name, "idx_ghost");
+        assert!(!result[0].is_unique);
+        assert!(result[0].definition.is_empty());
+    }
+
+    #[test]
+    fn test_empty_inputs_returns_empty() {
+        let result = detect_unused_indexes(&[], &[]);
+        assert!(result.is_empty());
+    }
+}
+
 // use aggregated multi-node stats over table-level stats
 pub fn effective_table_stats(table: &Table, schema: &SchemaSnapshot) -> Option<TableStats> {
     if !schema.node_stats.is_empty() {
