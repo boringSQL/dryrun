@@ -160,3 +160,148 @@ pub fn check_wide_column_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
 
     findings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::*;
+    use chrono::Utc;
+
+    fn make_col(name: &str, type_name: &str) -> Column {
+        Column {
+            name: name.into(), ordinal: 0, type_name: type_name.into(),
+            nullable: false, default: None, identity: None, comment: None, stats: None,
+        }
+    }
+
+    fn make_index(name: &str, columns: &[&str]) -> Index {
+        Index {
+            name: name.into(),
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+            include_columns: vec![], index_type: "btree".into(),
+            is_unique: false, is_primary: false, predicate: None,
+            definition: format!("CREATE INDEX {name} ON ..."),
+            stats: None,
+        }
+    }
+
+    fn make_table_with(
+        name: &str,
+        columns: Vec<Column>,
+        indexes: Vec<Index>,
+    ) -> Table {
+        Table {
+            oid: 0, schema: "public".into(), name: name.into(),
+            columns, constraints: vec![], indexes,
+            comment: None, stats: None, partition_info: None,
+            policies: vec![], triggers: vec![], rls_enabled: false,
+        }
+    }
+
+    fn schema_with(tables: Vec<Table>) -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(), database: "test".into(),
+            timestamp: Utc::now(), content_hash: "abc".into(), source: None,
+            tables, enums: vec![], domains: vec![], composites: vec![],
+            views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
+    #[test]
+    fn detects_duplicate_indexes() {
+        let schema = schema_with(vec![make_table_with(
+            "orders",
+            vec![make_col("user_id", "bigint"), make_col("status", "text")],
+            vec![
+                make_index("idx_orders_user_1", &["user_id"]),
+                make_index("idx_orders_user_2", &["user_id"]),
+            ],
+        )]);
+        let findings = check_duplicate_indexes(&schema);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "indexes/duplicate");
+        assert_eq!(findings[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn no_duplicate_when_columns_differ() {
+        let schema = schema_with(vec![make_table_with(
+            "orders",
+            vec![make_col("user_id", "bigint"), make_col("status", "text")],
+            vec![
+                make_index("idx_a", &["user_id"]),
+                make_index("idx_b", &["status"]),
+            ],
+        )]);
+        let findings = check_duplicate_indexes(&schema);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn detects_redundant_prefix_index() {
+        let schema = schema_with(vec![make_table_with(
+            "orders",
+            vec![make_col("user_id", "bigint"), make_col("status", "text")],
+            vec![
+                make_index("idx_user", &["user_id"]),
+                make_index("idx_user_status", &["user_id", "status"]),
+            ],
+        )]);
+        let findings = check_redundant_indexes(&schema);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "indexes/redundant");
+    }
+
+    #[test]
+    fn skips_partial_indexes_for_redundancy() {
+        let mut partial = make_index("idx_user_active", &["user_id"]);
+        partial.predicate = Some("status = 'active'".into());
+        let schema = schema_with(vec![make_table_with(
+            "orders",
+            vec![make_col("user_id", "bigint"), make_col("status", "text")],
+            vec![
+                partial,
+                make_index("idx_user_status", &["user_id", "status"]),
+            ],
+        )]);
+        let findings = check_redundant_indexes(&schema);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn detects_too_many_indexes() {
+        let cols = vec![make_col("id", "bigint")];
+        let indexes: Vec<_> = (0..12)
+            .map(|i| make_index(&format!("idx_{i}"), &["id"]))
+            .collect();
+        let schema = schema_with(vec![make_table_with("big_table", cols, indexes)]);
+        let config = AuditConfig::default();
+        let findings = check_too_many_indexes(&schema, &config);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "indexes/too_many");
+    }
+
+    #[test]
+    fn detects_wide_column_index() {
+        let schema = schema_with(vec![make_table_with(
+            "posts",
+            vec![make_col("body", "text"), make_col("metadata", "jsonb")],
+            vec![make_index("idx_body", &["body"])],
+        )]);
+        let findings = check_wide_column_indexes(&schema);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "indexes/wide_columns");
+    }
+
+    #[test]
+    fn no_wide_column_for_integer_indexes() {
+        let schema = schema_with(vec![make_table_with(
+            "posts",
+            vec![make_col("user_id", "bigint")],
+            vec![make_index("idx_user", &["user_id"])],
+        )]);
+        let findings = check_wide_column_indexes(&schema);
+        assert!(findings.is_empty());
+    }
+}

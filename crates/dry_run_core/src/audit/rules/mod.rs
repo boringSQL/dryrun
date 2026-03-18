@@ -46,3 +46,56 @@ pub fn run_all_audit_rules(
 
     findings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::schema::*;
+    use chrono::Utc;
+
+    fn empty_schema() -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(), database: "test".into(),
+            timestamp: Utc::now(), content_hash: "abc".into(), source: None,
+            tables: vec![], enums: vec![], domains: vec![], composites: vec![],
+            views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
+    #[test]
+    fn empty_schema_produces_no_findings() {
+        let config = AuditConfig::default();
+        let findings = run_all_audit_rules(&empty_schema(), &config);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn disabled_rules_are_skipped() {
+        let schema = SchemaSnapshot {
+            tables: vec![Table {
+                oid: 0, schema: "public".into(), name: "user".into(),
+                columns: vec![Column {
+                    name: "id".into(), ordinal: 0, type_name: "bigint".into(),
+                    nullable: false, default: None, identity: None, comment: None, stats: None,
+                }],
+                constraints: vec![], indexes: vec![],
+                comment: None, stats: None, partition_info: None,
+                policies: vec![], triggers: vec![], rls_enabled: false,
+            }],
+            ..empty_schema()
+        };
+
+        let config = AuditConfig::default();
+        let findings = run_all_audit_rules(&schema, &config);
+        assert!(findings.iter().any(|f| f.rule == "naming/reserved"));
+
+        let config = AuditConfig {
+            disabled_rules: vec!["naming/reserved".into()],
+            ..AuditConfig::default()
+        };
+        let findings = run_all_audit_rules(&schema, &config);
+        assert!(!findings.iter().any(|f| f.rule == "naming/reserved"));
+    }
+}

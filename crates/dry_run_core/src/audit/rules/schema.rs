@@ -268,3 +268,237 @@ pub fn check_no_comment(schema: &SchemaSnapshot, config: &AuditConfig) -> Vec<Au
 
     findings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::*;
+    use chrono::Utc;
+
+    fn make_col(name: &str, type_name: &str) -> Column {
+        Column {
+            name: name.into(), ordinal: 0, type_name: type_name.into(),
+            nullable: false, default: None, identity: None, comment: None, stats: None,
+        }
+    }
+
+    fn make_col_with_comment(name: &str, type_name: &str, comment: &str) -> Column {
+        Column {
+            name: name.into(), ordinal: 0, type_name: type_name.into(),
+            nullable: false, default: None, identity: None,
+            comment: Some(comment.into()), stats: None,
+        }
+    }
+
+    fn make_pk(name: &str, columns: &[&str]) -> Constraint {
+        Constraint {
+            name: name.into(), kind: ConstraintKind::PrimaryKey,
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+            definition: None, fk_table: None, fk_columns: vec![], comment: None,
+        }
+    }
+
+    fn make_fk(name: &str, columns: &[&str], fk_table: &str, fk_columns: &[&str]) -> Constraint {
+        Constraint {
+            name: name.into(), kind: ConstraintKind::ForeignKey,
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+            definition: None, fk_table: Some(fk_table.into()),
+            fk_columns: fk_columns.iter().map(|s| s.to_string()).collect(),
+            comment: None,
+        }
+    }
+
+    fn make_table(name: &str, columns: Vec<Column>, constraints: Vec<Constraint>) -> Table {
+        Table {
+            oid: 0, schema: "public".into(), name: name.into(),
+            columns, constraints, indexes: vec![],
+            comment: None, stats: None, partition_info: None,
+            policies: vec![], triggers: vec![], rls_enabled: false,
+        }
+    }
+
+    fn schema_with(tables: Vec<Table>) -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(), database: "test".into(),
+            timestamp: Utc::now(), content_hash: "abc".into(), source: None,
+            tables, enums: vec![], domains: vec![], composites: vec![],
+            views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
+    #[test]
+    fn detects_uuid_pk() {
+        let schema = schema_with(vec![make_table(
+            "events",
+            vec![make_col("event_id", "uuid"), make_col("data", "jsonb")],
+            vec![make_pk("pk_events", &["event_id"])],
+        )]);
+        let findings = check_pk_non_sequential(&schema);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "pk/non_sequential");
+    }
+
+    #[test]
+    fn no_finding_for_bigint_pk() {
+        let schema = schema_with(vec![make_table(
+            "users",
+            vec![make_col("user_id", "bigint")],
+            vec![make_pk("pk_users", &["user_id"])],
+        )]);
+        let findings = check_pk_non_sequential(&schema);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn detects_bool_without_prefix() {
+        let schema = schema_with(vec![make_table(
+            "users",
+            vec![
+                make_col("id", "bigint"),
+                make_col("active", "boolean"),
+                make_col("is_verified", "boolean"),
+            ],
+            vec![],
+        )]);
+        let findings = check_bool_prefix(&schema);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("active"));
+    }
+
+    #[test]
+    fn no_finding_for_prefixed_bool() {
+        let schema = schema_with(vec![make_table(
+            "users",
+            vec![
+                make_col("id", "bigint"),
+                make_col("is_active", "bool"),
+                make_col("has_avatar", "boolean"),
+            ],
+            vec![],
+        )]);
+        let findings = check_bool_prefix(&schema);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn detects_reserved_table_name() {
+        let schema = schema_with(vec![make_table(
+            "user",
+            vec![make_col("id", "bigint")],
+            vec![],
+        )]);
+        let findings = check_reserved_words(&schema);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("user"));
+    }
+
+    #[test]
+    fn detects_reserved_column_name() {
+        let schema = schema_with(vec![make_table(
+            "accounts",
+            vec![make_col("id", "bigint"), make_col("order", "integer")],
+            vec![],
+        )]);
+        let findings = check_reserved_words(&schema);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("order"));
+    }
+
+    #[test]
+    fn detects_inconsistent_fk_naming() {
+        let schema = schema_with(vec![
+            make_table(
+                "users",
+                vec![make_col("user_id", "bigint")],
+                vec![],
+            ),
+            make_table(
+                "orders",
+                vec![make_col("id", "bigint"), make_col("user_id", "bigint")],
+                vec![make_fk("fk_orders_user", &["user_id"], "public.users", &["user_id"])],
+            ),
+            make_table(
+                "comments",
+                vec![make_col("id", "bigint"), make_col("uid", "bigint")],
+                vec![make_fk("fk_comments_user", &["uid"], "public.users", &["user_id"])],
+            ),
+        ]);
+        let findings = check_id_mismatch(&schema);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "naming/id_mismatch");
+    }
+
+    #[test]
+    fn no_mismatch_when_consistent() {
+        let schema = schema_with(vec![
+            make_table("users", vec![make_col("user_id", "bigint")], vec![]),
+            make_table(
+                "orders",
+                vec![make_col("id", "bigint"), make_col("user_id", "bigint")],
+                vec![make_fk("fk_o", &["user_id"], "public.users", &["user_id"])],
+            ),
+            make_table(
+                "comments",
+                vec![make_col("id", "bigint"), make_col("user_id", "bigint")],
+                vec![make_fk("fk_c", &["user_id"], "public.users", &["user_id"])],
+            ),
+        ]);
+        let findings = check_id_mismatch(&schema);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn detects_no_comment_on_large_table() {
+        let schema = schema_with(vec![make_table(
+            "orders",
+            vec![
+                make_col("id", "bigint"),
+                make_col("user_id", "bigint"),
+                make_col("status", "text"),
+                make_col("total", "numeric"),
+                make_col("created_at", "timestamptz"),
+            ],
+            vec![],
+        )]);
+        let config = AuditConfig::default();
+        let findings = check_no_comment(&schema, &config);
+        assert!(findings.len() >= 2);
+        assert!(findings.iter().all(|f| f.rule == "docs/no_comment"));
+    }
+
+    #[test]
+    fn skips_small_tables_for_comments() {
+        let schema = schema_with(vec![make_table(
+            "config",
+            vec![
+                make_col("key", "text"),
+                make_col("value", "text"),
+            ],
+            vec![],
+        )]);
+        let config = AuditConfig::default();
+        let findings = check_no_comment(&schema, &config);
+        assert!(findings.is_empty(), "tables with < 5 columns should be skipped");
+    }
+
+    #[test]
+    fn no_finding_when_comments_present() {
+        let mut table = make_table(
+            "orders",
+            vec![
+                make_col_with_comment("id", "bigint", "primary key"),
+                make_col_with_comment("user_id", "bigint", "owner"),
+                make_col_with_comment("status", "text", "order status"),
+                make_col_with_comment("total", "numeric", "total amount"),
+                make_col_with_comment("created_at", "timestamptz", "creation time"),
+            ],
+            vec![],
+        );
+        table.comment = Some("customer orders".into());
+        let schema = schema_with(vec![table]);
+        let config = AuditConfig::default();
+        let findings = check_no_comment(&schema, &config);
+        assert!(findings.is_empty());
+    }
+}
