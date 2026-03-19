@@ -131,3 +131,130 @@ pub enum PgMustardError {
     #[error("pgMustard API error ({0}): {1}")]
     Api(u16, String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_score_response() {
+        let json = serde_json::json!({
+            "query-identifier": null,
+            "query-time": 3200.5,
+            "query-blocks": 80000,
+            "best-tips": [
+                {
+                    "tip-category": "index-potential",
+                    "tip-title": "Potential index on orders.customer_id",
+                    "score": 4.2,
+                    "tip-explanation": ["Sequential scan on orders reading 50M rows..."],
+                    "learn-more-links": ["https://www.pgmustard.com/docs/tips/seq-scan"]
+                }
+            ]
+        });
+        let resp: ScoreResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.query_time, Some(3200.5));
+        assert_eq!(resp.query_blocks, Some(80000));
+        assert_eq!(resp.best_tips.len(), 1);
+        assert_eq!(resp.best_tips[0].tip_category, "index-potential");
+        assert_eq!(resp.best_tips[0].score, 4.2);
+    }
+
+    #[test]
+    fn deserialize_score_response_empty_tips() {
+        let json = serde_json::json!({
+            "query-identifier": "abc123",
+            "query-time": 1.2,
+            "query-blocks": 10,
+            "best-tips": []
+        });
+        let resp: ScoreResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.best_tips.is_empty());
+        assert_eq!(resp.query_time, Some(1.2));
+    }
+
+    #[test]
+    fn deserialize_save_response() {
+        let json = serde_json::json!({
+            "id": "40d6478e-abcd-1234-5678-aabbccddeeff",
+            "explore_url": "https://app.pgmustard.com/#/explore/40d6478e",
+            "duration_ms": 150.3,
+            "buffers_kb": 512,
+            "top_tip_score": 3.8
+        });
+        let resp: SaveResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.id, "40d6478e-abcd-1234-5678-aabbccddeeff");
+        assert!(resp.explore_url.contains("pgmustard.com"));
+        assert_eq!(resp.duration_ms, Some(150.3));
+        assert_eq!(resp.top_tip_score, Some(3.8));
+    }
+
+    #[test]
+    fn deserialize_save_response_minimal() {
+        let json = serde_json::json!({
+            "id": "abc",
+            "explore_url": "https://app.pgmustard.com/#/explore/abc",
+            "duration_ms": null,
+            "buffers_kb": null,
+            "top_tip_score": null
+        });
+        let resp: SaveResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.id, "abc");
+        assert!(resp.duration_ms.is_none());
+    }
+
+    #[test]
+    fn serialize_score_request() {
+        let plan = serde_json::json!([{"Plan": {"Node Type": "Seq Scan"}}]);
+        let req = ScoreRequest { plan: &plan };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("plan").is_some());
+    }
+
+    #[test]
+    fn serialize_save_request_skips_none() {
+        let plan = serde_json::json!([{"Plan": {"Node Type": "Seq Scan"}}]);
+        let req = SaveRequest {
+            plan: &plan,
+            query_text: None,
+            name: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("plan").is_some());
+        assert!(json.get("query_text").is_none());
+        assert!(json.get("name").is_none());
+    }
+
+    #[test]
+    fn serialize_save_request_includes_optionals() {
+        let plan = serde_json::json!([{"Plan": {"Node Type": "Seq Scan"}}]);
+        let req = SaveRequest {
+            plan: &plan,
+            query_text: Some("SELECT 1"),
+            name: Some("test-plan"),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["query_text"], "SELECT 1");
+        assert_eq!(json["name"], "test-plan");
+    }
+
+    #[test]
+    fn from_env_returns_none_without_key() {
+        // ensure env var is not set for this test
+        std::env::remove_var("PGMUSTARD_API_KEY");
+        assert!(PgMustardClient::from_env().is_none());
+    }
+
+    #[test]
+    fn error_display() {
+        let err = PgMustardError::CreditsExhausted;
+        assert_eq!(err.to_string(), "pgMustard API credits exhausted");
+
+        let err = PgMustardError::AuthFailed;
+        assert!(err.to_string().contains("authentication failed"));
+
+        let err = PgMustardError::Api(500, "internal error".into());
+        assert!(err.to_string().contains("500"));
+        assert!(err.to_string().contains("internal error"));
+    }
+}

@@ -954,6 +954,140 @@ fn format_node_table_breakdown(node_stats: &[NodeStats], schema: &str, table: &s
     Some(lines.join("\n"))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_analyze_plan_params() {
+        let json = serde_json::json!({
+            "sql": "SELECT * FROM orders WHERE customer_id = 42",
+            "plan_json": [{"Plan": {
+                "Node Type": "Seq Scan",
+                "Relation Name": "orders",
+                "Schema": "public",
+                "Startup Cost": 0.0,
+                "Total Cost": 450.0,
+                "Plan Rows": 10000,
+                "Plan Width": 48
+            }}]
+        });
+        let params: AnalyzePlanParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.sql, "SELECT * FROM orders WHERE customer_id = 42");
+        assert!(params.plan_json.is_array());
+        // default value
+        assert_eq!(params.include_index_suggestions, Some(true));
+    }
+
+    #[test]
+    fn deserialize_analyze_plan_params_with_explicit_false() {
+        let json = serde_json::json!({
+            "sql": "SELECT 1",
+            "plan_json": {"Plan": {"Node Type": "Result", "Startup Cost": 0.0, "Total Cost": 0.01, "Plan Rows": 1, "Plan Width": 4}},
+            "include_index_suggestions": false
+        });
+        let params: AnalyzePlanParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.include_index_suggestions, Some(false));
+        assert!(params.plan_json.is_object());
+    }
+
+    #[test]
+    fn plan_json_extraction_wrapped_array() {
+        let plan_json = serde_json::json!([{
+            "Plan": {
+                "Node Type": "Seq Scan",
+                "Relation Name": "users",
+                "Schema": "public",
+                "Startup Cost": 0.0,
+                "Total Cost": 35.5,
+                "Plan Rows": 2550,
+                "Plan Width": 64
+            }
+        }]);
+        let plan_value = plan_json
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|obj| obj.get("Plan"))
+            .unwrap();
+        let plan = dry_run_core::query::parse_plan_json(plan_value).unwrap();
+        assert_eq!(plan.node_type, "Seq Scan");
+        assert_eq!(plan.relation_name.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn plan_json_extraction_bare_object() {
+        let plan_json = serde_json::json!({
+            "Plan": {
+                "Node Type": "Index Scan",
+                "Relation Name": "orders",
+                "Schema": "public",
+                "Index Name": "orders_pkey",
+                "Startup Cost": 0.0,
+                "Total Cost": 8.27,
+                "Plan Rows": 1,
+                "Plan Width": 64
+            }
+        });
+        let plan_value = plan_json.get("Plan").unwrap();
+        let plan = dry_run_core::query::parse_plan_json(plan_value).unwrap();
+        assert_eq!(plan.node_type, "Index Scan");
+    }
+
+    #[test]
+    fn plan_json_missing_plan_key_array() {
+        let plan_json = serde_json::json!([{"Something": "else"}]);
+        let result = plan_json
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|obj| obj.get("Plan"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn plan_json_missing_plan_key_object() {
+        let plan_json = serde_json::json!({"NotPlan": {}});
+        assert!(plan_json.get("Plan").is_none());
+    }
+
+    #[test]
+    fn analyze_plan_with_analyze_buffers_data() {
+        // realistic EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) output
+        let plan_json = serde_json::json!([{
+            "Plan": {
+                "Node Type": "Seq Scan",
+                "Relation Name": "orders",
+                "Schema": "public",
+                "Startup Cost": 0.0,
+                "Total Cost": 15234.5,
+                "Plan Rows": 500000,
+                "Plan Width": 120,
+                "Actual Rows": 487320,
+                "Actual Loops": 1,
+                "Actual Startup Time": 0.02,
+                "Actual Total Time": 320.5,
+                "Shared Hit Blocks": 8000,
+                "Shared Read Blocks": 2000,
+                "Filter": "(customer_id = 42)",
+                "Rows Removed by Filter": 487278
+            },
+            "Planning Time": 0.1,
+            "Execution Time": 320.6
+        }]);
+        let plan_value = plan_json
+            .as_array()
+            .unwrap()
+            .first()
+            .unwrap()
+            .get("Plan")
+            .unwrap();
+        let plan = dry_run_core::query::parse_plan_json(plan_value).unwrap();
+        assert_eq!(plan.total_cost, 15234.5);
+        assert_eq!(plan.actual_rows, Some(487320.0));
+        assert_eq!(plan.shared_hit_blocks, Some(8000));
+        assert_eq!(plan.rows_removed_by_filter, Some(487278.0));
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for DryRunServer {
     fn get_info(&self) -> ServerInfo {

@@ -126,6 +126,82 @@ mod tests {
     }
 
     #[test]
+    fn parse_wrapped_array_format() {
+        // EXPLAIN (FORMAT JSON) returns [{"Plan": {...}}]
+        let json = serde_json::json!([{
+            "Plan": {
+                "Node Type": "Seq Scan",
+                "Relation Name": "orders",
+                "Schema": "public",
+                "Startup Cost": 0.0,
+                "Total Cost": 450.0,
+                "Plan Rows": 10000,
+                "Plan Width": 48
+            }
+        }]);
+        let plan_value = json.as_array().unwrap().first().unwrap().get("Plan").unwrap();
+        let plan = parse_plan_json(plan_value).unwrap();
+        assert_eq!(plan.node_type, "Seq Scan");
+        assert_eq!(plan.relation_name.as_deref(), Some("orders"));
+        assert_eq!(plan.plan_rows, 10000.0);
+    }
+
+    #[test]
+    fn parse_bare_object_format() {
+        // bare {"Plan": {...}} without wrapping array
+        let json = serde_json::json!({
+            "Plan": {
+                "Node Type": "Index Scan",
+                "Relation Name": "users",
+                "Schema": "public",
+                "Index Name": "users_pkey",
+                "Startup Cost": 0.0,
+                "Total Cost": 8.27,
+                "Plan Rows": 1,
+                "Plan Width": 64
+            }
+        });
+        let plan_value = json.get("Plan").unwrap();
+        let plan = parse_plan_json(plan_value).unwrap();
+        assert_eq!(plan.node_type, "Index Scan");
+        assert_eq!(plan.index_name.as_deref(), Some("users_pkey"));
+    }
+
+    #[test]
+    fn parse_analyze_buffers_plan() {
+        let json = serde_json::json!({
+            "Node Type": "Seq Scan",
+            "Relation Name": "events",
+            "Schema": "public",
+            "Startup Cost": 0.0,
+            "Total Cost": 1500.0,
+            "Plan Rows": 50000,
+            "Plan Width": 120,
+            "Actual Rows": 48732,
+            "Actual Loops": 1,
+            "Actual Startup Time": 0.015,
+            "Actual Total Time": 42.5,
+            "Shared Hit Blocks": 800,
+            "Shared Read Blocks": 200,
+            "Filter": "(status = 'active')",
+            "Rows Removed by Filter": 1268
+        });
+        let plan = parse_plan_json(&json).unwrap();
+        assert_eq!(plan.actual_rows, Some(48732.0));
+        assert_eq!(plan.actual_total_time, Some(42.5));
+        assert_eq!(plan.shared_hit_blocks, Some(800));
+        assert_eq!(plan.shared_read_blocks, Some(200));
+        assert_eq!(plan.rows_removed_by_filter, Some(1268.0));
+        assert_eq!(plan.filter.as_deref(), Some("(status = 'active')"));
+    }
+
+    #[test]
+    fn parse_plan_missing_plan_key_is_error() {
+        let json = serde_json::json!("not an object");
+        assert!(parse_plan_json(&json).is_err());
+    }
+
+    #[test]
     fn parse_nested_plan() {
         let json = serde_json::json!({
             "Node Type": "Nested Loop",
