@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// PostgreSQL server version parsed from `SELECT version()`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PgVersion {
     pub major: u32,
     pub minor: u32,
@@ -17,6 +17,12 @@ impl std::fmt::Display for PgVersion {
 }
 
 impl PgVersion {
+    /// Returns true if this version is at least `major.minor`.
+    #[must_use]
+    pub fn at_least(&self, major: u32, minor: u32) -> bool {
+        (self.major, self.minor) >= (major, minor)
+    }
+
     /// Parse the output of `SELECT version()`.
     ///
     /// Expects a string like `"PostgreSQL 17.2 on x86_64-..."` or

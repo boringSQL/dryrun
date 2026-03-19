@@ -48,6 +48,7 @@ pub fn check_pk_non_sequential(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         ),
                         recommendation: "Consider UUIDv7 (time-ordered) or bigint IDENTITY for better insert performance".into(),
                         ddl_fix: None,
+                        min_pg_version: None,
                     });
                 }
             }
@@ -86,6 +87,7 @@ pub fn check_bool_prefix(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         "ALTER TABLE {} RENAME COLUMN {} TO is_{};",
                         qualified, col.name, col.name,
                     )),
+                    min_pg_version: None,
                 });
             }
         }
@@ -114,6 +116,7 @@ pub fn check_reserved_words(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                 ),
                 recommendation: format!("Rename table '{}' to avoid quoting issues", table.name),
                 ddl_fix: None,
+                min_pg_version: None,
             });
         }
 
@@ -133,6 +136,7 @@ pub fn check_reserved_words(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         col.name,
                     ),
                     ddl_fix: None,
+                    min_pg_version: None,
                 });
             }
         }
@@ -198,6 +202,7 @@ pub fn check_id_mismatch(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                 ),
                 recommendation: "Standardize FK column naming for consistency".into(),
                 ddl_fix: None,
+                min_pg_version: None,
             });
         }
     }
@@ -233,6 +238,7 @@ pub fn check_no_comment(schema: &SchemaSnapshot, config: &AuditConfig) -> Vec<Au
                     qualified,
                 ),
                 ddl_fix: None,
+                min_pg_version: None,
             });
         }
 
@@ -262,6 +268,7 @@ pub fn check_no_comment(schema: &SchemaSnapshot, config: &AuditConfig) -> Vec<Au
                 ),
                 recommendation: "Add COMMENT ON COLUMN for documentation".into(),
                 ddl_fix: None,
+                min_pg_version: None,
             });
         }
     }

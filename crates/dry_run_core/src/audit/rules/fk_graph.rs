@@ -75,6 +75,7 @@ pub fn check_circular_fks(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
             message: format!("Circular FK dependency: {}", cycle.join(" → ")),
             recommendation: "Circular FKs complicate migrations and cascade deletes — consider breaking the cycle".into(),
             ddl_fix: None,
+            min_pg_version: None,
         });
     }
 
@@ -133,6 +134,7 @@ pub fn check_orphan_tables(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                 recommendation:
                     "Verify this table is intentionally standalone or add FK relationships".into(),
                 ddl_fix: None,
+                min_pg_version: None,
             });
         }
     }
@@ -203,6 +205,7 @@ pub fn check_fk_type_mismatch(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         ddl_fix: Some(format!(
                             "ALTER TABLE {qualified} ALTER COLUMN {fk_col} TYPE {ref_type};",
                         )),
+                        min_pg_version: None,
                     });
                 }
             }

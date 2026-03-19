@@ -1,7 +1,6 @@
 use crate::audit::types::{AuditCategory, AuditConfig, AuditFinding};
 use crate::lint::Severity;
 use crate::schema::SchemaSnapshot;
-
 const WIDE_TYPES: &[&str] = &["text", "varchar", "bytea", "jsonb", "json", "xml"];
 
 #[must_use]
@@ -32,6 +31,7 @@ pub fn check_duplicate_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         ),
                         recommendation: "Drop one of the duplicate indexes".into(),
                         ddl_fix: Some(format!("DROP INDEX {};", b.name)),
+                        min_pg_version: None,
                     });
                 }
             }
@@ -80,6 +80,7 @@ pub fn check_redundant_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                             a.name, b.name,
                         ),
                         ddl_fix: Some(format!("DROP INDEX {};", a.name)),
+                        min_pg_version: None,
                     });
                 }
             }
@@ -108,6 +109,7 @@ pub fn check_too_many_indexes(schema: &SchemaSnapshot, config: &AuditConfig) -> 
                 ),
                 recommendation: "Review indexes for unused or redundant ones".into(),
                 ddl_fix: None,
+                min_pg_version: None,
             });
         }
     }
@@ -153,6 +155,7 @@ pub fn check_wide_column_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                     recommendation:
                         "Consider expression index, prefix index, or hash index instead".into(),
                     ddl_fix: None,
+                    min_pg_version: None,
                 });
             }
         }

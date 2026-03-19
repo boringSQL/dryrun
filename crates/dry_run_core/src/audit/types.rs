@@ -10,6 +10,9 @@ pub enum AuditCategory {
     PrimaryKeys,
     Naming,
     Documentation,
+    Storage,
+    Partitioning,
+    Security,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +25,8 @@ pub struct AuditFinding {
     pub recommendation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ddl_fix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_pg_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
