@@ -1,4 +1,5 @@
 mod mcp;
+mod pgmustard;
 
 use std::path::PathBuf;
 
