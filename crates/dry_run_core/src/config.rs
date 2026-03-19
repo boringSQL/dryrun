@@ -31,6 +31,9 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub conventions: Option<ConventionsConfig>,
+
+    #[serde(default)]
+    pub services: Option<ServicesConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +75,11 @@ pub struct DisabledRulesConfig {
 pub struct CustomPatternsConfig {
     pub table_name_regex: Option<String>,
     pub column_name_regex: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServicesConfig {
+    pub pgmustard_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +173,15 @@ impl ProjectConfig {
              or place a schema at .dry_run/schema.json"
                 .into(),
         ))
+    }
+
+    pub fn pgmustard_api_key(&self) -> Option<String> {
+        self.services
+            .as_ref()
+            .and_then(|s| s.pgmustard_api_key.as_ref())
+            .map(|k| expand_env_vars(k))
+            .filter(|k| !k.is_empty())
+            .or_else(|| std::env::var("PGMUSTARD_API_KEY").ok())
     }
 
     pub fn lint_config(&self) -> LintConfig {

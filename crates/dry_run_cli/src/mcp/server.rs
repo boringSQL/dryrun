@@ -37,6 +37,7 @@ impl DryRunServer {
         db_url: String,
         history: Option<HistoryStore>,
         lint_config: LintConfig,
+        pgmustard_api_key: Option<String>,
     ) -> Result<Self, dry_run_core::Error> {
         let snapshot = ctx.introspect_schema().await?;
         info!(tables = snapshot.tables.len(), "initial schema introspection complete");
@@ -48,12 +49,16 @@ impl DryRunServer {
             history: history.map(|h| Arc::new(std::sync::Mutex::new(h))),
             lint_config,
             audit_config: AuditConfig::default(),
-            pgmustard: PgMustardClient::from_env(),
+            pgmustard: Self::resolve_pgmustard(pgmustard_api_key),
             tool_router: Self::tool_router(),
         })
     }
 
-    pub fn from_snapshot_with_config(snapshot: SchemaSnapshot, lint_config: LintConfig) -> Self {
+    pub fn from_snapshot_with_config(
+        snapshot: SchemaSnapshot,
+        lint_config: LintConfig,
+        pgmustard_api_key: Option<String>,
+    ) -> Self {
         info!(
             tables = snapshot.tables.len(),
             database = %snapshot.database,
@@ -67,8 +72,16 @@ impl DryRunServer {
             history: None,
             lint_config,
             audit_config: AuditConfig::default(),
-            pgmustard: PgMustardClient::from_env(),
+            pgmustard: Self::resolve_pgmustard(pgmustard_api_key),
             tool_router: Self::tool_router(),
+        }
+    }
+
+    fn resolve_pgmustard(api_key: Option<String>) -> Option<PgMustardClient> {
+        if let Some(key) = api_key {
+            Some(PgMustardClient::new(key))
+        } else {
+            PgMustardClient::from_env()
         }
     }
 

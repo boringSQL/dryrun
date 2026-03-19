@@ -53,12 +53,16 @@ pub struct SaveResponse {
 }
 
 impl PgMustardClient {
-    pub fn from_env() -> Option<Self> {
-        let api_key = std::env::var("PGMUSTARD_API_KEY").ok()?;
-        Some(Self {
+    pub fn new(api_key: String) -> Self {
+        Self {
             api_key,
             client: reqwest::Client::new(),
-        })
+        }
+    }
+
+    pub fn from_env() -> Option<Self> {
+        let api_key = std::env::var("PGMUSTARD_API_KEY").ok()?;
+        Some(Self::new(api_key))
     }
 
     /// Call the score endpoint — returns 0-3 deterministic tips with scores and explanations.

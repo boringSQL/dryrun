@@ -558,6 +558,10 @@ async fn cmd_mcp_serve(
         .map(|c| c.lint_config())
         .unwrap_or_default();
 
+    let pgmustard_api_key = project_config
+        .as_ref()
+        .and_then(|c| c.pgmustard_api_key());
+
     // resolve schema source
     let auto_schema = schema_path.map(|p| p.to_path_buf()).or_else(|| {
         if let Some(ref config) = project_config {
@@ -590,11 +594,11 @@ async fn cmd_mcp_serve(
             "dry-run: loaded schema from {} ({} tables, offline mode)",
             schema_file.display(), snapshot.tables.len()
         );
-        mcp::DryRunServer::from_snapshot_with_config(snapshot, lint_config)
+        mcp::DryRunServer::from_snapshot_with_config(snapshot, lint_config, pgmustard_api_key)
     } else if let Some(db_url) = &effective_db {
         let ctx = DryRun::connect(db_url).await?;
         let history = HistoryStore::open_default().ok();
-        mcp::DryRunServer::new(ctx, db_url.clone(), history, lint_config).await?
+        mcp::DryRunServer::new(ctx, db_url.clone(), history, lint_config, pgmustard_api_key).await?
     } else {
         anyhow::bail!(
             "no schema source found. Either:\n\
