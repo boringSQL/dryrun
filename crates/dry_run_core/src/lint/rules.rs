@@ -6,7 +6,7 @@ use crate::schema::{ConstraintKind, SchemaSnapshot, Table};
 
 use super::types::{LintConfig, LintViolation, Severity};
 
-/// Walk the partition tree transitively and collect all descendant (schema, name) pairs.
+// Walk the partition tree transitively and collect all descendant (schema, name) pairs.
 fn collect_partition_children(tables: &[Table]) -> HashSet<(String, String)> {
     let mut children = HashSet::new();
 
@@ -104,7 +104,33 @@ pub fn run_all_rules(schema: &SchemaSnapshot, config: &LintConfig) -> Vec<LintVi
         }
     }
 
+    suppress_overlapping(&mut violations);
     violations
+}
+
+fn suppress_overlapping(violations: &mut Vec<LintViolation>) {
+    // (winner, loser) pairs — winner is more specific
+    const PAIRS: &[(&str, &str)] = &[
+        ("timestamps/correct_type", "types/timestamptz"),
+        ("pk/bigint_identity", "types/no_serial"),
+        ("pk/bigint_identity", "types/bigint_pk_fk"),
+    ];
+
+    for &(winner, loser) in PAIRS {
+        let winner_keys: HashSet<(String, Option<String>)> = violations
+            .iter()
+            .filter(|v| v.rule == winner)
+            .map(|v| (v.table.clone(), v.column.clone()))
+            .collect();
+
+        if winner_keys.is_empty() {
+            continue;
+        }
+
+        violations.retain(|v| {
+            v.rule != loser || !winner_keys.contains(&(v.table.clone(), v.column.clone()))
+        });
+    }
 }
 
 fn is_disabled(config: &LintConfig, rule: &str) -> bool {
