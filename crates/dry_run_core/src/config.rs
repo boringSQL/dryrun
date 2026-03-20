@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::lint::LintConfig;
+use crate::lint::{LintConfig, Severity};
 
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
@@ -57,6 +57,7 @@ pub struct ConventionsConfig {
     pub require_timestamps: Option<bool>,
     pub timestamp_type: Option<String>,
     pub prefer_text_over_varchar: Option<bool>,
+    pub min_severity: Option<String>,
 
     #[serde(default)]
     pub disabled_rules: Option<DisabledRulesConfig>,
@@ -214,6 +215,15 @@ impl ProjectConfig {
         }
         if let Some(v) = conv.prefer_text_over_varchar {
             config.prefer_text_over_varchar = v;
+        }
+
+        if let Some(v) = &conv.min_severity {
+            match v.as_str() {
+                "info" => config.min_severity = Severity::Info,
+                "warning" => config.min_severity = Severity::Warning,
+                "error" => config.min_severity = Severity::Error,
+                _ => {} // keep default
+            }
         }
 
         if let Some(disabled) = &conv.disabled_rules {

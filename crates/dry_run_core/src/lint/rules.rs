@@ -151,6 +151,7 @@ pub fn run_all_rules(schema: &SchemaSnapshot, config: &LintConfig) -> Vec<LintVi
     }
 
     suppress_overlapping(&mut violations);
+    violations.retain(|v| v.severity >= config.min_severity);
     violations
 }
 
@@ -759,6 +760,7 @@ mod tests {
 
     fn only_fk_rules() -> LintConfig {
         let mut config = LintConfig::default();
+        config.min_severity = Severity::Info;
         // disable everything except fk_has_index to isolate the test
         config.disabled_rules = vec![
             "naming/table_style".into(), "naming/column_style".into(),
@@ -864,6 +866,7 @@ mod tests {
             "timestamps/has_created_at", "timestamps/has_updated_at", "timestamps/correct_type",
         ];
         let mut config = LintConfig::default();
+        config.min_severity = Severity::Info;
         config.disabled_rules = all_rules
             .iter()
             .filter(|r| !rules.contains(r))

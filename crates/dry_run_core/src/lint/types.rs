@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
-    Error,
-    Warning,
     Info,
+    Warning,
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +101,7 @@ pub struct LintConfig {
     pub timestamp_type: String,
     pub prefer_text_over_varchar: bool,
     pub disabled_rules: Vec<String>,
+    pub min_severity: Severity,
     pub table_name_regex: Option<String>,
     pub column_name_regex: Option<String>,
 }
@@ -117,6 +118,7 @@ impl Default for LintConfig {
             timestamp_type: "timestamptz".into(),
             prefer_text_over_varchar: true,
             disabled_rules: vec![],
+            min_severity: Severity::Warning,
             table_name_regex: None,
             column_name_regex: None,
         }
