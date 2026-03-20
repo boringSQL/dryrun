@@ -998,6 +998,7 @@ async fn fetch_triggers(pool: &PgPool) -> Result<Vec<RawTrigger>> {
           JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
          WHERE NOT t.tgisinternal
+           AND t.tgparentid = 0
            AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
          ORDER BY t.tgrelid, t.tgname
         "#,
