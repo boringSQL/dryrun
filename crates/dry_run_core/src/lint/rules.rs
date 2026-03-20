@@ -829,4 +829,216 @@ mod tests {
             "exact match index should satisfy the FK");
     }
 
+    // --- partition dedup helpers ---
+
+    fn make_partition_child(name: &str) -> PartitionChild {
+        PartitionChild {
+            schema: "public".into(),
+            name: name.into(),
+            bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')".into(),
+        }
+    }
+
+    fn make_partitioned_table(name: &str, children: Vec<PartitionChild>) -> Table {
+        Table {
+            oid: 0, schema: "public".into(), name: name.into(),
+            columns: vec![make_col("id", "integer")],
+            constraints: vec![], indexes: vec![],
+            comment: None, stats: None,
+            partition_info: Some(PartitionInfo {
+                strategy: PartitionStrategy::Range,
+                key: "created_at".into(),
+                children,
+            }),
+            policies: vec![], triggers: vec![], rls_enabled: false,
+        }
+    }
+
+    /// Config that only enables the given rules
+    fn config_with_only(rules: &[&str]) -> LintConfig {
+        let all_rules = [
+            "naming/table_style", "naming/column_style", "naming/fk_pattern",
+            "naming/index_pattern", "pk/exists", "pk/bigint_identity",
+            "types/text_over_varchar", "types/timestamptz", "types/no_serial",
+            "types/bigint_pk_fk", "constraints/fk_has_index", "constraints/unnamed",
+            "timestamps/has_created_at", "timestamps/has_updated_at", "timestamps/correct_type",
+        ];
+        let mut config = LintConfig::default();
+        config.disabled_rules = all_rules
+            .iter()
+            .filter(|r| !rules.contains(r))
+            .map(|r| r.to_string())
+            .collect();
+        config
+    }
+
+    fn make_pk(name: &str, columns: &[&str]) -> Constraint {
+        Constraint {
+            name: name.into(), kind: ConstraintKind::PrimaryKey,
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+            definition: None, fk_table: None,
+            fk_columns: vec![], comment: None,
+        }
+    }
+
+    fn make_col_with_default(name: &str, type_name: &str, default: &str) -> Column {
+        Column {
+            name: name.into(), ordinal: 0, type_name: type_name.into(),
+            nullable: false, default: Some(default.into()), identity: None,
+            comment: None, stats: None,
+        }
+    }
+
+    // --- Change 1: partition dedup tests ---
+
+    #[test]
+    fn partition_parent_with_three_children_only_parent_violations() {
+        let parent = make_partitioned_table("event", vec![
+            make_partition_child("event_2024_01"),
+            make_partition_child("event_2024_02"),
+            make_partition_child("event_2024_03"),
+        ]);
+        let child1 = make_table_with("event_2024_01", vec![make_col("id", "integer")], vec![], vec![]);
+        let child2 = make_table_with("event_2024_02", vec![make_col("id", "integer")], vec![], vec![]);
+        let child3 = make_table_with("event_2024_03", vec![make_col("id", "integer")], vec![], vec![]);
+
+        let schema = schema_with(vec![parent, child1, child2, child3]);
+        let config = config_with_only(&["pk/exists"]);
+        let violations = run_all_rules(&schema, &config);
+
+        // only the parent should fire pk/exists
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].table, "public.event");
+    }
+
+    #[test]
+    fn nested_partitions_grandchild_also_skipped() {
+        let parent = make_partitioned_table("event", vec![
+            make_partition_child("event_2024_01"),
+        ]);
+        let mid = Table {
+            oid: 0, schema: "public".into(), name: "event_2024_01".into(),
+            columns: vec![make_col("id", "integer")],
+            constraints: vec![], indexes: vec![],
+            comment: None, stats: None,
+            partition_info: Some(PartitionInfo {
+                strategy: PartitionStrategy::Hash,
+                key: "id".into(),
+                children: vec![make_partition_child("event_2024_01_h0")],
+            }),
+            policies: vec![], triggers: vec![], rls_enabled: false,
+        };
+        let grandchild = make_table_with(
+            "event_2024_01_h0", vec![make_col("id", "integer")], vec![], vec![],
+        );
+
+        let schema = schema_with(vec![parent, mid, grandchild]);
+        let config = config_with_only(&["pk/exists"]);
+        let violations = run_all_rules(&schema, &config);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].table, "public.event");
+    }
+
+    // --- Change 2: overlapping rule suppression tests ---
+
+    #[test]
+    fn timestamp_correct_type_suppresses_timestamptz() {
+        // created_at with wrong type should fire timestamps/correct_type but NOT types/timestamptz
+        let table = make_table_with(
+            "user",
+            vec![make_col("created_at", "timestamp without time zone")],
+            vec![], vec![],
+        );
+        let schema = schema_with(vec![table]);
+        let config = config_with_only(&["timestamps/correct_type", "types/timestamptz"]);
+        let violations = run_all_rules(&schema, &config);
+
+        let rules: Vec<&str> = violations.iter().map(|v| v.rule.as_str()).collect();
+        assert!(rules.contains(&"timestamps/correct_type"),
+            "winner rule should fire");
+        assert!(!rules.contains(&"types/timestamptz"),
+            "loser rule should be suppressed");
+    }
+
+    #[test]
+    fn serial_pk_suppresses_no_serial() {
+        // integer PK with serial default should fire pk/bigint_identity but NOT types/no_serial
+        let table = make_table_with(
+            "user",
+            vec![make_col_with_default("id", "integer", "nextval('user_id_seq')")],
+            vec![make_pk("user_pkey", &["id"])],
+            vec![],
+        );
+        let schema = schema_with(vec![table]);
+        let config = config_with_only(&["pk/bigint_identity", "types/no_serial"]);
+        let violations = run_all_rules(&schema, &config);
+
+        let rules: Vec<&str> = violations.iter().map(|v| v.rule.as_str()).collect();
+        assert!(rules.contains(&"pk/bigint_identity"),
+            "winner rule should fire");
+        assert!(!rules.contains(&"types/no_serial"),
+            "loser rule should be suppressed");
+    }
+
+    #[test]
+    fn loser_fires_when_winner_disabled() {
+        // if timestamps/correct_type is disabled, types/timestamptz should still fire
+        let table = make_table_with(
+            "user",
+            vec![make_col("created_at", "timestamp without time zone")],
+            vec![], vec![],
+        );
+        let schema = schema_with(vec![table]);
+        let config = config_with_only(&["types/timestamptz"]);
+        let violations = run_all_rules(&schema, &config);
+
+        assert!(violations.iter().any(|v| v.rule == "types/timestamptz"),
+            "loser should fire when winner is disabled");
+    }
+
+    // --- Change 3: auto-detect table name style tests ---
+
+    #[test]
+    fn auto_detect_picks_snake_plural_when_majority_plural() {
+        // 4 plural + 1 singular = majority plural (>= 5 total)
+        let tables: Vec<Table> = ["users", "orders", "products", "invoices", "config"]
+            .iter()
+            .map(|n| make_table_with(n, vec![make_col("id", "bigint")], vec![], vec![]))
+            .collect();
+
+        let result = detect_table_name_style(&tables);
+        assert_eq!(result, "snake_plural");
+    }
+
+    #[test]
+    fn auto_detect_fallback_when_fewer_than_5_tables() {
+        let tables: Vec<Table> = ["user", "orders", "config"]
+            .iter()
+            .map(|n| make_table_with(n, vec![make_col("id", "bigint")], vec![], vec![]))
+            .collect();
+
+        let result = detect_table_name_style(&tables);
+        assert_eq!(result, "snake_singular");
+    }
+
+    #[test]
+    fn auto_detect_resolves_in_run_all_rules() {
+        // 3 plural + 2 singular tables, auto should resolve to snake_plural
+        // the singular tables should get naming violations
+        let tables: Vec<Table> = ["users", "orders", "products", "config", "setting"]
+            .iter()
+            .map(|n| make_table_with(n, vec![make_col("id", "bigint")], vec![], vec![]))
+            .collect();
+        let schema = schema_with(tables);
+
+        let mut config = config_with_only(&["naming/table_style"]);
+        config.table_name_style = "auto".into();
+        let violations = run_all_rules(&schema, &config);
+
+        // snake_plural doesn't check for plural (just snake_case), so no violations expected
+        assert!(violations.is_empty(),
+            "auto-resolved to snake_plural should accept all snake_case names, got: {:?}",
+            violations.iter().map(|v| &v.table).collect::<Vec<_>>());
+    }
 }
