@@ -730,6 +730,7 @@ mod tests {
             include_columns: vec![], index_type: "btree".into(),
             is_unique: false, is_primary: false, predicate: None,
             definition: format!("CREATE INDEX {name} ON ..."),
+            is_valid: true,
             stats: None,
         }
     }

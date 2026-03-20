@@ -316,6 +316,7 @@ struct RawIndex {
     is_primary: bool,
     predicate: Option<String>,
     definition: String,
+    is_valid: bool,
 }
 
 struct RawTableStats {
@@ -730,6 +731,7 @@ async fn fetch_indexes(pool: &PgPool) -> Result<Vec<RawIndex>> {
                i.indisprimary         AS is_primary,
                pg_catalog.pg_get_expr(i.indpred, i.indrelid) AS predicate,
                pg_catalog.pg_get_indexdef(i.indexrelid) AS definition,
+               i.indisvalid           AS is_valid,
                i.indnkeyatts          AS n_key_atts,
                -- All column names (key + include)
                (SELECT array_agg(a.attname ORDER BY ord.n)
@@ -779,6 +781,7 @@ async fn fetch_indexes(pool: &PgPool) -> Result<Vec<RawIndex>> {
                 is_primary: r.get("is_primary"),
                 predicate: r.get("predicate"),
                 definition: r.get("definition"),
+                is_valid: r.get("is_valid"),
             }
         })
         .collect())
@@ -1335,6 +1338,7 @@ fn assemble_tables(
             is_primary: ri.is_primary,
             predicate: ri.predicate,
             definition: ri.definition,
+            is_valid: ri.is_valid,
             stats,
         });
     }

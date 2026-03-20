@@ -93,8 +93,14 @@ pub struct Index {
     pub is_primary: bool,
     pub predicate: Option<String>,
     pub definition: String,
+    #[serde(default = "default_true")]
+    pub is_valid: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<IndexStats>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -594,6 +600,7 @@ mod tests {
             is_primary,
             predicate: None,
             definition: format!("CREATE INDEX {name} ON t (col)"),
+            is_valid: true,
             stats,
         }
     }
