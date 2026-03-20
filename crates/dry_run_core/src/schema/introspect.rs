@@ -746,6 +746,7 @@ async fn fetch_indexes(pool: &PgPool) -> Result<Vec<RawIndex>> {
           JOIN pg_catalog.pg_am am ON am.oid = ci.relam
          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
            AND n.nspname NOT LIKE 'pg_temp_%'
+           AND NOT EXISTS (SELECT 1 FROM pg_inherits inh WHERE inh.inhrelid = i.indexrelid)
          ORDER BY i.indrelid, ci.relname
         "#,
     )
