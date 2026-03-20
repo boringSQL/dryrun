@@ -63,6 +63,33 @@ impl LintReport {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct LintReportCompact {
+    pub tables_checked: usize,
+    pub total_violations: usize,
+    pub summary: LintSummary,
+    pub by_rule: Vec<RuleGroup>,
+    pub config_source: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleGroup {
+    pub rule: String,
+    pub severity: Severity,
+    pub count: usize,
+    pub recommendation: String,
+    pub examples: Vec<CompactViolation>,
+    pub omitted: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompactViolation {
+    pub table: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LintConfig {
     pub table_name_style: String,
