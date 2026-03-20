@@ -78,3 +78,126 @@ pub fn compact_report(report: &LintReport, max_examples: usize) -> LintReportCom
         config_source: report.config_source.clone(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_violation(rule: &str, severity: Severity, table: &str) -> LintViolation {
+        LintViolation {
+            rule: rule.into(),
+            severity,
+            table: table.into(),
+            column: None,
+            message: format!("{table} violates {rule}"),
+            recommendation: format!("fix {rule}"),
+            convention_doc: String::new(),
+        }
+    }
+
+    fn make_report(violations: Vec<LintViolation>) -> LintReport {
+        LintReport::new(violations, 5, "test".into())
+    }
+
+    #[test]
+    fn test_compact_report_empty() {
+        let report = make_report(vec![]);
+        let compact = compact_report(&report, 3);
+
+        assert_eq!(compact.total_violations, 0);
+        assert_eq!(compact.tables_checked, 5);
+        assert!(compact.by_rule.is_empty());
+    }
+
+    #[test]
+    fn test_compact_report_groups_by_rule() {
+        let report = make_report(vec![
+            make_violation("naming", Severity::Warning, "users"),
+            make_violation("naming", Severity::Warning, "orders"),
+            make_violation("pk_type", Severity::Error, "users"),
+        ]);
+        let compact = compact_report(&report, 10);
+
+        assert_eq!(compact.by_rule.len(), 2);
+        // error rule should come first
+        assert_eq!(compact.by_rule[0].rule, "pk_type");
+        assert_eq!(compact.by_rule[0].count, 1);
+        assert_eq!(compact.by_rule[1].rule, "naming");
+        assert_eq!(compact.by_rule[1].count, 2);
+    }
+
+    #[test]
+    fn test_compact_report_caps_examples() {
+        let report = make_report(vec![
+            make_violation("naming", Severity::Warning, "t1"),
+            make_violation("naming", Severity::Warning, "t2"),
+            make_violation("naming", Severity::Warning, "t3"),
+            make_violation("naming", Severity::Warning, "t4"),
+            make_violation("naming", Severity::Warning, "t5"),
+        ]);
+        let compact = compact_report(&report, 2);
+
+        let group = &compact.by_rule[0];
+        assert_eq!(group.count, 5);
+        assert_eq!(group.examples.len(), 2);
+        assert_eq!(group.omitted, 3);
+    }
+
+    #[test]
+    fn test_compact_report_severity_ordering() {
+        let report = make_report(vec![
+            make_violation("info_rule", Severity::Info, "t1"),
+            make_violation("warn_rule", Severity::Warning, "t1"),
+            make_violation("err_rule", Severity::Error, "t1"),
+        ]);
+        let compact = compact_report(&report, 10);
+
+        assert_eq!(compact.by_rule[0].severity, Severity::Error);
+        assert_eq!(compact.by_rule[1].severity, Severity::Warning);
+        assert_eq!(compact.by_rule[2].severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_compact_report_count_ordering_within_severity() {
+        let report = make_report(vec![
+            make_violation("few", Severity::Warning, "t1"),
+            make_violation("many", Severity::Warning, "t1"),
+            make_violation("many", Severity::Warning, "t2"),
+            make_violation("many", Severity::Warning, "t3"),
+        ]);
+        let compact = compact_report(&report, 10);
+
+        assert_eq!(compact.by_rule[0].rule, "many");
+        assert_eq!(compact.by_rule[0].count, 3);
+        assert_eq!(compact.by_rule[1].rule, "few");
+        assert_eq!(compact.by_rule[1].count, 1);
+    }
+
+    #[test]
+    fn test_compact_report_preserves_summary() {
+        let report = make_report(vec![
+            make_violation("r1", Severity::Error, "t1"),
+            make_violation("r2", Severity::Warning, "t1"),
+            make_violation("r3", Severity::Warning, "t2"),
+            make_violation("r4", Severity::Info, "t1"),
+        ]);
+        let compact = compact_report(&report, 10);
+
+        assert_eq!(compact.summary.errors, 1);
+        assert_eq!(compact.summary.warnings, 2);
+        assert_eq!(compact.summary.info, 1);
+        assert_eq!(compact.total_violations, 4);
+    }
+
+    #[test]
+    fn test_compact_report_no_omitted_when_under_cap() {
+        let report = make_report(vec![
+            make_violation("r1", Severity::Error, "t1"),
+            make_violation("r1", Severity::Error, "t2"),
+        ]);
+        let compact = compact_report(&report, 5);
+
+        assert_eq!(compact.by_rule[0].examples.len(), 2);
+        assert_eq!(compact.by_rule[0].omitted, 0);
+    }
+}
