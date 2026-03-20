@@ -375,7 +375,7 @@ rules = ["pk/exists"]
     fn lint_config_defaults_without_conventions() {
         let config = ProjectConfig::parse("").unwrap();
         let lint = config.lint_config();
-        assert_eq!(lint.table_name_style, "snake_singular");
+        assert_eq!(lint.table_name_style, "auto");
         assert!(lint.prefer_text_over_varchar);
     }
 
