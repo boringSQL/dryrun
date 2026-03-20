@@ -81,7 +81,7 @@ pub struct LintConfig {
 impl Default for LintConfig {
     fn default() -> Self {
         Self {
-            table_name_style: "snake_singular".into(),
+            table_name_style: "auto".into(),
             column_name_style: "snake_case".into(),
             pk_type: "bigint_identity".into(),
             fk_pattern: "fk_{table}_{column}".into(),
