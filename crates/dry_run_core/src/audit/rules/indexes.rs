@@ -17,7 +17,12 @@ pub fn check_duplicate_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
 
         for (i, a) in non_primary.iter().enumerate() {
             for b in non_primary.iter().skip(i + 1) {
-                if a.columns == b.columns && a.index_type == b.index_type {
+                if a.columns == b.columns
+                    && a.index_type == b.index_type
+                    && a.predicate == b.predicate
+                    && a.is_unique == b.is_unique
+                    && a.include_columns == b.include_columns
+                {
                     findings.push(AuditFinding {
                         rule: "indexes/duplicate".into(),
                         category: AuditCategory::Indexes,
