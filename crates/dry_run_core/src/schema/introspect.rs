@@ -500,6 +500,7 @@ async fn fetch_constraints(pool: &PgPool) -> Result<Vec<RawConstraint>> {
             ON d.objoid = con.oid AND d.objsubid = 0
          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
            AND n.nspname NOT LIKE 'pg_temp_%'
+           AND con.conislocal
          ORDER BY con.conrelid, con.conname
         "#,
     )
