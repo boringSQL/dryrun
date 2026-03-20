@@ -1,13 +1,60 @@
+use std::collections::HashSet;
+
 use regex::Regex;
 
 use crate::schema::{ConstraintKind, SchemaSnapshot, Table};
 
 use super::types::{LintConfig, LintViolation, Severity};
 
+/// Walk the partition tree transitively and collect all descendant (schema, name) pairs.
+fn collect_partition_children(tables: &[Table]) -> HashSet<(String, String)> {
+    let mut children = HashSet::new();
+
+    // seed with direct children
+    for table in tables {
+        if let Some(ref info) = table.partition_info {
+            for child in &info.children {
+                children.insert((child.schema.clone(), child.name.clone()));
+            }
+        }
+    }
+
+    // expand transitively: if a collected child itself has partition_info, add its children
+    loop {
+        let mut new = Vec::new();
+        for table in tables {
+            if !children.contains(&(table.schema.clone(), table.name.clone())) {
+                continue;
+            }
+            if let Some(ref info) = table.partition_info {
+                for child in &info.children {
+                    let key = (child.schema.clone(), child.name.clone());
+                    if !children.contains(&key) {
+                        new.push(key);
+                    }
+                }
+            }
+        }
+        if new.is_empty() {
+            break;
+        }
+        children.extend(new);
+    }
+
+    children
+}
+
 pub fn run_all_rules(schema: &SchemaSnapshot, config: &LintConfig) -> Vec<LintViolation> {
     let mut violations = Vec::new();
+    let partition_children = collect_partition_children(&schema.tables);
 
     for table in &schema.tables {
+        let key = (table.schema.clone(), table.name.clone());
+        if partition_children.contains(&key) {
+            tracing::debug!(schema = %table.schema, table = %table.name, "skipping partition child");
+            continue;
+        }
+
         let qualified = format!("{}.{}", table.schema, table.name);
 
         if !is_disabled(config, "naming/table_style") {
@@ -709,4 +756,5 @@ mod tests {
         assert!(!violations.iter().any(|v| v.rule == "constraints/fk_has_index"),
             "exact match index should satisfy the FK");
     }
+
 }
