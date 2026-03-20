@@ -22,23 +22,27 @@ pub fn lint_schema(schema: &SchemaSnapshot, config: &LintConfig) -> LintReport {
 }
 
 pub fn compact_report(report: &LintReport, max_examples: usize) -> LintReportCompact {
-    let mut groups_map: HashMap<String, (Severity, String, Vec<CompactViolation>)> =
+    let mut groups_map: HashMap<String, (Severity, String, String, Vec<CompactViolation>)> =
         HashMap::new();
 
     for v in &report.violations {
-        let entry = groups_map
-            .entry(v.rule.clone())
-            .or_insert_with(|| (v.severity.clone(), v.recommendation.clone(), Vec::new()));
-        entry.2.push(CompactViolation {
+        let entry = groups_map.entry(v.rule.clone()).or_insert_with(|| {
+            (
+                v.severity.clone(),
+                v.message.clone(),
+                v.recommendation.clone(),
+                Vec::new(),
+            )
+        });
+        entry.3.push(CompactViolation {
             table: v.table.clone(),
             column: v.column.clone(),
-            message: v.message.clone(),
         });
     }
 
     let mut by_rule: Vec<RuleGroup> = groups_map
         .into_iter()
-        .map(|(rule, (severity, recommendation, examples))| {
+        .map(|(rule, (severity, message, recommendation, examples))| {
             let count = examples.len();
             let omitted = count.saturating_sub(max_examples);
             let capped = examples.into_iter().take(max_examples).collect();
@@ -46,6 +50,7 @@ pub fn compact_report(report: &LintReport, max_examples: usize) -> LintReportCom
                 rule,
                 severity,
                 count,
+                message,
                 recommendation,
                 examples: capped,
                 omitted,

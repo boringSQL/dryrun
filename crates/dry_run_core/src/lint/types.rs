@@ -77,6 +77,7 @@ pub struct RuleGroup {
     pub rule: String,
     pub severity: Severity,
     pub count: usize,
+    pub message: String,
     pub recommendation: String,
     pub examples: Vec<CompactViolation>,
     pub omitted: usize,
@@ -87,7 +88,6 @@ pub struct CompactViolation {
     pub table: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column: Option<String>,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
