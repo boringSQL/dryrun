@@ -195,7 +195,8 @@ async fn fetch_named_index_stats(pool: &PgPool) -> Result<Vec<NodeIndexStats>> {
                ci.relpages::int8     AS index_relpages,
                ci.reltuples::float8  AS index_reltuples
           FROM pg_catalog.pg_stat_user_indexes s
-          JOIN pg_catalog.pg_namespace n ON n.oid = s.schemaoid
+          JOIN pg_catalog.pg_class ct ON ct.oid = s.relid
+          JOIN pg_catalog.pg_namespace n ON n.oid = ct.relnamespace
           JOIN pg_catalog.pg_class ci ON ci.oid = s.indexrelid
          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
            AND n.nspname NOT LIKE 'pg_temp_%'
@@ -1028,7 +1029,8 @@ async fn fetch_index_stats(pool: &PgPool) -> Result<Vec<RawIndexStats>> {
                ci.relpages::int8     AS index_relpages,
                ci.reltuples::float8  AS index_reltuples
           FROM pg_catalog.pg_stat_user_indexes s
-          JOIN pg_catalog.pg_namespace n ON n.oid = s.schemaoid
+          JOIN pg_catalog.pg_class ct ON ct.oid = s.relid
+          JOIN pg_catalog.pg_namespace n ON n.oid = ct.relnamespace
           JOIN pg_catalog.pg_class ci ON ci.oid = s.indexrelid
          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
            AND n.nspname NOT LIKE 'pg_temp_%'
