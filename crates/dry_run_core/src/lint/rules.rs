@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use regex::Regex;
@@ -44,9 +45,54 @@ fn collect_partition_children(tables: &[Table]) -> HashSet<(String, String)> {
     children
 }
 
+fn detect_table_name_style(tables: &[Table]) -> String {
+    let mut plural = 0u32;
+    let mut singular = 0u32;
+
+    for table in tables {
+        if !is_snake_case(&table.name) {
+            continue;
+        }
+        if looks_plural(&table.name) {
+            plural += 1;
+        } else {
+            singular += 1;
+        }
+    }
+
+    if plural + singular < 5 {
+        return "snake_singular".into();
+    }
+
+    if plural > singular {
+        "snake_plural".into()
+    } else {
+        "snake_singular".into()
+    }
+}
+
 pub fn run_all_rules(schema: &SchemaSnapshot, config: &LintConfig) -> Vec<LintViolation> {
     let mut violations = Vec::new();
     let partition_children = collect_partition_children(&schema.tables);
+
+    // resolve "auto" table_name_style
+    let resolved_style: Cow<'_, str> = if config.table_name_style == "auto" {
+        let detected = detect_table_name_style(&schema.tables);
+        tracing::info!(detected = %detected, "auto-detected table name style");
+        Cow::Owned(detected)
+    } else {
+        Cow::Borrowed(&config.table_name_style)
+    };
+    let effective_config;
+    let config = if *resolved_style != config.table_name_style {
+        effective_config = LintConfig {
+            table_name_style: resolved_style.into_owned(),
+            ..config.clone()
+        };
+        &effective_config
+    } else {
+        config
+    };
 
     for table in &schema.tables {
         let key = (table.schema.clone(), table.name.clone());
