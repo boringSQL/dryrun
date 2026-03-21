@@ -67,6 +67,7 @@ pub fn check_redundant_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                 // a is redundant if a's columns are strict prefix of b's columns
                 if a.columns.len() < b.columns.len()
                     && b.columns.starts_with(&a.columns)
+                    && !a.is_unique
                 {
                     findings.push(AuditFinding {
                         rule: "indexes/redundant".into(),
