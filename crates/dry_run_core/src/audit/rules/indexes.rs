@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn no_duplicate_when_uniqueness_differs() {
+    fn detects_nonunique_redundant_with_unique() {
         let mut unique = make_index("idx_user_uniq", &["user_id"]);
         unique.is_unique = true;
         let schema = schema_with(vec![make_table_with(
@@ -392,7 +392,34 @@ mod tests {
             ],
         )]);
         let findings = check_duplicate_indexes(&schema);
-        assert!(findings.is_empty());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert!(findings[0].message.contains("Non-unique index 'idx_user_plain'"));
+        assert!(findings[0].message.contains("unique index 'idx_user_uniq'"));
+        assert_eq!(findings[0].ddl_fix.as_deref(), Some("DROP INDEX idx_user_plain;"));
+    }
+
+    #[test]
+    fn check_duplicate_nonunique_redundant_with_partial_unique() {
+        // non-unique with predicate matching unique with same predicate
+        let mut unique = make_index("workspace_name_uniq", &["workspace_id", "name"]);
+        unique.is_unique = true;
+        unique.predicate = Some("deleted_at IS NULL".into());
+        let mut plain = make_index("idx_workspace_name", &["workspace_id", "name"]);
+        plain.predicate = Some("deleted_at IS NULL".into());
+        let schema = schema_with(vec![make_table_with(
+            "client_workspaces",
+            vec![
+                make_col("workspace_id", "bigint"),
+                make_col("name", "bigint"),
+                make_col("deleted_at", "timestamptz"),
+            ],
+            vec![plain, unique],
+        )]);
+        let findings = check_duplicate_indexes(&schema);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert_eq!(findings[0].ddl_fix.as_deref(), Some("DROP INDEX idx_workspace_name;"));
     }
 
     #[test]
