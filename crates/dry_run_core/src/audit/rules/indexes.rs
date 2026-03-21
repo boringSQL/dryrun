@@ -313,4 +313,68 @@ mod tests {
         let findings = check_wide_column_indexes(&schema);
         assert!(findings.is_empty());
     }
+
+    #[test]
+    fn no_duplicate_when_predicates_differ() {
+        let mut partial = make_index("idx_user_active", &["user_id"]);
+        partial.predicate = Some("status = 'active'".into());
+        let schema = schema_with(vec![make_table_with(
+            "orders",
+            vec![make_col("user_id", "bigint"), make_col("status", "text")],
+            vec![
+                make_index("idx_user_all", &["user_id"]),
+                partial,
+            ],
+        )]);
+        let findings = check_duplicate_indexes(&schema);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn no_duplicate_when_uniqueness_differs() {
+        let mut unique = make_index("idx_user_uniq", &["user_id"]);
+        unique.is_unique = true;
+        let schema = schema_with(vec![make_table_with(
+            "orders",
+            vec![make_col("user_id", "bigint")],
+            vec![
+                make_index("idx_user_plain", &["user_id"]),
+                unique,
+            ],
+        )]);
+        let findings = check_duplicate_indexes(&schema);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn no_duplicate_when_include_columns_differ() {
+        let mut covering = make_index("idx_user_cover", &["user_id"]);
+        covering.include_columns = vec!["status".into()];
+        let schema = schema_with(vec![make_table_with(
+            "orders",
+            vec![make_col("user_id", "bigint"), make_col("status", "text")],
+            vec![
+                make_index("idx_user_plain", &["user_id"]),
+                covering,
+            ],
+        )]);
+        let findings = check_duplicate_indexes(&schema);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn still_detects_duplicate_with_same_predicate() {
+        let mut a = make_index("idx_user_active_1", &["user_id"]);
+        a.predicate = Some("status = 'active'".into());
+        let mut b = make_index("idx_user_active_2", &["user_id"]);
+        b.predicate = Some("status = 'active'".into());
+        let schema = schema_with(vec![make_table_with(
+            "orders",
+            vec![make_col("user_id", "bigint"), make_col("status", "text")],
+            vec![a, b],
+        )]);
+        let findings = check_duplicate_indexes(&schema);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "indexes/duplicate");
+    }
 }
