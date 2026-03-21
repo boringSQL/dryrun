@@ -280,6 +280,29 @@ mod tests {
     }
 
     #[test]
+    fn skips_unique_prefix_index_for_redundancy() {
+        let mut unique = make_index("idx_task_project_uniq", &["planned_task_id", "project_id"]);
+        unique.is_unique = true;
+        let schema = schema_with(vec![make_table_with(
+            "assignments",
+            vec![
+                make_col("planned_task_id", "bigint"),
+                make_col("project_id", "bigint"),
+                make_col("workspace_id", "bigint"),
+            ],
+            vec![
+                unique,
+                make_index(
+                    "idx_task_project_workspace",
+                    &["planned_task_id", "project_id", "workspace_id"],
+                ),
+            ],
+        )]);
+        let findings = check_redundant_indexes(&schema);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
     fn detects_too_many_indexes() {
         let cols = vec![make_col("id", "bigint")];
         let indexes: Vec<_> = (0..12)
