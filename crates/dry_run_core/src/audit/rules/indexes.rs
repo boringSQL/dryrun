@@ -17,12 +17,16 @@ pub fn check_duplicate_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
 
         for (i, a) in non_primary.iter().enumerate() {
             for b in non_primary.iter().skip(i + 1) {
-                if a.columns == b.columns
-                    && a.index_type == b.index_type
-                    && a.predicate == b.predicate
-                    && a.is_unique == b.is_unique
-                    && a.include_columns == b.include_columns
+                if a.columns != b.columns
+                    || a.index_type != b.index_type
+                    || a.predicate != b.predicate
+                    || a.include_columns != b.include_columns
                 {
+                    continue;
+                }
+
+                if a.is_unique == b.is_unique {
+                    // exact duplicates — drop either one
                     findings.push(AuditFinding {
                         rule: "indexes/duplicate".into(),
                         category: AuditCategory::Indexes,
@@ -36,6 +40,27 @@ pub fn check_duplicate_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         ),
                         recommendation: "Drop one of the duplicate indexes".into(),
                         ddl_fix: Some(format!("DROP INDEX {};", b.name)),
+                        min_pg_version: None,
+                    });
+                } else {
+                    // one unique, one not — the non-unique is redundant
+                    let (non_uniq, uniq) = if a.is_unique { (b, a) } else { (a, b) };
+                    findings.push(AuditFinding {
+                        rule: "indexes/duplicate".into(),
+                        category: AuditCategory::Indexes,
+                        severity: Severity::Warning,
+                        tables: vec![qualified.clone()],
+                        message: format!(
+                            "Non-unique index '{}' is redundant — the unique index '{}' already covers these lookups: [{}]",
+                            non_uniq.name,
+                            uniq.name,
+                            a.columns.join(", "),
+                        ),
+                        recommendation: format!(
+                            "Non-unique index '{}' is redundant — the unique index '{}' already covers these lookups",
+                            non_uniq.name, uniq.name,
+                        ),
+                        ddl_fix: Some(format!("DROP INDEX {};", non_uniq.name)),
                         min_pg_version: None,
                     });
                 }
