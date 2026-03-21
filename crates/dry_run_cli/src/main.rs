@@ -4,6 +4,7 @@ mod pgmustard;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use dry_run_core::schema::{NodeColumnStats, NodeIndexStats, NodeStats, NodeTableStats};
 use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
 use rmcp::ServiceExt;
 
@@ -191,6 +192,50 @@ async fn cmd_dump_schema(
 
     let mut snapshot = ctx.introspect_schema().await?;
     snapshot.source = name;
+
+    if let Some(ref source) = snapshot.source {
+        let mut table_stats = Vec::new();
+        let mut index_stats = Vec::new();
+        let mut column_stats = Vec::new();
+
+        for table in &snapshot.tables {
+            if let Some(ref ts) = table.stats {
+                table_stats.push(NodeTableStats {
+                    schema: table.schema.clone(),
+                    table: table.name.clone(),
+                    stats: ts.clone(),
+                });
+            }
+            for idx in &table.indexes {
+                if let Some(ref is) = idx.stats {
+                    index_stats.push(NodeIndexStats {
+                        schema: table.schema.clone(),
+                        table: table.name.clone(),
+                        index_name: idx.name.clone(),
+                        stats: is.clone(),
+                    });
+                }
+            }
+            for col in &table.columns {
+                if let Some(ref cs) = col.stats {
+                    column_stats.push(NodeColumnStats {
+                        schema: table.schema.clone(),
+                        table: table.name.clone(),
+                        column: col.name.clone(),
+                        stats: cs.clone(),
+                    });
+                }
+            }
+        }
+
+        snapshot.node_stats = vec![NodeStats {
+            source: source.clone(),
+            timestamp: snapshot.timestamp,
+            table_stats,
+            index_stats,
+            column_stats,
+        }];
+    }
 
     let json = if pretty {
         serde_json::to_string_pretty(&snapshot)?
