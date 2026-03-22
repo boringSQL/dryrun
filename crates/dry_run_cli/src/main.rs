@@ -11,9 +11,6 @@ use rmcp::ServiceExt;
 #[derive(Parser)]
 #[command(name = "dry-run", version, about = "PostgreSQL schema intelligence")]
 struct Cli {
-    #[arg(long, env = "DATABASE_URL")]
-    db: Option<String>,
-
     #[arg(long)]
     profile: Option<String>,
 
@@ -26,13 +23,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    Init,
+    Init {
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
+    },
     Import {
         file: PathBuf,
         #[arg(long, num_args = 1..)]
         stats: Vec<PathBuf>,
     },
-    Probe,
+    Probe {
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
+    },
     Lint {
         #[arg(long)]
         schema: Option<String>,
@@ -42,6 +45,8 @@ enum Command {
         json: bool,
     },
     DumpSchema {
+        #[arg(long, env = "SOURCE_DATABASE_URL")]
+        source: Option<String>,
         #[arg(long)]
         pretty: bool,
         #[arg(short, long)]
@@ -64,6 +69,8 @@ enum Command {
         action: StatsAction,
     },
     McpServe {
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
         #[arg(long, env = "DRY_RUN_SCHEMA_FILE")]
         schema: Option<PathBuf>,
         #[arg(long, default_value = "stdio")]
@@ -76,6 +83,8 @@ enum Command {
 #[derive(Subcommand)]
 enum StatsAction {
     Apply {
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
         #[arg(long, short)]
         schema: Option<PathBuf>,
         #[arg(long, short)]
@@ -86,14 +95,20 @@ enum StatsAction {
 #[derive(Subcommand)]
 enum SnapshotAction {
     Take {
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
         #[arg(long)]
         history_db: Option<PathBuf>,
     },
     List {
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
         #[arg(long)]
         history_db: Option<PathBuf>,
     },
     Diff {
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
         #[arg(long)]
         from: Option<String>,
         #[arg(long)]
@@ -133,28 +148,28 @@ async fn main() {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Probe => cmd_probe(&cli).await,
-        Command::DumpSchema { pretty, ref output, stats_only, ref name } => {
-            cmd_dump_schema(&cli, pretty, output.clone(), stats_only, name.clone()).await
+        Command::Probe { ref db } => cmd_probe(db.as_deref()).await,
+        Command::DumpSchema { ref source, pretty, ref output, stats_only, ref name } => {
+            cmd_dump_schema(source.as_deref(), pretty, output.clone(), stats_only, name.clone()).await
         }
-        Command::Init => cmd_init(&cli).await,
+        Command::Init { ref db } => cmd_init(db.as_deref()).await,
         Command::Import { ref file, ref stats } => cmd_import(file, stats).await,
         Command::Lint {
             ref schema,
             pretty,
             json,
         } => cmd_lint(&cli, schema.as_deref(), pretty, json).await,
-        Command::Snapshot { ref action } => cmd_snapshot(&cli, action).await,
+        Command::Snapshot { ref action } => cmd_snapshot(action).await,
         Command::Profile { ref action } => cmd_profile(&cli, action),
-        Command::Stats { ref action } => cmd_stats(&cli, action).await,
-        Command::McpServe { ref schema, ref transport, port } => {
-            cmd_mcp_serve(&cli, schema.as_deref(), transport, port).await
+        Command::Stats { ref action } => cmd_stats(action).await,
+        Command::McpServe { ref db, ref schema, ref transport, port } => {
+            cmd_mcp_serve(&cli, db.as_deref(), schema.as_deref(), transport, port).await
         }
     }
 }
 
-async fn cmd_probe(cli: &Cli) -> anyhow::Result<()> {
-    let db_url = require_db(cli)?;
+async fn cmd_probe(db: Option<&str>) -> anyhow::Result<()> {
+    let db_url = require_db_url(db)?;
     let ctx = DryRun::connect(&db_url).await?;
 
     let result = ctx.probe().await?;
@@ -170,13 +185,13 @@ async fn cmd_probe(cli: &Cli) -> anyhow::Result<()> {
 }
 
 async fn cmd_dump_schema(
-    cli: &Cli,
+    source: Option<&str>,
     pretty: bool,
     output: Option<PathBuf>,
     stats_only: bool,
     name: Option<String>,
 ) -> anyhow::Result<()> {
-    let db_url = require_db(cli)?;
+    let db_url = require_db_url(source)?;
     let ctx = DryRun::connect(&db_url).await?;
 
     if stats_only {
@@ -267,8 +282,8 @@ async fn cmd_dump_schema(
     Ok(())
 }
 
-async fn cmd_init(cli: &Cli) -> anyhow::Result<()> {
-    let db_url = require_db(cli)?;
+async fn cmd_init(db: Option<&str>) -> anyhow::Result<()> {
+    let db_url = require_db_url(db)?;
     let ctx = DryRun::connect(&db_url).await?;
     let snapshot = ctx.introspect_schema().await?;
 
@@ -364,10 +379,10 @@ async fn cmd_lint(
     Ok(())
 }
 
-async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> {
+async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
     match action {
-        SnapshotAction::Take { history_db } => {
-            let db_url = require_db(cli)?;
+        SnapshotAction::Take { db, history_db } => {
+            let db_url = require_db_url(db.as_deref())?;
             let ctx = DryRun::connect(&db_url).await?;
             let store = open_history_store(history_db.as_deref())?;
             let snapshot = ctx.introspect_schema().await?;
@@ -386,8 +401,8 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
             }
             Ok(())
         }
-        SnapshotAction::List { history_db } => {
-            let db_url = require_db(cli)?;
+        SnapshotAction::List { db, history_db } => {
+            let db_url = require_db_url(db.as_deref())?;
             let store = open_history_store(history_db.as_deref())?;
             let snapshots = store.list_snapshots(&db_url)?;
 
@@ -407,9 +422,9 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
             Ok(())
         }
         SnapshotAction::Diff {
-            from, to, latest, history_db, pretty,
+            db, from, to, latest, history_db, pretty,
         } => {
-            let db_url = require_db(cli)?;
+            let db_url = require_db_url(db.as_deref())?;
             let ctx = DryRun::connect(&db_url).await?;
             let store = open_history_store(history_db.as_deref())?;
 
@@ -535,10 +550,10 @@ async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::
     Ok(())
 }
 
-async fn cmd_stats(cli: &Cli, action: &StatsAction) -> anyhow::Result<()> {
+async fn cmd_stats(action: &StatsAction) -> anyhow::Result<()> {
     match action {
-        StatsAction::Apply { schema, node } => {
-            let db_url = require_db(cli)?;
+        StatsAction::Apply { db, schema, node } => {
+            let db_url = require_db_url(db.as_deref())?;
 
             // load schema.json
             let snapshot = if let Some(path) = schema {
@@ -599,10 +614,8 @@ async fn cmd_stats(cli: &Cli, action: &StatsAction) -> anyhow::Result<()> {
 
 // helpers
 
-fn require_db(cli: &Cli) -> anyhow::Result<String> {
-    cli.db.clone().ok_or_else(|| {
-        anyhow::anyhow!("--db or DRY_RUN_DATABASE_URL is required")
-    })
+fn require_db_url(db: Option<&str>) -> anyhow::Result<&str> {
+    db.ok_or_else(|| anyhow::anyhow!("--db or DATABASE_URL is required"))
 }
 
 fn load_project_config(cli: &Cli, cwd: &std::path::Path) -> Option<ProjectConfig> {
@@ -620,7 +633,7 @@ async fn load_schema_for_lint(cli: &Cli) -> anyhow::Result<dry_run_core::SchemaS
     // try profile-based schema file
     if let Some(ref config) = project_config {
         if let Ok(resolved) =
-            config.resolve_profile(cli.db.as_deref(), None, cli.profile.as_deref(), &cwd)
+            config.resolve_profile(None, None, cli.profile.as_deref(), &cwd)
         {
             if let Some(schema_file) = resolved.schema_file {
                 if schema_file.exists() {
@@ -638,17 +651,8 @@ async fn load_schema_for_lint(cli: &Cli) -> anyhow::Result<dry_run_core::SchemaS
         }
     }
 
-    // fall back to live DB
-    if let Some(db_url) = &cli.db {
-        let ctx = DryRun::connect(db_url).await?;
-        return Ok(ctx.introspect_schema().await?);
-    }
-
     anyhow::bail!(
-        "no schema source found. Either:\n\
-         1. Run 'dry-run --db <url> init' to create .dry_run/schema.json\n\
-         2. Pass --db <url> for live database mode\n\
-         3. Configure a profile in dry_run.toml"
+        "no schema found — run dump-schema first or pass --schema-file"
     );
 }
 
@@ -668,6 +672,7 @@ fn open_history_store(path: Option<&std::path::Path>) -> anyhow::Result<HistoryS
 
 async fn cmd_mcp_serve(
     cli: &Cli,
+    db: Option<&str>,
     schema_path: Option<&std::path::Path>,
     transport: &str,
     port: u16,
@@ -688,7 +693,7 @@ async fn cmd_mcp_serve(
     let auto_schema = schema_path.map(|p| p.to_path_buf()).or_else(|| {
         if let Some(ref config) = project_config {
             if let Ok(resolved) = config.resolve_profile(
-                cli.db.as_deref(), None, cli.profile.as_deref(), &cwd,
+                db, None, cli.profile.as_deref(), &cwd,
             ) {
                 if let Some(sf) = resolved.schema_file {
                     if sf.exists() { return Some(sf); }
@@ -700,7 +705,7 @@ async fn cmd_mcp_serve(
     });
 
     // resolve db_url from profile if not set via CLI
-    let effective_db = cli.db.clone().or_else(|| {
+    let effective_db = db.map(|s| s.to_string()).or_else(|| {
         if let Some(ref config) = project_config {
             if let Ok(resolved) = config.resolve_profile(None, None, cli.profile.as_deref(), &cwd) {
                 return resolved.db_url;

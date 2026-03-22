@@ -4,3 +4,6 @@
 .sqlx/
 pgcontext/*.json
 pgcontext/*.db
+SPEC.md
+ROADMAP.md
+TARGET.md
