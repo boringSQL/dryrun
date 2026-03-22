@@ -38,7 +38,7 @@ enum Command {
     },
     Lint {
         #[arg(long)]
-        schema: Option<String>,
+        schema_name: Option<String>,
         #[arg(long)]
         pretty: bool,
         #[arg(long)]
@@ -72,7 +72,7 @@ enum Command {
         #[arg(long, env = "DATABASE_URL")]
         db: Option<String>,
         #[arg(long, env = "DRY_RUN_SCHEMA_FILE")]
-        schema: Option<PathBuf>,
+        schema_file: Option<PathBuf>,
         #[arg(long, default_value = "stdio")]
         transport: String,
         #[arg(long, default_value = "3000")]
@@ -86,7 +86,7 @@ enum StatsAction {
         #[arg(long, env = "DATABASE_URL")]
         db: Option<String>,
         #[arg(long, short)]
-        schema: Option<PathBuf>,
+        schema_file: Option<PathBuf>,
         #[arg(long, short)]
         node: Option<String>,
     },
@@ -155,15 +155,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Init { ref db } => cmd_init(db.as_deref()).await,
         Command::Import { ref file, ref stats } => cmd_import(file, stats).await,
         Command::Lint {
-            ref schema,
+            ref schema_name,
             pretty,
             json,
-        } => cmd_lint(&cli, schema.as_deref(), pretty, json).await,
+        } => cmd_lint(&cli, schema_name.as_deref(), pretty, json).await,
         Command::Snapshot { ref action } => cmd_snapshot(action).await,
         Command::Profile { ref action } => cmd_profile(&cli, action),
         Command::Stats { ref action } => cmd_stats(action).await,
-        Command::McpServe { ref db, ref schema, ref transport, port } => {
-            cmd_mcp_serve(&cli, db.as_deref(), schema.as_deref(), transport, port).await
+        Command::McpServe { ref db, ref schema_file, ref transport, port } => {
+            cmd_mcp_serve(&cli, db.as_deref(), schema_file.as_deref(), transport, port).await
         }
     }
 }
@@ -552,11 +552,11 @@ async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::
 
 async fn cmd_stats(action: &StatsAction) -> anyhow::Result<()> {
     match action {
-        StatsAction::Apply { db, schema, node } => {
+        StatsAction::Apply { db, schema_file, node } => {
             let db_url = require_db_url(db.as_deref())?;
 
             // load schema.json
-            let snapshot = if let Some(path) = schema {
+            let snapshot = if let Some(path) = schema_file {
                 load_schema_file(path)?
             } else if let Ok(data_dir) = dry_run_core::history::default_data_dir() {
                 let candidate = data_dir.join("schema.json");
@@ -564,12 +564,12 @@ async fn cmd_stats(action: &StatsAction) -> anyhow::Result<()> {
                     load_schema_file(&candidate)?
                 } else {
                     anyhow::bail!(
-                        "no schema.json found at {}. Use --schema to specify path",
+                        "no schema.json found at {}. Use --schema-file to specify path",
                         candidate.display()
                     );
                 }
             } else {
-                anyhow::bail!("no schema source found. Use --schema to specify path to schema.json");
+                anyhow::bail!("no schema source found. Use --schema-file to specify path to schema.json");
             };
 
             let ctx = DryRun::connect(&db_url).await?;
@@ -730,7 +730,7 @@ async fn cmd_mcp_serve(
         anyhow::bail!(
             "no schema source found. Either:\n\
              1. Run 'dry-run --db <url> init' to create .dry_run/schema.json\n\
-             2. Pass --schema <path> to a schema JSON file\n\
+             2. Pass --schema-file <path> to a schema JSON file\n\
              3. Pass --db <url> for live database mode\n\
              4. Configure a profile in dry_run.toml"
         );
