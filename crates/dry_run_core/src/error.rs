@@ -21,6 +21,9 @@ pub enum Error {
     #[error("config error: {0}")]
     Config(String),
 
+    #[error("stats injection failed: {0}")]
+    StatsInjection(String),
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }

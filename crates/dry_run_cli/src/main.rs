@@ -11,7 +11,7 @@ use rmcp::ServiceExt;
 #[derive(Parser)]
 #[command(name = "dry-run", version, about = "PostgreSQL schema intelligence")]
 struct Cli {
-    #[arg(long, env = "DRY_RUN_DATABASE_URL")]
+    #[arg(long, env = "DATABASE_URL")]
     db: Option<String>,
 
     #[arg(long)]
@@ -59,6 +59,10 @@ enum Command {
         #[command(subcommand)]
         action: ProfileAction,
     },
+    Stats {
+        #[command(subcommand)]
+        action: StatsAction,
+    },
     McpServe {
         #[arg(long, env = "DRY_RUN_SCHEMA_FILE")]
         schema: Option<PathBuf>,
@@ -66,6 +70,16 @@ enum Command {
         transport: String,
         #[arg(long, default_value = "3000")]
         port: u16,
+    },
+}
+
+#[derive(Subcommand)]
+enum StatsAction {
+    Apply {
+        #[arg(long, short)]
+        schema: Option<PathBuf>,
+        #[arg(long, short)]
+        node: Option<String>,
     },
 }
 
@@ -132,6 +146,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => cmd_lint(&cli, schema.as_deref(), pretty, json).await,
         Command::Snapshot { ref action } => cmd_snapshot(&cli, action).await,
         Command::Profile { ref action } => cmd_profile(&cli, action),
+        Command::Stats { ref action } => cmd_stats(&cli, action).await,
         Command::McpServe { ref schema, ref transport, port } => {
             cmd_mcp_serve(&cli, schema.as_deref(), transport, port).await
         }
@@ -518,6 +533,68 @@ async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::
         }
     );
     Ok(())
+}
+
+async fn cmd_stats(cli: &Cli, action: &StatsAction) -> anyhow::Result<()> {
+    match action {
+        StatsAction::Apply { schema, node } => {
+            let db_url = require_db(cli)?;
+
+            // load schema.json
+            let snapshot = if let Some(path) = schema {
+                load_schema_file(path)?
+            } else if let Ok(data_dir) = dry_run_core::history::default_data_dir() {
+                let candidate = data_dir.join("schema.json");
+                if candidate.exists() {
+                    load_schema_file(&candidate)?
+                } else {
+                    anyhow::bail!(
+                        "no schema.json found at {}. Use --schema to specify path",
+                        candidate.display()
+                    );
+                }
+            } else {
+                anyhow::bail!("no schema source found. Use --schema to specify path to schema.json");
+            };
+
+            let ctx = DryRun::connect(&db_url).await?;
+
+            let result = dry_run_core::schema::apply_stats(
+                ctx.pool(),
+                &snapshot,
+                node.as_deref(),
+            )
+            .await?;
+
+            // pg_regresql warning
+            if !result.regresql_loaded {
+                eprintln!();
+                eprintln!("  pg_regresql extension is not loaded.");
+                eprintln!("  Without it, PostgreSQL ignores pg_class.reltuples/relpages and uses");
+                eprintln!("  physical file sizes instead. Your injected row counts will have no");
+                eprintln!("  effect on EXPLAIN cost estimates.");
+                eprintln!();
+                eprintln!("  Install: sudo pgxn install pg_regresql");
+                eprintln!("  Then:    CREATE EXTENSION pg_regresql;");
+                eprintln!("  See:     https://github.com/boringSQL/regresql");
+                eprintln!();
+            }
+
+            eprintln!(
+                "Applied: {} tables, {} indexes, {} columns",
+                result.tables_updated, result.indexes_updated, result.columns_injected
+            );
+
+            if !result.skipped.is_empty() {
+                eprintln!("Skipped ({}):", result.skipped.len());
+                for s in &result.skipped {
+                    eprintln!("  {s}");
+                }
+            }
+
+            Ok(())
+        }
+    }
 }
 
 // helpers
