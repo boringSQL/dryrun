@@ -687,12 +687,18 @@ async fn cmd_mcp_serve(
         .as_ref()
         .and_then(|c| c.pgmustard_api_key());
 
-    // resolve schema source
-    let auto_schema = resolve_schema_path(
+    // schema file is always required
+    let schema_file = resolve_schema_path(
         schema_path, project_config.as_ref(), cli.profile.as_deref(),
-    ).ok();
+    )?;
+    let json = std::fs::read_to_string(&schema_file)?;
+    let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)?;
+    eprintln!(
+        "dry-run: loaded schema from {} ({} tables)",
+        schema_file.display(), snapshot.tables.len()
+    );
 
-    // resolve db_url from profile if not set via CLI
+    // optional --db enables live tools (explain_query, refresh_schema)
     let effective_db = db.map(|s| s.to_string()).or_else(|| {
         if let Some(ref config) = project_config {
             if let Ok(resolved) = config.resolve_profile(None, None, cli.profile.as_deref(), &cwd) {
@@ -702,27 +708,18 @@ async fn cmd_mcp_serve(
         None
     });
 
-    let server = if let Some(schema_file) = &auto_schema {
-        let json = std::fs::read_to_string(schema_file)?;
-        let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)?;
-        eprintln!(
-            "dry-run: loaded schema from {} ({} tables, offline mode)",
-            schema_file.display(), snapshot.tables.len()
-        );
-        mcp::DryRunServer::from_snapshot_with_config(snapshot, lint_config, pgmustard_api_key)
-    } else if let Some(db_url) = &effective_db {
+    let db_connection = if let Some(ref db_url) = effective_db {
         let ctx = DryRun::connect(db_url).await?;
-        let history = HistoryStore::open_default().ok();
-        mcp::DryRunServer::new(ctx, db_url.clone(), history, lint_config, pgmustard_api_key).await?
+        eprintln!("dry-run: connected to local db (live tools enabled)");
+        Some((db_url.as_str(), ctx))
     } else {
-        anyhow::bail!(
-            "no schema source found. Either:\n\
-             1. Run 'dry-run --db <url> init' to create .dry_run/schema.json\n\
-             2. Pass --schema-file <path> to a schema JSON file\n\
-             3. Pass --db <url> for live database mode\n\
-             4. Configure a profile in dry_run.toml"
-        );
+        eprintln!("dry-run: offline mode (explain_query, refresh_schema disabled)");
+        None
     };
+
+    let server = mcp::DryRunServer::from_snapshot_with_db(
+        snapshot, db_connection, lint_config, pgmustard_api_key,
+    );
 
     match transport {
         "stdio" => {

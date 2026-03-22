@@ -32,42 +32,27 @@ pub struct DryRunServer {
 }
 
 impl DryRunServer {
-    pub async fn new(
-        ctx: DryRun,
-        db_url: String,
-        history: Option<HistoryStore>,
-        lint_config: LintConfig,
-        pgmustard_api_key: Option<String>,
-    ) -> Result<Self, dry_run_core::Error> {
-        let snapshot = ctx.introspect_schema().await?;
-        info!(tables = snapshot.tables.len(), "initial schema introspection complete");
-
-        Ok(Self {
-            ctx: Some(Arc::new(ctx)),
-            db_url,
-            schema: Arc::new(RwLock::new(Some(snapshot))),
-            history: history.map(|h| Arc::new(std::sync::Mutex::new(h))),
-            lint_config,
-            audit_config: AuditConfig::default(),
-            pgmustard: Self::resolve_pgmustard(pgmustard_api_key),
-            tool_router: Self::tool_router(),
-        })
-    }
-
-    pub fn from_snapshot_with_config(
+    pub fn from_snapshot_with_db(
         snapshot: SchemaSnapshot,
+        db: Option<(&str, DryRun)>,
         lint_config: LintConfig,
         pgmustard_api_key: Option<String>,
     ) -> Self {
+        let (ctx, db_url) = match db {
+            Some((url, ctx)) => (Some(Arc::new(ctx)), url.to_string()),
+            None => (None, String::new()),
+        };
+
         info!(
             tables = snapshot.tables.len(),
             database = %snapshot.database,
+            live_db = ctx.is_some(),
             "loaded schema from file"
         );
 
         Self {
-            ctx: None,
-            db_url: String::new(),
+            ctx,
+            db_url,
             schema: Arc::new(RwLock::new(Some(snapshot))),
             history: None,
             lint_config,
