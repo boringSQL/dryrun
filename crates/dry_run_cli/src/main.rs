@@ -316,7 +316,10 @@ async fn cmd_lint(
     pretty: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    let snapshot = load_schema_for_lint(cli).await?;
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let project_config = load_project_config(cli, &cwd);
+
+    let snapshot = resolve_schema(None, project_config.as_ref(), cli.profile.as_deref())?;
 
     let snapshot = if let Some(filter) = schema_filter {
         let mut filtered = snapshot.clone();
@@ -325,9 +328,6 @@ async fn cmd_lint(
     } else {
         snapshot
     };
-
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let project_config = load_project_config(cli, &cwd);
 
     let lint_config = project_config
         .as_ref()
@@ -555,22 +555,7 @@ async fn cmd_stats(action: &StatsAction) -> anyhow::Result<()> {
         StatsAction::Apply { db, schema_file, node } => {
             let db_url = require_db_url(db.as_deref())?;
 
-            // load schema.json
-            let snapshot = if let Some(path) = schema_file {
-                load_schema_file(path)?
-            } else if let Ok(data_dir) = dry_run_core::history::default_data_dir() {
-                let candidate = data_dir.join("schema.json");
-                if candidate.exists() {
-                    load_schema_file(&candidate)?
-                } else {
-                    anyhow::bail!(
-                        "no schema.json found at {}. Use --schema-file to specify path",
-                        candidate.display()
-                    );
-                }
-            } else {
-                anyhow::bail!("no schema source found. Use --schema-file to specify path to schema.json");
-            };
+            let snapshot = resolve_schema(schema_file.as_deref(), None, None)?;
 
             let ctx = DryRun::connect(&db_url).await?;
 
@@ -626,34 +611,47 @@ fn load_project_config(cli: &Cli, cwd: &std::path::Path) -> Option<ProjectConfig
     }
 }
 
-async fn load_schema_for_lint(cli: &Cli) -> anyhow::Result<dry_run_core::SchemaSnapshot> {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let project_config = load_project_config(cli, &cwd);
+fn resolve_schema_path(
+    schema_file: Option<&std::path::Path>,
+    project_config: Option<&ProjectConfig>,
+    profile: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    // 1. explicit --schema-file
+    if let Some(path) = schema_file {
+        return Ok(path.to_path_buf());
+    }
 
-    // try profile-based schema file
-    if let Some(ref config) = project_config {
-        if let Ok(resolved) =
-            config.resolve_profile(None, None, cli.profile.as_deref(), &cwd)
-        {
-            if let Some(schema_file) = resolved.schema_file {
-                if schema_file.exists() {
-                    return load_schema_file(&schema_file);
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    // 2. profile config in dry_run.toml
+    if let Some(config) = project_config {
+        if let Ok(resolved) = config.resolve_profile(None, None, profile, &cwd) {
+            if let Some(sf) = resolved.schema_file {
+                if sf.exists() {
+                    return Ok(sf);
                 }
             }
         }
     }
 
-    // try auto-discovered schema.json
+    // 3. auto-discovered .dry_run/schema.json
     if let Ok(data_dir) = dry_run_core::history::default_data_dir() {
         let candidate = data_dir.join("schema.json");
         if candidate.exists() {
-            return load_schema_file(&candidate);
+            return Ok(candidate);
         }
     }
 
-    anyhow::bail!(
-        "no schema found — run dump-schema first or pass --schema-file"
-    );
+    anyhow::bail!("no schema found — run dump-schema first or pass --schema-file");
+}
+
+fn resolve_schema(
+    schema_file: Option<&std::path::Path>,
+    project_config: Option<&ProjectConfig>,
+    profile: Option<&str>,
+) -> anyhow::Result<dry_run_core::SchemaSnapshot> {
+    let path = resolve_schema_path(schema_file, project_config, profile)?;
+    load_schema_file(&path)
 }
 
 fn load_schema_file(path: &std::path::Path) -> anyhow::Result<dry_run_core::SchemaSnapshot> {
@@ -690,19 +688,9 @@ async fn cmd_mcp_serve(
         .and_then(|c| c.pgmustard_api_key());
 
     // resolve schema source
-    let auto_schema = schema_path.map(|p| p.to_path_buf()).or_else(|| {
-        if let Some(ref config) = project_config {
-            if let Ok(resolved) = config.resolve_profile(
-                db, None, cli.profile.as_deref(), &cwd,
-            ) {
-                if let Some(sf) = resolved.schema_file {
-                    if sf.exists() { return Some(sf); }
-                }
-            }
-        }
-        let candidate = dry_run_core::history::default_data_dir().ok()?.join("schema.json");
-        candidate.exists().then_some(candidate)
-    });
+    let auto_schema = resolve_schema_path(
+        schema_path, project_config.as_ref(), cli.profile.as_deref(),
+    ).ok();
 
     // resolve db_url from profile if not set via CLI
     let effective_db = db.map(|s| s.to_string()).or_else(|| {
