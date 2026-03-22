@@ -245,7 +245,8 @@ mod tests {
     #[test]
     fn from_env_returns_none_without_key() {
         // ensure env var is not set for this test
-        std::env::remove_var("PGMUSTARD_API_KEY");
+        // SAFETY: test runs sequentially, no other thread reads this var
+        unsafe { std::env::remove_var("PGMUSTARD_API_KEY") };
         assert!(PgMustardClient::from_env().is_none());
     }
 
