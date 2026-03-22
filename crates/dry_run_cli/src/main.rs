@@ -71,7 +71,7 @@ enum Command {
     McpServe {
         #[arg(long, env = "DATABASE_URL")]
         db: Option<String>,
-        #[arg(long, env = "DRY_RUN_SCHEMA_FILE")]
+        #[arg(long, env = "SCHEMA_FILE")]
         schema_file: Option<PathBuf>,
         #[arg(long, default_value = "stdio")]
         transport: String,

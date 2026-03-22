@@ -122,7 +122,7 @@ impl ProjectConfig {
     // resolution order:
     // 1. explicit cli_db or cli_schema (CLI flags)
     // 2. cli_profile flag (--profile)
-    // 3. DRY_RUN_PROFILE env var
+    // 3. PROFILE env var
     // 4. [default].profile in toml
     // 5. auto-discovery of .dry_run/schema.json
     pub fn resolve_profile(
@@ -149,7 +149,7 @@ impl ProjectConfig {
 
         let profile_name = cli_profile
             .map(|s| s.to_string())
-            .or_else(|| std::env::var("DRY_RUN_PROFILE").ok())
+            .or_else(|| std::env::var("PROFILE").ok())
             .or_else(|| self.default.as_ref().and_then(|d| d.profile.clone()));
 
         if let Some(name) = profile_name {
@@ -169,7 +169,7 @@ impl ProjectConfig {
         }
 
         Err(Error::Config(
-            "no profile found: specify --profile, set DRY_RUN_PROFILE, \
+            "no profile found: specify --profile, set PROFILE, \
              configure [default].profile in dry_run.toml, \
              or place a schema at .dry_run/schema.json"
                 .into(),
