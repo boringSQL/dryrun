@@ -228,7 +228,7 @@ fn default_history_path() -> Result<PathBuf> {
 pub fn default_data_dir() -> Result<PathBuf> {
     let cwd = std::env::current_dir()
         .map_err(|e| Error::History(format!("cannot determine working directory: {e}")))?;
-    Ok(cwd.join(".dry_run"))
+    Ok(cwd.join(".dryrun"))
 }
 
 fn hash_url(url: &str) -> String {

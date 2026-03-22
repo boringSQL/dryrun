@@ -313,7 +313,7 @@ async fn cmd_init(db: Option<&str>) -> anyhow::Result<()> {
     }
 
     eprintln!(
-        "Initialized .dry_run/ with {} tables, {} views, {} functions",
+        "Initialized .dryrun/ with {} tables, {} views, {} functions",
         snapshot.tables.len(),
         snapshot.views.len(),
         snapshot.functions.len()
@@ -700,7 +700,7 @@ fn resolve_schema_path(
         }
     }
 
-    // 3. auto-discovered .dry_run/schema.json
+    // 3. auto-discovered .dryrun/schema.json
     if let Ok(data_dir) = dry_run_core::history::default_data_dir() {
         let candidate = data_dir.join("schema.json");
         if candidate.exists() {

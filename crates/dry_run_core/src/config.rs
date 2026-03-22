@@ -124,7 +124,7 @@ impl ProjectConfig {
     // 2. cli_profile flag (--profile)
     // 3. PROFILE env var
     // 4. [default].profile in toml
-    // 5. auto-discovery of .dry_run/schema.json
+    // 5. auto-discovery of .dryrun/schema.json
     pub fn resolve_profile(
         &self,
         cli_db: Option<&str>,
@@ -159,7 +159,7 @@ impl ProjectConfig {
             return Ok(resolve_profile_config(&name, profile, project_root));
         }
 
-        let auto_schema = project_root.join(".dry_run/schema.json");
+        let auto_schema = project_root.join(".dryrun/schema.json");
         if auto_schema.is_file() {
             return Ok(ResolvedProfile {
                 name: "<auto>".into(),
@@ -171,7 +171,7 @@ impl ProjectConfig {
         Err(Error::Config(
             "no profile found: specify --profile, set PROFILE, \
              configure [default].profile in dry_run.toml, \
-             or place a schema at .dry_run/schema.json"
+             or place a schema at .dryrun/schema.json"
                 .into(),
         ))
     }
@@ -292,10 +292,10 @@ profile = "production"
 db_url = "${DEV_DATABASE_URL}"
 
 [profiles.staging]
-schema_file = ".dry_run/staging-schema.json"
+schema_file = ".dryrun/staging-schema.json"
 
 [profiles.production]
-schema_file = ".dry_run/schema.json"
+schema_file = ".dryrun/schema.json"
 
 [conventions]
 table_name = "snake_singular"
@@ -403,14 +403,14 @@ rules = ["pk/exists"]
     fn resolve_profile_by_name() {
         let toml = r#"
 [profiles.staging]
-schema_file = ".dry_run/staging.json"
+schema_file = ".dryrun/staging.json"
 "#;
         let config = ProjectConfig::parse(toml).unwrap();
         let resolved = config
             .resolve_profile(None, None, Some("staging"), Path::new("/project"))
             .unwrap();
         assert_eq!(resolved.name, "staging");
-        assert_eq!(resolved.schema_file.unwrap(), PathBuf::from("/project/.dry_run/staging.json"));
+        assert_eq!(resolved.schema_file.unwrap(), PathBuf::from("/project/.dryrun/staging.json"));
     }
 
     #[test]
