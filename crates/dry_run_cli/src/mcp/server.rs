@@ -864,6 +864,21 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
     }
 
+    #[tool(description = "Compare the live local database against the loaded production schema snapshot. Classifies each difference as ahead (local has extra — your pending migration), behind (prod has something local doesn't — you need to catch up), or diverged (both differ — potential conflict). Requires live DB connection.")]
+    async fn check_drift(&self) -> Result<CallToolResult, McpError> {
+        let ctx = self.require_live_db()?;
+        let prod_snapshot = self.get_schema().await?;
+        let local_snapshot = ctx.introspect_schema().await
+            .map_err(|e| McpError::internal_error(format!("introspection failed: {e}"), None))?;
+
+        let report = dry_run_core::diff::classify_drift(&prod_snapshot, &local_snapshot);
+
+        let json = serde_json::to_string_pretty(&report)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "Force re-introspection of the database schema (requires live DB)")]
     async fn refresh_schema(&self) -> Result<CallToolResult, McpError> {
         let ctx = self.require_live_db()?;
