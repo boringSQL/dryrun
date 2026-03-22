@@ -44,6 +44,36 @@ pub struct ColumnChange {
     pub to: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftDirection {
+    Ahead,
+    Behind,
+    Diverged,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriftEntry {
+    pub direction: DriftDirection,
+    #[serde(flatten)]
+    pub change: Change,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriftReport {
+    pub local_hash: String,
+    pub snapshot_hash: String,
+    pub entries: Vec<DriftEntry>,
+    pub summary: DriftSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriftSummary {
+    pub ahead: usize,
+    pub behind: usize,
+    pub diverged: usize,
+}
+
 pub fn compute_changeset(from: &SchemaSnapshot, to: &SchemaSnapshot) -> SchemaChangeset {
     let mut changes = Vec::new();
 

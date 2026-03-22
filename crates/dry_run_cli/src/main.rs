@@ -68,6 +68,16 @@ enum Command {
         #[command(subcommand)]
         action: StatsAction,
     },
+    Drift {
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
+        #[arg(long)]
+        against: Option<PathBuf>,
+        #[arg(long)]
+        pretty: bool,
+        #[arg(long)]
+        json: bool,
+    },
     McpServe {
         #[arg(long, env = "DATABASE_URL")]
         db: Option<String>,
@@ -162,6 +172,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Snapshot { ref action } => cmd_snapshot(action).await,
         Command::Profile { ref action } => cmd_profile(&cli, action),
         Command::Stats { ref action } => cmd_stats(action).await,
+        Command::Drift { ref db, ref against, pretty, json } => {
+            cmd_drift(db.as_deref(), against.as_deref(), pretty, json).await
+        }
         Command::McpServe { ref db, ref schema_file, ref transport, port } => {
             cmd_mcp_serve(&cli, db.as_deref(), schema_file.as_deref(), transport, port).await
         }
@@ -595,6 +608,59 @@ async fn cmd_stats(action: &StatsAction) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+async fn cmd_drift(
+    db: Option<&str>,
+    against: Option<&std::path::Path>,
+    pretty: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let db_url = require_db_url(db)?;
+    let prod_snapshot = resolve_schema(against, None, None)?;
+
+    let ctx = DryRun::connect(db_url).await?;
+    let local_snapshot = ctx.introspect_schema().await?;
+
+    let report = dry_run_core::diff::classify_drift(&prod_snapshot, &local_snapshot);
+
+    if json {
+        let output = if pretty {
+            serde_json::to_string_pretty(&report)?
+        } else {
+            serde_json::to_string(&report)?
+        };
+        println!("{output}");
+    } else {
+        if report.entries.is_empty() {
+            println!("No drift detected. Local DB matches the snapshot.");
+        } else {
+            for entry in &report.entries {
+                let arrow = match entry.direction {
+                    dry_run_core::diff::DriftDirection::Ahead => "AHEAD",
+                    dry_run_core::diff::DriftDirection::Behind => "BEHIND",
+                    dry_run_core::diff::DriftDirection::Diverged => "DIVERGED",
+                };
+                let location = entry.change.schema.as_deref().map_or(
+                    entry.change.name.clone(),
+                    |s| format!("{s}.{}", entry.change.name),
+                );
+                println!("[{arrow:>8}] {}: {location}", entry.change.object_type);
+                for detail in &entry.change.details {
+                    println!("           {detail}");
+                }
+            }
+            println!();
+            println!(
+                "{} difference(s): {} ahead, {} behind, {} diverged",
+                report.entries.len(),
+                report.summary.ahead,
+                report.summary.behind,
+                report.summary.diverged,
+            );
+        }
+    }
+    Ok(())
 }
 
 // helpers
