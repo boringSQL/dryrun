@@ -26,6 +26,7 @@ pub struct PlanNode {
     pub sort_method: Option<String>,
     pub hash_cond: Option<String>,
     pub join_type: Option<String>,
+    pub subplans_removed: Option<i64>,
     pub children: Vec<PlanNode>,
 }
 
@@ -70,6 +71,7 @@ pub fn parse_plan_json(value: &serde_json::Value) -> Result<PlanNode> {
         sort_method: get_opt_str(obj, "Sort Method"),
         hash_cond: get_opt_str(obj, "Hash Cond"),
         join_type: get_opt_str(obj, "Join Type"),
+        subplans_removed: get_opt_i64(obj, "Subplans Removed"),
         children,
     })
 }
