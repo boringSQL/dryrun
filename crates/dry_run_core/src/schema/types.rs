@@ -155,6 +155,16 @@ pub enum PartitionStrategy {
     Hash,
 }
 
+impl std::fmt::Display for PartitionStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Range => write!(f, "range"),
+            Self::List => write!(f, "list"),
+            Self::Hash => write!(f, "hash"),
+        }
+    }
+}
+
 impl PartitionStrategy {
     pub fn from_pg_partstrat(c: &str) -> Option<Self> {
         match c {
