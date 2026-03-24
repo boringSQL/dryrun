@@ -13,6 +13,7 @@ pub fn detect_antipatterns(
     detect_unbounded_query(parsed, schema, warnings);
     detect_cartesian_join(parsed, warnings);
     detect_dml_without_where(parsed, warnings);
+    detect_partition_key_antipatterns(parsed, schema, warnings);
 }
 
 fn detect_select_star(parsed: &ParsedQuery, warnings: &mut Vec<ValidationWarning>) {
@@ -98,4 +99,60 @@ fn detect_dml_without_where(parsed: &ParsedQuery, warnings: &mut Vec<ValidationW
             ),
         });
     }
+}
+
+fn detect_partition_key_antipatterns(
+    parsed: &ParsedQuery,
+    schema: &SchemaSnapshot,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    for table_ref in &parsed.info.tables {
+        let schema_name = table_ref.schema.as_deref().unwrap_or("public");
+
+        let table = schema
+            .tables
+            .iter()
+            .find(|t| t.name == table_ref.name && t.schema == schema_name);
+
+        let table = match table {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let pi = match &table.partition_info {
+            Some(pi) => pi,
+            None => continue,
+        };
+
+        let key_columns = parse_partition_key_columns(&pi.key);
+        let found = key_columns.iter().any(|kc| {
+            parsed
+                .info
+                .filter_columns
+                .iter()
+                .any(|(_, col)| col.eq_ignore_ascii_case(kc))
+        });
+
+        if !found {
+            warnings.push(ValidationWarning {
+                severity: WarningSeverity::Warning,
+                message: format!(
+                    "query on partitioned table '{}.{}' ({} on '{}', {} partitions) \
+                     does not filter on partition key; all partitions will be scanned",
+                    table.schema,
+                    table.name,
+                    pi.strategy,
+                    pi.key,
+                    pi.children.len()
+                ),
+            });
+        }
+    }
+}
+
+fn parse_partition_key_columns(key: &str) -> Vec<String> {
+    key.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
