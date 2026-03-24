@@ -332,7 +332,7 @@ mod tests {
             actual_rows: None, actual_loops: None, actual_startup_time: None, actual_total_time: None,
             shared_hit_blocks: None, shared_read_blocks: None, index_name: None, index_cond: None,
             filter: Some("(email = 'test@example.com')".into()), rows_removed_by_filter: None,
-            sort_key: None, sort_method: None, hash_cond: None, join_type: None, children: vec![],
+            sort_key: None, sort_method: None, hash_cond: None, join_type: None, subplans_removed: None, children: vec![],
         };
         let suggestions = suggest_index("SELECT * FROM users WHERE email = 'test@example.com'", &schema, Some(&plan), None).unwrap();
         let email_count = suggestions.iter().filter(|s| s.columns.contains(&"email".to_string())).count();
