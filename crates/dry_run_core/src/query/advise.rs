@@ -395,7 +395,7 @@ mod tests {
             actual_rows: None, actual_loops: None, actual_startup_time: None, actual_total_time: None,
             shared_hit_blocks: None, shared_read_blocks: None, index_name: None, index_cond: None,
             filter: filter.map(String::from), rows_removed_by_filter: None,
-            sort_key: None, sort_method: None, hash_cond: None, join_type: None, children: vec![],
+            sort_key: None, sort_method: None, hash_cond: None, join_type: None, subplans_removed: None, children: vec![],
         }
     }
 

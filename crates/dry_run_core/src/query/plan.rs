@@ -198,6 +198,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_subplans_removed() {
+        let json = serde_json::json!({
+            "Node Type": "Append",
+            "Startup Cost": 0.0,
+            "Total Cost": 100.0,
+            "Plan Rows": 1000,
+            "Plan Width": 64,
+            "Subplans Removed": 8,
+            "Plans": [
+                {
+                    "Node Type": "Seq Scan",
+                    "Relation Name": "orders_2024_q1",
+                    "Schema": "public",
+                    "Startup Cost": 0.0,
+                    "Total Cost": 25.0,
+                    "Plan Rows": 250,
+                    "Plan Width": 64
+                }
+            ]
+        });
+        let plan = parse_plan_json(&json).unwrap();
+        assert_eq!(plan.subplans_removed, Some(8));
+        assert_eq!(plan.children.len(), 1);
+        assert_eq!(plan.children[0].subplans_removed, None);
+    }
+
+    #[test]
     fn parse_plan_missing_plan_key_is_error() {
         let json = serde_json::json!("not an object");
         assert!(parse_plan_json(&json).is_err());

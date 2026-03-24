@@ -154,6 +154,7 @@ mod tests {
             sort_method: None,
             hash_cond: None,
             join_type: None,
+            subplans_removed: None,
             children: vec![],
         }
     }

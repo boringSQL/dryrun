@@ -156,3 +156,112 @@ fn parse_partition_key_columns(key: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{
+        PartitionChild, PartitionInfo, PartitionStrategy, Table,
+    };
+    use crate::query::{QueryInfo, ReferencedTable};
+
+    fn partitioned_snapshot() -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "16.0".into(),
+            database: "test".into(),
+            timestamp: chrono::Utc::now(),
+            content_hash: String::new(),
+            source: None,
+            tables: vec![Table {
+                oid: 1,
+                schema: "public".into(),
+                name: "orders".into(),
+                columns: vec![],
+                constraints: vec![],
+                indexes: vec![],
+                comment: None,
+                stats: None,
+                partition_info: Some(PartitionInfo {
+                    strategy: PartitionStrategy::Range,
+                    key: "created_at".into(),
+                    children: vec![
+                        PartitionChild {
+                            schema: "public".into(),
+                            name: "orders_2024_q1".into(),
+                            bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-04-01')".into(),
+                        },
+                        PartitionChild {
+                            schema: "public".into(),
+                            name: "orders_2024_q2".into(),
+                            bound: "FOR VALUES FROM ('2024-04-01') TO ('2024-07-01')".into(),
+                        },
+                    ],
+                }),
+                policies: vec![],
+                triggers: vec![],
+                rls_enabled: false,
+            }],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
+    #[test]
+    fn partition_key_missing_warns() {
+        let parsed = ParsedQuery {
+            sql: "SELECT * FROM orders WHERE status = 'active'".into(),
+            info: QueryInfo {
+                tables: vec![ReferencedTable {
+                    schema: Some("public".into()),
+                    name: "orders".into(),
+                    alias: None,
+                    context: "select".into(),
+                }],
+                filter_columns: vec![(None, "status".into())],
+                has_select_star: true,
+                has_limit: false,
+                has_where: true,
+                has_join: false,
+                statement_type: "SELECT".into(),
+            },
+        };
+
+        let snap = partitioned_snapshot();
+        let mut warnings = Vec::new();
+        detect_partition_key_antipatterns(&parsed, &snap, &mut warnings);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("does not filter on partition key"));
+    }
+
+    #[test]
+    fn partition_key_present_no_warn() {
+        let parsed = ParsedQuery {
+            sql: "SELECT * FROM orders WHERE created_at >= '2024-01-01'".into(),
+            info: QueryInfo {
+                tables: vec![ReferencedTable {
+                    schema: Some("public".into()),
+                    name: "orders".into(),
+                    alias: None,
+                    context: "select".into(),
+                }],
+                filter_columns: vec![(None, "created_at".into())],
+                has_select_star: true,
+                has_limit: false,
+                has_where: true,
+                has_join: false,
+                statement_type: "SELECT".into(),
+            },
+        };
+
+        let snap = partitioned_snapshot();
+        let mut warnings = Vec::new();
+        detect_partition_key_antipatterns(&parsed, &snap, &mut warnings);
+        assert!(warnings.is_empty());
+    }
+}
