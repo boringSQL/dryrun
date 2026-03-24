@@ -224,12 +224,22 @@ impl DryRunServer {
                         }
                     })
                     .unwrap_or_default();
+                let partition = t
+                    .partition_info
+                    .as_ref()
+                    .map(|pi| {
+                        format!(
+                            " [partitioned: {} on '{}', {} children]",
+                            pi.strategy, pi.key, pi.children.len()
+                        )
+                    })
+                    .unwrap_or_default();
                 let comment = t
                     .comment
                     .as_ref()
                     .map(|c| format!(" — {c}"))
                     .unwrap_or_default();
-                format!("{}.{}{}{}", t.schema, t.name, row_est, comment)
+                format!("{}.{}{}{}{}", t.schema, t.name, row_est, partition, comment)
             })
             .collect();
 
