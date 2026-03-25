@@ -257,6 +257,8 @@ mod tests {
                     context: "select".into(),
                 }],
                 filter_columns: vec![(None, "status".into())],
+                func_wrapped_columns: vec![],
+                update_targets: vec![],
                 has_select_star: true,
                 has_limit: false,
                 has_where: true,
@@ -273,6 +275,40 @@ mod tests {
     }
 
     #[test]
+    fn partition_key_func_wrapped_warns() {
+        let parsed = ParsedQuery {
+            sql: "SELECT * FROM orders WHERE EXTRACT(year FROM created_at) = 2024".into(),
+            info: QueryInfo {
+                tables: vec![ReferencedTable {
+                    schema: Some("public".into()),
+                    name: "orders".into(),
+                    alias: None,
+                    context: "select".into(),
+                }],
+                filter_columns: vec![(None, "created_at".into())],
+                func_wrapped_columns: vec![crate::query::FuncWrappedColumn {
+                    table: None,
+                    column: "created_at".into(),
+                    func_name: "extract".into(),
+                }],
+                update_targets: vec![],
+                has_select_star: true,
+                has_limit: false,
+                has_where: true,
+                has_join: false,
+                statement_type: "SELECT".into(),
+            },
+        };
+
+        let snap = partitioned_snapshot();
+        let mut warnings = Vec::new();
+        detect_partition_key_antipatterns(&parsed, &snap, &mut warnings);
+        // should have a func-wrap warning (partition key is in filter_columns so no missing-key warning)
+        assert!(warnings.iter().any(|w| w.message.contains("wrapped in extract")));
+        assert!(warnings.iter().any(|w| w.message.contains("Rewrite as")));
+    }
+
+    #[test]
     fn partition_key_present_no_warn() {
         let parsed = ParsedQuery {
             sql: "SELECT * FROM orders WHERE created_at >= '2024-01-01'".into(),
@@ -284,6 +320,8 @@ mod tests {
                     context: "select".into(),
                 }],
                 filter_columns: vec![(None, "created_at".into())],
+                func_wrapped_columns: vec![],
+                update_targets: vec![],
                 has_select_star: true,
                 has_limit: false,
                 has_where: true,
