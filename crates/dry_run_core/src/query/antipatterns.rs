@@ -147,6 +147,39 @@ fn detect_partition_key_antipatterns(
                 ),
             });
         }
+
+        // check for function-wrapped partition key columns
+        for kc in &key_columns {
+            for fwc in &parsed.info.func_wrapped_columns {
+                if fwc.column.eq_ignore_ascii_case(kc) {
+                    warnings.push(ValidationWarning {
+                        severity: WarningSeverity::Warning,
+                        message: format!(
+                            "partition key '{}' on '{}.{}' is wrapped in {} — this prevents \
+                             partition pruning. {}",
+                            kc,
+                            table.schema,
+                            table.name,
+                            fwc.func_name,
+                            func_wrap_rewrite_hint(&fwc.func_name, kc)
+                        ),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn func_wrap_rewrite_hint(func_name: &str, col: &str) -> String {
+    match func_name {
+        "extract" | "::date" | "to_char" => format!(
+            "Rewrite as: WHERE {col} >= '2025-01-01' AND {col} < '2026-01-01'"
+        ),
+        "date_trunc" => format!(
+            "Rewrite as: WHERE {col} >= date_trunc('month', target) \
+             AND {col} < date_trunc('month', target) + interval '1 month'"
+        ),
+        _ => format!("Rewrite using a direct range comparison on {col} instead."),
     }
 }
 
