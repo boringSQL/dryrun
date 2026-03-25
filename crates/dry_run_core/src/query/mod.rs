@@ -11,7 +11,7 @@ mod validate;
 pub use advise::{advise, advise_with_index_suggestions, Advice, AdviseResult};
 pub use explain::{explain_query, ExplainResult, PlanWarning};
 pub use migration::{check_migration, MigrationCheck, SafetyRating};
-pub use parse::{ParsedQuery, QueryInfo, ReferencedTable};
+pub use parse::{FuncWrappedColumn, ParsedQuery, QueryInfo, ReferencedTable};
 pub use plan::{PlanNode, parse_plan_json};
 pub use plan_warnings::detect_plan_warnings;
 pub use suggest::IndexSuggestion;
