@@ -15,11 +15,21 @@ pub struct ParsedQuery {
 pub struct QueryInfo {
     pub tables: Vec<ReferencedTable>,
     pub filter_columns: Vec<(Option<String>, String)>,
+    pub func_wrapped_columns: Vec<FuncWrappedColumn>,
+    pub update_targets: Vec<String>,
     pub has_select_star: bool,
     pub has_limit: bool,
     pub has_where: bool,
     pub has_join: bool,
     pub statement_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FuncWrappedColumn {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    pub column: String,
+    pub func_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +50,9 @@ pub fn parse_sql(sql: &str) -> Result<ParsedQuery> {
     let mut has_where = false;
     let mut has_limit = false;
     let mut statement_type = String::new();
+
+    let mut func_wrapped_columns = Vec::new();
+    let mut update_targets = Vec::new();
 
     let mut seen_tables: HashSet<String> = HashSet::new();
     for (table_name, context) in &result.tables {
@@ -73,6 +86,10 @@ pub fn parse_sql(sql: &str) -> Result<ParsedQuery> {
                 }
                 if s.where_clause.is_some() {
                     has_where = true;
+                    collect_func_wrapped_columns(
+                        s.where_clause.as_deref(),
+                        &mut func_wrapped_columns,
+                    );
                 }
                 if s.limit_count.is_some() || s.limit_offset.is_some() {
                     has_limit = true;
@@ -104,6 +121,17 @@ pub fn parse_sql(sql: &str) -> Result<ParsedQuery> {
                 }
                 if u.where_clause.is_some() {
                     has_where = true;
+                    collect_func_wrapped_columns(
+                        u.where_clause.as_deref(),
+                        &mut func_wrapped_columns,
+                    );
+                }
+                for tl in &u.target_list {
+                    if let Some(pg_query::protobuf::node::Node::ResTarget(rt)) = &tl.node {
+                        if !rt.name.is_empty() {
+                            update_targets.push(rt.name.clone());
+                        }
+                    }
                 }
             }
             NodeRef::DeleteStmt(d) => {
@@ -132,6 +160,8 @@ pub fn parse_sql(sql: &str) -> Result<ParsedQuery> {
         info: QueryInfo {
             tables,
             filter_columns,
+            func_wrapped_columns,
+            update_targets,
             has_select_star,
             has_limit,
             has_where,
@@ -147,4 +177,115 @@ fn split_qualified(name: &str) -> (Option<String>, String) {
     } else {
         (None, name.to_string())
     }
+}
+
+fn collect_func_wrapped_columns(
+    node: Option<&pg_query::protobuf::Node>,
+    out: &mut Vec<FuncWrappedColumn>,
+) {
+    let node = match node {
+        Some(n) => n,
+        None => return,
+    };
+    let inner = match &node.node {
+        Some(n) => n,
+        None => return,
+    };
+
+    match inner {
+        pg_query::protobuf::node::Node::FuncCall(fc) => {
+            let func_name = extract_func_name(&fc.funcname);
+            for arg in &fc.args {
+                if let Some(col) = as_column_ref(arg) {
+                    out.push(FuncWrappedColumn {
+                        table: col.0,
+                        column: col.1,
+                        func_name: func_name.clone(),
+                    });
+                } else {
+                    collect_func_wrapped_columns(Some(arg), out);
+                }
+            }
+        }
+        pg_query::protobuf::node::Node::TypeCast(tc) => {
+            if let Some(arg) = &tc.arg {
+                if let Some(col) = as_column_ref(arg) {
+                    let type_name = tc
+                        .type_name
+                        .as_ref()
+                        .map(|tn| format!("::{}", extract_type_name(tn)))
+                        .unwrap_or_default();
+                    out.push(FuncWrappedColumn {
+                        table: col.0,
+                        column: col.1,
+                        func_name: type_name,
+                    });
+                } else {
+                    collect_func_wrapped_columns(Some(arg), out);
+                }
+            }
+        }
+        pg_query::protobuf::node::Node::BoolExpr(be) => {
+            for arg in &be.args {
+                collect_func_wrapped_columns(Some(arg), out);
+            }
+        }
+        pg_query::protobuf::node::Node::AExpr(ae) => {
+            collect_func_wrapped_columns(ae.lexpr.as_deref(), out);
+            collect_func_wrapped_columns(ae.rexpr.as_deref(), out);
+        }
+        pg_query::protobuf::node::Node::SubLink(sl) => {
+            collect_func_wrapped_columns(sl.testexpr.as_deref(), out);
+        }
+        _ => {}
+    }
+}
+
+fn as_column_ref(node: &pg_query::protobuf::Node) -> Option<(Option<String>, String)> {
+    if let Some(pg_query::protobuf::node::Node::ColumnRef(cr)) = &node.node {
+        let fields: Vec<String> = cr
+            .fields
+            .iter()
+            .filter_map(|f| {
+                if let Some(pg_query::protobuf::node::Node::String(s)) = &f.node {
+                    Some(s.sval.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        match fields.len() {
+            1 => Some((None, fields[0].clone())),
+            2 => Some((Some(fields[0].clone()), fields[1].clone())),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+fn extract_func_name(funcname: &[pg_query::protobuf::Node]) -> String {
+    funcname
+        .last()
+        .and_then(|n| {
+            if let Some(pg_query::protobuf::node::Node::String(s)) = &n.node {
+                Some(s.sval.to_lowercase())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn extract_type_name(tn: &pg_query::protobuf::TypeName) -> String {
+    tn.names
+        .last()
+        .and_then(|n| {
+            if let Some(pg_query::protobuf::node::Node::String(s)) = &n.node {
+                Some(s.sval.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
 }
