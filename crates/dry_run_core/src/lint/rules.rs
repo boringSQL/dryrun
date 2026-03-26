@@ -1014,6 +1014,8 @@ mod tests {
             "types/text_over_varchar", "types/timestamptz", "types/no_serial",
             "types/bigint_pk_fk", "constraints/fk_has_index", "constraints/unnamed",
             "timestamps/has_created_at", "timestamps/has_updated_at", "timestamps/correct_type",
+            "partition/too_many_children", "partition/range_gaps", "partition/no_default",
+            "partition/gucs",
         ];
         let mut config = LintConfig::default();
         config.min_severity = Severity::Info;
@@ -1193,5 +1195,125 @@ mod tests {
         assert!(violations.is_empty(),
             "auto-resolved to snake_plural should accept all snake_case names, got: {:?}",
             violations.iter().map(|v| &v.table).collect::<Vec<_>>());
+    }
+
+    // --- partition lint rules ---
+
+    #[test]
+    fn partition_too_many_children_warns() {
+        let children: Vec<PartitionChild> = (0..600)
+            .map(|i| PartitionChild {
+                schema: "public".into(),
+                name: format!("orders_{i}"),
+                bound: format!("FOR VALUES FROM ('{i}') TO ('{}')", i + 1),
+            })
+            .collect();
+
+        let table = make_partitioned_table("orders", children);
+        let schema = schema_with(vec![table]);
+        let config = config_with_only(&["partition/too_many_children"]);
+        let violations = run_all_rules(&schema, &config);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("600 partitions"));
+    }
+
+    #[test]
+    fn partition_too_many_children_no_warn_under_threshold() {
+        let children: Vec<PartitionChild> = (0..10)
+            .map(|i| PartitionChild {
+                schema: "public".into(),
+                name: format!("orders_{i}"),
+                bound: format!("FOR VALUES FROM ('{i}') TO ('{}')", i + 1),
+            })
+            .collect();
+
+        let table = make_partitioned_table("orders", children);
+        let schema = schema_with(vec![table]);
+        let config = config_with_only(&["partition/too_many_children"]);
+        let violations = run_all_rules(&schema, &config);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn partition_range_gaps_detected() {
+        let table = Table {
+            oid: 0, schema: "public".into(), name: "events".into(),
+            columns: vec![make_col("id", "integer")],
+            constraints: vec![], indexes: vec![],
+            comment: None, stats: None,
+            partition_info: Some(PartitionInfo {
+                strategy: PartitionStrategy::Range,
+                key: "created_at".into(),
+                children: vec![
+                    PartitionChild {
+                        schema: "public".into(),
+                        name: "events_q1".into(),
+                        bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-04-01')".into(),
+                    },
+                    // gap: 2024-04-01 to 2024-07-01 missing
+                    PartitionChild {
+                        schema: "public".into(),
+                        name: "events_q3".into(),
+                        bound: "FOR VALUES FROM ('2024-07-01') TO ('2024-10-01')".into(),
+                    },
+                ],
+            }),
+            policies: vec![], triggers: vec![], rls_enabled: false,
+        };
+        let schema = schema_with(vec![table]);
+        let config = config_with_only(&["partition/range_gaps"]);
+        let violations = run_all_rules(&schema, &config);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("gap"));
+    }
+
+    #[test]
+    fn partition_no_default_warns() {
+        let table = make_partitioned_table("orders", vec![
+            PartitionChild {
+                schema: "public".into(),
+                name: "orders_q1".into(),
+                bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-04-01')".into(),
+            },
+        ]);
+        let schema = schema_with(vec![table]);
+        let config = config_with_only(&["partition/no_default"]);
+        let violations = run_all_rules(&schema, &config);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("no DEFAULT"));
+    }
+
+    #[test]
+    fn partition_no_default_skips_when_default_exists() {
+        let table = make_partitioned_table("orders", vec![
+            PartitionChild {
+                schema: "public".into(),
+                name: "orders_q1".into(),
+                bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-04-01')".into(),
+            },
+            PartitionChild {
+                schema: "public".into(),
+                name: "orders_default".into(),
+                bound: "DEFAULT".into(),
+            },
+        ]);
+        let schema = schema_with(vec![table]);
+        let config = config_with_only(&["partition/no_default"]);
+        let violations = run_all_rules(&schema, &config);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn partition_gucs_warns_when_pruning_off() {
+        let table = make_partitioned_table("orders", vec![make_partition_child("orders_q1")]);
+        let mut schema = schema_with(vec![table]);
+        schema.gucs.push(GucSetting {
+            name: "enable_partition_pruning".into(),
+            setting: "off".into(),
+            unit: None,
+        });
+        let config = config_with_only(&["partition/gucs"]);
+        let violations = run_all_rules(&schema, &config);
+        assert!(violations.iter().any(|v| v.message.contains("enable_partition_pruning")));
     }
 }
