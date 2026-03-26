@@ -355,6 +355,63 @@ mod tests {
     }
 
     #[test]
+    fn partition_key_update_warns() {
+        let parsed = ParsedQuery {
+            sql: "UPDATE orders SET created_at = NOW() WHERE id = 1".into(),
+            info: QueryInfo {
+                tables: vec![ReferencedTable {
+                    schema: Some("public".into()),
+                    name: "orders".into(),
+                    alias: None,
+                    context: "dml".into(),
+                }],
+                filter_columns: vec![(None, "id".into())],
+                func_wrapped_columns: vec![],
+                update_targets: vec!["created_at".into()],
+                has_select_star: false,
+                has_limit: false,
+                has_where: true,
+                has_join: false,
+                statement_type: "UPDATE".into(),
+            },
+        };
+
+        let snap = partitioned_snapshot();
+        let mut warnings = Vec::new();
+        detect_partition_key_update(&parsed, &snap, &mut warnings);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("cross-partition row movement"));
+    }
+
+    #[test]
+    fn partition_key_update_non_key_no_warn() {
+        let parsed = ParsedQuery {
+            sql: "UPDATE orders SET status = 'done' WHERE id = 1".into(),
+            info: QueryInfo {
+                tables: vec![ReferencedTable {
+                    schema: Some("public".into()),
+                    name: "orders".into(),
+                    alias: None,
+                    context: "dml".into(),
+                }],
+                filter_columns: vec![(None, "id".into())],
+                func_wrapped_columns: vec![],
+                update_targets: vec!["status".into()],
+                has_select_star: false,
+                has_limit: false,
+                has_where: true,
+                has_join: false,
+                statement_type: "UPDATE".into(),
+            },
+        };
+
+        let snap = partitioned_snapshot();
+        let mut warnings = Vec::new();
+        detect_partition_key_update(&parsed, &snap, &mut warnings);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     fn partition_key_present_no_warn() {
         let parsed = ParsedQuery {
             sql: "SELECT * FROM orders WHERE created_at >= '2024-01-01'".into(),
