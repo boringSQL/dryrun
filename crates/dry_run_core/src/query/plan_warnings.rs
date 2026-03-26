@@ -15,6 +15,7 @@ fn walk_plan(node: &PlanNode, schema: Option<&SchemaSnapshot>, warnings: &mut Ve
     detect_nested_loop_seq_scan(node, warnings);
     detect_sort_without_index(node, warnings);
     detect_high_rows_removed(node, warnings);
+    detect_partition_pruning_issues(node, schema, warnings);
 
     for child in &node.children {
         walk_plan(child, schema, warnings);
@@ -124,6 +125,86 @@ fn detect_high_rows_removed(node: &PlanNode, warnings: &mut Vec<PlanWarning>) {
             }
         }
     }
+}
+
+fn detect_partition_pruning_issues(
+    node: &PlanNode,
+    schema: Option<&SchemaSnapshot>,
+    warnings: &mut Vec<PlanWarning>,
+) {
+    let schema = match schema {
+        Some(s) => s,
+        None => return,
+    };
+
+    if node.node_type != "Append" && node.node_type != "Merge Append" {
+        return;
+    }
+
+    let mut parent: Option<&crate::schema::Table> = None;
+    let mut scanned = 0usize;
+
+    for child in &node.children {
+        let child_name = match &child.relation_name {
+            Some(n) => n,
+            None => continue,
+        };
+
+        if let Some(p) = find_partition_parent(child_name, schema) {
+            if parent.is_none() {
+                parent = Some(p);
+            }
+            scanned += 1;
+        }
+    }
+
+    let parent = match parent {
+        Some(p) => p,
+        None => return,
+    };
+
+    let pi = match &parent.partition_info {
+        Some(pi) => pi,
+        None => return,
+    };
+
+    let total = pi.children.len();
+    let pruned = node.subplans_removed.unwrap_or(0);
+
+    let qualified = format!("{}.{}", parent.schema, parent.name);
+
+    if pruned == 0 {
+        warnings.push(PlanWarning {
+            severity: "warning".into(),
+            message: format!(
+                "no partition pruning on '{qualified}': scanning all {scanned} of {total} partitions. \
+                 Add WHERE filter on partition key '{}'",
+                pi.key
+            ),
+            node_type: node.node_type.clone(),
+            detail: None,
+        });
+    } else if scanned > total / 2 {
+        warnings.push(PlanWarning {
+            severity: "info".into(),
+            message: format!(
+                "partial pruning on '{qualified}': {pruned} partitions pruned, {scanned} still scanned"
+            ),
+            node_type: node.node_type.clone(),
+            detail: None,
+        });
+    }
+}
+
+fn find_partition_parent<'a>(
+    child_table_name: &str,
+    schema: &'a SchemaSnapshot,
+) -> Option<&'a crate::schema::Table> {
+    schema.tables.iter().find(|t| {
+        t.partition_info.as_ref().is_some_and(|pi| {
+            pi.children.iter().any(|c| c.name == child_table_name)
+        })
+    })
 }
 
 #[cfg(test)]
