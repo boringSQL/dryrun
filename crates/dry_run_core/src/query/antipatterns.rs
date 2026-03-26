@@ -14,6 +14,7 @@ pub fn detect_antipatterns(
     detect_cartesian_join(parsed, warnings);
     detect_dml_without_where(parsed, warnings);
     detect_partition_key_antipatterns(parsed, schema, warnings);
+    detect_partition_key_update(parsed, schema, warnings);
 }
 
 fn detect_select_star(parsed: &ParsedQuery, warnings: &mut Vec<ValidationWarning>) {
@@ -162,6 +163,51 @@ fn detect_partition_key_antipatterns(
                             table.name,
                             fwc.func_name,
                             func_wrap_rewrite_hint(&fwc.func_name, kc)
+                        ),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn detect_partition_key_update(
+    parsed: &ParsedQuery,
+    schema: &SchemaSnapshot,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    if parsed.info.statement_type != "UPDATE" || parsed.info.update_targets.is_empty() {
+        return;
+    }
+
+    for table_ref in &parsed.info.tables {
+        let schema_name = table_ref.schema.as_deref().unwrap_or("public");
+
+        let table = schema
+            .tables
+            .iter()
+            .find(|t| t.name == table_ref.name && t.schema == schema_name);
+
+        let table = match table {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let pi = match &table.partition_info {
+            Some(pi) => pi,
+            None => continue,
+        };
+
+        let key_columns = parse_partition_key_columns(&pi.key);
+        for kc in &key_columns {
+            for ut in &parsed.info.update_targets {
+                if ut.eq_ignore_ascii_case(kc) {
+                    warnings.push(ValidationWarning {
+                        severity: WarningSeverity::Warning,
+                        message: format!(
+                            "UPDATE changes partition key '{kc}' on partitioned table '{}.{}'. \
+                             This causes cross-partition row movement (DELETE + INSERT)",
+                            table.schema, table.name
                         ),
                     });
                 }
