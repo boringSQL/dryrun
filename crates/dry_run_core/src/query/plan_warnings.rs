@@ -283,4 +283,90 @@ mod tests {
         let warnings = detect_plan_warnings(&plan, None);
         assert!(warnings.iter().any(|w| w.message.contains("sort")));
     }
+
+    fn partitioned_schema() -> SchemaSnapshot {
+        use crate::schema::*;
+        SchemaSnapshot {
+            pg_version: "16.0".into(),
+            database: "test".into(),
+            timestamp: chrono::Utc::now(),
+            content_hash: String::new(),
+            source: None,
+            tables: vec![Table {
+                oid: 1,
+                schema: "public".into(),
+                name: "orders".into(),
+                columns: vec![],
+                constraints: vec![],
+                indexes: vec![],
+                comment: None,
+                stats: None,
+                partition_info: Some(PartitionInfo {
+                    strategy: PartitionStrategy::Range,
+                    key: "created_at".into(),
+                    children: vec![
+                        PartitionChild { schema: "public".into(), name: "orders_q1".into(), bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-04-01')".into() },
+                        PartitionChild { schema: "public".into(), name: "orders_q2".into(), bound: "FOR VALUES FROM ('2024-04-01') TO ('2024-07-01')".into() },
+                        PartitionChild { schema: "public".into(), name: "orders_q3".into(), bound: "FOR VALUES FROM ('2024-07-01') TO ('2024-10-01')".into() },
+                        PartitionChild { schema: "public".into(), name: "orders_q4".into(), bound: "FOR VALUES FROM ('2024-10-01') TO ('2025-01-01')".into() },
+                    ],
+                }),
+                policies: vec![], triggers: vec![], rls_enabled: false,
+            }],
+            enums: vec![], domains: vec![], composites: vec![],
+            views: vec![], functions: vec![], extensions: vec![],
+            gucs: vec![], node_stats: vec![],
+        }
+    }
+
+    #[test]
+    fn no_pruning_warns() {
+        let schema = partitioned_schema();
+        // Append scanning all 4 partitions, no SubplansRemoved
+        let plan = PlanNode {
+            node_type: "Append".into(),
+            children: vec![
+                make_seq_scan("orders_q1", 1000.0),
+                make_seq_scan("orders_q2", 1000.0),
+                make_seq_scan("orders_q3", 1000.0),
+                make_seq_scan("orders_q4", 1000.0),
+            ],
+            ..make_seq_scan("", 0.0)
+        };
+        let warnings = detect_plan_warnings(&plan, Some(&schema));
+        assert!(warnings.iter().any(|w|
+            w.message.contains("no partition pruning") && w.message.contains("scanning all 4")));
+    }
+
+    #[test]
+    fn good_pruning_no_warning() {
+        let schema = partitioned_schema();
+        // Only 1 partition scanned, 3 pruned
+        let plan = PlanNode {
+            node_type: "Append".into(),
+            subplans_removed: Some(3),
+            children: vec![make_seq_scan("orders_q1", 1000.0)],
+            ..make_seq_scan("", 0.0)
+        };
+        let warnings = detect_plan_warnings(&plan, Some(&schema));
+        assert!(!warnings.iter().any(|w| w.message.contains("partition pruning")));
+    }
+
+    #[test]
+    fn partial_pruning_info() {
+        let schema = partitioned_schema();
+        // 3 partitions still scanned but 1 pruned — scanning > half
+        let plan = PlanNode {
+            node_type: "Append".into(),
+            subplans_removed: Some(1),
+            children: vec![
+                make_seq_scan("orders_q1", 1000.0),
+                make_seq_scan("orders_q2", 1000.0),
+                make_seq_scan("orders_q3", 1000.0),
+            ],
+            ..make_seq_scan("", 0.0)
+        };
+        let warnings = detect_plan_warnings(&plan, Some(&schema));
+        assert!(warnings.iter().any(|w| w.message.contains("partial pruning")));
+    }
 }
