@@ -150,6 +150,11 @@ pub fn run_all_rules(schema: &SchemaSnapshot, config: &LintConfig) -> Vec<LintVi
         }
     }
 
+    // schema-level rules (not per-table)
+    if !is_disabled(config, "partition/gucs") {
+        check_partition_gucs(schema, &mut violations);
+    }
+
     suppress_overlapping(&mut violations);
     violations.retain(|v| v.severity >= config.min_severity);
     violations
@@ -699,6 +704,41 @@ fn looks_plural(name: &str) -> bool {
         return true;
     }
     false
+}
+
+fn check_partition_gucs(schema: &SchemaSnapshot, violations: &mut Vec<LintViolation>) {
+    let has_partitioned = schema
+        .tables
+        .iter()
+        .any(|t| t.partition_info.is_some());
+
+    if !has_partitioned {
+        return;
+    }
+
+    let gucs_to_check = [
+        ("enable_partition_pruning", "on"),
+        ("enable_partitionwise_join", "on"),
+        ("enable_partitionwise_aggregate", "on"),
+    ];
+
+    for (name, expected) in &gucs_to_check {
+        let current = schema.gucs.iter().find(|g| g.name == *name);
+        let value = current.map(|g| g.setting.as_str()).unwrap_or("on");
+        if value != *expected {
+            violations.push(LintViolation {
+                rule: "partition/gucs".into(),
+                severity: Severity::Warning,
+                table: String::new(),
+                column: None,
+                message: format!(
+                    "{name} = '{value}' — should be '{expected}' when partitioned tables exist"
+                ),
+                recommendation: format!("ALTER SYSTEM SET {name} = '{expected}';"),
+                convention_doc: "partitioning".into(),
+            });
+        }
+    }
 }
 
 #[cfg(test)]
