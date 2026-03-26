@@ -148,6 +148,15 @@ pub fn run_all_rules(schema: &SchemaSnapshot, config: &LintConfig) -> Vec<LintVi
         if !is_disabled(config, "timestamps/correct_type") {
             check_timestamp_type(table, &qualified, config, &mut violations);
         }
+        if !is_disabled(config, "partition/too_many_children") {
+            check_partition_too_many_children(table, &qualified, &mut violations);
+        }
+        if !is_disabled(config, "partition/range_gaps") {
+            check_partition_range_gaps(table, &qualified, &mut violations);
+        }
+        if !is_disabled(config, "partition/no_default") {
+            check_partition_no_default(table, &qualified, &mut violations);
+        }
     }
 
     // schema-level rules (not per-table)
@@ -704,6 +713,106 @@ fn looks_plural(name: &str) -> bool {
         return true;
     }
     false
+}
+
+fn check_partition_too_many_children(
+    table: &Table,
+    qualified: &str,
+    violations: &mut Vec<LintViolation>,
+) {
+    let pi = match &table.partition_info {
+        Some(pi) => pi,
+        None => return,
+    };
+    let n = pi.children.len();
+    if n > 500 {
+        violations.push(LintViolation {
+            rule: "partition/too_many_children".into(),
+            severity: Severity::Warning,
+            table: qualified.into(),
+            column: None,
+            message: format!(
+                "table has {n} partitions; planning overhead may be significant"
+            ),
+            recommendation: "consider sub-partitioning or coarser granularity".into(),
+            convention_doc: "partitioning".into(),
+        });
+    }
+}
+
+fn check_partition_range_gaps(
+    table: &Table,
+    qualified: &str,
+    violations: &mut Vec<LintViolation>,
+) {
+    let pi = match &table.partition_info {
+        Some(pi) if pi.strategy == crate::schema::PartitionStrategy::Range => pi,
+        _ => return,
+    };
+
+    let re = match Regex::new(r"FROM \('([^']+)'\) TO \('([^']+)'\)") {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let mut bounds: Vec<(String, String)> = pi
+        .children
+        .iter()
+        .filter_map(|c| {
+            re.captures(&c.bound).map(|cap| {
+                (cap[1].to_string(), cap[2].to_string())
+            })
+        })
+        .collect();
+
+    bounds.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for w in bounds.windows(2) {
+        if w[0].1 != w[1].0 {
+            violations.push(LintViolation {
+                rule: "partition/range_gaps".into(),
+                severity: Severity::Warning,
+                table: qualified.into(),
+                column: None,
+                message: format!(
+                    "gap in range partitions: '{}' ends at '{}' but next starts at '{}'",
+                    qualified, w[0].1, w[1].0
+                ),
+                recommendation: "create a partition covering the missing range".into(),
+                convention_doc: "partitioning".into(),
+            });
+        }
+    }
+}
+
+fn check_partition_no_default(
+    table: &Table,
+    qualified: &str,
+    violations: &mut Vec<LintViolation>,
+) {
+    let pi = match &table.partition_info {
+        Some(pi) => pi,
+        None => return,
+    };
+
+    let has_default = pi.children.iter().any(|c| c.bound.contains("DEFAULT"));
+    if !has_default {
+        violations.push(LintViolation {
+            rule: "partition/no_default".into(),
+            severity: Severity::Info,
+            table: qualified.into(),
+            column: None,
+            message: format!(
+                "partitioned table '{qualified}' has no DEFAULT partition — \
+                 rows not matching any partition will be rejected"
+            ),
+            recommendation: format!(
+                "CREATE TABLE {}_default PARTITION OF {} DEFAULT",
+                table.name, qualified
+            ),
+            convention_doc: "partitioning".into(),
+        });
+    }
 }
 
 fn check_partition_gucs(schema: &SchemaSnapshot, violations: &mut Vec<LintViolation>) {
