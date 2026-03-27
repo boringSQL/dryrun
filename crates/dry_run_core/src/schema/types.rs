@@ -493,6 +493,42 @@ pub struct UnusedIndexEntry {
     pub definition: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BloatedIndexEntry {
+    pub schema: String,
+    pub table: String,
+    pub index_name: String,
+    pub bloat_ratio: f64,
+    pub actual_pages: i64,
+    pub expected_pages: i64,
+    pub definition: String,
+}
+
+pub fn detect_bloated_indexes(tables: &[Table], threshold: f64) -> Vec<BloatedIndexEntry> {
+    let mut entries = Vec::new();
+
+    for table in tables {
+        for idx in &table.indexes {
+            if let Some(est) = super::bloat::estimate_index_bloat(idx, table) {
+                if est.bloat_ratio > threshold {
+                    entries.push(BloatedIndexEntry {
+                        schema: table.schema.clone(),
+                        table: table.name.clone(),
+                        index_name: idx.name.clone(),
+                        bloat_ratio: est.bloat_ratio,
+                        actual_pages: est.actual_pages,
+                        expected_pages: est.expected_pages,
+                        definition: idx.definition.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| b.bloat_ratio.partial_cmp(&a.bloat_ratio).unwrap_or(std::cmp::Ordering::Equal));
+    entries
+}
+
 /// Detect indexes with zero scans across all nodes.
 /// Skips primary key indexes — those are never droppable.
 /// When `node_stats` is empty, falls back to `Table.indexes[].stats`.
