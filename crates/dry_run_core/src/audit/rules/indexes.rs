@@ -195,6 +195,38 @@ pub fn check_wide_column_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
     findings
 }
 
+const DEFAULT_BLOAT_THRESHOLD: f64 = 1.5;
+
+#[must_use]
+pub fn check_bloated_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+
+    for table in &schema.tables {
+        let qualified = format!("{}.{}", table.schema, table.name);
+        for idx in &table.indexes {
+            if let Some(est) = crate::schema::bloat::estimate_index_bloat(idx, table) {
+                if est.bloat_ratio > DEFAULT_BLOAT_THRESHOLD {
+                    findings.push(AuditFinding {
+                        rule: "indexes/bloated".into(),
+                        category: AuditCategory::Storage,
+                        severity: Severity::Warning,
+                        tables: vec![qualified.clone()],
+                        message: format!(
+                            "index '{}' on '{}' has estimated bloat ratio {:.1}x ({} actual pages vs {} expected)",
+                            idx.name, qualified, est.bloat_ratio, est.actual_pages, est.expected_pages
+                        ),
+                        recommendation: format!("REINDEX INDEX CONCURRENTLY {};", idx.name),
+                        ddl_fix: Some(format!("REINDEX INDEX CONCURRENTLY {};", idx.name)),
+                        min_pg_version: None,
+                    });
+                }
+            }
+        }
+    }
+
+    findings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
