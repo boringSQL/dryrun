@@ -27,6 +27,7 @@ pub fn run_all_audit_rules(
     run_rule!("indexes/redundant", indexes::check_redundant_indexes(snapshot));
     run_rule!("indexes/too_many", indexes::check_too_many_indexes(snapshot, config));
     run_rule!("indexes/wide_columns", indexes::check_wide_column_indexes(snapshot));
+    run_rule!("indexes/bloated", indexes::check_bloated_indexes(snapshot));
 
     // FK rules
     run_rule!("fk/type_mismatch", fk_graph::check_fk_type_mismatch(snapshot));

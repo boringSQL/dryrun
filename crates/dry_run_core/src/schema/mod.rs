@@ -1,3 +1,4 @@
+pub mod bloat;
 mod hash;
 pub mod inject;
 mod introspect;
