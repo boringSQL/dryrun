@@ -710,6 +710,22 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Analyze autovacuum health for all significant tables. Shows trigger thresholds, dead tuple progress, and recommendations for tuning. Works offline.")]
+    async fn vacuum_health(&self) -> Result<CallToolResult, McpError> {
+        let snapshot = self.get_schema().await?;
+        let results = dry_run_core::schema::vacuum::analyze_vacuum_health(&snapshot);
+
+        if results.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No tables with significant row counts found.",
+            )]));
+        }
+
+        let json = serde_json::to_string_pretty(&results)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "Overview of stats health across all nodes — tables sorted by total seq_scans, highlighting missing indexes, node routing imbalances, and stale stats. Works offline.")]
     async fn stats_summary(&self) -> Result<CallToolResult, McpError> {
         let snapshot = self.get_schema().await?;
