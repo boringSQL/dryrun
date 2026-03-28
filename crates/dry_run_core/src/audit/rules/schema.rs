@@ -276,6 +276,46 @@ pub fn check_no_comment(schema: &SchemaSnapshot, config: &AuditConfig) -> Vec<Au
     findings
 }
 
+#[must_use]
+pub fn check_vacuum_large_table_defaults(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
+    use crate::schema::effective_table_stats;
+
+    let mut findings = Vec::new();
+
+    for table in &schema.tables {
+        let stats = match effective_table_stats(table, schema) {
+            Some(s) if s.reltuples >= 1_000_000.0 => s,
+            _ => continue,
+        };
+
+        let has_overrides = table
+            .reloptions
+            .iter()
+            .any(|opt| opt.starts_with("autovacuum_"));
+
+        if !has_overrides {
+            let qualified = format!("{}.{}", table.schema, table.name);
+            findings.push(AuditFinding {
+                rule: "vacuum/large_table_defaults".into(),
+                category: AuditCategory::Storage,
+                severity: Severity::Info,
+                tables: vec![qualified.clone()],
+                message: format!(
+                    "'{}' has {}M rows but uses default autovacuum settings",
+                    qualified,
+                    stats.reltuples as i64 / 1_000_000
+                ),
+                recommendation: "consider tuning autovacuum_vacuum_scale_factor for large tables"
+                    .into(),
+                ddl_fix: None,
+                min_pg_version: None,
+            });
+        }
+    }
+
+    findings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

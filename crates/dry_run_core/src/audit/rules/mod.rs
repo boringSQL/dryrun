@@ -45,6 +45,9 @@ pub fn run_all_audit_rules(
     // documentation rules
     run_rule!("docs/no_comment", schema::check_no_comment(snapshot, config));
 
+    // storage rules
+    run_rule!("vacuum/large_table_defaults", schema::check_vacuum_large_table_defaults(snapshot));
+
     findings
 }
 
