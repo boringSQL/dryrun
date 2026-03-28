@@ -34,6 +34,8 @@ pub struct Table {
     pub partition_info: Option<PartitionInfo>,
     pub policies: Vec<RlsPolicy>,
     pub triggers: Vec<Trigger>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reloptions: Vec<String>,
     pub rls_enabled: bool,
 }
 
@@ -664,6 +666,7 @@ mod tests {
             partition_info: None,
             policies: vec![],
             triggers: vec![],
+            reloptions: vec![],
             rls_enabled: false,
         }
     }

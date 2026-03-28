@@ -311,7 +311,7 @@ mod tests {
                         PartitionChild { schema: "public".into(), name: "orders_q4".into(), bound: "FOR VALUES FROM ('2024-10-01') TO ('2025-01-01')".into() },
                     ],
                 }),
-                policies: vec![], triggers: vec![], rls_enabled: false,
+                policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
             }],
             enums: vec![], domains: vec![], composites: vec![],
             views: vec![], functions: vec![], extensions: vec![],

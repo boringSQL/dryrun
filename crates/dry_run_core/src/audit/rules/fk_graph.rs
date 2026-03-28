@@ -270,7 +270,7 @@ mod tests {
             oid: 0, schema: "public".into(), name: name.into(),
             columns, constraints, indexes: vec![],
             comment: None, stats: None, partition_info: None,
-            policies: vec![], triggers: vec![], rls_enabled: false,
+            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
         }
     }
 

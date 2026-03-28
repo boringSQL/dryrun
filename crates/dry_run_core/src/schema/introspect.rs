@@ -1436,6 +1436,7 @@ fn assemble_tables(
             partition_info: partition_info_by_oid.get(&rt.oid).cloned(),
             policies: policies_by_oid.remove(&rt.oid).unwrap_or_default(),
             triggers: triggers_by_oid.remove(&rt.oid).unwrap_or_default(),
+            reloptions: vec![], // populated from pg_class.reloptions when available
             rls_enabled: rt.rls_enabled,
         })
         .collect()

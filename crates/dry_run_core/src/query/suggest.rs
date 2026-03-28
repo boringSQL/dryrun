@@ -288,6 +288,7 @@ mod tests {
                 partition_info: None,
                 policies: vec![],
                 triggers: vec![],
+                reloptions: vec![],
                 rls_enabled: false,
             }],
             enums: vec![], domains: vec![], composites: vec![], views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
