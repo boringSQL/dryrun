@@ -1,5 +1,6 @@
 pub mod bloat;
 mod hash;
+pub mod vacuum;
 pub mod inject;
 mod introspect;
 mod types;
