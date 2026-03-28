@@ -92,6 +92,7 @@ mod tests {
             partition_info: None,
             policies: vec![],
             triggers: vec![],
+            reloptions: vec![],
             rls_enabled: false,
         }
     }

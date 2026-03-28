@@ -381,7 +381,7 @@ mod tests {
                     Column { name: "data".into(), ordinal: 3, type_name: "jsonb".into(), nullable: true, default: None, identity: None, comment: None, stats: None },
                 ],
                 constraints: vec![], indexes: vec![], comment: None, stats: None,
-                partition_info: None, policies: vec![], triggers: vec![], rls_enabled: false,
+                partition_info: None, policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
             }],
             enums: vec![], domains: vec![], composites: vec![], views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
             node_stats: vec![],

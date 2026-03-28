@@ -83,7 +83,7 @@ mod tests {
                 }],
                 constraints: vec![], indexes: vec![],
                 comment: None, stats: None, partition_info: None,
-                policies: vec![], triggers: vec![], rls_enabled: false,
+                policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
             }],
             ..empty_schema()
         };

@@ -497,7 +497,7 @@ mod tests {
                     last_analyze: None, last_autoanalyze: None,
                     seq_scan: 0, idx_scan: 0, table_size: 2_147_483_648,
                 }),
-                partition_info: None, policies: vec![], triggers: vec![], rls_enabled: false,
+                partition_info: None, policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
             }],
             enums: vec![], domains: vec![], composites: vec![], views: vec![],
             functions: vec![], extensions: vec![], gucs: vec![],

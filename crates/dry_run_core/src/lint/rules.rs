@@ -894,7 +894,7 @@ mod tests {
             oid: 0, schema: "public".into(), name: name.into(),
             columns, constraints, indexes,
             comment: None, stats: None, partition_info: None,
-            policies: vec![], triggers: vec![], rls_enabled: false,
+            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
         }
     }
 
@@ -1002,7 +1002,7 @@ mod tests {
                 key: "created_at".into(),
                 children,
             }),
-            policies: vec![], triggers: vec![], rls_enabled: false,
+            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
         }
     }
 
@@ -1081,7 +1081,7 @@ mod tests {
                 key: "id".into(),
                 children: vec![make_partition_child("event_2024_01_h0")],
             }),
-            policies: vec![], triggers: vec![], rls_enabled: false,
+            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
         };
         let grandchild = make_table_with(
             "event_2024_01_h0", vec![make_col("id", "integer")], vec![], vec![],
@@ -1258,7 +1258,7 @@ mod tests {
                     },
                 ],
             }),
-            policies: vec![], triggers: vec![], rls_enabled: false,
+            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
         };
         let schema = schema_with(vec![table]);
         let config = config_with_only(&["partition/range_gaps"]);
