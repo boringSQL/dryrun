@@ -131,7 +131,7 @@ pub fn run_all_rules(schema: &SchemaSnapshot, config: &LintConfig) -> Vec<LintVi
             check_no_serial(table, &qualified, &mut violations);
         }
         if !is_disabled(config, "types/bigint_pk_fk") {
-            check_bigint_pk_fk(table, &qualified, &mut violations);
+            check_bigint_pk_fk(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "constraints/fk_has_index") {
             check_fk_has_index(table, &qualified, schema, &mut violations);
@@ -378,7 +378,7 @@ fn check_pk_type(
     config: &LintConfig,
     violations: &mut Vec<LintViolation>,
 ) {
-    if config.pk_type != "bigint_identity" {
+    if config.pk_type != "bigint_identity" && config.pk_type != "int_identity" {
         return;
     }
 
@@ -391,6 +391,8 @@ fn check_pk_type(
         return;
     };
 
+    let allow_int = config.pk_type == "int_identity";
+
     for pk_col_name in &pk.columns {
         let Some(col) = table.columns.iter().find(|c| &c.name == pk_col_name) else {
             continue;
@@ -398,21 +400,29 @@ fn check_pk_type(
 
         let type_lower = col.type_name.to_lowercase();
         let is_bigint = type_lower == "bigint" || type_lower == "int8";
+        let is_int = type_lower == "integer" || type_lower == "int4" || type_lower == "int";
         let is_identity = col.identity.is_some();
 
-        if !is_bigint || !is_identity {
+        let type_ok = is_bigint || (allow_int && is_int);
+
+        if !type_ok || !is_identity {
+            let expected = if allow_int {
+                "integer or bigint with identity"
+            } else {
+                "bigint with identity"
+            };
             violations.push(LintViolation {
                 rule: "pk/bigint_identity".into(),
                 severity: Severity::Warning,
                 table: qualified.into(),
                 column: Some(pk_col_name.clone()),
                 message: format!(
-                    "PK column '{}' is {} {}— expected bigint with identity",
+                    "PK column '{}' is {} {}— expected {expected}",
                     pk_col_name,
                     col.type_name,
                     if is_identity { "(identity) " } else { "" }
                 ),
-                recommendation: "use bigint GENERATED ALWAYS AS IDENTITY for primary keys".into(),
+                recommendation: format!("use {expected} for primary keys"),
                 convention_doc: "primary_keys".into(),
             });
         }
@@ -488,7 +498,7 @@ fn check_no_serial(table: &Table, qualified: &str, violations: &mut Vec<LintViol
     }
 }
 
-fn check_bigint_pk_fk(table: &Table, qualified: &str, violations: &mut Vec<LintViolation>) {
+fn check_bigint_pk_fk(table: &Table, qualified: &str, config: &LintConfig, violations: &mut Vec<LintViolation>) {
     let pk_cols: Vec<&str> = table
         .constraints
         .iter()
@@ -511,9 +521,12 @@ fn check_bigint_pk_fk(table: &Table, qualified: &str, violations: &mut Vec<LintV
         }
 
         let type_lower = col.type_name.to_lowercase();
-        if type_lower == "integer"
-            || type_lower == "int4"
-            || type_lower == "int"
+        let is_int = type_lower == "integer" || type_lower == "int4" || type_lower == "int";
+        // when pk_type is int_identity, integer is acceptable
+        if is_int && config.pk_type == "int_identity" {
+            continue;
+        }
+        if is_int
             || type_lower == "smallint"
             || type_lower == "int2"
         {
