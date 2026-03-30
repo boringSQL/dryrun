@@ -12,8 +12,8 @@ use tracing::info;
 use dry_run_core::audit::AuditConfig;
 use dry_run_core::lint::LintConfig;
 use dry_run_core::schema::{
-    ConstraintKind, NodeStats, TableFlag, detect_seq_scan_imbalance, detect_stale_stats,
-    detect_table_flags, detect_unused_indexes, effective_table_stats, summarize_table_stats,
+    ConstraintKind, NodeStats, detect_seq_scan_imbalance, detect_stale_stats,
+    detect_unused_indexes, effective_table_stats,
 };
 use dry_run_core::{DryRun, HistoryStore, SchemaSnapshot};
 
@@ -726,95 +726,6 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Overview of stats health across all nodes — tables sorted by total seq_scans, highlighting missing indexes, node routing imbalances, and stale stats. Works offline.")]
-    async fn stats_summary(&self) -> Result<CallToolResult, McpError> {
-        let snapshot = self.get_schema().await?;
-
-        if snapshot.node_stats.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "No per-node stats available. Import stats with:\n  \
-                 dry-run import schema.json --stats r1.json r2.json"
-                    .to_string(),
-            )]));
-        }
-
-        let mut sorted = summarize_table_stats(&snapshot.node_stats);
-        sorted.sort_by(|a, b| b.total_seq_scan.cmp(&a.total_seq_scan));
-
-        let mut lines: Vec<String> = Vec::new();
-        lines.push(format!(
-            "Stats summary across {} node(s), {} table(s):\n",
-            snapshot.node_stats.len(),
-            sorted.len()
-        ));
-
-        lines.push(format!(
-            "{:<40} {:>12} {:>12}  {}",
-            "table", "seq_scan", "idx_scan", "flags"
-        ));
-        lines.push("-".repeat(90));
-
-        for ta in sorted.iter().take(30) {
-            let flags = detect_table_flags(ta, &snapshot.node_stats);
-            let flag_str = flags
-                .iter()
-                .map(|f| match f {
-                    TableFlag::HighSeqIdxRatio => "⚠ high seq/idx ratio",
-                    TableFlag::SeqScanOnly => "⚠ seq_scan only (no idx_scan)",
-                    TableFlag::NodeImbalance => "⚠ node imbalance",
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let qualified = format!("{}.{}", ta.schema, ta.table);
-            lines.push(format!(
-                "{:<40} {:>12} {:>12}  {}",
-                qualified,
-                format_number(ta.total_seq_scan),
-                format_number(ta.total_idx_scan),
-                flag_str,
-            ));
-        }
-
-        if sorted.len() > 30 {
-            lines.push(format!("... and {} more tables", sorted.len() - 30));
-        }
-
-        let stale = detect_stale_stats(&snapshot.node_stats, 7);
-        if !stale.is_empty() {
-            lines.push(String::new());
-            lines.push("Stale stats (last analyze > 7 days ago):".to_string());
-            for entry in &stale {
-                let qualified = format!("{}.{}", entry.schema, entry.table);
-                let detail = match entry.last_analyzed_days_ago {
-                    Some(days) => format!("last analyzed {days} days ago"),
-                    None => "never analyzed".to_string(),
-                };
-                lines.push(format!("  {}/{qualified}: {detail}", entry.node));
-            }
-        }
-
-        let unused = detect_unused_indexes(&snapshot.node_stats, &snapshot.tables);
-        if !unused.is_empty() {
-            lines.push(String::new());
-            lines.push("Unused indexes (idx_scan = 0 across all nodes):".to_string());
-            for entry in &unused {
-                let size_mb = entry.total_size_bytes / (1024 * 1024);
-                let unique_note = if entry.is_unique {
-                    ", unique — kept for constraint?"
-                } else {
-                    ", not unique"
-                };
-                lines.push(format!(
-                    "  {}.{}.{} ({} MB{})",
-                    entry.schema, entry.table, entry.index_name, size_mb, unique_note,
-                ));
-            }
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
-    }
-
     #[tool(description = "Compare per-node stats for a table across all nodes — shows reltuples, relpages, seq/idx scans, table size, and per-index breakdowns. Works offline from imported node_stats.")]
     async fn compare_nodes(
         &self,
@@ -1145,7 +1056,7 @@ impl ServerHandler for DryRunServer {
                  - lint_schema: per-table convention checks (naming, types, timestamps, constraints).\n\
                  - schema_audit: cross-table structural analysis (FK cycles, duplicate indexes, type mismatches, orphan tables, docs gaps). \
                    Run both together for a full schema review.\n\
-                 Cluster health: stats_summary (overview), compare_nodes (per-table drill-down)."
+                 Cluster health: vacuum_health, compare_nodes (per-table drill-down)."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
