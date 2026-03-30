@@ -353,7 +353,7 @@ pub struct NodeImbalanceInfo {
 }
 
 // A single table with stale or missing analyze stats.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaleStatsEntry {
     pub node: String,
     pub schema: String,
@@ -484,7 +484,7 @@ pub fn detect_seq_scan_imbalance(
 }
 
 // A single unused index (idx_scan = 0 across all nodes).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnusedIndexEntry {
     pub schema: String,
     pub table: String,
