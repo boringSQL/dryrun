@@ -166,6 +166,9 @@ pub struct LintSchemaParams {
     #[serde(default)]
     #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
     pub schema: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Scope: 'conventions' (lint only), 'audit' (audit only), or 'all' (default, both).")]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -187,12 +190,6 @@ pub struct CompareNodesParams {
     pub schema: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SchemaAuditParams {
-    #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
-    pub schema: Option<String>,
-}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AnalyzePlanParams {
@@ -674,7 +671,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Lint the loaded schema against convention rules — naming, types, constraints, timestamps. Works offline.")]
+    #[tool(description = "Schema quality checks. Scope: 'conventions' (naming, types, timestamps), 'audit' (indexes, FKs, structure), or 'all' (default, both). Works offline.")]
     async fn lint_schema(
         &self,
         Parameters(params): Parameters<LintSchemaParams>,
@@ -689,32 +686,26 @@ impl DryRunServer {
             snapshot
         };
 
-        let report = dry_run_core::lint::lint_schema(&target, &self.lint_config);
+        let scope = params.scope.as_deref().unwrap_or("all");
+        let mut result = serde_json::Map::new();
 
-        let json = serde_json::to_string_pretty(&report)
-            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+        if scope == "all" || scope == "conventions" {
+            let report = dry_run_core::lint::lint_schema(&target, &self.lint_config);
+            result.insert(
+                "conventions".into(),
+                serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+            );
+        }
 
-        Ok(CallToolResult::success(vec![Content::text(json)]))
-    }
+        if scope == "all" || scope == "audit" {
+            let report = dry_run_core::audit::run_audit(&target, &self.audit_config);
+            result.insert(
+                "audit".into(),
+                serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+            );
+        }
 
-    #[tool(description = "Deep structural audit of the schema — cross-table FK graph analysis, index quality, naming consistency, documentation coverage. Works offline from schema snapshots.")]
-    async fn schema_audit(
-        &self,
-        Parameters(params): Parameters<SchemaAuditParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let snapshot = self.get_schema().await?;
-
-        let target = if let Some(schema_filter) = &params.schema {
-            let mut filtered = snapshot.clone();
-            filtered.tables.retain(|t| &t.schema == schema_filter);
-            filtered
-        } else {
-            snapshot
-        };
-
-        let report = dry_run_core::audit::run_audit(&target, &self.audit_config);
-
-        let json = serde_json::to_string_pretty(&report)
+        let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -1101,9 +1092,8 @@ impl ServerHandler for DryRunServer {
                  Query analysis: validate_query (offline), explain_query (live DB), advise (both — prefer this for query help), analyze_plan (accepts pre-existing EXPLAIN JSON, offline).\n\
                  Migration safety: check_migration.\n\
                  Schema quality:\n\
-                 - lint_schema: per-table convention checks (naming, types, timestamps, constraints).\n\
-                 - schema_audit: cross-table structural analysis (FK cycles, duplicate indexes, type mismatches, orphan tables, docs gaps). \
-                   Run both together for a full schema review.\n\
+                 - lint_schema: convention + audit checks. Use scope='conventions' for naming/types/timestamps, \
+                   scope='audit' for indexes/FKs/structure, or scope='all' (default) for both.\n\
                  Cluster health: vacuum_health, compare_nodes (per-table drill-down)."
                     .into(),
             ),
