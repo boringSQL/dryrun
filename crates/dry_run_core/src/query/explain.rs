@@ -13,6 +13,10 @@ pub struct ExplainResult {
     pub estimated_rows: f64,
     pub warnings: Vec<PlanWarning>,
     pub execution: Option<ExecutionStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_plan: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgmustard_tips: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,5 +104,7 @@ pub async fn explain_query(
         estimated_rows,
         warnings,
         execution,
+        raw_plan: Some(plan_json),
+        pgmustard_tips: None,
     })
 }
