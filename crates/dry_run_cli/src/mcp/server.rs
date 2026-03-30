@@ -169,6 +169,16 @@ pub struct LintSchemaParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DetectParams {
+    #[serde(default)]
+    #[schemars(description = "Detection kind: stale_stats, unused_indexes, bloated_indexes, or all (default).")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Bloat ratio threshold (default 1.5).")]
+    pub threshold: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CompareNodesParams {
     #[schemars(description = "Table name (without schema prefix).")]
     pub table: String,
@@ -722,6 +732,44 @@ impl DryRunServer {
         }
 
         let json = serde_json::to_string_pretty(&results)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Run health detection checks. Kinds: stale_stats, unused_indexes, anomalies, bloated_indexes, all (default). Works offline from imported node_stats.")]
+    async fn detect(
+        &self,
+        Parameters(params): Parameters<DetectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let snapshot = self.get_schema().await?;
+        let kind = params.kind.as_deref().unwrap_or("all");
+
+        let mut result = serde_json::Map::new();
+
+        let run_stale = kind == "all" || kind == "stale_stats";
+        let run_unused = kind == "all" || kind == "unused_indexes";
+        let run_bloated = kind == "all" || kind == "bloated_indexes";
+
+        if run_stale {
+            let stale = detect_stale_stats(&snapshot.node_stats, 7);
+            result.insert("stale_stats".into(), serde_json::to_value(&stale)
+                .unwrap_or(serde_json::Value::Null));
+        }
+
+        if run_unused {
+            let unused = detect_unused_indexes(&snapshot.node_stats, &snapshot.tables);
+            result.insert("unused_indexes".into(), serde_json::to_value(&unused)
+                .unwrap_or(serde_json::Value::Null));
+        }
+
+        if run_bloated {
+            let threshold = params.threshold.unwrap_or(1.5);
+            let bloated = dry_run_core::schema::detect_bloated_indexes(&snapshot.tables, threshold);
+            result.insert("bloated_indexes".into(), serde_json::to_value(&bloated)
+                .unwrap_or(serde_json::Value::Null));
+        }
+
+        let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
