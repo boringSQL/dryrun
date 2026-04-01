@@ -99,6 +99,10 @@ static CONVENTIONS_DOCS: &[(&str, &str)] = &[
         "anti_patterns",
         include_str!("../../knowledge/conventions/anti_patterns.md"),
     ),
+    (
+        "cte_patterns",
+        include_str!("../../knowledge/conventions/cte_patterns.md"),
+    ),
 ];
 
 pub fn migration_safety_docs() -> Vec<KnowledgeDoc> {
