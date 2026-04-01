@@ -504,7 +504,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Analyze a query: run EXPLAIN (when live DB available), match plan anti-patterns against the knowledge base, suggest indexes from query structure. Works offline with static SQL analysis.")]
+    #[tool(description = "Analyze a query: run EXPLAIN (when live DB available), detect plan anti-patterns, suggest indexes from query structure. Works offline with static SQL analysis.")]
     async fn advise(
         &self,
         Parameters(params): Parameters<AdviseParams>,

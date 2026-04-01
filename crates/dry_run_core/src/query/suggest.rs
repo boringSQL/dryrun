@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use super::parse::parse_sql;
 use super::plan::PlanNode;
 use crate::error::Result;
-use crate::knowledge;
 use crate::schema::{SchemaSnapshot, Table, effective_table_stats};
 use crate::version::PgVersion;
 
@@ -16,7 +15,6 @@ pub struct IndexSuggestion {
     pub partial_predicate: Option<String>,
     pub ddl: String,
     pub rationale: String,
-    pub knowledge_doc: Option<String>,
     pub estimated_impact: String,
 }
 
@@ -24,16 +22,16 @@ pub(crate) fn suggest_index(
     sql: &str,
     schema: &SchemaSnapshot,
     plan: Option<&PlanNode>,
-    pg_version: Option<&PgVersion>,
+    _pg_version: Option<&PgVersion>,
 ) -> Result<Vec<IndexSuggestion>> {
     let parsed = parse_sql(sql)?;
     let mut suggestions = Vec::new();
 
     if let Some(plan) = plan {
-        suggest_from_plan(plan, schema, pg_version, &mut suggestions);
+        suggest_from_plan(plan, schema, &mut suggestions);
     }
 
-    suggest_from_query_structure(&parsed, schema, pg_version, &mut suggestions);
+    suggest_from_query_structure(&parsed, schema, &mut suggestions);
     dedup_suggestions(&mut suggestions);
 
     Ok(suggestions)
@@ -44,7 +42,6 @@ pub(crate) fn suggest_index(
 fn suggest_from_plan(
     node: &PlanNode,
     schema: &SchemaSnapshot,
-    pg_version: Option<&PgVersion>,
     suggestions: &mut Vec<IndexSuggestion>,
 ) {
     if node.node_type == "Seq Scan" && node.plan_rows >= 1000.0 {
@@ -74,7 +71,6 @@ fn suggest_from_plan(
                                 "Seq scan on '{qualified}' filtering on '{col}' (~{} rows)",
                                 node.plan_rows as i64
                             ),
-                            knowledge_doc: doc_for_type(idx_type, pg_version),
                             estimated_impact: estimate_impact(node.plan_rows),
                         });
                     }
@@ -110,7 +106,6 @@ fn suggest_from_plan(
                         "Sort on ~{} rows could be avoided with an index on ({})",
                         node.plan_rows as i64, col_list
                     ),
-                    knowledge_doc: doc_for_type("btree", pg_version),
                     estimated_impact: "eliminates sort step".into(),
                 });
             }
@@ -118,7 +113,7 @@ fn suggest_from_plan(
     }
 
     for child in &node.children {
-        suggest_from_plan(child, schema, pg_version, suggestions);
+        suggest_from_plan(child, schema, suggestions);
     }
 }
 
@@ -127,7 +122,6 @@ fn suggest_from_plan(
 fn suggest_from_query_structure(
     parsed: &super::parse::ParsedQuery,
     schema: &SchemaSnapshot,
-    pg_version: Option<&PgVersion>,
     suggestions: &mut Vec<IndexSuggestion>,
 ) {
     for (alias, col_name) in &parsed.info.filter_columns {
@@ -178,7 +172,6 @@ fn suggest_from_query_structure(
                             "WHERE clause filters on '{col_name}' on table '{qualified}' (~{} rows)",
                             reltuples as i64
                         ),
-                        knowledge_doc: doc_for_type(idx_type, pg_version),
                         estimated_impact: estimate_impact(reltuples),
                     });
                 }
@@ -221,11 +214,6 @@ fn choose_index_type<'a>(table: Option<&Table>, col: &str) -> &'a str {
         }
     }
     "btree"
-}
-
-fn doc_for_type(idx_type: &str, pg_version: Option<&PgVersion>) -> Option<String> {
-    let docs = knowledge::lookup_index_decisions(idx_type, pg_version);
-    docs.first().map(|d| d.name.clone())
 }
 
 fn estimate_impact(row_count: f64) -> String {
@@ -338,14 +326,5 @@ mod tests {
         let suggestions = suggest_index("SELECT * FROM users WHERE email = 'test@example.com'", &schema, Some(&plan), None).unwrap();
         let email_count = suggestions.iter().filter(|s| s.columns.contains(&"email".to_string())).count();
         assert_eq!(email_count, 1, "should deduplicate");
-    }
-
-    #[test]
-    fn includes_knowledge_doc() {
-        let schema = test_schema();
-        let suggestions = suggest_index("SELECT * FROM users WHERE email = 'x'", &schema, None, None).unwrap();
-        if !suggestions.is_empty() {
-            assert!(suggestions[0].knowledge_doc.is_some());
-        }
     }
 }
