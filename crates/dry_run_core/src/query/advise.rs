@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use super::plan::PlanNode;
 use super::suggest::{self, IndexSuggestion};
 use crate::error::Result;
-use crate::knowledge;
 use crate::schema::SchemaSnapshot;
 use crate::version::PgVersion;
 
@@ -14,7 +13,6 @@ pub struct Advice {
     pub table: Option<String>,
     pub recommendation: String,
     pub ddl: Option<String>,
-    pub knowledge_doc: Option<String>,
     pub version_note: Option<String>,
 }
 
@@ -127,14 +125,10 @@ fn advise_seq_scan(
                 "Run ANALYZE to update statistics. The planner may correctly prefer a seq scan if selectivity is low."
                     .into(),
             ddl: Some(format!("ANALYZE {schema_name}.{table_name};")),
-            knowledge_doc: None,
             version_note: None,
         });
         return;
     }
-
-    let index_docs = knowledge::lookup_index_decisions("btree index", pg_version);
-    let doc_ref = index_docs.first().map(|d| d.name.clone());
 
     let (ddl, recommendation) = if let Some(col) = &filter_col {
         let col_type = table
@@ -193,7 +187,6 @@ fn advise_seq_scan(
         table: Some(qualified),
         recommendation: full_recommendation,
         ddl,
-        knowledge_doc: doc_ref,
         version_note: version_note_for_index(pg_version),
     });
 }
@@ -238,7 +231,6 @@ fn advise_nested_loop_seq_scan(
             "Add an index on the join/filter column of the inner table to convert the seq scan to an index scan."
                 .into(),
         ddl,
-        knowledge_doc: Some("btree".into()),
         version_note: version_note_for_index(pg_version),
     });
 }
@@ -286,7 +278,6 @@ fn advise_sort(
         recommendation: "Consider an index matching the sort order to avoid an explicit sort step."
             .into(),
         ddl: Some(ddl),
-        knowledge_doc: Some("btree".into()),
         version_note: version_note_for_index(pg_version),
     });
 }

@@ -2,7 +2,6 @@ use pg_query::NodeRef;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::knowledge;
 use crate::schema::SchemaSnapshot;
 use crate::version::PgVersion;
 
@@ -18,7 +17,6 @@ pub struct MigrationCheck {
     pub recommendation: String,
     pub version_behavior: Option<String>,
     pub rollback_ddl: Option<String>,
-    pub knowledge_doc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,9 +104,6 @@ fn analyze_alter_table_cmd(
                 }
             });
 
-            let docs = knowledge::lookup_migration_safety("add column", pg_version);
-            let doc_ref = docs.first().map(|d| d.name.clone());
-
             let (safety, recommendation, lock_duration) = if !has_default {
                 (
                     SafetyRating::Safe,
@@ -146,12 +141,10 @@ fn analyze_alter_table_cmd(
                 } else {
                     Some(format!("ALTER TABLE ... DROP COLUMN {};", cmd.name))
                 },
-                knowledge_doc: doc_ref,
             })
         }
 
         pg_query::protobuf::AlterTableType::AtDropColumn => {
-            let docs = knowledge::lookup_migration_safety("drop column", pg_version);
             Some(MigrationCheck {
                 operation: "DROP COLUMN".into(),
                 table: Some(table_name),
@@ -163,13 +156,10 @@ fn analyze_alter_table_cmd(
                 recommendation: "Metadata-only operation. Column space reclaimed by VACUUM.".into(),
                 version_behavior: None,
                 rollback_ddl: None,
-                knowledge_doc: docs.first().map(|d| d.name.clone()),
             })
         }
 
         pg_query::protobuf::AlterTableType::AtSetNotNull => {
-            let docs = knowledge::lookup_migration_safety("set not null", pg_version);
-
             let (safety, recommendation) = if pg_version.is_some_and(|v| v.major >= 12) {
                 (
                     SafetyRating::Caution,
@@ -197,12 +187,10 @@ fn analyze_alter_table_cmd(
                     "PG 12+: skips scan if a valid CHECK (col IS NOT NULL) exists.".into(),
                 ),
                 rollback_ddl: Some("ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL;".into()),
-                knowledge_doc: docs.first().map(|d| d.name.clone()),
             })
         }
 
         pg_query::protobuf::AlterTableType::AtAlterColumnType => {
-            let docs = knowledge::lookup_migration_safety("alter column type", pg_version);
             Some(MigrationCheck {
                 operation: "ALTER COLUMN TYPE".into(),
                 table: Some(table_name),
@@ -218,7 +206,6 @@ fn analyze_alter_table_cmd(
                         .into(),
                 version_behavior: None,
                 rollback_ddl: None,
-                knowledge_doc: docs.first().map(|d| d.name.clone()),
             })
         }
 
@@ -239,7 +226,6 @@ fn analyze_alter_table_cmd(
                     .into(),
             version_behavior: None,
             rollback_ddl: None,
-            knowledge_doc: None,
         }),
 
         _ => None,
@@ -252,7 +238,7 @@ fn analyze_add_constraint(
     table_size: Option<String>,
     row_estimate: Option<f64>,
     _schema: &SchemaSnapshot,
-    pg_version: Option<&PgVersion>,
+    _pg_version: Option<&PgVersion>,
 ) -> Option<MigrationCheck> {
     let is_not_valid = cmd.def.as_ref().is_some_and(|def| {
         if let Some(pg_query::protobuf::node::Node::Constraint(con)) = &def.node {
@@ -270,17 +256,11 @@ fn analyze_add_constraint(
         }
     });
 
-    let (operation, docs_keyword) = match con_type {
-        Some(pg_query::protobuf::ConstrType::ConstrForeign) => {
-            ("ADD FOREIGN KEY", "add foreign key")
-        }
-        Some(pg_query::protobuf::ConstrType::ConstrCheck) => {
-            ("ADD CHECK CONSTRAINT", "add check constraint")
-        }
-        _ => ("ADD CONSTRAINT", "add constraint"),
+    let operation = match con_type {
+        Some(pg_query::protobuf::ConstrType::ConstrForeign) => "ADD FOREIGN KEY",
+        Some(pg_query::protobuf::ConstrType::ConstrCheck) => "ADD CHECK CONSTRAINT",
+        _ => "ADD CONSTRAINT",
     };
-
-    let docs = knowledge::lookup_migration_safety(docs_keyword, pg_version);
 
     let (safety, recommendation, lock_duration) = if is_not_valid {
         (
@@ -314,14 +294,13 @@ fn analyze_add_constraint(
         recommendation,
         version_behavior: None,
         rollback_ddl: Some(format!("ALTER TABLE {table_name} DROP CONSTRAINT <name>;")),
-        knowledge_doc: docs.first().map(|d| d.name.clone()),
     })
 }
 
 fn analyze_create_index(
     idx: &pg_query::protobuf::IndexStmt,
     schema: &SchemaSnapshot,
-    pg_version: Option<&PgVersion>,
+    _pg_version: Option<&PgVersion>,
 ) -> MigrationCheck {
     let table_name = idx
         .relation
@@ -336,7 +315,6 @@ fn analyze_create_index(
         .unwrap_or_default();
 
     let (table_size, row_estimate) = lookup_table_stats(schema, &table_name);
-    let docs = knowledge::lookup_migration_safety("create index", pg_version);
 
     let (safety, recommendation, lock_type) = if idx.concurrent {
         (
@@ -380,7 +358,6 @@ fn analyze_create_index(
         recommendation,
         version_behavior: None,
         rollback_ddl: Some(format!("DROP INDEX CONCURRENTLY {idx_name};")),
-        knowledge_doc: docs.first().map(|d| d.name.clone()),
     }
 }
 
@@ -388,7 +365,6 @@ fn analyze_rename(
     _ren: &pg_query::protobuf::RenameStmt,
     _schema: &SchemaSnapshot,
 ) -> MigrationCheck {
-    let docs = knowledge::lookup_migration_safety("rename", None);
     MigrationCheck {
         operation: "RENAME".into(),
         table: None,
@@ -403,7 +379,6 @@ fn analyze_rename(
                 .into(),
         version_behavior: None,
         rollback_ddl: Some("ALTER TABLE/COLUMN ... RENAME TO <old_name>;".into()),
-        knowledge_doc: docs.first().map(|d| d.name.clone()),
     }
 }
 
@@ -426,7 +401,6 @@ fn fallback_keyword_check(
             recommendation: "Irreversible. Ensure no dependent objects or application code references this table.".into(),
             version_behavior: None,
             rollback_ddl: None,
-            knowledge_doc: None,
         });
     }
 
@@ -569,11 +543,5 @@ mod tests {
         let checks = check_migration("ALTER TABLE orders ADD COLUMN x text", &empty_schema(), Some(&pg17())).unwrap();
         assert!(checks[0].table_size.as_ref().unwrap().contains("GB"));
         assert_eq!(checks[0].row_estimate, Some(5_000_000.0));
-    }
-
-    #[test]
-    fn includes_knowledge_doc() {
-        let checks = check_migration("ALTER TABLE orders ADD COLUMN x text", &empty_schema(), Some(&pg17())).unwrap();
-        assert!(checks[0].knowledge_doc.is_some());
     }
 }
