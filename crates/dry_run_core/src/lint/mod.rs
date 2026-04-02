@@ -96,6 +96,7 @@ mod tests {
             column: None,
             message: format!("{table} violates {rule}"),
             recommendation: format!("fix {rule}"),
+            ddl_fix: None,
             convention_doc: String::new(),
         }
     }

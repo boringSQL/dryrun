@@ -2,6 +2,7 @@ use pg_query::NodeRef;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::jit;
 use crate::schema::SchemaSnapshot;
 use crate::version::PgVersion;
 
@@ -111,17 +112,21 @@ fn analyze_alter_table_cmd(
                     "brief (milliseconds)".into(),
                 )
             } else if pg_version.is_some_and(|v| v.major >= 11) {
+                let e = jit::add_column_volatile_default(&table_name, &cmd.name, "unknown", "<default>");
                 (
                     SafetyRating::Caution,
-                    "Column with DEFAULT on PG 11+ — safe for immutable defaults (metadata-only). \
-                     Volatile defaults (now(), random()) still trigger a full table rewrite."
-                        .into(),
+                    format!(
+                        "Column with DEFAULT on PG 11+ — safe for immutable defaults (metadata-only). \
+                         Volatile defaults (now(), random()) still trigger a full table rewrite.\n\n\
+                         If the default IS volatile:\n{}", e.fix
+                    ),
                     "brief for immutable default, long for volatile".into(),
                 )
             } else {
+                let e = jit::add_column_pre_pg11(&table_name, &cmd.name, "unknown", "<default>");
                 (
                     SafetyRating::Dangerous,
-                    "Column with DEFAULT on PG <11 — triggers full table rewrite.".into(),
+                    e.to_string(),
                     "proportional to table size".into(),
                 )
             };
@@ -160,18 +165,12 @@ fn analyze_alter_table_cmd(
         }
 
         pg_query::protobuf::AlterTableType::AtSetNotNull => {
-            let (safety, recommendation) = if pg_version.is_some_and(|v| v.major >= 12) {
-                (
-                    SafetyRating::Caution,
-                    "On PG 12+, add a CHECK (col IS NOT NULL) NOT VALID first, VALIDATE it, \
-                     then SET NOT NULL — the scan will be skipped."
-                        .into(),
-                )
+            let pg_major = pg_version.map(|v| v.major).unwrap_or(0);
+            let e = jit::set_not_null(&table_name, "<col>", pg_major);
+            let safety = if pg_major >= 12 {
+                SafetyRating::Caution
             } else {
-                (
-                    SafetyRating::Dangerous,
-                    "Scans entire table under ACCESS EXCLUSIVE lock to verify no NULLs.".into(),
-                )
+                SafetyRating::Dangerous
             };
 
             Some(MigrationCheck {
@@ -182,7 +181,7 @@ fn analyze_alter_table_cmd(
                 lock_duration: "scan duration (unless CHECK exists on PG 12+)".into(),
                 table_size,
                 row_estimate,
-                recommendation,
+                recommendation: e.to_string(),
                 version_behavior: Some(
                     "PG 12+: skips scan if a valid CHECK (col IS NOT NULL) exists.".into(),
                 ),
@@ -191,6 +190,8 @@ fn analyze_alter_table_cmd(
         }
 
         pg_query::protobuf::AlterTableType::AtAlterColumnType => {
+            let col_name = &cmd.name;
+            let e = jit::alter_column_type(&table_name, col_name, "<new_type>");
             Some(MigrationCheck {
                 operation: "ALTER COLUMN TYPE".into(),
                 table: Some(table_name),
@@ -199,11 +200,7 @@ fn analyze_alter_table_cmd(
                 lock_duration: "proportional to table size (full rewrite)".into(),
                 table_size,
                 row_estimate,
-                recommendation:
-                    "Most type changes rewrite the entire table. Safe exceptions: varchar(N) → text, \
-                     varchar(N) → varchar(M) where M > N, numeric precision increase. \
-                     For unsafe changes, use the add-column-swap pattern."
-                        .into(),
+                recommendation: e.to_string(),
                 version_behavior: None,
                 rollback_ddl: None,
             })
@@ -269,12 +266,14 @@ fn analyze_add_constraint(
             "brief (metadata-only)".into(),
         )
     } else {
+        let e = match operation {
+            "ADD FOREIGN KEY" => jit::add_foreign_key_unsafe(table_name, "<col>", "<ref_table>", "<ref_col>"),
+            "ADD CHECK CONSTRAINT" => jit::add_check_constraint_unsafe(table_name, "<expr>"),
+            _ => jit::add_check_constraint_unsafe(table_name, "<expr>"),
+        };
         (
             SafetyRating::Dangerous,
-            format!(
-                "{operation} without NOT VALID — scans entire table under ACCESS EXCLUSIVE. \
-                 Use the two-step pattern: ADD ... NOT VALID, then VALIDATE CONSTRAINT."
-            ),
+            e.to_string(),
             "proportional to table size".into(),
         )
     };
@@ -325,11 +324,11 @@ fn analyze_create_index(
             "SHARE UPDATE EXCLUSIVE".to_string(),
         )
     } else {
+        let idx_method = if idx.access_method.is_empty() { "btree" } else { &idx.access_method };
+        let e = jit::create_index_blocking(&table_name, &idx.idxname, idx_method, "<columns>");
         (
             SafetyRating::Dangerous,
-            "CREATE INDEX without CONCURRENTLY — blocks writes for the entire build duration. \
-             Use CREATE INDEX CONCURRENTLY for production tables."
-                .into(),
+            e.to_string(),
             "SHARE (blocks writes)".to_string(),
         )
     };
@@ -365,6 +364,7 @@ fn analyze_rename(
     _ren: &pg_query::protobuf::RenameStmt,
     _schema: &SchemaSnapshot,
 ) -> MigrationCheck {
+    let e = jit::rename("<old_name>", "<new_name>");
     MigrationCheck {
         operation: "RENAME".into(),
         table: None,
@@ -373,10 +373,7 @@ fn analyze_rename(
         lock_duration: "brief (metadata-only)".into(),
         table_size: None,
         row_estimate: None,
-        recommendation:
-            "Rename is instant but breaks all callers using the old name (queries, views, functions, ORMs). \
-             Deploy application changes first, or use a compatibility view."
-                .into(),
+        recommendation: e.to_string(),
         version_behavior: None,
         rollback_ddl: Some("ALTER TABLE/COLUMN ... RENAME TO <old_name>;".into()),
     }

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::plan::PlanNode;
 use super::suggest::{self, IndexSuggestion};
 use crate::error::Result;
+use crate::jit;
 use crate::schema::SchemaSnapshot;
 use crate::version::PgVersion;
 
@@ -68,6 +69,7 @@ fn walk_for_advice(
     advise_seq_scan(node, schema, pg_version, advice);
     advise_nested_loop_seq_scan(node, pg_version, advice);
     advise_sort(node, schema, pg_version, advice);
+    advise_cte(node, advice);
 
     for child in &node.children {
         walk_for_advice(child, schema, pg_version, advice);
@@ -136,7 +138,7 @@ fn advise_seq_scan(
             .map(|c| c.type_name.as_str())
             .unwrap_or("unknown");
 
-        let (idx_type, rec) = suggest_index_type(col_type, col);
+        let (idx_type, rec) = suggest_index_type(&qualified, col_type, col);
         let idx_name = format!("idx_{table_name}_{col}");
         let ddl = format!(
             "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({col});"
@@ -282,6 +284,29 @@ fn advise_sort(
     });
 }
 
+fn advise_cte(node: &PlanNode, advice: &mut Vec<Advice>) {
+    if node.node_type != "CTE Scan" {
+        return;
+    }
+    let cte_name = match &node.cte_name {
+        Some(n) => n,
+        None => return,
+    };
+    let rows = node.plan_rows as i64;
+    if rows < 1000 {
+        return;
+    }
+    let e = jit::cte_materialized(cte_name, rows);
+    advice.push(Advice {
+        issue: format!("materialized CTE '{cte_name}' (~{rows} rows)"),
+        severity: "info".into(),
+        table: None,
+        recommendation: format!("{}\n{}", e.reason, e.fix),
+        ddl: None,
+        version_note: None,
+    });
+}
+
 // helpers
 
 fn extract_column_from_filter(filter: &str) -> Option<String> {
@@ -295,31 +320,21 @@ fn extract_column_from_filter(filter: &str) -> Option<String> {
     }
 }
 
-fn suggest_index_type(col_type: &str, col_name: &str) -> (&'static str, String) {
+fn suggest_index_type(table: &str, col_type: &str, col_name: &str) -> (&'static str, String) {
     let ct = col_type.to_lowercase();
-    if ct == "jsonb" {
-        return (
-            "gin",
-            format!("Use GIN index for JSONB column '{col_name}' — supports @>, ?, ?& operators."),
-        );
+    if ct == "jsonb" || ct == "tsvector" {
+        let e = jit::suggest_gin(table, col_name, col_type);
+        let rec = match &e.note {
+            Some(note) => format!("{}\n{note}", e.reason),
+            None => e.reason,
+        };
+        return ("gin", rec);
     }
-    if ct == "tsvector" {
-        return (
-            "gin",
-            format!("Use GIN index for full-text search column '{col_name}'."),
-        );
-    }
-    if ct.contains("geometry") || ct.contains("geography") {
-        return (
-            "gist",
-            format!("Use GiST index for spatial column '{col_name}'."),
-        );
-    }
-    if ct.contains("range") || ct == "tsrange" || ct == "daterange" || ct == "int4range" {
-        return (
-            "gist",
-            format!("Use GiST index for range column '{col_name}' — supports overlap (&&) and containment."),
-        );
+    if ct.contains("geometry") || ct.contains("geography") || ct.contains("range")
+        || ct == "tsrange" || ct == "daterange" || ct == "int4range"
+    {
+        let e = jit::suggest_gist(table, col_name, col_type);
+        return ("gist", e.reason);
     }
     (
         "btree",
@@ -386,7 +401,7 @@ mod tests {
             actual_rows: None, actual_loops: None, actual_startup_time: None, actual_total_time: None,
             shared_hit_blocks: None, shared_read_blocks: None, index_name: None, index_cond: None,
             filter: filter.map(String::from), rows_removed_by_filter: None,
-            sort_key: None, sort_method: None, hash_cond: None, join_type: None, subplans_removed: None, children: vec![],
+            sort_key: None, sort_method: None, hash_cond: None, join_type: None, subplans_removed: None, cte_name: None, parent_relationship: None, children: vec![],
         }
     }
 
