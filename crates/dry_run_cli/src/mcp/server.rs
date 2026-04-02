@@ -23,6 +23,8 @@ use crate::pgmustard::PgMustardClient;
 pub struct DryRunServer {
     ctx: Option<Arc<DryRun>>,
     db_url: String,
+    pg_version_display: String,
+    database_name: String,
     schema: Arc<RwLock<Option<SchemaSnapshot>>>,
     history: Option<Arc<std::sync::Mutex<HistoryStore>>>,
     lint_config: LintConfig,
@@ -43,6 +45,11 @@ impl DryRunServer {
             None => (None, String::new()),
         };
 
+        let pg_version_display = dry_run_core::PgVersion::parse_from_version_string(&snapshot.pg_version)
+            .map(|v| format!("{}.{}.{}", v.major, v.minor, v.patch))
+            .unwrap_or_default();
+        let database_name = snapshot.database.clone();
+
         info!(
             tables = snapshot.tables.len(),
             database = %snapshot.database,
@@ -53,6 +60,8 @@ impl DryRunServer {
         Self {
             ctx,
             db_url,
+            pg_version_display,
+            database_name,
             schema: Arc::new(RwLock::new(Some(snapshot))),
             history: None,
             lint_config,
@@ -250,10 +259,19 @@ impl DryRunServer {
             })
             .collect();
 
-        let text = if tables.is_empty() {
-            "No tables found.".to_string()
+        let pg_header = if !snapshot.pg_version.is_empty() {
+            let ver = dry_run_core::PgVersion::parse_from_version_string(&snapshot.pg_version)
+                .map(|v| format!("{}.{}.{}", v.major, v.minor, v.patch))
+                .unwrap_or_else(|_| snapshot.pg_version.clone());
+            format!("PostgreSQL {} | database: {}\n", ver, snapshot.database)
         } else {
-            format!("{} table(s):\n{}", tables.len(), tables.join("\n"))
+            String::new()
+        };
+
+        let text = if tables.is_empty() {
+            format!("{pg_header}No tables found.")
+        } else {
+            format!("{pg_header}{} table(s):\n{}", tables.len(), tables.join("\n"))
         };
 
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -278,7 +296,13 @@ impl DryRunServer {
                 )
             })?;
 
-        let mut text = serde_json::to_string_pretty(table)
+        let mut json_val = serde_json::to_value(table)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+        if let Some(obj) = json_val.as_object_mut() {
+            obj.insert("pg_version".into(), serde_json::Value::String(snapshot.pg_version.clone()));
+        }
+
+        let mut text = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
         if let Some(breakdown) = format_node_table_breakdown(&snapshot.node_stats, schema_name, &params.table) {
@@ -1080,9 +1104,18 @@ mod tests {
 #[tool_handler]
 impl ServerHandler for DryRunServer {
     fn get_info(&self) -> ServerInfo {
+        let version_header = if !self.pg_version_display.is_empty() {
+            format!(
+                "dryrun PostgreSQL schema advisor. PostgreSQL {}; database: {}\n\n",
+                self.pg_version_display, self.database_name
+            )
+        } else {
+            "dryrun PostgreSQL schema advisor. No schema loaded yet.\n\n".to_string()
+        };
+
         ServerInfo {
             instructions: Some(
-                "PostgreSQL schema intelligence server.\n\n\
+                format!("{version_header}\
                  MODE REQUIREMENTS:\n\
                  - Most tools work offline from schema snapshots.\n\
                  - explain_query and refresh_schema require a live DB connection (--db). analyze=true actually executes the query.\n\
@@ -1094,8 +1127,7 @@ impl ServerHandler for DryRunServer {
                  Schema quality:\n\
                  - lint_schema: convention + audit checks. Use scope='conventions' for naming/types/timestamps, \
                    scope='audit' for indexes/FKs/structure, or scope='all' (default) for both.\n\
-                 Cluster health: vacuum_health, compare_nodes (per-table drill-down)."
-                    .into(),
+                 Cluster health: vacuum_health, compare_nodes (per-table drill-down)."),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
