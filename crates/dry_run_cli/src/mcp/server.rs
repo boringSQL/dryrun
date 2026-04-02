@@ -1062,6 +1062,57 @@ mod tests {
         assert!(plan_json.get("Plan").is_none());
     }
 
+    #[tokio::test]
+    async fn list_tables_includes_pg_version() {
+        let snapshot = test_snapshot();
+        let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None);
+        let result = server
+            .list_tables(Parameters(ListTablesParams { schema: None }))
+            .await
+            .unwrap();
+        let text = result.content.first().unwrap();
+        let text_str = format!("{text:?}");
+        assert!(text_str.contains("PostgreSQL 18.3.0"), "list_tables output should contain PG version");
+    }
+
+    #[tokio::test]
+    async fn describe_table_includes_pg_version() {
+        let snapshot = test_snapshot();
+        let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None);
+        let result = server
+            .describe_table(Parameters(DescribeTableParams {
+                table: "orders".into(),
+                schema: None,
+            }))
+            .await
+            .unwrap();
+        let text = result.content.first().unwrap();
+        let text_str = format!("{text:?}");
+        assert!(text_str.contains("pg_version"), "describe_table output should contain pg_version field");
+    }
+
+    fn test_snapshot() -> dry_run_core::SchemaSnapshot {
+        use dry_run_core::schema::*;
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 18.3.0 on x86_64-pc-linux-gnu".into(),
+            database: "testdb".into(),
+            timestamp: chrono::Utc::now(),
+            content_hash: "abc123".into(),
+            source: None,
+            tables: vec![Table {
+                oid: 1, schema: "public".into(), name: "orders".into(),
+                columns: vec![
+                    Column { name: "id".into(), ordinal: 1, type_name: "bigint".into(), nullable: false, default: None, identity: None, comment: None, stats: None },
+                ],
+                constraints: vec![], indexes: vec![], comment: None,
+                stats: Some(TableStats { reltuples: 50000.0, relpages: 625, dead_tuples: 0, last_vacuum: None, last_autovacuum: None, last_analyze: None, last_autoanalyze: None, seq_scan: 0, idx_scan: 0, table_size: 5000000 }),
+                partition_info: None, policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+            }],
+            enums: vec![], domains: vec![], composites: vec![], views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
     #[test]
     fn analyze_plan_with_analyze_buffers_data() {
         // realistic EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) output
