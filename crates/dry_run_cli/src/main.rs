@@ -8,8 +8,12 @@ use dry_run_core::schema::{NodeColumnStats, NodeIndexStats, NodeStats, NodeTable
 use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
 use rmcp::ServiceExt;
 
+fn get_version() -> &'static str {
+    option_env!("DRY_RUN_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 #[derive(Parser)]
-#[command(name = "dry-run", version, about = "PostgreSQL schema intelligence")]
+#[command(name = "dry-run", version = get_version(), about = "PostgreSQL schema intelligence")]
 struct Cli {
     #[arg(long)]
     profile: Option<String>,
@@ -784,7 +788,7 @@ async fn cmd_mcp_serve(
     };
 
     let server = mcp::DryRunServer::from_snapshot_with_db(
-        snapshot, db_connection, lint_config, pgmustard_api_key,
+        snapshot, db_connection, lint_config, pgmustard_api_key, get_version(),
     );
 
     match transport {
