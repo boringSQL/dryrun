@@ -16,6 +16,8 @@ pub struct LintViolation {
     pub column: Option<String>,
     pub message: String,
     pub recommendation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ddl_fix: Option<String>,
     pub convention_doc: String,
 }
 

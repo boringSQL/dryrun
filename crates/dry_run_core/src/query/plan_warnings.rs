@@ -1,5 +1,6 @@
 use super::explain::PlanWarning;
 use super::plan::PlanNode;
+use crate::jit;
 use crate::schema::SchemaSnapshot;
 
 const SEQ_SCAN_ROW_THRESHOLD: f64 = 5_000.0;
@@ -16,6 +17,7 @@ fn walk_plan(node: &PlanNode, schema: Option<&SchemaSnapshot>, warnings: &mut Ve
     detect_sort_without_index(node, warnings);
     detect_high_rows_removed(node, warnings);
     detect_partition_pruning_issues(node, schema, warnings);
+    detect_cte_materialized(node, schema, warnings);
 
     for child in &node.children {
         walk_plan(child, schema, warnings);
@@ -174,13 +176,10 @@ fn detect_partition_pruning_issues(
     let qualified = format!("{}.{}", parent.schema, parent.name);
 
     if pruned == 0 {
+        let e = jit::no_partition_pruning(&qualified, &pi.key, scanned, total);
         warnings.push(PlanWarning {
             severity: "warning".into(),
-            message: format!(
-                "no partition pruning on '{qualified}': scanning all {scanned} of {total} partitions. \
-                 Add WHERE filter on partition key '{}'",
-                pi.key
-            ),
+            message: e.to_string(),
             node_type: node.node_type.clone(),
             detail: None,
         });
@@ -194,6 +193,50 @@ fn detect_partition_pruning_issues(
             detail: None,
         });
     }
+}
+
+fn detect_cte_materialized(
+    node: &PlanNode,
+    schema: Option<&SchemaSnapshot>,
+    warnings: &mut Vec<PlanWarning>,
+) {
+    if node.node_type != "CTE Scan" {
+        return;
+    }
+    let cte_name = match &node.cte_name {
+        Some(n) => n,
+        None => return,
+    };
+    let rows = node.plan_rows as i64;
+    if rows < 1000 {
+        return;
+    }
+
+    let mut e = jit::cte_materialized(cte_name, rows);
+
+    // check if CTE scans a partitioned table
+    if let Some(schema) = schema {
+        for child in &node.children {
+            if child.node_type == "Append" || child.node_type == "Merge Append" {
+                for grandchild in &child.children {
+                    if let Some(rel) = &grandchild.relation_name {
+                        if let Some(p) = find_partition_parent(rel, schema) {
+                            let qualified = format!("{}.{}", p.schema, p.name);
+                            e = jit::cte_over_partitioned_table(cte_name, &qualified);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    warnings.push(PlanWarning {
+        severity: "warning".into(),
+        message: e.to_string(),
+        node_type: "CTE Scan".into(),
+        detail: None,
+    });
 }
 
 fn find_partition_parent<'a>(
@@ -236,6 +279,8 @@ mod tests {
             hash_cond: None,
             join_type: None,
             subplans_removed: None,
+            cte_name: None,
+            parent_relationship: None,
             children: vec![],
         }
     }
@@ -335,7 +380,7 @@ mod tests {
         };
         let warnings = detect_plan_warnings(&plan, Some(&schema));
         assert!(warnings.iter().any(|w|
-            w.message.contains("no partition pruning") && w.message.contains("scanning all 4")));
+            w.message.contains("no pruning") && w.message.contains("4/4")));
     }
 
     #[test]

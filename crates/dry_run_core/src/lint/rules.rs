@@ -3,6 +3,7 @@ use std::collections::HashSet;
 
 use regex::Regex;
 
+use crate::jit;
 use crate::schema::{ConstraintKind, SchemaSnapshot, Table};
 
 use super::types::{LintConfig, LintViolation, Severity};
@@ -241,6 +242,7 @@ fn check_table_name_style(
                 name, config.table_name_style
             ),
             recommendation: format!("rename to match {} convention", config.table_name_style),
+            ddl_fix: None,
             convention_doc: "naming".into(),
         });
     }
@@ -280,7 +282,8 @@ fn check_column_name_style(
                     col.name, config.column_name_style
                 ),
                 recommendation: format!("rename to match {} convention", config.column_name_style),
-                convention_doc: "naming".into(),
+                ddl_fix: None,
+            convention_doc: "naming".into(),
             });
         }
     }
@@ -312,7 +315,8 @@ fn check_fk_naming(
                     constraint.name, config.fk_pattern, expected
                 ),
                 recommendation: format!("rename constraint to '{expected}'"),
-                convention_doc: "naming".into(),
+                ddl_fix: None,
+            convention_doc: "naming".into(),
             });
         }
     }
@@ -344,7 +348,8 @@ fn check_index_naming(
                     index.name, config.index_pattern, expected
                 ),
                 recommendation: format!("rename index to '{expected}'"),
-                convention_doc: "naming".into(),
+                ddl_fix: None,
+            convention_doc: "naming".into(),
             });
         }
     }
@@ -359,14 +364,15 @@ fn check_pk_exists(table: &Table, qualified: &str, violations: &mut Vec<LintViol
         .any(|c| c.kind == ConstraintKind::PrimaryKey);
 
     if !has_pk {
+        let e = jit::missing_primary_key(qualified);
         violations.push(LintViolation {
             rule: "pk/exists".into(),
             severity: Severity::Error,
             table: qualified.into(),
             column: None,
             message: "table has no primary key".into(),
-            recommendation: "add a primary key (bigint GENERATED ALWAYS AS IDENTITY recommended)"
-                .into(),
+            recommendation: e.reason,
+            ddl_fix: Some(e.fix),
             convention_doc: "primary_keys".into(),
         });
     }
@@ -423,7 +429,8 @@ fn check_pk_type(
                     if is_identity { "(identity) " } else { "" }
                 ),
                 recommendation: format!("use {expected} for primary keys"),
-                convention_doc: "primary_keys".into(),
+                ddl_fix: None,
+            convention_doc: "primary_keys".into(),
             });
         }
     }
@@ -444,16 +451,16 @@ fn check_text_over_varchar(
     for col in &table.columns {
         let type_lower = col.type_name.to_lowercase();
         if type_lower.starts_with("character varying") || type_lower.starts_with("varchar") {
+            let e = jit::text_over_varchar(qualified, &col.name);
             violations.push(LintViolation {
                 rule: "types/text_over_varchar".into(),
                 severity: Severity::Warning,
                 table: qualified.into(),
                 column: Some(col.name.clone()),
                 message: format!("column '{}' uses {} — prefer text", col.name, col.type_name),
-                recommendation:
-                    "use text instead of varchar; add a CHECK constraint for length if needed"
-                        .into(),
-                convention_doc: "types".into(),
+                recommendation: e.reason,
+                ddl_fix: Some(e.fix),
+            convention_doc: "types".into(),
             });
         }
     }
@@ -463,14 +470,20 @@ fn check_timestamptz(table: &Table, qualified: &str, violations: &mut Vec<LintVi
     for col in &table.columns {
         let type_lower = col.type_name.to_lowercase();
         if type_lower == "timestamp without time zone" || type_lower == "timestamp" {
+            let e = jit::timestamp_to_timestamptz(qualified, &col.name);
+            let rec = match &e.note {
+                Some(note) => format!("{}\n{note}", e.reason),
+                None => e.reason,
+            };
             violations.push(LintViolation {
                 rule: "types/timestamptz".into(),
                 severity: Severity::Warning,
                 table: qualified.into(),
                 column: Some(col.name.clone()),
                 message: format!("column '{}' uses timestamp without time zone", col.name),
-                recommendation: "use timestamptz (timestamp with time zone) instead".into(),
-                convention_doc: "types".into(),
+                recommendation: rec,
+                ddl_fix: Some(e.fix),
+            convention_doc: "types".into(),
             });
         }
     }
@@ -491,7 +504,8 @@ fn check_no_serial(table: &Table, qualified: &str, violations: &mut Vec<LintViol
                     ),
                     recommendation: "use bigint GENERATED ALWAYS AS IDENTITY instead of serial"
                         .into(),
-                    convention_doc: "types".into(),
+                    ddl_fix: None,
+            convention_doc: "types".into(),
                 });
             }
         }
@@ -540,7 +554,8 @@ fn check_bigint_pk_fk(table: &Table, qualified: &str, config: &LintConfig, viola
                     col.name, col.type_name
                 ),
                 recommendation: "use bigint for PK and FK columns".into(),
-                convention_doc: "types".into(),
+                ddl_fix: None,
+            convention_doc: "types".into(),
             });
         }
     }
@@ -575,24 +590,26 @@ fn check_fk_has_index(
         });
 
         if !has_covering_index {
+            let col_list = constraint.columns.join(", ");
+            let ddl = format!(
+                "CREATE INDEX CONCURRENTLY idx_{}_{} ON {}({});",
+                table.name,
+                constraint.columns.join("_"),
+                qualified,
+                col_list
+            );
             violations.push(LintViolation {
                 rule: "constraints/fk_has_index".into(),
                 severity: Severity::Error,
                 table: qualified.into(),
-                column: Some(constraint.columns.join(", ")),
+                column: Some(col_list.clone()),
                 message: format!(
                     "FK '{}' on column(s) ({}) has no covering index",
-                    constraint.name,
-                    constraint.columns.join(", ")
+                    constraint.name, col_list
                 ),
-                recommendation: format!(
-                    "CREATE INDEX idx_{}_{} ON {}({})",
-                    table.name,
-                    constraint.columns.join("_"),
-                    table.name,
-                    constraint.columns.join(", ")
-                ),
-                convention_doc: "constraints".into(),
+                recommendation: "Add an index on FK columns to avoid sequential scans on DELETE/UPDATE of the referenced table.".into(),
+                ddl_fix: Some(ddl),
+            convention_doc: "constraints".into(),
             });
         }
     }
@@ -615,7 +632,8 @@ fn check_unnamed_constraints(table: &Table, qualified: &str, violations: &mut Ve
                 column: None,
                 message: format!("constraint '{}' appears to be auto-generated", name),
                 recommendation: "name constraints explicitly for readable error messages".into(),
-                convention_doc: "constraints".into(),
+                ddl_fix: None,
+            convention_doc: "constraints".into(),
             });
         }
     }
@@ -635,13 +653,15 @@ fn check_has_created_at(
 
     let has_created_at = table.columns.iter().any(|c| c.name == "created_at");
     if !has_created_at {
+        let e = jit::missing_timestamp(qualified, "created_at");
         violations.push(LintViolation {
             rule: "timestamps/has_created_at".into(),
             severity: Severity::Warning,
             table: qualified.into(),
             column: None,
             message: "table is missing 'created_at' column".into(),
-            recommendation: "add: created_at timestamptz NOT NULL DEFAULT now()".into(),
+            recommendation: e.reason,
+            ddl_fix: Some(e.fix),
             convention_doc: "timestamps".into(),
         });
     }
@@ -659,13 +679,15 @@ fn check_has_updated_at(
 
     let has_updated_at = table.columns.iter().any(|c| c.name == "updated_at");
     if !has_updated_at {
+        let e = jit::missing_timestamp(qualified, "updated_at");
         violations.push(LintViolation {
             rule: "timestamps/has_updated_at".into(),
             severity: Severity::Warning,
             table: qualified.into(),
             column: None,
             message: "table is missing 'updated_at' column".into(),
-            recommendation: "add: updated_at timestamptz NOT NULL DEFAULT now()".into(),
+            recommendation: e.reason,
+            ddl_fix: Some(e.fix),
             convention_doc: "timestamps".into(),
         });
     }
@@ -699,7 +721,8 @@ fn check_timestamp_type(
                     col.name, col.type_name
                 ),
                 recommendation: "use timestamptz for timestamp columns".into(),
-                convention_doc: "timestamps".into(),
+                ddl_fix: None,
+            convention_doc: "timestamps".into(),
             });
         }
     }
@@ -739,6 +762,11 @@ fn check_partition_too_many_children(
     };
     let n = pi.children.len();
     if n > 500 {
+        let e = jit::partition_too_many_children(qualified, n);
+        let rec = match &e.note {
+            Some(note) => format!("{}\n{note}", e.reason),
+            None => e.reason,
+        };
         violations.push(LintViolation {
             rule: "partition/too_many_children".into(),
             severity: Severity::Warning,
@@ -747,7 +775,8 @@ fn check_partition_too_many_children(
             message: format!(
                 "table has {n} partitions; planning overhead may be significant"
             ),
-            recommendation: "consider sub-partitioning or coarser granularity".into(),
+            recommendation: rec,
+            ddl_fix: None,
             convention_doc: "partitioning".into(),
         });
     }
@@ -782,6 +811,7 @@ fn check_partition_range_gaps(
 
     for w in bounds.windows(2) {
         if w[0].1 != w[1].0 {
+            let e = jit::partition_range_gap(&table.name, &w[0].1, &w[1].0);
             violations.push(LintViolation {
                 rule: "partition/range_gaps".into(),
                 severity: Severity::Warning,
@@ -791,8 +821,9 @@ fn check_partition_range_gaps(
                     "gap in range partitions: '{}' ends at '{}' but next starts at '{}'",
                     qualified, w[0].1, w[1].0
                 ),
-                recommendation: "create a partition covering the missing range".into(),
-                convention_doc: "partitioning".into(),
+                recommendation: e.reason,
+                ddl_fix: Some(e.fix),
+            convention_doc: "partitioning".into(),
             });
         }
     }
@@ -810,6 +841,7 @@ fn check_partition_no_default(
 
     let has_default = pi.children.iter().any(|c| c.bound.contains("DEFAULT"));
     if !has_default {
+        let e = jit::partition_no_default(&table.name);
         violations.push(LintViolation {
             rule: "partition/no_default".into(),
             severity: Severity::Info,
@@ -819,10 +851,8 @@ fn check_partition_no_default(
                 "partitioned table '{qualified}' has no DEFAULT partition — \
                  rows not matching any partition will be rejected"
             ),
-            recommendation: format!(
-                "CREATE TABLE {}_default PARTITION OF {} DEFAULT",
-                table.name, qualified
-            ),
+            recommendation: e.reason,
+            ddl_fix: Some(e.fix),
             convention_doc: "partitioning".into(),
         });
     }
@@ -857,7 +887,8 @@ fn check_partition_gucs(schema: &SchemaSnapshot, violations: &mut Vec<LintViolat
                     "{name} = '{value}' — should be '{expected}' when partitioned tables exist"
                 ),
                 recommendation: format!("ALTER SYSTEM SET {name} = '{expected}';"),
-                convention_doc: "partitioning".into(),
+                ddl_fix: None,
+            convention_doc: "partitioning".into(),
             });
         }
     }

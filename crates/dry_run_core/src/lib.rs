@@ -4,6 +4,7 @@ pub mod connection;
 pub mod diff;
 pub mod error;
 pub mod history;
+pub mod jit;
 pub mod lint;
 pub mod query;
 pub mod schema;
