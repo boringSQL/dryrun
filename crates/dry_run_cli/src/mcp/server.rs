@@ -23,6 +23,7 @@ use crate::pgmustard::PgMustardClient;
 pub struct DryRunServer {
     ctx: Option<Arc<DryRun>>,
     db_url: String,
+    app_version: String,
     pg_version_display: String,
     database_name: String,
     schema: Arc<RwLock<Option<SchemaSnapshot>>>,
@@ -39,6 +40,7 @@ impl DryRunServer {
         db: Option<(&str, DryRun)>,
         lint_config: LintConfig,
         pgmustard_api_key: Option<String>,
+        app_version: &str,
     ) -> Self {
         let (ctx, db_url) = match db {
             Some((url, ctx)) => (Some(Arc::new(ctx)), url.to_string()),
@@ -60,6 +62,7 @@ impl DryRunServer {
         Self {
             ctx,
             db_url,
+            app_version: app_version.to_string(),
             pg_version_display,
             database_name,
             schema: Arc::new(RwLock::new(Some(snapshot))),
@@ -1065,7 +1068,7 @@ mod tests {
     #[tokio::test]
     async fn list_tables_includes_pg_version() {
         let snapshot = test_snapshot();
-        let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None);
+        let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None, "test");
         let result = server
             .list_tables(Parameters(ListTablesParams { schema: None }))
             .await
@@ -1078,7 +1081,7 @@ mod tests {
     #[tokio::test]
     async fn describe_table_includes_pg_version() {
         let snapshot = test_snapshot();
-        let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None);
+        let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None, "test");
         let result = server
             .describe_table(Parameters(DescribeTableParams {
                 table: "orders".into(),
@@ -1157,11 +1160,11 @@ impl ServerHandler for DryRunServer {
     fn get_info(&self) -> ServerInfo {
         let version_header = if !self.pg_version_display.is_empty() {
             format!(
-                "dryrun PostgreSQL schema advisor. PostgreSQL {}; database: {}\n\n",
-                self.pg_version_display, self.database_name
+                "dryrun {} PostgreSQL schema advisor. PostgreSQL {}; database: {}\n\n",
+                self.app_version, self.pg_version_display, self.database_name
             )
         } else {
-            "dryrun PostgreSQL schema advisor. No schema loaded yet.\n\n".to_string()
+            format!("dryrun {} PostgreSQL schema advisor. No schema loaded yet.\n\n", self.app_version)
         };
 
         ServerInfo {
