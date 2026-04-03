@@ -300,30 +300,64 @@ async fn cmd_dump_schema(
 }
 
 async fn cmd_init(db: Option<&str>) -> anyhow::Result<()> {
-    let db_url = require_db_url(db)?;
-    let ctx = DryRun::connect(&db_url).await?;
-    let snapshot = ctx.introspect_schema().await?;
+    let config_path = PathBuf::from("dryrun.toml");
 
+    // scaffold config file
+    if !config_path.exists() {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let profile_name = cwd
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("default");
+        let content = format!(
+            r#"[default]
+profile = "{profile_name}"
+
+[profiles.{profile_name}]
+schema_file = ".dryrun/schema.json"
+
+# [profiles.dev]
+# db_url = "${{DATABASE_URL}}"
+
+# [conventions]
+# See: https://boringsql.com/dryrun/docs/dryrun-toml
+"#
+        );
+        std::fs::write(&config_path, &content)?;
+        eprintln!("Created {} (profile \"{profile_name}\")", config_path.display());
+    } else {
+        eprintln!("{} already exists, skipping", config_path.display());
+    }
+
+    // create .dryrun/ directory
     let data_dir = dry_run_core::history::default_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
 
-    let schema_path = data_dir.join("schema.json");
-    let json = serde_json::to_string_pretty(&snapshot)?;
-    std::fs::write(&schema_path, &json)?;
+    // if --db is provided, introspect and save schema
+    if let Some(db_url) = db {
+        let ctx = DryRun::connect(db_url).await?;
+        let snapshot = ctx.introspect_schema().await?;
 
-    let store = open_history_store(None)?;
-    if let Err(e) = store.save_snapshot(&db_url, &snapshot) {
-        eprintln!("warning: could not save snapshot: {e}");
+        let schema_path = data_dir.join("schema.json");
+        let json = serde_json::to_string_pretty(&snapshot)?;
+        std::fs::write(&schema_path, &json)?;
+
+        let store = open_history_store(None)?;
+        if let Err(e) = store.save_snapshot(db_url, &snapshot) {
+            eprintln!("warning: could not save snapshot: {e}");
+        }
+
+        eprintln!(
+            "Captured schema: {} tables, {} views, {} functions",
+            snapshot.tables.len(),
+            snapshot.views.len(),
+            snapshot.functions.len()
+        );
+        eprintln!("  Schema: {}", schema_path.display());
+    } else {
+        eprintln!("Run 'dryrun init --db <url>' to capture a schema snapshot");
     }
 
-    eprintln!(
-        "Initialized .dryrun/ with {} tables, {} views, {} functions",
-        snapshot.tables.len(),
-        snapshot.views.len(),
-        snapshot.functions.len()
-    );
-    eprintln!("  Schema: {}", schema_path.display());
-    eprintln!("  History: {}", data_dir.join("history.db").display());
     Ok(())
 }
 
