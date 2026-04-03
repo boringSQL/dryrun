@@ -303,6 +303,24 @@ impl DryRunServer {
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
         if let Some(obj) = json_val.as_object_mut() {
             obj.insert("pg_version".into(), serde_json::Value::String(snapshot.pg_version.clone()));
+
+            // column profiles from stats
+            let table_rows = effective_table_stats(table, &snapshot)
+                .map(|s| s.reltuples)
+                .unwrap_or(0.0);
+            let profiles: Vec<serde_json::Value> = table.columns.iter()
+                .filter_map(|col| {
+                    dry_run_core::schema::profile_column(col, table_rows).map(|p| {
+                        serde_json::json!({
+                            "column": col.name,
+                            "profile": p,
+                        })
+                    })
+                })
+                .collect();
+            if !profiles.is_empty() {
+                obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
+            }
         }
 
         let mut text = serde_json::to_string_pretty(&json_val)

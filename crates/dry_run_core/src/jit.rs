@@ -268,7 +268,7 @@ pub fn no_partition_pruning(
     Entry {
         status: "warning".into(),
         reason: format!(
-            "Query scans {scanned}/{total} partitions of `{table}` — no pruning on `{partition_key}`."
+            "Query scans {scanned}/{total} partitions of `{table}`: no pruning on `{partition_key}`."
         ),
         fix: format!(
             "-- Add a WHERE clause (or JOIN condition) on the partition key `{partition_key}`\n\
