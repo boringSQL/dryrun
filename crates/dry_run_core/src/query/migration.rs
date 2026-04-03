@@ -166,12 +166,32 @@ fn analyze_alter_table_cmd(
 
         pg_query::protobuf::AlterTableType::AtSetNotNull => {
             let pg_major = pg_version.map(|v| v.major).unwrap_or(0);
-            let e = jit::set_not_null(&table_name, "<col>", pg_major);
+            let col_name = if cmd.name.is_empty() { "<col>" } else { &cmd.name };
+            let e = jit::set_not_null(&table_name, col_name, pg_major);
             let safety = if pg_major >= 12 {
                 SafetyRating::Caution
             } else {
                 SafetyRating::Dangerous
             };
+
+            let mut rec = e.to_string();
+
+            // check column stats for null_frac context
+            if !cmd.name.is_empty() {
+                if let Some(col) = find_column(schema, &table_name, &cmd.name) {
+                    if let Some(nf) = col.stats.as_ref().and_then(|s| s.null_frac) {
+                        if nf == 0.0 {
+                            rec.push_str("\n\nDATA CHECK: Column currently has 0% NULLs. The scan will pass, but ACCESS EXCLUSIVE lock is still held.");
+                        } else if let Some(rows) = row_estimate {
+                            let null_rows = (nf * rows) as i64;
+                            rec.push_str(&format!(
+                                "\n\nDATA CHECK: Column has ~{:.0}% NULLs (~{} rows) that must be backfilled before this constraint can be applied.",
+                                nf * 100.0, null_rows
+                            ));
+                        }
+                    }
+                }
+            }
 
             Some(MigrationCheck {
                 operation: "SET NOT NULL".into(),
@@ -181,7 +201,7 @@ fn analyze_alter_table_cmd(
                 lock_duration: "scan duration (unless CHECK exists on PG 12+)".into(),
                 table_size,
                 row_estimate,
-                recommendation: e.to_string(),
+                recommendation: rec,
                 version_behavior: Some(
                     "PG 12+: skips scan if a valid CHECK (col IS NOT NULL) exists.".into(),
                 ),
@@ -402,6 +422,19 @@ fn fallback_keyword_check(
     }
 
     None
+}
+
+fn find_column<'a>(schema: &'a SchemaSnapshot, table_name: &str, col_name: &str) -> Option<&'a crate::schema::Column> {
+    let (schema_part, name_part) = if let Some((s, n)) = table_name.rsplit_once('.') {
+        (s, n)
+    } else {
+        ("public", table_name)
+    };
+    schema
+        .tables
+        .iter()
+        .find(|t| t.name == name_part && t.schema == schema_part)
+        .and_then(|t| t.columns.iter().find(|c| c.name == col_name))
 }
 
 fn lookup_table_stats(schema: &SchemaSnapshot, table_name: &str) -> (Option<String>, Option<f64>) {

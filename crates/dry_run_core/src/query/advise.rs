@@ -4,7 +4,7 @@ use super::plan::PlanNode;
 use super::suggest::{self, IndexSuggestion};
 use crate::error::Result;
 use crate::jit;
-use crate::schema::SchemaSnapshot;
+use crate::schema::{self, Column, SchemaSnapshot};
 use crate::version::PgVersion;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,18 +132,58 @@ fn advise_seq_scan(
         return;
     }
 
-    let (ddl, recommendation) = if let Some(col) = &filter_col {
-        let col_type = table
-            .and_then(|t| t.columns.iter().find(|c| c.name == *col))
-            .map(|c| c.type_name.as_str())
-            .unwrap_or("unknown");
+    let (ddl, recommendation) = if let Some(filter_col_name) = &filter_col {
+        let col_obj = table.and_then(|t| t.columns.iter().find(|c| c.name == *filter_col_name));
+        let col_type = col_obj.map(|c| c.type_name.as_str()).unwrap_or("unknown");
 
-        let (idx_type, rec) = suggest_index_type(&qualified, col_type, col);
-        let idx_name = format!("idx_{table_name}_{col}");
-        let ddl = format!(
-            "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({col});"
-        );
-        (Some(ddl), rec)
+        let (idx_type, rec) = suggest_index_type(&qualified, col_type, filter_col_name);
+        let mut recommendation = rec;
+
+        // stats-aware refinements
+        if let Some(col) = col_obj {
+            if col.stats.is_some() {
+                let mut table_rows = node.plan_rows;
+                if let Some(t) = table {
+                    if let Some(s) = &t.stats {
+                        if s.reltuples > table_rows {
+                            table_rows = s.reltuples;
+                        }
+                    }
+                }
+                recommendation.push_str(&stats_aware_advice(col, filter_col_name, table_rows));
+            }
+        }
+
+        let idx_name = format!("idx_{table_name}_{filter_col_name}");
+
+        // prefer partial index for high-null or skewed columns
+        let ddl = if let Some(col) = col_obj {
+            if col.stats.as_ref().and_then(|s| s.null_frac).unwrap_or(0.0) > 0.5 {
+                format!(
+                    "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name}) WHERE {filter_col_name} IS NOT NULL;"
+                )
+            } else if let Some(stats) = &col.stats {
+                if let Some((dominant, _freq)) = schema::has_skewed_distribution(stats, 0.5) {
+                    format!(
+                        "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name}) WHERE {filter_col_name} != '{dominant}';"
+                    )
+                } else {
+                    format!(
+                        "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name});"
+                    )
+                }
+            } else {
+                format!(
+                    "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name});"
+                )
+            }
+        } else {
+            format!(
+                "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name});"
+            )
+        };
+
+        (Some(ddl), recommendation)
     } else {
         (
             None,
@@ -282,6 +322,61 @@ fn advise_sort(
         ddl: Some(ddl),
         version_note: version_note_for_index(pg_version),
     });
+}
+
+fn stats_aware_advice(col: &Column, filter_col: &str, table_rows: f64) -> String {
+    let stats = match &col.stats {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    let mut parts = Vec::new();
+
+    // selectivity assessment
+    let sel = schema::column_selectivity(col, table_rows);
+    if let Some(nd) = stats.n_distinct {
+        if nd > 0.0 && nd <= 5.0 {
+            parts.push(format!(
+                "\nColumn '{}' has only {:.0} distinct values, so a full index has poor selectivity ({:.0}% of rows per value).",
+                filter_col, nd, sel * 100.0
+            ));
+        } else if nd > 0.0 && nd <= 20.0 {
+            parts.push(format!(
+                "\nColumn '{}' has {} distinct values (selectivity ~{:.1}%).",
+                filter_col, nd as i64, sel * 100.0
+            ));
+        }
+    }
+
+    // skew detection
+    if let Some((dominant, freq)) = schema::has_skewed_distribution(stats, 0.5) {
+        parts.push(format!(
+            "Value '{}' dominates at ~{:.0}%. A partial index excluding it would be much smaller and faster.",
+            dominant, freq * 100.0
+        ));
+    }
+
+    // high null fraction
+    if let Some(nf) = stats.null_frac {
+        if nf > 0.5 {
+            let null_rows = (nf * table_rows) as i64;
+            parts.push(format!(
+                "Column is {:.0}% NULL (~{} rows). Use a partial index WHERE {} IS NOT NULL to index only the non-null rows.",
+                nf * 100.0, null_rows, filter_col
+            ));
+        }
+    }
+
+    // correlation warning for range scans
+    if let Some(c) = stats.correlation {
+        if c > -0.3 && c < 0.3 && table_rows > 10_000.0 {
+            parts.push(format!(
+                "Physical ordering is random (correlation: {:.2}); index range scans will cause random I/O.",
+                c
+            ));
+        }
+    }
+
+    parts.join(" ")
 }
 
 fn advise_cte(node: &PlanNode, advice: &mut Vec<Advice>) {
