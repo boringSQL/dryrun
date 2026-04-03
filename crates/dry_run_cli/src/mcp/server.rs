@@ -143,6 +143,7 @@ pub struct SchemaDiffParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ValidateQueryParams {
+    #[schemars(description = "SQL query to validate against the schema.")]
     pub sql: String,
 }
 
@@ -170,6 +171,7 @@ fn default_true() -> Option<bool> {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CheckMigrationParams {
+    #[schemars(description = "DDL statement(s) to check for migration safety (e.g. ALTER TABLE, CREATE INDEX).")]
     pub ddl: String,
 }
 
@@ -784,6 +786,7 @@ impl DryRunServer {
 
         let run_stale = kind == "all" || kind == "stale_stats";
         let run_unused = kind == "all" || kind == "unused_indexes";
+        let run_anomalies = kind == "all" || kind == "anomalies";
         let run_bloated = kind == "all" || kind == "bloated_indexes";
 
         if run_stale {
@@ -796,6 +799,22 @@ impl DryRunServer {
             let unused = detect_unused_indexes(&snapshot.node_stats, &snapshot.tables);
             result.insert("unused_indexes".into(), serde_json::to_value(&unused)
                 .unwrap_or(serde_json::Value::Null));
+        }
+
+        if run_anomalies {
+            let mut anomalies = Vec::new();
+            for table in &snapshot.tables {
+                let schema_name = &table.schema;
+                if let Some(imb) = detect_seq_scan_imbalance(&snapshot.node_stats, schema_name, &table.name) {
+                    anomalies.push(serde_json::json!({
+                        "table": format!("{}.{}", schema_name, table.name),
+                        "type": "seq_scan_imbalance",
+                        "hot_node": imb.hot_node,
+                        "multiplier": format!("{}x", imb.multiplier),
+                    }));
+                }
+            }
+            result.insert("anomalies".into(), serde_json::Value::Array(anomalies));
         }
 
         if run_bloated {
@@ -1185,13 +1204,16 @@ impl ServerHandler for DryRunServer {
             format!("dryrun {} PostgreSQL schema advisor. No schema loaded yet.\n\n", self.app_version)
         };
 
+        let online_note = if self.ctx.is_some() {
+            "Live DB connected: explain_query, refresh_schema, check_drift available."
+        } else {
+            "Offline mode: explain_query, refresh_schema, check_drift not available (no --db)."
+        };
+
         ServerInfo {
             instructions: Some(
                 format!("{version_header}\
-                 MODE REQUIREMENTS:\n\
-                 - Most tools work offline from schema snapshots.\n\
-                 - explain_query and refresh_schema require a live DB connection (--db). analyze=true actually executes the query.\n\
-                 - schema_diff requires the history store (--history).\n\n\
+                 {online_note}\n\n\
                  Schema exploration: list_tables, describe_table, search_schema, find_related.\n\
                  Schema history: schema_diff (compare snapshots by content hash).\n\
                  Query analysis: validate_query (offline), explain_query (live DB), advise (both — prefer this for query help), analyze_plan (accepts pre-existing EXPLAIN JSON, offline).\n\
