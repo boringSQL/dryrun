@@ -199,6 +199,9 @@ pub struct LintSchemaParams {
     #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
     pub schema: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Table name to lint a single table. Omit to include all tables.")]
+    pub table: Option<String>,
+    #[serde(default)]
     #[schemars(description = "Scope: 'conventions' (lint only), 'audit' (audit only), or 'all' (default, both).")]
     pub scope: Option<String>,
 }
@@ -840,12 +843,15 @@ impl DryRunServer {
     ) -> Result<CallToolResult, McpError> {
         let snapshot = self.get_schema().await?;
 
-        let target = if let Some(schema_filter) = &params.schema {
+        let target = {
             let mut filtered = snapshot.clone();
-            filtered.tables.retain(|t| &t.schema == schema_filter);
+            if let Some(schema_filter) = &params.schema {
+                filtered.tables.retain(|t| &t.schema == schema_filter);
+            }
+            if let Some(table_filter) = &params.table {
+                filtered.tables.retain(|t| &t.name == table_filter);
+            }
             filtered
-        } else {
-            snapshot
         };
 
         let scope = params.scope.as_deref().unwrap_or("all");
