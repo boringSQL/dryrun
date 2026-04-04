@@ -275,9 +275,12 @@ async fn cmd_dump_schema(
             }
         }
 
+        let is_standby = ctx.is_standby().await?;
+
         snapshot.node_stats = vec![NodeStats {
             source: source.clone(),
             timestamp: snapshot.timestamp,
+            is_standby,
             table_stats,
             index_stats,
             column_stats,
