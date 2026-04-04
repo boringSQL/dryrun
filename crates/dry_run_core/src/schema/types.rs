@@ -74,6 +74,7 @@ pub struct Constraint {
     pub fk_table: Option<String>,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub fk_columns: Vec<String>,
+    pub backing_index: Option<String>,
     pub comment: Option<String>,
 }
 
