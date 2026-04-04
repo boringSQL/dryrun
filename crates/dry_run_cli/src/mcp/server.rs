@@ -107,6 +107,15 @@ pub struct ListTablesParams {
     #[serde(default)]
     #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
     pub schema: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Sort by: 'name' (default), 'rows', or 'size'.")]
+    pub sort: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Maximum number of results (default 50).")]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "Skip N results (default 0).")]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -124,6 +133,12 @@ pub struct DescribeTableParams {
 pub struct SearchSchemaParams {
     #[schemars(description = "Case-insensitive substring to search for across all schema objects.")]
     pub query: String,
+    #[serde(default)]
+    #[schemars(description = "Maximum number of results (default 30).")]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "Skip N results (default 0).")]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -228,43 +243,56 @@ impl DryRunServer {
         Parameters(params): Parameters<ListTablesParams>,
     ) -> Result<CallToolResult, McpError> {
         let snapshot = self.get_schema().await?;
+        let limit = params.limit.unwrap_or(50);
+        let offset = params.offset.unwrap_or(0);
+        let sort_by = params.sort.as_deref().unwrap_or("name");
 
-        let tables: Vec<_> = snapshot
+        struct TableEntry {
+            line: String,
+            name: String,
+            rows: f64,
+            size: i64,
+        }
+
+        let mut entries: Vec<TableEntry> = snapshot
             .tables
             .iter()
             .filter(|t| params.schema.as_ref().is_none_or(|s| &t.schema == s))
             .map(|t| {
-                let node_count = if snapshot.node_stats.is_empty() {
-                    0
+                let node_count = if snapshot.node_stats.is_empty() { 0 } else { snapshot.node_stats.len() };
+                let stats = effective_table_stats(t, &snapshot);
+                let rows = stats.as_ref().map(|s| s.reltuples).unwrap_or(0.0);
+                let size = stats.as_ref().map(|s| s.table_size).unwrap_or(0);
+                let row_est = if rows > 0.0 {
+                    if node_count > 0 {
+                        format!(" (~{} rows, {} nodes)", rows as i64, node_count)
+                    } else {
+                        format!(" (~{} rows)", rows as i64)
+                    }
                 } else {
-                    snapshot.node_stats.len()
+                    String::new()
                 };
-                let row_est = effective_table_stats(t, &snapshot)
-                    .map(|s| {
-                        if node_count > 0 {
-                            format!(" (~{} rows, {} nodes)", s.reltuples as i64, node_count)
-                        } else {
-                            format!(" (~{} rows)", s.reltuples as i64)
-                        }
-                    })
+                let partition = t.partition_info.as_ref()
+                    .map(|pi| format!(" [partitioned: {} on '{}', {} children]", pi.strategy, pi.key, pi.children.len()))
                     .unwrap_or_default();
-                let partition = t
-                    .partition_info
-                    .as_ref()
-                    .map(|pi| {
-                        format!(
-                            " [partitioned: {} on '{}', {} children]",
-                            pi.strategy, pi.key, pi.children.len()
-                        )
-                    })
-                    .unwrap_or_default();
-                let comment = t
-                    .comment
-                    .as_ref()
-                    .map(|c| format!(" — {c}"))
-                    .unwrap_or_default();
-                format!("{}.{}{}{}{}", t.schema, t.name, row_est, partition, comment)
+                let comment = t.comment.as_ref().map(|c| format!(" — {c}")).unwrap_or_default();
+                let name = format!("{}.{}", t.schema, t.name);
+                let line = format!("{name}{row_est}{partition}{comment}");
+                TableEntry { line, name, rows, size }
             })
+            .collect();
+
+        match sort_by {
+            "rows" => entries.sort_by(|a, b| b.rows.partial_cmp(&a.rows).unwrap_or(std::cmp::Ordering::Equal)),
+            "size" => entries.sort_by(|a, b| b.size.cmp(&a.size)),
+            _ => entries.sort_by(|a, b| a.name.cmp(&b.name)),
+        }
+
+        let total = entries.len();
+        let paginated: Vec<&str> = entries.iter()
+            .skip(offset)
+            .take(limit)
+            .map(|e| e.line.as_str())
             .collect();
 
         let pg_header = if !snapshot.pg_version.is_empty() {
@@ -276,10 +304,15 @@ impl DryRunServer {
             String::new()
         };
 
-        let text = if tables.is_empty() {
+        let text = if paginated.is_empty() {
             format!("{pg_header}No tables found.")
+        } else if offset > 0 || paginated.len() < total {
+            format!(
+                "{pg_header}Showing {}-{} of {} table(s):\n{}",
+                offset + 1, offset + paginated.len(), total, paginated.join("\n")
+            )
         } else {
-            format!("{pg_header}{} table(s):\n{}", tables.len(), tables.join("\n"))
+            format!("{pg_header}{} table(s):\n{}", total, paginated.join("\n"))
         };
 
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -471,10 +504,24 @@ impl DryRunServer {
             }
         }
 
-        let text = if results.is_empty() {
+        let limit = params.limit.unwrap_or(30);
+        let offset = params.offset.unwrap_or(0);
+        let total = results.len();
+        let paginated: Vec<&str> = results.iter()
+            .skip(offset)
+            .take(limit)
+            .map(|s| s.as_str())
+            .collect();
+
+        let text = if paginated.is_empty() {
             format!("No matches for '{}'.", params.query)
+        } else if offset > 0 || paginated.len() < total {
+            format!(
+                "Showing {}-{} of {} match(es) for '{}':\n{}",
+                offset + 1, offset + paginated.len(), total, params.query, paginated.join("\n")
+            )
         } else {
-            format!("{} match(es) for '{}':\n{}", results.len(), params.query, results.join("\n"))
+            format!("{} match(es) for '{}':\n{}", total, params.query, paginated.join("\n"))
         };
 
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -1175,7 +1222,7 @@ mod tests {
         let snapshot = test_snapshot();
         let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None, "test");
         let result = server
-            .list_tables(Parameters(ListTablesParams { schema: None }))
+            .list_tables(Parameters(ListTablesParams { schema: None, sort: None, limit: None, offset: None }))
             .await
             .unwrap();
         let text = result.content.first().unwrap();
