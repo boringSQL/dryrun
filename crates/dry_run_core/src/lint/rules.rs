@@ -912,7 +912,7 @@ mod tests {
             name: name.into(), kind: ConstraintKind::ForeignKey,
             columns: columns.iter().map(|s| s.to_string()).collect(),
             definition: None, fk_table: Some(fk_table.into()),
-            fk_columns: vec!["id".into()], comment: None,
+            fk_columns: vec!["id".into()], backing_index: None, comment: None,
         }
     }
 
@@ -1077,7 +1077,7 @@ mod tests {
             name: name.into(), kind: ConstraintKind::PrimaryKey,
             columns: columns.iter().map(|s| s.to_string()).collect(),
             definition: None, fk_table: None,
-            fk_columns: vec![], comment: None,
+            fk_columns: vec![], backing_index: None, comment: None,
         }
     }
 

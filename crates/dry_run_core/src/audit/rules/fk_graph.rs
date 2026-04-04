@@ -251,7 +251,7 @@ mod tests {
         Constraint {
             name: name.into(), kind: ConstraintKind::PrimaryKey,
             columns: columns.iter().map(|s| s.to_string()).collect(),
-            definition: None, fk_table: None, fk_columns: vec![], comment: None,
+            definition: None, fk_table: None, fk_columns: vec![], backing_index: None, comment: None,
         }
     }
 
@@ -261,7 +261,7 @@ mod tests {
             columns: columns.iter().map(|s| s.to_string()).collect(),
             definition: None, fk_table: Some(fk_table.into()),
             fk_columns: fk_columns.iter().map(|s| s.to_string()).collect(),
-            comment: None,
+            backing_index: None, comment: None,
         }
     }
 
