@@ -14,6 +14,7 @@ GRANT CONNECT ON DATABASE :db_name TO dryrun_readonly;
 
 -- 3. pg_read_all_data covers SELECT on all tables, views, sequences across all schemas (PG14+)
 GRANT pg_read_all_data TO dryrun_readonly;
+GRANT pg_read_all_stats TO dryrun_readonly;
 
 -- 4. Create a login user that inherits the role
 CREATE ROLE dryrun_user LOGIN PASSWORD :dryrun_password IN ROLE dryrun_readonly;
