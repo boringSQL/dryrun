@@ -545,6 +545,7 @@ mod tests {
             NodeStats {
                 source: "master".into(),
                 timestamp: Utc::now(),
+                is_standby: false,
                 table_stats: vec![NodeTableStats {
                     schema: "public".into(),
                     table: "orders".into(),
@@ -561,6 +562,7 @@ mod tests {
             NodeStats {
                 source: "replica-1".into(),
                 timestamp: Utc::now(),
+                is_standby: true,
                 table_stats: vec![NodeTableStats {
                     schema: "public".into(),
                     table: "orders".into(),

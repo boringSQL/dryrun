@@ -682,6 +682,7 @@ mod tests {
             node_stats: vec![NodeStats {
                 source: "prod-1".to_string(),
                 timestamp: Utc::now(),
+                is_standby: false,
                 table_stats: vec![],
                 index_stats: vec![],
                 column_stats: vec![],
@@ -716,6 +717,7 @@ mod tests {
                 NodeStats {
                     source: "prod-1".to_string(),
                     timestamp: Utc::now(),
+                    is_standby: false,
                     table_stats: vec![],
                     index_stats: vec![],
                     column_stats: vec![],
@@ -723,6 +725,7 @@ mod tests {
                 NodeStats {
                     source: "prod-2".to_string(),
                     timestamp: Utc::now(),
+                    is_standby: true,
                     table_stats: vec![],
                     index_stats: vec![],
                     column_stats: vec![],

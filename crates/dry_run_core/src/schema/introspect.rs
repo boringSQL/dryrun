@@ -120,19 +120,28 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
 }
 
 pub async fn fetch_stats_only(pool: &PgPool, source: &str) -> Result<NodeStats> {
-    let (raw_table_stats, raw_index_stats, raw_column_stats) = tokio::try_join!(
+    let (raw_table_stats, raw_index_stats, raw_column_stats, is_standby) = tokio::try_join!(
         fetch_named_table_stats(pool),
         fetch_named_index_stats(pool),
         fetch_named_column_stats(pool),
+        fetch_is_standby(pool),
     )?;
 
     Ok(NodeStats {
         source: source.to_string(),
         timestamp: Utc::now(),
+        is_standby,
         table_stats: raw_table_stats,
         index_stats: raw_index_stats,
         column_stats: raw_column_stats,
     })
+}
+
+pub async fn fetch_is_standby(pool: &PgPool) -> Result<bool> {
+    let row: PgRow = sqlx::query("SELECT pg_catalog.pg_is_in_recovery() AS is_standby")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.get("is_standby"))
 }
 
 async fn fetch_named_table_stats(pool: &PgPool) -> Result<Vec<NodeTableStats>> {

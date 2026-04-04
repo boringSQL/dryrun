@@ -692,6 +692,7 @@ mod tests {
         NodeStats {
             source: source.into(),
             timestamp: chrono::Utc::now(),
+            is_standby: false,
             table_stats: vec![],
             index_stats,
             column_stats: vec![],
@@ -891,6 +892,8 @@ pub fn effective_table_stats(table: &Table, schema: &SchemaSnapshot) -> Option<T
 pub struct NodeStats {
     pub source: String,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub is_standby: bool,
     pub table_stats: Vec<NodeTableStats>,
     pub index_stats: Vec<NodeIndexStats>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -85,6 +85,10 @@ impl DryRun {
         crate::schema::fetch_stats_only(&self.pool, source).await
     }
 
+    pub async fn is_standby(&self) -> Result<bool> {
+        crate::schema::fetch_is_standby(&self.pool).await
+    }
+
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
