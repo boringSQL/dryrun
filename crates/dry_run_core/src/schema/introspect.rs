@@ -272,6 +272,7 @@ struct RawTable {
     schema: String,
     name: String,
     rls_enabled: bool,
+    reloptions: Vec<String>,
 }
 
 struct RawColumn {
@@ -394,7 +395,8 @@ async fn fetch_tables(pool: &PgPool) -> Result<Vec<RawTable>> {
         SELECT c.oid::int4      AS oid,
                n.nspname         AS schema_name,
                c.relname         AS table_name,
-               c.relrowsecurity  AS rls_enabled
+               c.relrowsecurity  AS rls_enabled,
+               COALESCE(c.reloptions, '{}')  AS reloptions
           FROM pg_catalog.pg_class c
           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
          WHERE c.relkind IN ('r', 'p')
@@ -413,6 +415,7 @@ async fn fetch_tables(pool: &PgPool) -> Result<Vec<RawTable>> {
             schema: r.get("schema_name"),
             name: r.get("table_name"),
             rls_enabled: r.get("rls_enabled"),
+            reloptions: r.get::<Vec<String>, _>("reloptions"),
         })
         .collect())
 }
@@ -798,10 +801,10 @@ async fn fetch_table_stats(pool: &PgPool) -> Result<Vec<RawTableStats>> {
                c.reltuples::float8     AS reltuples,
                c.relpages::int8        AS relpages,
                COALESCE(s.n_dead_tup, 0)::int8 AS dead_tuples,
-               s.last_vacuum           AS last_vacuum,
-               s.last_autovacuum       AS last_autovacuum,
-               s.last_analyze          AS last_analyze,
-               s.last_autoanalyze      AS last_autoanalyze,
+               s.last_vacuum,
+               s.last_autovacuum,
+               s.last_analyze,
+               s.last_autoanalyze,
                COALESCE(s.seq_scan, 0)::int8  AS seq_scan,
                COALESCE(s.idx_scan, 0)::int8  AS idx_scan,
                pg_catalog.pg_total_relation_size(c.oid)::int8 AS table_size
@@ -817,7 +820,7 @@ async fn fetch_table_stats(pool: &PgPool) -> Result<Vec<RawTableStats>> {
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
+    let stats: Vec<RawTableStats> = rows
         .iter()
         .map(|r| RawTableStats {
             table_oid: r.get::<i32, _>("table_oid") as u32,
@@ -832,7 +835,19 @@ async fn fetch_table_stats(pool: &PgPool) -> Result<Vec<RawTableStats>> {
             idx_scan: r.get("idx_scan"),
             table_size: r.get("table_size"),
         })
-        .collect())
+        .collect();
+
+    let with_vacuum = stats.iter().filter(|s| s.last_autovacuum.is_some()).count();
+    if with_vacuum == 0 && !stats.is_empty() {
+        tracing::warn!(
+            "all vacuum/analyze timestamps are null — this is expected on \
+             replicas (autovacuum doesn't run there). If this is a primary, \
+             check that the role has pg_read_all_stats privilege"
+        );
+    }
+    info!(total = stats.len(), with_autovacuum = with_vacuum, "table stats fetched");
+
+    Ok(stats)
 }
 
 // ---------------------------------------------------------------------------
@@ -1188,7 +1203,10 @@ async fn fetch_gucs(pool: &PgPool) -> Result<Vec<GucSetting>> {
          WHERE name IN (
                'work_mem', 'effective_cache_size', 'random_page_cost',
                'seq_page_cost', 'effective_io_concurrency', 'shared_buffers',
-               'maintenance_work_mem', 'default_statistics_target'
+               'maintenance_work_mem', 'default_statistics_target',
+               'autovacuum', 'autovacuum_vacuum_threshold',
+               'autovacuum_vacuum_scale_factor', 'autovacuum_analyze_threshold',
+               'autovacuum_analyze_scale_factor'
          )
          ORDER BY name
         "#,
@@ -1436,7 +1454,7 @@ fn assemble_tables(
             partition_info: partition_info_by_oid.get(&rt.oid).cloned(),
             policies: policies_by_oid.remove(&rt.oid).unwrap_or_default(),
             triggers: triggers_by_oid.remove(&rt.oid).unwrap_or_default(),
-            reloptions: vec![], // populated from pg_class.reloptions when available
+            reloptions: rt.reloptions,
             rls_enabled: rt.rls_enabled,
         })
         .collect()
