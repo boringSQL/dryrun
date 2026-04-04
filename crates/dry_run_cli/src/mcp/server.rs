@@ -115,6 +115,9 @@ pub struct DescribeTableParams {
     #[serde(default)]
     #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
     pub schema: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Detail level: 'summary' (default, compact with profiles), 'full' (all raw stats), 'stats' (only profiles and stats).")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -301,28 +304,93 @@ impl DryRunServer {
                 )
             })?;
 
-        let mut json_val = serde_json::to_value(table)
-            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
-        if let Some(obj) = json_val.as_object_mut() {
-            obj.insert("pg_version".into(), serde_json::Value::String(snapshot.pg_version.clone()));
+        let detail = params.detail.as_deref().unwrap_or("summary");
+        let table_rows = effective_table_stats(table, &snapshot)
+            .map(|s| s.reltuples)
+            .unwrap_or(0.0);
 
-            // column profiles from stats
-            let table_rows = effective_table_stats(table, &snapshot)
-                .map(|s| s.reltuples)
-                .unwrap_or(0.0);
-            let profiles: Vec<serde_json::Value> = table.columns.iter()
-                .filter_map(|col| {
-                    dry_run_core::schema::profile_column(col, table_rows).map(|p| {
-                        serde_json::json!({
-                            "column": col.name,
-                            "profile": p,
-                        })
+        // build column profiles
+        let profiles: Vec<serde_json::Value> = table.columns.iter()
+            .filter_map(|col| {
+                dry_run_core::schema::profile_column(col, table_rows).map(|p| {
+                    serde_json::json!({
+                        "column": col.name,
+                        "profile": p,
                     })
                 })
-                .collect();
-            if !profiles.is_empty() {
-                obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
+            })
+            .collect();
+
+        let mut json_val = match detail {
+            "full" => {
+                let mut v = serde_json::to_value(table)
+                    .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+                if let Some(obj) = v.as_object_mut() {
+                    if !profiles.is_empty() {
+                        obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
+                    }
+                }
+                v
             }
+            "stats" => {
+                let mut result = serde_json::json!({
+                    "schema": table.schema,
+                    "name": table.name,
+                    "stats": table.stats,
+                });
+                if let Some(obj) = result.as_object_mut() {
+                    if !profiles.is_empty() {
+                        obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
+                    }
+                }
+                result
+            }
+            _ => {
+                // summary: compact columns without raw stats
+                let compact_cols: Vec<serde_json::Value> = table.columns.iter().map(|c| {
+                    serde_json::json!({
+                        "name": c.name,
+                        "ordinal": c.ordinal,
+                        "type_name": c.type_name,
+                        "nullable": c.nullable,
+                        "default": c.default,
+                        "identity": c.identity,
+                        "comment": c.comment,
+                    })
+                }).collect();
+                let compact_idxs: Vec<serde_json::Value> = table.indexes.iter().map(|i| {
+                    serde_json::json!({
+                        "name": i.name,
+                        "columns": i.columns,
+                        "index_type": i.index_type,
+                        "is_unique": i.is_unique,
+                        "is_primary": i.is_primary,
+                        "predicate": i.predicate,
+                        "definition": i.definition,
+                        "is_valid": i.is_valid,
+                    })
+                }).collect();
+                let mut result = serde_json::json!({
+                    "schema": table.schema,
+                    "name": table.name,
+                    "columns": compact_cols,
+                    "constraints": table.constraints,
+                    "indexes": compact_idxs,
+                    "comment": table.comment,
+                    "stats": table.stats,
+                    "partition_info": table.partition_info,
+                });
+                if let Some(obj) = result.as_object_mut() {
+                    if !profiles.is_empty() {
+                        obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
+                    }
+                }
+                result
+            }
+        };
+
+        if let Some(obj) = json_val.as_object_mut() {
+            obj.insert("pg_version".into(), serde_json::Value::String(snapshot.pg_version.clone()));
         }
 
         let mut text = serde_json::to_string_pretty(&json_val)
@@ -1123,6 +1191,7 @@ mod tests {
             .describe_table(Parameters(DescribeTableParams {
                 table: "orders".into(),
                 schema: None,
+                detail: None,
             }))
             .await
             .unwrap();
