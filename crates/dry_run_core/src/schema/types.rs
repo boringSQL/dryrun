@@ -1,5 +1,13 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(|v| v.unwrap_or_default())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaSnapshot {
@@ -26,15 +34,20 @@ pub struct Table {
     pub oid: u32,
     pub schema: String,
     pub name: String,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub columns: Vec<Column>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub constraints: Vec<Constraint>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub indexes: Vec<Index>,
     pub comment: Option<String>,
     pub stats: Option<TableStats>,
     pub partition_info: Option<PartitionInfo>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub policies: Vec<RlsPolicy>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub triggers: Vec<Trigger>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "null_as_empty_vec", skip_serializing_if = "Vec::is_empty")]
     pub reloptions: Vec<String>,
     pub rls_enabled: bool,
 }
@@ -55,9 +68,11 @@ pub struct Column {
 pub struct Constraint {
     pub name: String,
     pub kind: ConstraintKind,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub columns: Vec<String>,
     pub definition: Option<String>,
     pub fk_table: Option<String>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub fk_columns: Vec<String>,
     pub comment: Option<String>,
 }
@@ -88,7 +103,9 @@ impl ConstraintKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     pub name: String,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub columns: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub include_columns: Vec<String>,
     pub index_type: String,
     pub is_unique: bool,
