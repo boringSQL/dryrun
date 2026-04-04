@@ -326,14 +326,29 @@ pub fn aggregate_table_stats(
     let idx_scan: i64 = matching.iter().map(|s| s.idx_scan).sum();
     let table_size = matching.iter().map(|s| s.table_size).max().unwrap_or(0);
 
+    // Vacuum/analyze timestamps only make sense from primary nodes
+    // (autovacuum doesn't run on standbys, so timestamps are always null there).
+    let primary_stats: Vec<&TableStats> = node_stats
+        .iter()
+        .filter(|ns| !ns.is_standby)
+        .flat_map(|ns| &ns.table_stats)
+        .filter(|nts| nts.schema == schema && nts.table == table)
+        .map(|nts| &nts.stats)
+        .collect();
+
+    let last_vacuum = primary_stats.iter().filter_map(|s| s.last_vacuum).max();
+    let last_autovacuum = primary_stats.iter().filter_map(|s| s.last_autovacuum).max();
+    let last_analyze = primary_stats.iter().filter_map(|s| s.last_analyze).max();
+    let last_autoanalyze = primary_stats.iter().filter_map(|s| s.last_autoanalyze).max();
+
     Some(TableStats {
         reltuples,
         relpages,
         dead_tuples,
-        last_vacuum: None,
-        last_autovacuum: None,
-        last_analyze: None,
-        last_autoanalyze: None,
+        last_vacuum,
+        last_autovacuum,
+        last_analyze,
+        last_autoanalyze,
         seq_scan,
         idx_scan,
         table_size,

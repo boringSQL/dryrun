@@ -50,15 +50,29 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
     )?;
 
     // Group 2: top-level objects.
-    let (enums, domains, composites, views, functions, extensions, gucs) = tokio::try_join!(
-        fetch_enums(pool),
-        fetch_domains(pool),
-        fetch_composites(pool),
-        fetch_views(pool),
-        fetch_functions(pool),
-        fetch_extensions(pool),
-        fetch_gucs(pool),
-    )?;
+    let (enums, domains, composites, views, functions, extensions, gucs, is_standby) =
+        tokio::try_join!(
+            fetch_enums(pool),
+            fetch_domains(pool),
+            fetch_composites(pool),
+            fetch_views(pool),
+            fetch_functions(pool),
+            fetch_extensions(pool),
+            fetch_gucs(pool),
+            fetch_is_standby(pool),
+        )?;
+
+    let with_vacuum = raw_table_stats.iter().filter(|s| s.last_autovacuum.is_some()).count();
+    if with_vacuum == 0 && !raw_table_stats.is_empty() {
+        if is_standby {
+            info!("all vacuum timestamps are null;expected on standby");
+        } else {
+            tracing::warn!(
+                "all vacuum/analyze timestamps are null on primary! \
+                 check that the role has pg_read_all_stats privilege"
+            );
+        }
+    }
 
     let tables = assemble_tables(
         raw_tables,
@@ -846,15 +860,7 @@ async fn fetch_table_stats(pool: &PgPool) -> Result<Vec<RawTableStats>> {
         })
         .collect();
 
-    let with_vacuum = stats.iter().filter(|s| s.last_autovacuum.is_some()).count();
-    if with_vacuum == 0 && !stats.is_empty() {
-        tracing::warn!(
-            "all vacuum/analyze timestamps are null — this is expected on \
-             replicas (autovacuum doesn't run there). If this is a primary, \
-             check that the role has pg_read_all_stats privilege"
-        );
-    }
-    info!(total = stats.len(), with_autovacuum = with_vacuum, "table stats fetched");
+    info!(total = stats.len(), "table stats fetched");
 
     Ok(stats)
 }
