@@ -114,6 +114,8 @@ pub struct Index {
     pub definition: String,
     #[serde(default = "default_true")]
     pub is_valid: bool,
+    #[serde(default)]
+    pub backs_constraint: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<IndexStats>,
 }
@@ -681,6 +683,7 @@ mod tests {
             predicate: None,
             definition: format!("CREATE INDEX {name} ON t (col)"),
             is_valid: true,
+            backs_constraint: false,
             stats,
         }
     }

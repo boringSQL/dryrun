@@ -193,6 +193,7 @@ mod tests {
             is_unique: true,
             is_primary: true,
             is_valid: true,
+            backs_constraint: false,
             predicate: None,
             definition: String::new(),
             stats: Some(IndexStats {
