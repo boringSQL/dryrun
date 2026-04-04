@@ -214,6 +214,22 @@ pub struct DetectParams {
     #[serde(default)]
     #[schemars(description = "Bloat ratio threshold (default 1.5).")]
     pub threshold: Option<f64>,
+    #[serde(default)]
+    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
+    pub schema: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Table name to check a single table. Omit to include all tables.")]
+    pub table: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct VacuumHealthParams {
+    #[serde(default)]
+    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
+    pub schema: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Table name to check a single table. Omit to include all tables.")]
+    pub table: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -879,9 +895,21 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Analyze autovacuum health for all significant tables. Shows trigger thresholds, dead tuple progress, and recommendations for tuning. Works offline.")]
-    async fn vacuum_health(&self) -> Result<CallToolResult, McpError> {
-        let snapshot = self.get_schema().await?;
+    #[tool(description = "Analyze autovacuum health. Shows trigger thresholds, dead tuple progress, and recommendations for tuning. Works offline. Filter by schema/table or omit for all.")]
+    async fn vacuum_health(
+        &self,
+        Parameters(params): Parameters<VacuumHealthParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let snapshot = {
+            let mut filtered = self.get_schema().await?.clone();
+            if let Some(schema_filter) = &params.schema {
+                filtered.tables.retain(|t| &t.schema == schema_filter);
+            }
+            if let Some(table_filter) = &params.table {
+                filtered.tables.retain(|t| &t.name == table_filter);
+            }
+            filtered
+        };
         let results = dry_run_core::schema::vacuum::analyze_vacuum_health(&snapshot);
 
         if results.is_empty() {
@@ -900,7 +928,24 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<DetectParams>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = self.get_schema().await?;
+        let snapshot = {
+            let mut filtered = self.get_schema().await?.clone();
+            if let Some(schema_filter) = &params.schema {
+                filtered.tables.retain(|t| &t.schema == schema_filter);
+                filtered.node_stats.iter_mut().for_each(|ns| {
+                    ns.table_stats.retain(|ts| &ts.schema == schema_filter);
+                    ns.index_stats.retain(|is| &is.schema == schema_filter);
+                });
+            }
+            if let Some(table_filter) = &params.table {
+                filtered.tables.retain(|t| &t.name == table_filter);
+                filtered.node_stats.iter_mut().for_each(|ns| {
+                    ns.table_stats.retain(|ts| &ts.table == table_filter);
+                    ns.index_stats.retain(|is| &is.table == table_filter);
+                });
+            }
+            filtered
+        };
         let kind = params.kind.as_deref().unwrap_or("all");
 
         let mut result = serde_json::Map::new();
