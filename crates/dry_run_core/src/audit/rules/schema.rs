@@ -295,6 +295,16 @@ pub fn check_vacuum_large_table_defaults(schema: &SchemaSnapshot) -> Vec<AuditFi
 
         if !has_overrides {
             let qualified = format!("{}.{}", table.schema, table.name);
+
+            let mut vac_sf = 100_000.0 / stats.reltuples;
+            vac_sf = (vac_sf * 1000.0).round() / 1000.0;
+            if vac_sf < 0.001 {
+                vac_sf = 0.001;
+            }
+            let az_sf = (vac_sf / 2.0 * 1000.0).round() / 1000.0;
+            let vac_thresh = ((stats.reltuples * 0.01) as i64).clamp(500, 5000);
+            let az_thresh = (vac_thresh / 2).max(250);
+
             findings.push(AuditFinding {
                 rule: "vacuum/large_table_defaults".into(),
                 category: AuditCategory::Storage,
@@ -305,9 +315,18 @@ pub fn check_vacuum_large_table_defaults(schema: &SchemaSnapshot) -> Vec<AuditFi
                     qualified,
                     stats.reltuples as i64 / 1_000_000
                 ),
-                recommendation: "consider tuning autovacuum_vacuum_scale_factor for large tables"
-                    .into(),
-                ddl_fix: None,
+                recommendation: format!(
+                    "consider tuning autovacuum for large tables — \
+                     lower scale factors alone aren't enough without explicit thresholds"
+                ),
+                ddl_fix: Some(format!(
+                    "ALTER TABLE {qualified} SET (\n  \
+                       autovacuum_vacuum_scale_factor = {vac_sf},\n  \
+                       autovacuum_vacuum_threshold = {vac_thresh},\n  \
+                       autovacuum_analyze_scale_factor = {az_sf},\n  \
+                       autovacuum_analyze_threshold = {az_thresh}\n\
+                     );"
+                )),
                 min_pg_version: None,
             });
         }
