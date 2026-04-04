@@ -26,12 +26,35 @@ pub fn check_duplicate_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                 }
 
                 if a.is_unique == b.is_unique {
-                    // when exact duplicates found; drop the one that does NOT back a constraint
+                    // both back constraints — neither can be simply dropped;
+                    // one owns a UNIQUE/PK constraint, the other is used by a FK.
+                    // flag it but without a one-liner DDL fix
+                    if a.backs_constraint && b.backs_constraint {
+                        findings.push(AuditFinding {
+                            rule: "indexes/duplicate".into(),
+                            category: AuditCategory::Indexes,
+                            severity: Severity::Warning,
+                            tables: vec![qualified.clone()],
+                            message: format!(
+                                "Indexes '{}' and '{}' have identical columns [{}] but both back constraints",
+                                a.name, b.name, a.columns.join(", "),
+                            ),
+                            recommendation: format!(
+                                "One index is redundant but a FK depends on it — \
+                                 drop the FK first, then the extra index, then re-create the FK \
+                                 so PG picks the remaining index"
+                            ),
+                            ddl_fix: None,
+                            min_pg_version: None,
+                        });
+                        continue;
+                    }
+
+                    // drop the one that does NOT back a constraint
                     let (to_drop, to_keep) = match (a.backs_constraint, b.backs_constraint) {
                         (true, false) => (b, a),
                         (false, true) => (a, b),
-
-                        // otherwise pick 2nd (b)
+                        // neither backs a constraint — pick 2nd (b) to drop
                         _ => (b, a),
                     };
                     findings.push(AuditFinding {
@@ -507,6 +530,30 @@ mod tests {
             Some("DROP INDEX idx_unique_task_id_workspace_id;"),
             "must drop the copy, not the constraint-backing index"
         );
+    }
+
+    #[test]
+    fn both_back_constraints_warns_without_ddl_fix() {
+        // one index owns a UNIQUE constraint, the other is used by a FK —
+        // neither can be simply dropped, needs FK drop+recreate
+        let mut constraint_idx = make_index("unique_status_id_workspace_id", &["workspace_id", "id"]);
+        constraint_idx.is_unique = true;
+        constraint_idx.backs_constraint = true;
+
+        let mut fk_used_idx = make_index("idx_unique_status_id_workspace_id", &["workspace_id", "id"]);
+        fk_used_idx.is_unique = true;
+        fk_used_idx.backs_constraint = true;
+
+        let schema = schema_with(vec![make_table_with(
+            "status",
+            vec![make_col("workspace_id", "bigint"), make_col("id", "bigint")],
+            vec![constraint_idx, fk_used_idx],
+        )]);
+
+        let findings = check_duplicate_indexes(&schema);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert!(findings[0].ddl_fix.is_none(), "no simple DDL fix when both back constraints");
     }
 
     #[test]
