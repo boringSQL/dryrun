@@ -341,6 +341,7 @@ struct RawIndex {
     predicate: Option<String>,
     definition: String,
     is_valid: bool,
+    backs_constraint: bool,
 }
 
 struct RawTableStats {
@@ -759,6 +760,11 @@ async fn fetch_indexes(pool: &PgPool) -> Result<Vec<RawIndex>> {
                pg_catalog.pg_get_indexdef(i.indexrelid) AS definition,
                i.indisvalid           AS is_valid,
                i.indnkeyatts          AS n_key_atts,
+               -- check when index backs a UNIQUE/PK/EXCLUSION constraint
+               EXISTS (
+                   SELECT 1 FROM pg_catalog.pg_constraint con
+                    WHERE con.conindid = i.indexrelid
+               ) AS backs_constraint,
                -- All column names (key + include)
                (SELECT array_agg(a.attname ORDER BY ord.n)
                   FROM unnest(i.indkey) WITH ORDINALITY AS ord(attnum, n)
@@ -808,6 +814,7 @@ async fn fetch_indexes(pool: &PgPool) -> Result<Vec<RawIndex>> {
                 predicate: r.get("predicate"),
                 definition: r.get("definition"),
                 is_valid: r.get("is_valid"),
+                backs_constraint: r.get("backs_constraint"),
             }
         })
         .collect())
@@ -1372,6 +1379,7 @@ fn assemble_tables(
             predicate: ri.predicate,
             definition: ri.definition,
             is_valid: ri.is_valid,
+            backs_constraint: ri.backs_constraint,
             stats,
         });
     }

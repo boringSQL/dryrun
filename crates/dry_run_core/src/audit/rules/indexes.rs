@@ -26,7 +26,14 @@ pub fn check_duplicate_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                 }
 
                 if a.is_unique == b.is_unique {
-                    // exact duplicates — drop either one
+                    // when exact duplicates found; drop the one that does NOT back a constraint
+                    let (to_drop, to_keep) = match (a.backs_constraint, b.backs_constraint) {
+                        (true, false) => (b, a),
+                        (false, true) => (a, b),
+
+                        // otherwise pick 2nd (b)
+                        _ => (b, a),
+                    };
                     findings.push(AuditFinding {
                         rule: "indexes/duplicate".into(),
                         category: AuditCategory::Indexes,
@@ -34,12 +41,17 @@ pub fn check_duplicate_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         tables: vec![qualified.clone()],
                         message: format!(
                             "Indexes '{}' and '{}' have identical columns: [{}]",
-                            a.name,
-                            b.name,
+                            to_drop.name,
+                            to_keep.name,
                             a.columns.join(", "),
                         ),
-                        recommendation: "Drop one of the duplicate indexes".into(),
-                        ddl_fix: Some(format!("DROP INDEX {};", b.name)),
+                        recommendation: format!(
+                            "Drop '{}' — '{}'{}",
+                            to_drop.name,
+                            to_keep.name,
+                            if to_keep.backs_constraint { " backs a constraint" } else { " is sufficient" },
+                        ),
+                        ddl_fix: Some(format!("DROP INDEX {};", to_drop.name)),
                         min_pg_version: None,
                     });
                 } else {
@@ -248,6 +260,7 @@ mod tests {
             is_unique: false, is_primary: false, predicate: None,
             definition: format!("CREATE INDEX {name} ON ..."),
             is_valid: true,
+            backs_constraint: false,
             stats: None,
         }
     }
@@ -468,6 +481,32 @@ mod tests {
         )]);
         let findings = check_duplicate_indexes(&schema);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn duplicate_drops_non_constraint_index() {
+        // unique_task_id_workspace_id backs the UNIQUE constraint,
+        // idx_unique_task_id_workspace_id is the redundant copy —
+        // the DDL must drop the copy, not the constraint-backing index
+        let mut constraint_idx = make_index("unique_task_id_workspace_id", &["workspace_id", "id"]);
+        constraint_idx.is_unique = true;
+        constraint_idx.backs_constraint = true;
+
+        let mut copy_idx = make_index("idx_unique_task_id_workspace_id", &["workspace_id", "id"]);
+        copy_idx.is_unique = true;
+        let schema = schema_with(vec![make_table_with(
+            "task",
+            vec![make_col("workspace_id", "bigint"), make_col("id", "bigint")],
+            vec![constraint_idx, copy_idx],
+        )]);
+
+        let findings = check_duplicate_indexes(&schema);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].ddl_fix.as_deref(),
+            Some("DROP INDEX idx_unique_task_id_workspace_id;"),
+            "must drop the copy, not the constraint-backing index"
+        );
     }
 
     #[test]
