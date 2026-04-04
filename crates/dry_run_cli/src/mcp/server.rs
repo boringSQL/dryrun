@@ -875,9 +875,10 @@ impl DryRunServer {
 
         if scope == "all" || scope == "conventions" {
             let report = dry_run_core::lint::lint_schema(&target, &self.lint_config);
+            let compact = dry_run_core::lint::compact_report(&report, 5);
             result.insert(
                 "conventions".into(),
-                serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+                serde_json::to_value(&compact).unwrap_or(serde_json::Value::Null),
             );
         }
 
@@ -889,7 +890,7 @@ impl DryRunServer {
             );
         }
 
-        let json = serde_json::to_string_pretty(&result)
+        let json = serde_json::to_string(&result)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
