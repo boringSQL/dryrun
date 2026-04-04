@@ -956,7 +956,7 @@ impl DryRunServer {
         if snapshot.node_stats.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
                 "No per-node stats available. Import stats with:\n  \
-                 dry-run import schema.json --stats r1.json r2.json"
+                 dryrun import schema.json --stats r1.json r2.json"
                     .to_string(),
             )]));
         }

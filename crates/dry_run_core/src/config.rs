@@ -92,7 +92,7 @@ pub struct ResolvedProfile {
 
 impl ProjectConfig {
     pub fn parse(content: &str) -> Result<Self> {
-        toml::from_str(content).map_err(|e| Error::Config(format!("invalid dry_run.toml: {e}")))
+        toml::from_str(content).map_err(|e| Error::Config(format!("invalid dryrun.toml: {e}")))
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -104,7 +104,7 @@ impl ProjectConfig {
     pub fn discover(start_dir: &Path) -> Option<(PathBuf, Self)> {
         let mut dir = start_dir.to_path_buf();
         loop {
-            let candidate = dir.join("dry_run.toml");
+            let candidate = dir.join("dryrun.toml");
             if candidate.is_file() {
                 if let Ok(config) = Self::load(&candidate) {
                     return Some((candidate, config));
@@ -154,7 +154,7 @@ impl ProjectConfig {
 
         if let Some(name) = profile_name {
             let profile = self.profiles.get(&name).ok_or_else(|| {
-                Error::Config(format!("profile '{name}' not found in dry_run.toml"))
+                Error::Config(format!("profile '{name}' not found in dryrun.toml"))
             })?;
             return Ok(resolve_profile_config(&name, profile, project_root));
         }
@@ -170,7 +170,7 @@ impl ProjectConfig {
 
         Err(Error::Config(
             "no profile found: specify --profile, set PROFILE, \
-             configure [default].profile in dry_run.toml, \
+             configure [default].profile in dryrun.toml, \
              or place a schema at .dryrun/schema.json"
                 .into(),
         ))

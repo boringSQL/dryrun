@@ -13,7 +13,7 @@ fn get_version() -> &'static str {
 }
 
 #[derive(Parser)]
-#[command(name = "dry-run", version = get_version(), about = "PostgreSQL schema intelligence")]
+#[command(name = "dryrun", version = get_version(), about = "PostgreSQL schema intelligence")]
 struct Cli {
     #[arg(long)]
     profile: Option<String>,
@@ -515,7 +515,7 @@ fn cmd_profile(cli: &Cli, action: &ProfileAction) -> anyhow::Result<()> {
         (config_path.clone(), config)
     } else {
         ProjectConfig::discover(&cwd)
-            .ok_or_else(|| anyhow::anyhow!("no dry_run.toml found"))?
+            .ok_or_else(|| anyhow::anyhow!("no dryrun.toml found"))?
     };
 
     match action {
@@ -727,7 +727,7 @@ fn resolve_schema_path(
 
     let cwd = std::env::current_dir().unwrap_or_default();
 
-    // 2. profile config in dry_run.toml
+    // 2. profile config in dryrun.toml
     if let Some(config) = project_config {
         if let Ok(resolved) = config.resolve_profile(None, None, profile, &cwd) {
             if let Some(sf) = resolved.schema_file {
@@ -798,7 +798,7 @@ async fn cmd_mcp_serve(
     let json = std::fs::read_to_string(&schema_file)?;
     let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)?;
     eprintln!(
-        "dry-run: loaded schema from {} ({} tables)",
+        "dryrun: loaded schema from {} ({} tables)",
         schema_file.display(), snapshot.tables.len()
     );
 
@@ -814,10 +814,10 @@ async fn cmd_mcp_serve(
 
     let db_connection = if let Some(ref db_url) = effective_db {
         let ctx = DryRun::connect(db_url).await?;
-        eprintln!("dry-run: connected to local db (live tools enabled)");
+        eprintln!("dryrun: connected to local db (live tools enabled)");
         Some((db_url.as_str(), ctx))
     } else {
-        eprintln!("dry-run: offline mode (explain_query, refresh_schema disabled)");
+        eprintln!("dryrun: offline mode (explain_query, refresh_schema disabled)");
         None
     };
 
@@ -827,14 +827,14 @@ async fn cmd_mcp_serve(
 
     match transport {
         "stdio" => {
-            eprintln!("dry-run: starting MCP server on stdio");
+            eprintln!("dryrun: starting MCP server on stdio");
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
         }
         "sse" => {
             let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse()?;
             let sse_server = rmcp::transport::sse_server::SseServer::serve(bind_addr).await?;
-            eprintln!("dry-run: SSE server listening on http://{bind_addr}/sse");
+            eprintln!("dryrun: SSE server listening on http://{bind_addr}/sse");
             let ct = sse_server.config.ct.clone();
             sse_server.with_service(move || server.clone());
             ct.cancelled().await;

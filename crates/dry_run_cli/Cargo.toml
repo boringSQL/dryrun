@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "dry-run"
+name = "dryrun"
 path = "src/main.rs"
 
 [dependencies]
