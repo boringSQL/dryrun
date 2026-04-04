@@ -7,6 +7,8 @@ pub struct AutovacuumDefaults {
     pub enabled: bool,
     pub vacuum_threshold: i64,
     pub vacuum_scale_factor: f64,
+    pub analyze_threshold: i64,
+    pub analyze_scale_factor: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +22,9 @@ pub struct VacuumHealth {
     pub has_overrides: bool,
     pub effective_threshold: i64,
     pub effective_scale_factor: f64,
+    pub effective_analyze_threshold: i64,
+    pub effective_analyze_scale_factor: f64,
+    pub analyze_trigger_at: f64,
     pub autovacuum_enabled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recommendations: Vec<String>,
@@ -30,6 +35,8 @@ pub fn parse_autovacuum_defaults(gucs: &[GucSetting]) -> AutovacuumDefaults {
         enabled: true,
         vacuum_threshold: 50,
         vacuum_scale_factor: 0.2,
+        analyze_threshold: 50,
+        analyze_scale_factor: 0.1,
     };
 
     for g in gucs {
@@ -43,6 +50,16 @@ pub fn parse_autovacuum_defaults(gucs: &[GucSetting]) -> AutovacuumDefaults {
             "autovacuum_vacuum_scale_factor" => {
                 if let Ok(v) = g.setting.parse::<f64>() {
                     d.vacuum_scale_factor = v;
+                }
+            }
+            "autovacuum_analyze_threshold" => {
+                if let Ok(v) = g.setting.parse::<i64>() {
+                    d.analyze_threshold = v;
+                }
+            }
+            "autovacuum_analyze_scale_factor" => {
+                if let Ok(v) = g.setting.parse::<f64>() {
+                    d.analyze_scale_factor = v;
                 }
             }
             _ => {}
@@ -76,6 +93,8 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
 
         let mut threshold = defaults.vacuum_threshold;
         let mut scale_factor = defaults.vacuum_scale_factor;
+        let mut analyze_threshold = defaults.analyze_threshold;
+        let mut analyze_scale_factor = defaults.analyze_scale_factor;
         let mut av_enabled = defaults.enabled;
 
         if let Some(v) = opts.get("autovacuum_vacuum_threshold") {
@@ -88,11 +107,22 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
                 scale_factor = parsed;
             }
         }
+        if let Some(v) = opts.get("autovacuum_analyze_threshold") {
+            if let Ok(parsed) = v.parse::<i64>() {
+                analyze_threshold = parsed;
+            }
+        }
+        if let Some(v) = opts.get("autovacuum_analyze_scale_factor") {
+            if let Ok(parsed) = v.parse::<f64>() {
+                analyze_scale_factor = parsed;
+            }
+        }
         if let Some(v) = opts.get("autovacuum_enabled") {
             av_enabled = v == "on" || v == "true";
         }
 
         let trigger_at = threshold as f64 + scale_factor * stats.reltuples;
+        let analyze_trigger = analyze_threshold as f64 + analyze_scale_factor * stats.reltuples;
         let progress = if trigger_at > 0.0 {
             stats.dead_tuples as f64 / trigger_at
         } else {
@@ -109,14 +139,23 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
         }
 
         if stats.reltuples >= 1_000_000.0 && !has_overrides {
-            let mut suggested_sf = 100_000.0 / stats.reltuples;
-            suggested_sf = (suggested_sf * 1000.0).round() / 1000.0;
-            if suggested_sf < 0.001 {
-                suggested_sf = 0.001;
+            let mut suggested_vac_sf = 100_000.0 / stats.reltuples;
+            suggested_vac_sf = (suggested_vac_sf * 1000.0).round() / 1000.0;
+            if suggested_vac_sf < 0.001 {
+                suggested_vac_sf = 0.001;
             }
+            let suggested_az_sf = (suggested_vac_sf / 2.0 * 1000.0).round() / 1000.0;
+
+            // threshold: ~1% of rows, clamped to 500..5000
+            let suggested_vac_thresh = ((stats.reltuples * 0.01) as i64).clamp(500, 5000);
+            let suggested_az_thresh = (suggested_vac_thresh / 2).max(250);
+
             recommendations.push(format!(
-                "large table ({}k rows) using default autovacuum settings; \
-                 consider lowering autovacuum_vacuum_scale_factor (e.g. {suggested_sf})",
+                "large table ({}k rows) using default autovacuum settings; consider: \
+                 autovacuum_vacuum_scale_factor={suggested_vac_sf}, \
+                 autovacuum_vacuum_threshold={suggested_vac_thresh}, \
+                 autovacuum_analyze_scale_factor={suggested_az_sf}, \
+                 autovacuum_analyze_threshold={suggested_az_thresh}",
                 stats.reltuples as i64 / 1000
             ));
         }
@@ -149,6 +188,9 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
             has_overrides,
             effective_threshold: threshold,
             effective_scale_factor: scale_factor,
+            effective_analyze_threshold: analyze_threshold,
+            effective_analyze_scale_factor: analyze_scale_factor,
+            analyze_trigger_at: analyze_trigger,
             autovacuum_enabled: av_enabled,
             recommendations,
         });
@@ -254,9 +296,13 @@ mod tests {
         let gucs = vec![
             GucSetting { name: "autovacuum_vacuum_threshold".into(), setting: "100".into(), unit: None },
             GucSetting { name: "autovacuum_vacuum_scale_factor".into(), setting: "0.05".into(), unit: None },
+            GucSetting { name: "autovacuum_analyze_threshold".into(), setting: "200".into(), unit: None },
+            GucSetting { name: "autovacuum_analyze_scale_factor".into(), setting: "0.02".into(), unit: None },
         ];
         let d = parse_autovacuum_defaults(&gucs);
         assert_eq!(d.vacuum_threshold, 100);
         assert!((d.vacuum_scale_factor - 0.05).abs() < f64::EPSILON);
+        assert_eq!(d.analyze_threshold, 200);
+        assert!((d.analyze_scale_factor - 0.02).abs() < f64::EPSILON);
     }
 }
