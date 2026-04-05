@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::{
@@ -31,6 +32,7 @@ pub struct DryRunServer {
     lint_config: LintConfig,
     audit_config: AuditConfig,
     pgmustard: Option<PgMustardClient>,
+    schema_candidates: Vec<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -41,6 +43,7 @@ impl DryRunServer {
         lint_config: LintConfig,
         pgmustard_api_key: Option<String>,
         app_version: &str,
+        schema_candidates: Vec<PathBuf>,
     ) -> Self {
         let (ctx, db_url) = match db {
             Some((url, ctx)) => (Some(Arc::new(ctx)), url.to_string()),
@@ -70,6 +73,7 @@ impl DryRunServer {
             lint_config,
             audit_config: AuditConfig::default(),
             pgmustard: Self::resolve_pgmustard(pgmustard_api_key),
+            schema_candidates,
             tool_router: Self::tool_router(),
         }
     }
@@ -82,11 +86,42 @@ impl DryRunServer {
         }
     }
 
+    /// Create a server with no schema loaded. All schema-dependent tools will
+    /// return a helpful initialization message until a schema is provided.
+    pub fn uninitialized(
+        lint_config: LintConfig,
+        app_version: &str,
+        schema_candidates: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            ctx: None,
+            db_url: String::new(),
+            app_version: app_version.to_string(),
+            pg_version_display: String::new(),
+            database_name: String::new(),
+            schema: Arc::new(RwLock::new(None)),
+            history: None,
+            lint_config,
+            audit_config: AuditConfig::default(),
+            pgmustard: None,
+            schema_candidates,
+            tool_router: Self::tool_router(),
+        }
+    }
+
     async fn get_schema(&self) -> Result<SchemaSnapshot, McpError> {
         let guard = self.schema.read().await;
-        guard
-            .clone()
-            .ok_or_else(|| McpError::internal_error("schema not available", None))
+        guard.clone().ok_or_else(|| {
+            McpError::internal_error(
+                "no schema loaded — initialize first:\n\
+                 \n\
+                 1. Run `dryrun dump-schema --db <DATABASE_URL>` in a terminal\n\
+                 2. Call the `reload_schema` tool in this session\n\
+                 \n\
+                 The schema will be picked up without restarting the server.",
+                None,
+            )
+        })
     }
 
     fn require_live_db(&self) -> Result<&Arc<DryRun>, McpError> {
@@ -1102,6 +1137,41 @@ impl DryRunServer {
 
         Ok(CallToolResult::success(vec![Content::text(summary)]))
     }
+
+    #[tool(description = "Reload schema from disk. Use after running `dryrun dump-schema` to pick up the schema without restarting the server.")]
+    async fn reload_schema(&self) -> Result<CallToolResult, McpError> {
+        for candidate in &self.schema_candidates {
+            if !candidate.exists() {
+                continue;
+            }
+            let json = std::fs::read_to_string(candidate)
+                .map_err(|e| McpError::internal_error(format!("failed to read {}: {e}", candidate.display()), None))?;
+            let snapshot: SchemaSnapshot = serde_json::from_str(&json)
+                .map_err(|e| McpError::internal_error(format!("failed to parse {}: {e}", candidate.display()), None))?;
+
+            let summary = format!(
+                "Schema loaded from {}: {} tables, {} views, {} functions",
+                candidate.display(),
+                snapshot.tables.len(),
+                snapshot.views.len(),
+                snapshot.functions.len(),
+            );
+
+            *self.schema.write().await = Some(snapshot);
+
+            return Ok(CallToolResult::success(vec![Content::text(summary)]));
+        }
+
+        let paths: Vec<_> = self.schema_candidates.iter().map(|p| format!("  - {}", p.display())).collect();
+        Err(McpError::internal_error(
+            format!(
+                "no schema file found at any expected location:\n{}\n\n\
+                 Run `dryrun dump-schema --db <DATABASE_URL>` first.",
+                paths.join("\n")
+            ),
+            None,
+        ))
+    }
 }
 
 fn to_mcp_err(e: dry_run_core::Error) -> McpError {
@@ -1272,7 +1342,7 @@ mod tests {
     #[tokio::test]
     async fn list_tables_includes_pg_version() {
         let snapshot = test_snapshot();
-        let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None, "test");
+        let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None, "test", vec![]);
         let result = server
             .list_tables(Parameters(ListTablesParams { schema: None, sort: None, limit: None, offset: None }))
             .await
@@ -1285,7 +1355,7 @@ mod tests {
     #[tokio::test]
     async fn describe_table_includes_pg_version() {
         let snapshot = test_snapshot();
-        let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None, "test");
+        let server = DryRunServer::from_snapshot_with_db(snapshot, None, LintConfig::default(), None, "test", vec![]);
         let result = server
             .describe_table(Parameters(DescribeTableParams {
                 table: "orders".into(),

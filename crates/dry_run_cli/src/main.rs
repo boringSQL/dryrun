@@ -718,38 +718,45 @@ fn load_project_config(cli: &Cli, cwd: &std::path::Path) -> Option<ProjectConfig
     }
 }
 
+/// Returns the ordered list of paths where a schema file might live,
+/// without checking whether any of them actually exist.
+fn schema_candidate_paths(
+    schema_file: Option<&std::path::Path>,
+    project_config: Option<&ProjectConfig>,
+    profile: Option<&str>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(path) = schema_file {
+        candidates.push(path.to_path_buf());
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    if let Some(config) = project_config {
+        if let Ok(resolved) = config.resolve_profile(None, None, profile, &cwd) {
+            if let Some(sf) = resolved.schema_file {
+                candidates.push(sf);
+            }
+        }
+    }
+
+    if let Ok(data_dir) = dry_run_core::history::default_data_dir() {
+        candidates.push(data_dir.join("schema.json"));
+    }
+
+    candidates
+}
+
 fn resolve_schema_path(
     schema_file: Option<&std::path::Path>,
     project_config: Option<&ProjectConfig>,
     profile: Option<&str>,
 ) -> anyhow::Result<PathBuf> {
-    // 1. explicit --schema-file
-    if let Some(path) = schema_file {
-        return Ok(path.to_path_buf());
-    }
-
-    let cwd = std::env::current_dir().unwrap_or_default();
-
-    // 2. profile config in dryrun.toml
-    if let Some(config) = project_config {
-        if let Ok(resolved) = config.resolve_profile(None, None, profile, &cwd) {
-            if let Some(sf) = resolved.schema_file {
-                if sf.exists() {
-                    return Ok(sf);
-                }
-            }
-        }
-    }
-
-    // 3. auto-discovered .dryrun/schema.json
-    if let Ok(data_dir) = dry_run_core::history::default_data_dir() {
-        let candidate = data_dir.join("schema.json");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    anyhow::bail!("no schema found — run dump-schema first or pass --schema-file");
+    schema_candidate_paths(schema_file, project_config, profile)
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| anyhow::anyhow!("no schema found — run dump-schema first or pass --schema-file"))
 }
 
 fn resolve_schema(
@@ -794,39 +801,57 @@ async fn cmd_mcp_serve(
         .as_ref()
         .and_then(|c| c.pgmustard_api_key());
 
-    // schema file is always required
-    let schema_file = resolve_schema_path(
+    let candidates = schema_candidate_paths(
         schema_path, project_config.as_ref(), cli.profile.as_deref(),
-    )?;
-    let json = std::fs::read_to_string(&schema_file)?;
-    let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)?;
-    eprintln!(
-        "dryrun: loaded schema from {} ({} tables)",
-        schema_file.display(), snapshot.tables.len()
     );
 
-    // optional --db enables live tools (explain_query, refresh_schema)
-    let effective_db = db.map(|s| s.to_string()).or_else(|| {
-        if let Some(ref config) = project_config {
-            if let Ok(resolved) = config.resolve_profile(None, None, cli.profile.as_deref(), &cwd) {
-                return resolved.db_url;
-            }
+    // try to load schema — if missing, start in uninitialized mode;
+    // if file exists but is broken, propagate the error
+    let schema_path_result = resolve_schema_path(
+        schema_path, project_config.as_ref(), cli.profile.as_deref(),
+    );
+
+    let server = match schema_path_result {
+        Ok(schema_file) => {
+            let json = std::fs::read_to_string(&schema_file)?;
+            let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)?;
+            eprintln!(
+                "dryrun: loaded schema from {} ({} tables)",
+                schema_file.display(), snapshot.tables.len()
+            );
+
+            // optional --db enables live tools (explain_query, refresh_schema)
+            let effective_db = db.map(|s| s.to_string()).or_else(|| {
+                if let Some(ref config) = project_config {
+                    if let Ok(resolved) = config.resolve_profile(None, None, cli.profile.as_deref(), &cwd) {
+                        return resolved.db_url;
+                    }
+                }
+                None
+            });
+
+            let db_connection = if let Some(ref db_url) = effective_db {
+                let ctx = DryRun::connect(db_url).await?;
+                eprintln!("dryrun: connected to local db (live tools enabled)");
+                Some((db_url.as_str(), ctx))
+            } else {
+                eprintln!("dryrun: offline mode (explain_query, refresh_schema disabled)");
+                None
+            };
+
+            mcp::DryRunServer::from_snapshot_with_db(
+                snapshot, db_connection, lint_config, pgmustard_api_key, get_version(),
+                candidates,
+            )
         }
-        None
-    });
-
-    let db_connection = if let Some(ref db_url) = effective_db {
-        let ctx = DryRun::connect(db_url).await?;
-        eprintln!("dryrun: connected to local db (live tools enabled)");
-        Some((db_url.as_str(), ctx))
-    } else {
-        eprintln!("dryrun: offline mode (explain_query, refresh_schema disabled)");
-        None
+        Err(_) => {
+            eprintln!(
+                "dryrun: no schema found — starting in uninitialized mode\n\
+                 dryrun: use the reload_schema tool after running dump-schema"
+            );
+            mcp::DryRunServer::uninitialized(lint_config, get_version(), candidates)
+        }
     };
-
-    let server = mcp::DryRunServer::from_snapshot_with_db(
-        snapshot, db_connection, lint_config, pgmustard_api_key, get_version(),
-    );
 
     match transport {
         "stdio" => {
