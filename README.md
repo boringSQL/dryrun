@@ -155,6 +155,7 @@ See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Clau
 ## More
 
 - **[Tutorial](TUTORIAL.md)** for offline, online, and multi-node workflows with full tool reference
+- **[Configuration reference](docs/dryrun-toml.md)** for `dryrun.toml` profiles, conventions, and lint rules
 - **[boringSQL](https://boringsql.com)**, the blog and project home
 - **[RegreSQL](https://github.com/boringsql/regresql)**, SQL regression testing and **`dryrun`**'s companion tool
 
