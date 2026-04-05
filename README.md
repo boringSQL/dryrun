@@ -134,8 +134,27 @@ dryrun lint
 
 All commands work offline from the schema file. Each project has its own `dryrun.toml` and `.dryrun/`, there is no global state. Add `.dryrun/` to your `.gitignore`.
 
+## MCP server
+
+Add `dryrun` to your AI assistant. If you installed via Homebrew, `dryrun` is already on your PATH:
+
+```sh
+claude mcp add dryrun -- dryrun mcp-serve
+```
+
+If you built from source, use the full path to the binary:
+
+```sh
+claude mcp add dryrun -- /path/to/dryrun mcp-serve
+```
+
+That's it. The server auto-discovers `.dryrun/schema.json` in the current project. No database credentials needed, your AI assistant gets full schema intelligence from the offline snapshot.
+
+See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Claude Desktop configuration.
+
 ## More
 
+- **[Tutorial](TUTORIAL.md)** for offline, online, and multi-node workflows with full tool reference
 - **[boringSQL](https://boringsql.com)**, the blog and project home
 - **[RegreSQL](https://github.com/boringsql/regresql)**, SQL regression testing and **`dryrun`**'s companion tool
 
