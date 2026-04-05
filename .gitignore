@@ -2,8 +2,7 @@
 .env
 *.db
 .sqlx/
-pgcontext/*.json
-pgcontext/*.db
+.dryrun/
+!examples/demo/.dryrun/
 SPEC.md
-ROADMAP.md
-TARGET.md
+ROADMAP-internal.md
