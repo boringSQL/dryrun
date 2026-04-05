@@ -1,0 +1,14 @@
+[default]
+profile = "offline"
+
+[profiles.offline]
+schema_file = ".dryrun/schema.json"
+
+[profiles.dev]
+db_url = "${DATABASE_URL}"
+
+[conventions]
+min_severity = "warning"
+
+[conventions.disabled_rules]
+rules = ["naming/fk_pattern", "naming/index_pattern", "constraints/unnamed"]
