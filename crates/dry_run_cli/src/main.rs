@@ -9,7 +9,7 @@ use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
 use rmcp::ServiceExt;
 
 fn get_version() -> &'static str {
-    option_env!("DRY_RUN_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+    env!("CARGO_PKG_VERSION")
 }
 
 #[derive(Parser)]
