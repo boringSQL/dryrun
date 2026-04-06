@@ -31,7 +31,7 @@ Once you have the snapshot, the CLI works offline:
 - **Migration safety** - lock type analysis, duration estimates, table rewrite detection, safe alternatives for each DDL statement
 - **Query validation** - SQL parsing via libpg_query, column reference checks against the actual schema, anti-pattern detection
 - **Schema diff** - compare snapshots over time, detect drift between live database and saved state
-- **Multi-node stats** - per-replica statistics, seq_scan hotspots, routing imbalances
+- **[Multi-node stats](docs/multi-node-stats.md)** - per-replica statistics, seq_scan hotspots, routing imbalances
 
 ### MCP server - give your AI assistant a schema brain
 
@@ -155,6 +155,7 @@ See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Clau
 ## More
 
 - **[Tutorial](TUTORIAL.md)** for offline, online, and multi-node workflows with full tool reference
+- **[Multi-node statistics](docs/multi-node-stats.md)** for cluster-wide stats collection, aggregation rules, and replica imbalance detection
 - **[Configuration reference](docs/dryrun-toml.md)** for `dryrun.toml` profiles, conventions, and lint rules
 - **[boringSQL](https://boringsql.com)**, the blog and project home
 - **[RegreSQL](https://github.com/boringsql/regresql)**, SQL regression testing and **`dryrun`**'s companion tool
