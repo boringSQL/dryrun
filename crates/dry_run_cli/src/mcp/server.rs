@@ -133,6 +133,32 @@ impl DryRunServer {
             )
         })
     }
+
+    fn mode_str(&self) -> &'static str {
+        if self.ctx.is_some() { "live" } else { "offline" }
+    }
+
+    fn wrap_text(&self, body: &str, hint: Option<&str>) -> String {
+        let header = format!("PostgreSQL {} | {} | {}\n", self.pg_version_display, self.database_name, self.mode_str());
+        if let Some(h) = hint {
+            format!("{header}{body}\n\n> {h}")
+        } else {
+            format!("{header}{body}")
+        }
+    }
+
+    fn inject_meta(&self, val: &mut serde_json::Value, hint: Option<&str>) {
+        let obj = val.as_object_mut().expect("inject_meta expects a JSON object");
+        let mut meta = serde_json::json!({
+            "pg_version": self.pg_version_display,
+            "database": self.database_name,
+            "mode": self.mode_str(),
+        });
+        if let Some(h) = hint {
+            meta["hint"] = serde_json::Value::String(h.into());
+        }
+        obj.insert("_meta".into(), meta);
+    }
 }
 
 // parameter types
@@ -349,26 +375,18 @@ impl DryRunServer {
             .map(|e| e.line.as_str())
             .collect();
 
-        let pg_header = if !snapshot.pg_version.is_empty() {
-            let ver = dry_run_core::PgVersion::parse_from_version_string(&snapshot.pg_version)
-                .map(|v| format!("{}.{}.{}", v.major, v.minor, v.patch))
-                .unwrap_or_else(|_| snapshot.pg_version.clone());
-            format!("PostgreSQL {} | database: {}\n", ver, snapshot.database)
-        } else {
-            String::new()
-        };
-
-        let text = if paginated.is_empty() {
-            format!("{pg_header}No tables found.")
+        let body = if paginated.is_empty() {
+            "No tables found.".to_string()
         } else if offset > 0 || paginated.len() < total {
             format!(
-                "{pg_header}Showing {}-{} of {} table(s):\n{}",
+                "Showing {}-{} of {} table(s):\n{}",
                 offset + 1, offset + paginated.len(), total, paginated.join("\n")
             )
         } else {
-            format!("{pg_header}{} table(s):\n{}", total, paginated.join("\n"))
+            format!("{} table(s):\n{}", total, paginated.join("\n"))
         };
 
+        let text = self.wrap_text(&body, None);
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -476,9 +494,13 @@ impl DryRunServer {
             }
         };
 
-        if let Some(obj) = json_val.as_object_mut() {
-            obj.insert("pg_version".into(), serde_json::Value::String(snapshot.pg_version.clone()));
-        }
+        let has_fks = table.constraints.iter().any(|c| c.kind == ConstraintKind::ForeignKey);
+        let hint = if has_fks {
+            Some("This table has foreign keys — use find_related for JOIN patterns with related tables.")
+        } else {
+            None
+        };
+        self.inject_meta(&mut json_val, hint);
 
         let mut text = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -567,7 +589,7 @@ impl DryRunServer {
             .map(|s| s.as_str())
             .collect();
 
-        let text = if paginated.is_empty() {
+        let body = if paginated.is_empty() {
             format!("No matches for '{}'.", params.query)
         } else if offset > 0 || paginated.len() < total {
             format!(
@@ -578,6 +600,7 @@ impl DryRunServer {
             format!("{} match(es) for '{}':\n{}", total, params.query, paginated.join("\n"))
         };
 
+        let text = self.wrap_text(&body, None);
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -638,7 +661,9 @@ impl DryRunServer {
             lines.extend(incoming);
         }
 
-        Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
+        let body = lines.join("\n");
+        let text = self.wrap_text(&body, None);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(description = "Show schema changes between two saved snapshots, or between the latest saved snapshot and the current live schema. Requires history store (--history).")]
@@ -678,10 +703,14 @@ impl DryRunServer {
         let changeset = dry_run_core::diff::diff_schemas(&from_snapshot, &to_snapshot);
 
         if changeset.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text("No schema changes detected.".to_string())]));
+            let text = self.wrap_text("No schema changes detected.", None);
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
 
-        let json = serde_json::to_string_pretty(&changeset)
+        let mut json_val = serde_json::json!({ "changes": changeset });
+        self.inject_meta(&mut json_val, None);
+
+        let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -696,7 +725,19 @@ impl DryRunServer {
         let result = dry_run_core::query::validate_query(&params.sql, &snapshot)
             .map_err(|e| McpError::invalid_params(format!("SQL parse error: {e}"), None))?;
 
-        let json = serde_json::to_string_pretty(&result)
+        let hint = if result.valid && !result.warnings.is_empty() {
+            Some("Query is valid but has warnings. Use advise for index suggestions and plan analysis.")
+        } else if result.valid {
+            Some("Query is valid. Use advise if you need optimization suggestions.")
+        } else {
+            None
+        };
+
+        let mut json_val = serde_json::to_value(&result)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+        self.inject_meta(&mut json_val, hint);
+
+        let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -714,7 +755,17 @@ impl DryRunServer {
             ctx.pool(), &params.sql, params.analyze.unwrap_or(false), schema.as_ref(),
         ).await.map_err(|e| McpError::invalid_params(format!("EXPLAIN failed: {e}"), None))?;
 
-        let json = serde_json::to_string_pretty(&result)
+        let hint = if !result.warnings.is_empty() {
+            Some("Warnings detected. Use advise for index suggestions and actionable recommendations.")
+        } else {
+            None
+        };
+
+        let mut json_val = serde_json::to_value(&result)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+        self.inject_meta(&mut json_val, hint);
+
+        let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -745,7 +796,14 @@ impl DryRunServer {
             include_idx,
         ).map_err(|e| McpError::invalid_params(format!("analysis failed: {e}"), None))?;
 
-        let result = if let Some(ref explain) = explain_result {
+        let has_ddl_suggestions = !advise_result.index_suggestions.is_empty();
+        let hint = if has_ddl_suggestions {
+            Some("Index suggestions contain DDL. Run each through check_migration before applying — it checks lock safety and duration.")
+        } else {
+            None
+        };
+
+        let mut result = if let Some(ref explain) = explain_result {
             serde_json::json!({
                 "plan_summary": {
                     "total_cost": explain.total_cost,
@@ -764,6 +822,7 @@ impl DryRunServer {
                 "index_suggestions": advise_result.index_suggestions,
             })
         };
+        self.inject_meta(&mut result, hint);
 
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -831,7 +890,14 @@ impl DryRunServer {
             None
         };
 
-        let result = serde_json::json!({
+        let has_ddl_suggestions = !advise_result.index_suggestions.is_empty();
+        let hint = if has_ddl_suggestions {
+            Some("Index suggestions contain DDL. Run each through check_migration before applying — it checks lock safety and duration.")
+        } else {
+            None
+        };
+
+        let mut result = serde_json::json!({
             "plan_summary": {
                 "total_cost": plan.total_cost,
                 "estimated_rows": plan.plan_rows,
@@ -855,6 +921,7 @@ impl DryRunServer {
                 obj
             }),
         });
+        self.inject_meta(&mut result, hint);
 
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -881,7 +948,17 @@ impl DryRunServer {
             )]));
         }
 
-        let json = serde_json::to_string_pretty(&checks)
+        let has_dangerous = checks.iter().any(|c| c.safety == dry_run_core::query::SafetyRating::Dangerous);
+        let hint = if has_dangerous {
+            Some("DANGEROUS operations detected. Check the recommendation and rollback_ddl fields for safe alternatives.")
+        } else {
+            None
+        };
+
+        let mut json_val = serde_json::json!({ "checks": checks });
+        self.inject_meta(&mut json_val, hint);
+
+        let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -917,15 +994,28 @@ impl DryRunServer {
             );
         }
 
-        if scope == "all" || scope == "audit" {
+        let has_ddl_fixes = if scope == "all" || scope == "audit" {
             let report = dry_run_core::audit::run_audit(&target, &self.audit_config);
+            let has_fixes = report.findings.iter().any(|f| f.ddl_fix.is_some());
             result.insert(
                 "audit".into(),
                 serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
             );
-        }
+            has_fixes
+        } else {
+            false
+        };
 
-        let json = serde_json::to_string(&result)
+        let hint = if has_ddl_fixes {
+            Some("Some findings include ddl_fix fields. Run those through check_migration before applying to verify lock safety.")
+        } else {
+            None
+        };
+
+        let mut json_val = serde_json::Value::Object(result);
+        self.inject_meta(&mut json_val, hint);
+
+        let json = serde_json::to_string(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -949,12 +1039,14 @@ impl DryRunServer {
         let results = dry_run_core::schema::vacuum::analyze_vacuum_health(&snapshot);
 
         if results.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "No tables with significant row counts found.",
-            )]));
+            let text = self.wrap_text("No tables with significant row counts found.", None);
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
 
-        let json = serde_json::to_string_pretty(&results)
+        let mut json_val = serde_json::json!({ "tables": results });
+        self.inject_meta(&mut json_val, None);
+
+        let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -991,14 +1083,19 @@ impl DryRunServer {
         let run_anomalies = kind == "all" || kind == "anomalies";
         let run_bloated = kind == "all" || kind == "bloated_indexes";
 
+        let mut found_stale = false;
+        let mut found_unused = false;
+
         if run_stale {
             let stale = detect_stale_stats(&snapshot.node_stats, 7);
+            found_stale = !stale.is_empty();
             result.insert("stale_stats".into(), serde_json::to_value(&stale)
                 .unwrap_or(serde_json::Value::Null));
         }
 
         if run_unused {
             let unused = detect_unused_indexes(&snapshot.node_stats, &snapshot.tables);
+            found_unused = !unused.is_empty();
             result.insert("unused_indexes".into(), serde_json::to_value(&unused)
                 .unwrap_or(serde_json::Value::Null));
         }
@@ -1026,7 +1123,17 @@ impl DryRunServer {
                 .unwrap_or(serde_json::Value::Null));
         }
 
-        let json = serde_json::to_string_pretty(&result)
+        let hint = match (found_stale, found_unused) {
+            (true, true) => Some("Stale stats may cause bad plans — run ANALYZE. Unused indexes add write overhead — verify with compare_nodes before dropping."),
+            (true, false) => Some("Stale stats may cause bad query plans — consider running ANALYZE."),
+            (false, true) => Some("Unused indexes add write overhead. Use compare_nodes to verify across all replicas before dropping."),
+            (false, false) => None,
+        };
+
+        let mut json_val = serde_json::Value::Object(result);
+        self.inject_meta(&mut json_val, hint);
+
+        let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -1103,7 +1210,9 @@ impl DryRunServer {
             }
         }
 
-        Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
+        let body = lines.join("\n");
+        let text = self.wrap_text(&body, None);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(description = "Compare the live local database against the loaded production schema snapshot. Classifies each difference as ahead (local has extra — your pending migration), behind (prod has something local doesn't — you need to catch up), or diverged (both differ — potential conflict). Requires live DB connection.")]
@@ -1115,7 +1224,11 @@ impl DryRunServer {
 
         let report = dry_run_core::diff::classify_drift(&prod_snapshot, &local_snapshot);
 
-        let json = serde_json::to_string_pretty(&report)
+        let mut json_val = serde_json::to_value(&report)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+        self.inject_meta(&mut json_val, None);
+
+        let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -1127,7 +1240,7 @@ impl DryRunServer {
         let snapshot = ctx.introspect_schema().await
             .map_err(|e| McpError::internal_error(format!("introspection failed: {e}"), None))?;
 
-        let summary = format!(
+        let body = format!(
             "Schema refreshed: {} tables, {} views, {} functions (hash: {})",
             snapshot.tables.len(), snapshot.views.len(), snapshot.functions.len(),
             &snapshot.content_hash[..16],
@@ -1135,7 +1248,8 @@ impl DryRunServer {
 
         *self.schema.write().await = Some(snapshot);
 
-        Ok(CallToolResult::success(vec![Content::text(summary)]))
+        let text = self.wrap_text(&body, None);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(description = "Reload schema from disk. Use after running `dryrun dump-schema` to pick up the schema without restarting the server.")]
@@ -1149,7 +1263,7 @@ impl DryRunServer {
             let snapshot: SchemaSnapshot = serde_json::from_str(&json)
                 .map_err(|e| McpError::internal_error(format!("failed to parse {}: {e}", candidate.display()), None))?;
 
-            let summary = format!(
+            let body = format!(
                 "Schema loaded from {}: {} tables, {} views, {} functions",
                 candidate.display(),
                 snapshot.tables.len(),
@@ -1159,7 +1273,8 @@ impl DryRunServer {
 
             *self.schema.write().await = Some(snapshot);
 
-            return Ok(CallToolResult::success(vec![Content::text(summary)]));
+            let text = self.wrap_text(&body, None);
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
 
         let paths: Vec<_> = self.schema_candidates.iter().map(|p| format!("  - {}", p.display())).collect();
@@ -1452,14 +1567,9 @@ impl ServerHandler for DryRunServer {
             instructions: Some(
                 format!("{version_header}\
                  {online_note}\n\n\
-                 Schema exploration: list_tables, describe_table, search_schema, find_related.\n\
-                 Schema history: schema_diff (compare snapshots by content hash).\n\
-                 Query analysis: validate_query (offline), explain_query (live DB), advise (both — prefer this for query help), analyze_plan (accepts pre-existing EXPLAIN JSON, offline).\n\
-                 Migration safety: check_migration.\n\
-                 Schema quality:\n\
-                 - lint_schema: convention + audit checks. Use scope='conventions' for naming/types/timestamps, \
-                   scope='audit' for indexes/FKs/structure, or scope='all' (default) for both.\n\
-                 Cluster health: vacuum_health, compare_nodes (per-table drill-down)."),
+                 Start with list_tables or search_schema to explore. Use advise for query help. \
+                 Use check_migration before applying DDL. Each tool response includes a _meta.hint \
+                 field with contextual next-step guidance."),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
