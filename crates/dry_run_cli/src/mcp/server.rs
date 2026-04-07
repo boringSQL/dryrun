@@ -453,15 +453,20 @@ impl DryRunServer {
             _ => {
                 // summary: compact columns without raw stats
                 let compact_cols: Vec<serde_json::Value> = table.columns.iter().map(|c| {
-                    serde_json::json!({
+                    let mut col = serde_json::json!({
                         "name": c.name,
                         "ordinal": c.ordinal,
                         "type_name": c.type_name,
                         "nullable": c.nullable,
                         "default": c.default,
                         "identity": c.identity,
+                        "generated": c.generated,
                         "comment": c.comment,
-                    })
+                    });
+                    if let Some(target) = c.statistics_target {
+                        col["statistics_target"] = serde_json::json!(target);
+                    }
+                    col
                 }).collect();
                 let compact_idxs: Vec<serde_json::Value> = table.indexes.iter().map(|i| {
                     serde_json::json!({
