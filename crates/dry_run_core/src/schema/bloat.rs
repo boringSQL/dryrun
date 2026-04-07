@@ -128,6 +128,7 @@ mod tests {
                     nullable: false,
                     default: None,
                     identity: None,
+                    generated: None,
                     comment: None,
                     statistics_target: None,
                     stats: None,

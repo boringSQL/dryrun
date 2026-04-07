@@ -330,6 +330,7 @@ mod tests {
             nullable: true,
             default: None,
             identity: None,
+            generated: None,
             comment: None,
             statistics_target: None,
             stats,
