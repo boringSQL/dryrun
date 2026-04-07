@@ -129,6 +129,7 @@ mod tests {
                     default: None,
                     identity: None,
                     comment: None,
+                    statistics_target: None,
                     stats: None,
                 })
                 .collect(),

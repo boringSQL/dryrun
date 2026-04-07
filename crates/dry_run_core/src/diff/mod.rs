@@ -151,6 +151,7 @@ mod tests {
             default: None,
             identity: None,
             comment: None,
+            statistics_target: None,
             stats: None,
         });
         local.tables.push(shared);

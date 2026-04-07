@@ -61,6 +61,8 @@ pub struct Column {
     pub default: Option<String>,
     pub identity: Option<String>,
     pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statistics_target: Option<i16>,
     pub stats: Option<ColumnStats>,
 }
 

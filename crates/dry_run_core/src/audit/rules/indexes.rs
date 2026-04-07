@@ -271,7 +271,7 @@ mod tests {
     fn make_col(name: &str, type_name: &str) -> Column {
         Column {
             name: name.into(), ordinal: 0, type_name: type_name.into(),
-            nullable: false, default: None, identity: None, comment: None, stats: None,
+            nullable: false, default: None, identity: None, comment: None, statistics_target: None, stats: None,
         }
     }
 
