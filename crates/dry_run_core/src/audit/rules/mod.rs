@@ -82,7 +82,7 @@ mod tests {
                 oid: 0, schema: "public".into(), name: "user".into(),
                 columns: vec![Column {
                     name: "id".into(), ordinal: 0, type_name: "bigint".into(),
-                    nullable: false, default: None, identity: None, comment: None, statistics_target: None, stats: None,
+                    nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None,
                 }],
                 constraints: vec![], indexes: vec![],
                 comment: None, stats: None, partition_info: None,

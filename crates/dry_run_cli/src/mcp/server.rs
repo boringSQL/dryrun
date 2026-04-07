@@ -1495,7 +1495,7 @@ mod tests {
             tables: vec![Table {
                 oid: 1, schema: "public".into(), name: "orders".into(),
                 columns: vec![
-                    Column { name: "id".into(), ordinal: 1, type_name: "bigint".into(), nullable: false, default: None, identity: None, comment: None, statistics_target: None, stats: None },
+                    Column { name: "id".into(), ordinal: 1, type_name: "bigint".into(), nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None },
                 ],
                 constraints: vec![], indexes: vec![], comment: None,
                 stats: Some(TableStats { reltuples: 50000.0, relpages: 625, dead_tuples: 0, last_vacuum: None, last_autovacuum: None, last_analyze: None, last_autoanalyze: None, seq_scan: 0, idx_scan: 0, table_size: 5000000 }),

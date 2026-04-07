@@ -265,9 +265,9 @@ mod tests {
                 schema: "public".into(),
                 name: "users".into(),
                 columns: vec![
-                    Column { name: "id".into(), ordinal: 1, type_name: "bigint".into(), nullable: false, default: None, identity: None, comment: None, statistics_target: None, stats: None },
-                    Column { name: "email".into(), ordinal: 2, type_name: "text".into(), nullable: false, default: None, identity: None, comment: None, statistics_target: None, stats: None },
-                    Column { name: "data".into(), ordinal: 3, type_name: "jsonb".into(), nullable: true, default: None, identity: None, comment: None, statistics_target: None, stats: None },
+                    Column { name: "id".into(), ordinal: 1, type_name: "bigint".into(), nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None },
+                    Column { name: "email".into(), ordinal: 2, type_name: "text".into(), nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None },
+                    Column { name: "data".into(), ordinal: 3, type_name: "jsonb".into(), nullable: true, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None },
                 ],
                 constraints: vec![],
                 indexes: vec![],

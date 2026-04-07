@@ -306,6 +306,7 @@ struct RawColumn {
     nullable: bool,
     default: Option<String>,
     identity: Option<String>,
+    generated: Option<String>,
     statistics_target: Option<i16>,
 }
 
@@ -464,7 +465,11 @@ async fn fetch_columns(pool: &PgPool) -> Result<Vec<RawColumn>> {
                    WHEN 'd' THEN 'by_default'
                    ELSE NULL
                END AS identity,
-               NULLIF(a.attstattarget, -1)::int2 AS statistics_target
+               NULLIF(a.attstattarget, -1)::int2 AS statistics_target,
+               CASE a.attgenerated
+                   WHEN 's' THEN 'stored'
+                   ELSE NULL
+               END AS generated
           FROM pg_catalog.pg_attribute a
           JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -490,6 +495,7 @@ async fn fetch_columns(pool: &PgPool) -> Result<Vec<RawColumn>> {
             nullable: r.get("nullable"),
             default: r.get("default_expr"),
             identity: r.get("identity"),
+            generated: r.get("generated"),
             statistics_target: r.get("statistics_target"),
         })
         .collect())
@@ -1287,6 +1293,7 @@ fn assemble_tables(
                 nullable: rc.nullable,
                 default: rc.default,
                 identity: rc.identity,
+                generated: rc.generated,
                 comment: None,
                 statistics_target: rc.statistics_target,
                 stats: None,
