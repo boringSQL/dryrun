@@ -613,6 +613,7 @@ mod tests {
                     default: None,
                     identity: None,
                     comment: None,
+                    statistics_target: None,
                     stats: Some(ColumnStats {
                         null_frac: Some(0.0),
                         n_distinct: Some(-1.0),

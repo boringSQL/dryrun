@@ -903,7 +903,7 @@ mod tests {
     fn make_col(name: &str, type_name: &str) -> Column {
         Column {
             name: name.into(), ordinal: 0, type_name: type_name.into(),
-            nullable: false, default: None, identity: None, comment: None, stats: None,
+            nullable: false, default: None, identity: None, comment: None, statistics_target: None, stats: None,
         }
     }
 
@@ -1085,7 +1085,7 @@ mod tests {
         Column {
             name: name.into(), ordinal: 0, type_name: type_name.into(),
             nullable: false, default: Some(default.into()), identity: None,
-            comment: None, stats: None,
+            comment: None, statistics_target: None, stats: None,
         }
     }
 
