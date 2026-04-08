@@ -1,12 +1,16 @@
+mod constraints;
+mod naming;
+mod partitions;
+mod pk;
+mod timestamps;
+mod typecheck;
+
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use regex::Regex;
+use crate::schema::{SchemaSnapshot, Table};
 
-use crate::jit;
-use crate::schema::{ConstraintKind, SchemaSnapshot, Table};
-
-use super::types::{LintConfig, LintViolation, Severity};
+use super::types::{LintConfig, LintViolation};
 
 // Walk the partition tree transitively and collect all descendant (schema, name) pairs.
 fn collect_partition_children(tables: &[Table]) -> HashSet<(String, String)> {
@@ -51,10 +55,10 @@ fn detect_table_name_style(tables: &[Table]) -> String {
     let mut singular = 0u32;
 
     for table in tables {
-        if !is_snake_case(&table.name) {
+        if !naming::is_snake_case(&table.name) {
             continue;
         }
-        if looks_plural(&table.name) {
+        if naming::looks_plural(&table.name) {
             plural += 1;
         } else {
             singular += 1;
@@ -105,64 +109,64 @@ pub fn run_all_rules(schema: &SchemaSnapshot, config: &LintConfig) -> Vec<LintVi
         let qualified = format!("{}.{}", table.schema, table.name);
 
         if !is_disabled(config, "naming/table_style") {
-            check_table_name_style(table, &qualified, config, &mut violations);
+            naming::check_table_name_style(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "naming/column_style") {
-            check_column_name_style(table, &qualified, config, &mut violations);
+            naming::check_column_name_style(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "naming/fk_pattern") {
-            check_fk_naming(table, &qualified, config, &mut violations);
+            naming::check_fk_naming(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "naming/index_pattern") {
-            check_index_naming(table, &qualified, config, &mut violations);
+            naming::check_index_naming(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "pk/exists") {
-            check_pk_exists(table, &qualified, &mut violations);
+            pk::check_pk_exists(table, &qualified, &mut violations);
         }
         if !is_disabled(config, "pk/bigint_identity") {
-            check_pk_type(table, &qualified, config, &mut violations);
+            pk::check_pk_type(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "types/text_over_varchar") {
-            check_text_over_varchar(table, &qualified, config, &mut violations);
+            typecheck::check_text_over_varchar(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "types/timestamptz") {
-            check_timestamptz(table, &qualified, &mut violations);
+            typecheck::check_timestamptz(table, &qualified, &mut violations);
         }
         if !is_disabled(config, "types/no_serial") {
-            check_no_serial(table, &qualified, &mut violations);
+            typecheck::check_no_serial(table, &qualified, &mut violations);
         }
         if !is_disabled(config, "types/bigint_pk_fk") {
-            check_bigint_pk_fk(table, &qualified, config, &mut violations);
+            typecheck::check_bigint_pk_fk(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "constraints/fk_has_index") {
-            check_fk_has_index(table, &qualified, schema, &mut violations);
+            constraints::check_fk_has_index(table, &qualified, schema, &mut violations);
         }
         if !is_disabled(config, "constraints/unnamed") {
-            check_unnamed_constraints(table, &qualified, &mut violations);
+            constraints::check_unnamed_constraints(table, &qualified, &mut violations);
         }
         if !is_disabled(config, "timestamps/has_created_at") {
-            check_has_created_at(table, &qualified, config, &mut violations);
+            timestamps::check_has_created_at(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "timestamps/has_updated_at") {
-            check_has_updated_at(table, &qualified, config, &mut violations);
+            timestamps::check_has_updated_at(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "timestamps/correct_type") {
-            check_timestamp_type(table, &qualified, config, &mut violations);
+            timestamps::check_timestamp_type(table, &qualified, config, &mut violations);
         }
         if !is_disabled(config, "partition/too_many_children") {
-            check_partition_too_many_children(table, &qualified, &mut violations);
+            partitions::check_partition_too_many_children(table, &qualified, &mut violations);
         }
         if !is_disabled(config, "partition/range_gaps") {
-            check_partition_range_gaps(table, &qualified, &mut violations);
+            partitions::check_partition_range_gaps(table, &qualified, &mut violations);
         }
         if !is_disabled(config, "partition/no_default") {
-            check_partition_no_default(table, &qualified, &mut violations);
+            partitions::check_partition_no_default(table, &qualified, &mut violations);
         }
     }
 
     // schema-level rules (not per-table)
     if !is_disabled(config, "partition/gucs") {
-        check_partition_gucs(schema, &mut violations);
+        partitions::check_partition_gucs(schema, &mut violations);
     }
 
     suppress_overlapping(&mut violations);
@@ -199,704 +203,10 @@ fn is_disabled(config: &LintConfig, rule: &str) -> bool {
     config.disabled_rules.iter().any(|r| r == rule)
 }
 
-// naming rules
-
-fn check_table_name_style(
-    table: &Table,
-    qualified: &str,
-    config: &LintConfig,
-    violations: &mut Vec<LintViolation>,
-) {
-    let name = &table.name;
-    let valid = match config.table_name_style.as_str() {
-        "snake_singular" => is_snake_case(name) && !looks_plural(name),
-        "snake_plural" => is_snake_case(name),
-        "camelCase" => {
-            let re = Regex::new(r"^[a-z][a-zA-Z0-9]*$").unwrap();
-            re.is_match(name)
-        }
-        "PascalCase" => {
-            let re = Regex::new(r"^[A-Z][a-zA-Z0-9]*$").unwrap();
-            re.is_match(name)
-        }
-        "custom_regex" => {
-            if let Some(pattern) = &config.table_name_regex {
-                Regex::new(pattern)
-                    .map(|re| re.is_match(name))
-                    .unwrap_or(true)
-            } else {
-                true
-            }
-        }
-        _ => true,
-    };
-
-    if !valid {
-        violations.push(LintViolation {
-            rule: "naming/table_style".into(),
-            severity: Severity::Warning,
-            table: qualified.into(),
-            column: None,
-            message: format!(
-                "table name '{}' does not match style '{}'",
-                name, config.table_name_style
-            ),
-            recommendation: format!("rename to match {} convention", config.table_name_style),
-            ddl_fix: None,
-            convention_doc: "naming".into(),
-        });
-    }
-}
-
-fn check_column_name_style(
-    table: &Table,
-    qualified: &str,
-    config: &LintConfig,
-    violations: &mut Vec<LintViolation>,
-) {
-    let camel_re = Regex::new(r"^[a-z][a-zA-Z0-9]*$").unwrap();
-    let custom_re = config
-        .column_name_regex
-        .as_ref()
-        .and_then(|p| Regex::new(p).ok());
-
-    for col in &table.columns {
-        let valid = match config.column_name_style.as_str() {
-            "snake_case" => is_snake_case(&col.name),
-            "camelCase" => camel_re.is_match(&col.name),
-            "custom_regex" => custom_re
-                .as_ref()
-                .map(|re| re.is_match(&col.name))
-                .unwrap_or(true),
-            _ => true,
-        };
-
-        if !valid {
-            violations.push(LintViolation {
-                rule: "naming/column_style".into(),
-                severity: Severity::Warning,
-                table: qualified.into(),
-                column: Some(col.name.clone()),
-                message: format!(
-                    "column '{}' does not match style '{}'",
-                    col.name, config.column_name_style
-                ),
-                recommendation: format!("rename to match {} convention", config.column_name_style),
-                ddl_fix: None,
-            convention_doc: "naming".into(),
-            });
-        }
-    }
-}
-
-fn check_fk_naming(
-    table: &Table,
-    qualified: &str,
-    config: &LintConfig,
-    violations: &mut Vec<LintViolation>,
-) {
-    for constraint in &table.constraints {
-        if constraint.kind != ConstraintKind::ForeignKey {
-            continue;
-        }
-        let expected = config
-            .fk_pattern
-            .replace("{table}", &table.name)
-            .replace("{column}", &constraint.columns.join("_"));
-
-        if constraint.name != expected {
-            violations.push(LintViolation {
-                rule: "naming/fk_pattern".into(),
-                severity: Severity::Info,
-                table: qualified.into(),
-                column: None,
-                message: format!(
-                    "FK constraint '{}' doesn't match pattern '{}' (expected '{}')",
-                    constraint.name, config.fk_pattern, expected
-                ),
-                recommendation: format!("rename constraint to '{expected}'"),
-                ddl_fix: None,
-            convention_doc: "naming".into(),
-            });
-        }
-    }
-}
-
-fn check_index_naming(
-    table: &Table,
-    qualified: &str,
-    config: &LintConfig,
-    violations: &mut Vec<LintViolation>,
-) {
-    for index in &table.indexes {
-        if index.is_primary {
-            continue;
-        }
-        let expected = config
-            .index_pattern
-            .replace("{table}", &table.name)
-            .replace("{columns}", &index.columns.join("_"));
-
-        if index.name != expected {
-            violations.push(LintViolation {
-                rule: "naming/index_pattern".into(),
-                severity: Severity::Info,
-                table: qualified.into(),
-                column: None,
-                message: format!(
-                    "index '{}' doesn't match pattern '{}' (expected '{}')",
-                    index.name, config.index_pattern, expected
-                ),
-                recommendation: format!("rename index to '{expected}'"),
-                ddl_fix: None,
-            convention_doc: "naming".into(),
-            });
-        }
-    }
-}
-
-// primary key rules
-
-fn check_pk_exists(table: &Table, qualified: &str, violations: &mut Vec<LintViolation>) {
-    let has_pk = table
-        .constraints
-        .iter()
-        .any(|c| c.kind == ConstraintKind::PrimaryKey);
-
-    if !has_pk {
-        let e = jit::missing_primary_key(qualified);
-        violations.push(LintViolation {
-            rule: "pk/exists".into(),
-            severity: Severity::Error,
-            table: qualified.into(),
-            column: None,
-            message: "table has no primary key".into(),
-            recommendation: e.reason,
-            ddl_fix: Some(e.fix),
-            convention_doc: "primary_keys".into(),
-        });
-    }
-}
-
-fn check_pk_type(
-    table: &Table,
-    qualified: &str,
-    config: &LintConfig,
-    violations: &mut Vec<LintViolation>,
-) {
-    if config.pk_type != "bigint_identity" && config.pk_type != "int_identity" {
-        return;
-    }
-
-    let pk_constraint = table
-        .constraints
-        .iter()
-        .find(|c| c.kind == ConstraintKind::PrimaryKey);
-
-    let Some(pk) = pk_constraint else {
-        return;
-    };
-
-    let allow_int = config.pk_type == "int_identity";
-
-    for pk_col_name in &pk.columns {
-        let Some(col) = table.columns.iter().find(|c| &c.name == pk_col_name) else {
-            continue;
-        };
-
-        let type_lower = col.type_name.to_lowercase();
-        let is_bigint = type_lower == "bigint" || type_lower == "int8";
-        let is_int = type_lower == "integer" || type_lower == "int4" || type_lower == "int";
-        let is_identity = col.identity.is_some();
-
-        let type_ok = is_bigint || (allow_int && is_int);
-
-        if !type_ok || !is_identity {
-            let expected = if allow_int {
-                "integer or bigint with identity"
-            } else {
-                "bigint with identity"
-            };
-            violations.push(LintViolation {
-                rule: "pk/bigint_identity".into(),
-                severity: Severity::Warning,
-                table: qualified.into(),
-                column: Some(pk_col_name.clone()),
-                message: format!(
-                    "PK column '{}' is {} {}— expected {expected}",
-                    pk_col_name,
-                    col.type_name,
-                    if is_identity { "(identity) " } else { "" }
-                ),
-                recommendation: format!("use {expected} for primary keys"),
-                ddl_fix: None,
-            convention_doc: "primary_keys".into(),
-            });
-        }
-    }
-}
-
-// type rules
-
-fn check_text_over_varchar(
-    table: &Table,
-    qualified: &str,
-    config: &LintConfig,
-    violations: &mut Vec<LintViolation>,
-) {
-    if !config.prefer_text_over_varchar {
-        return;
-    }
-
-    for col in &table.columns {
-        let type_lower = col.type_name.to_lowercase();
-        if type_lower.starts_with("character varying") || type_lower.starts_with("varchar") {
-            let e = jit::text_over_varchar(qualified, &col.name);
-            violations.push(LintViolation {
-                rule: "types/text_over_varchar".into(),
-                severity: Severity::Warning,
-                table: qualified.into(),
-                column: Some(col.name.clone()),
-                message: format!("column '{}' uses {} — prefer text", col.name, col.type_name),
-                recommendation: e.reason,
-                ddl_fix: Some(e.fix),
-            convention_doc: "types".into(),
-            });
-        }
-    }
-}
-
-fn check_timestamptz(table: &Table, qualified: &str, violations: &mut Vec<LintViolation>) {
-    for col in &table.columns {
-        let type_lower = col.type_name.to_lowercase();
-        if type_lower == "timestamp without time zone" || type_lower == "timestamp" {
-            let e = jit::timestamp_to_timestamptz(qualified, &col.name);
-            let rec = match &e.note {
-                Some(note) => format!("{}\n{note}", e.reason),
-                None => e.reason,
-            };
-            violations.push(LintViolation {
-                rule: "types/timestamptz".into(),
-                severity: Severity::Warning,
-                table: qualified.into(),
-                column: Some(col.name.clone()),
-                message: format!("column '{}' uses timestamp without time zone", col.name),
-                recommendation: rec,
-                ddl_fix: Some(e.fix),
-            convention_doc: "types".into(),
-            });
-        }
-    }
-}
-
-fn check_no_serial(table: &Table, qualified: &str, violations: &mut Vec<LintViolation>) {
-    for col in &table.columns {
-        if let Some(default) = &col.default {
-            if default.to_lowercase().contains("nextval(") {
-                violations.push(LintViolation {
-                    rule: "types/no_serial".into(),
-                    severity: Severity::Warning,
-                    table: qualified.into(),
-                    column: Some(col.name.clone()),
-                    message: format!(
-                        "column '{}' uses serial/sequence default ({})",
-                        col.name, default
-                    ),
-                    recommendation: "use bigint GENERATED ALWAYS AS IDENTITY instead of serial"
-                        .into(),
-                    ddl_fix: None,
-            convention_doc: "types".into(),
-                });
-            }
-        }
-    }
-}
-
-fn check_bigint_pk_fk(table: &Table, qualified: &str, config: &LintConfig, violations: &mut Vec<LintViolation>) {
-    let pk_cols: Vec<&str> = table
-        .constraints
-        .iter()
-        .filter(|c| c.kind == ConstraintKind::PrimaryKey)
-        .flat_map(|c| c.columns.iter().map(|s| s.as_str()))
-        .collect();
-
-    let fk_cols: Vec<&str> = table
-        .constraints
-        .iter()
-        .filter(|c| c.kind == ConstraintKind::ForeignKey)
-        .flat_map(|c| c.columns.iter().map(|s| s.as_str()))
-        .collect();
-
-    for col in &table.columns {
-        let is_pk_or_fk =
-            pk_cols.contains(&col.name.as_str()) || fk_cols.contains(&col.name.as_str());
-        if !is_pk_or_fk {
-            continue;
-        }
-
-        let type_lower = col.type_name.to_lowercase();
-        let is_int = type_lower == "integer" || type_lower == "int4" || type_lower == "int";
-        // when pk_type is int_identity, integer is acceptable
-        if is_int && config.pk_type == "int_identity" {
-            continue;
-        }
-        if is_int
-            || type_lower == "smallint"
-            || type_lower == "int2"
-        {
-            violations.push(LintViolation {
-                rule: "types/bigint_pk_fk".into(),
-                severity: Severity::Warning,
-                table: qualified.into(),
-                column: Some(col.name.clone()),
-                message: format!(
-                    "PK/FK column '{}' uses {} — risk of 32-bit overflow",
-                    col.name, col.type_name
-                ),
-                recommendation: "use bigint for PK and FK columns".into(),
-                ddl_fix: None,
-            convention_doc: "types".into(),
-            });
-        }
-    }
-}
-
-// constraint rules
-
-fn check_fk_has_index(
-    table: &Table,
-    qualified: &str,
-    _schema: &SchemaSnapshot,
-    violations: &mut Vec<LintViolation>,
-) {
-    for constraint in &table.constraints {
-        if constraint.kind != ConstraintKind::ForeignKey {
-            continue;
-        }
-        if constraint.columns.is_empty() {
-            continue;
-        }
-
-        // index must have FK columns as a leading prefix, in order
-        let has_covering_index = table.indexes.iter().any(|idx| {
-            if idx.columns.len() < constraint.columns.len() {
-                return false;
-            }
-            constraint
-                .columns
-                .iter()
-                .zip(idx.columns.iter())
-                .all(|(fk_col, idx_col)| fk_col == idx_col)
-        });
-
-        if !has_covering_index {
-            let col_list = constraint.columns.join(", ");
-            let ddl = format!(
-                "CREATE INDEX CONCURRENTLY idx_{}_{} ON {}({});",
-                table.name,
-                constraint.columns.join("_"),
-                qualified,
-                col_list
-            );
-            violations.push(LintViolation {
-                rule: "constraints/fk_has_index".into(),
-                severity: Severity::Error,
-                table: qualified.into(),
-                column: Some(col_list.clone()),
-                message: format!(
-                    "FK '{}' on column(s) ({}) has no covering index",
-                    constraint.name, col_list
-                ),
-                recommendation: "Add an index on FK columns to avoid sequential scans on DELETE/UPDATE of the referenced table.".into(),
-                ddl_fix: Some(ddl),
-            convention_doc: "constraints".into(),
-            });
-        }
-    }
-}
-
-fn check_unnamed_constraints(table: &Table, qualified: &str, violations: &mut Vec<LintViolation>) {
-    for constraint in &table.constraints {
-        let name = &constraint.name;
-        let is_auto = name.ends_with("_pkey")
-            || name.ends_with("_fkey")
-            || name.ends_with("_key")
-            || name.ends_with("_check")
-            || name.ends_with("_excl");
-
-        if is_auto {
-            violations.push(LintViolation {
-                rule: "constraints/unnamed".into(),
-                severity: Severity::Info,
-                table: qualified.into(),
-                column: None,
-                message: format!("constraint '{}' appears to be auto-generated", name),
-                recommendation: "name constraints explicitly for readable error messages".into(),
-                ddl_fix: None,
-            convention_doc: "constraints".into(),
-            });
-        }
-    }
-}
-
-// timestamp rules
-
-fn check_has_created_at(
-    table: &Table,
-    qualified: &str,
-    config: &LintConfig,
-    violations: &mut Vec<LintViolation>,
-) {
-    if !config.require_timestamps {
-        return;
-    }
-
-    let has_created_at = table.columns.iter().any(|c| c.name == "created_at");
-    if !has_created_at {
-        let e = jit::missing_timestamp(qualified, "created_at");
-        violations.push(LintViolation {
-            rule: "timestamps/has_created_at".into(),
-            severity: Severity::Warning,
-            table: qualified.into(),
-            column: None,
-            message: "table is missing 'created_at' column".into(),
-            recommendation: e.reason,
-            ddl_fix: Some(e.fix),
-            convention_doc: "timestamps".into(),
-        });
-    }
-}
-
-fn check_has_updated_at(
-    table: &Table,
-    qualified: &str,
-    config: &LintConfig,
-    violations: &mut Vec<LintViolation>,
-) {
-    if !config.require_timestamps {
-        return;
-    }
-
-    let has_updated_at = table.columns.iter().any(|c| c.name == "updated_at");
-    if !has_updated_at {
-        let e = jit::missing_timestamp(qualified, "updated_at");
-        violations.push(LintViolation {
-            rule: "timestamps/has_updated_at".into(),
-            severity: Severity::Warning,
-            table: qualified.into(),
-            column: None,
-            message: "table is missing 'updated_at' column".into(),
-            recommendation: e.reason,
-            ddl_fix: Some(e.fix),
-            convention_doc: "timestamps".into(),
-        });
-    }
-}
-
-fn check_timestamp_type(
-    table: &Table,
-    qualified: &str,
-    config: &LintConfig,
-    violations: &mut Vec<LintViolation>,
-) {
-    if config.timestamp_type != "timestamptz" {
-        return;
-    }
-
-    let timestamp_cols = ["created_at", "updated_at", "deleted_at"];
-
-    for col in &table.columns {
-        if !timestamp_cols.contains(&col.name.as_str()) {
-            continue;
-        }
-        let type_lower = col.type_name.to_lowercase();
-        if type_lower == "timestamp without time zone" || type_lower == "timestamp" {
-            violations.push(LintViolation {
-                rule: "timestamps/correct_type".into(),
-                severity: Severity::Warning,
-                table: qualified.into(),
-                column: Some(col.name.clone()),
-                message: format!(
-                    "timestamp column '{}' uses {} instead of timestamptz",
-                    col.name, col.type_name
-                ),
-                recommendation: "use timestamptz for timestamp columns".into(),
-                ddl_fix: None,
-            convention_doc: "timestamps".into(),
-            });
-        }
-    }
-}
-
-// helpers
-
-fn is_snake_case(s: &str) -> bool {
-    let re = Regex::new(r"^[a-z][a-z0-9_]*$").unwrap();
-    re.is_match(s)
-}
-
-// simple heuristic: looks plural if ends in 's' but not 'ss', 'us', 'is'
-fn looks_plural(name: &str) -> bool {
-    if name.ends_with('s')
-        && !name.ends_with("ss")
-        && !name.ends_with("us")
-        && !name.ends_with("is")
-        && !name.ends_with("ies")
-    {
-        return true;
-    }
-    if name.ends_with("ies") && name != "series" {
-        return true;
-    }
-    false
-}
-
-fn check_partition_too_many_children(
-    table: &Table,
-    qualified: &str,
-    violations: &mut Vec<LintViolation>,
-) {
-    let pi = match &table.partition_info {
-        Some(pi) => pi,
-        None => return,
-    };
-    let n = pi.children.len();
-    if n > 500 {
-        let e = jit::partition_too_many_children(qualified, n);
-        let rec = match &e.note {
-            Some(note) => format!("{}\n{note}", e.reason),
-            None => e.reason,
-        };
-        violations.push(LintViolation {
-            rule: "partition/too_many_children".into(),
-            severity: Severity::Warning,
-            table: qualified.into(),
-            column: None,
-            message: format!(
-                "table has {n} partitions; planning overhead may be significant"
-            ),
-            recommendation: rec,
-            ddl_fix: None,
-            convention_doc: "partitioning".into(),
-        });
-    }
-}
-
-fn check_partition_range_gaps(
-    table: &Table,
-    qualified: &str,
-    violations: &mut Vec<LintViolation>,
-) {
-    let pi = match &table.partition_info {
-        Some(pi) if pi.strategy == crate::schema::PartitionStrategy::Range => pi,
-        _ => return,
-    };
-
-    let re = match Regex::new(r"FROM \('([^']+)'\) TO \('([^']+)'\)") {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    let mut bounds: Vec<(String, String)> = pi
-        .children
-        .iter()
-        .filter_map(|c| {
-            re.captures(&c.bound).map(|cap| {
-                (cap[1].to_string(), cap[2].to_string())
-            })
-        })
-        .collect();
-
-    bounds.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for w in bounds.windows(2) {
-        if w[0].1 != w[1].0 {
-            let e = jit::partition_range_gap(&table.name, &w[0].1, &w[1].0);
-            violations.push(LintViolation {
-                rule: "partition/range_gaps".into(),
-                severity: Severity::Warning,
-                table: qualified.into(),
-                column: None,
-                message: format!(
-                    "gap in range partitions: '{}' ends at '{}' but next starts at '{}'",
-                    qualified, w[0].1, w[1].0
-                ),
-                recommendation: e.reason,
-                ddl_fix: Some(e.fix),
-            convention_doc: "partitioning".into(),
-            });
-        }
-    }
-}
-
-fn check_partition_no_default(
-    table: &Table,
-    qualified: &str,
-    violations: &mut Vec<LintViolation>,
-) {
-    let pi = match &table.partition_info {
-        Some(pi) => pi,
-        None => return,
-    };
-
-    let has_default = pi.children.iter().any(|c| c.bound.contains("DEFAULT"));
-    if !has_default {
-        let e = jit::partition_no_default(&table.name);
-        violations.push(LintViolation {
-            rule: "partition/no_default".into(),
-            severity: Severity::Info,
-            table: qualified.into(),
-            column: None,
-            message: format!(
-                "partitioned table '{qualified}' has no DEFAULT partition — \
-                 rows not matching any partition will be rejected"
-            ),
-            recommendation: e.reason,
-            ddl_fix: Some(e.fix),
-            convention_doc: "partitioning".into(),
-        });
-    }
-}
-
-fn check_partition_gucs(schema: &SchemaSnapshot, violations: &mut Vec<LintViolation>) {
-    let has_partitioned = schema
-        .tables
-        .iter()
-        .any(|t| t.partition_info.is_some());
-
-    if !has_partitioned {
-        return;
-    }
-
-    let gucs_to_check = [
-        ("enable_partition_pruning", "on"),
-        ("enable_partitionwise_join", "on"),
-        ("enable_partitionwise_aggregate", "on"),
-    ];
-
-    for (name, expected) in &gucs_to_check {
-        let current = schema.gucs.iter().find(|g| g.name == *name);
-        let value = current.map(|g| g.setting.as_str()).unwrap_or("on");
-        if value != *expected {
-            violations.push(LintViolation {
-                rule: "partition/gucs".into(),
-                severity: Severity::Warning,
-                table: String::new(),
-                column: None,
-                message: format!(
-                    "{name} = '{value}' — should be '{expected}' when partitioned tables exist"
-                ),
-                recommendation: format!("ALTER SYSTEM SET {name} = '{expected}';"),
-                ddl_fix: None,
-            convention_doc: "partitioning".into(),
-            });
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lint::Severity;
     use crate::schema::*;
     use chrono::Utc;
 
