@@ -1,0 +1,411 @@
+mod catalog;
+mod comments;
+mod indexes;
+mod objects;
+mod partitions;
+mod policies;
+mod raw_types;
+mod stats;
+mod tables;
+
+use std::collections::HashMap;
+
+use chrono::Utc;
+use sqlx::postgres::PgRow;
+use sqlx::{PgPool, Row};
+use tracing::info;
+
+use super::hash::{compute_content_hash, HashInput};
+use super::types::*;
+use crate::error::Result;
+
+pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
+    let pg_version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(pool)
+        .await?;
+
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await?;
+
+    // Group 1: table-centric data.
+    let (
+        raw_tables,
+        raw_columns,
+        raw_constraints,
+        table_comments,
+        column_comments,
+        raw_indexes,
+        raw_table_stats,
+        raw_column_stats,
+        raw_partitions,
+        raw_partition_children,
+        raw_policies,
+        raw_triggers,
+        raw_index_stats,
+    ) = tokio::try_join!(
+        tables::fetch_tables(pool),
+        tables::fetch_columns(pool),
+        tables::fetch_constraints(pool),
+        comments::fetch_table_comments(pool),
+        comments::fetch_column_comments(pool),
+        indexes::fetch_indexes(pool),
+        tables::fetch_table_stats(pool),
+        tables::fetch_column_stats(pool),
+        partitions::fetch_partition_info(pool),
+        partitions::fetch_partition_children(pool),
+        policies::fetch_policies(pool),
+        policies::fetch_triggers(pool),
+        indexes::fetch_index_stats(pool),
+    )?;
+
+    // Group 2: top-level objects.
+    let (enums, domains, composites, views, functions, extensions, gucs, is_standby) =
+        tokio::try_join!(
+            catalog::fetch_enums(pool),
+            catalog::fetch_domains(pool),
+            catalog::fetch_composites(pool),
+            objects::fetch_views(pool),
+            objects::fetch_functions(pool),
+            objects::fetch_extensions(pool),
+            objects::fetch_gucs(pool),
+            fetch_is_standby(pool),
+        )?;
+
+    let with_vacuum = raw_table_stats.iter().filter(|s| s.last_autovacuum.is_some()).count();
+    if with_vacuum == 0 && !raw_table_stats.is_empty() {
+        if is_standby {
+            info!("all vacuum timestamps are null;expected on standby");
+        } else {
+            tracing::warn!(
+                "all vacuum/analyze timestamps are null on primary! \
+                 check that the role has pg_read_all_stats privilege"
+            );
+        }
+    }
+
+    let tables = assemble_tables(
+        raw_tables,
+        raw_columns,
+        raw_constraints,
+        table_comments,
+        column_comments,
+        raw_indexes,
+        raw_table_stats,
+        raw_column_stats,
+        raw_partitions,
+        raw_partition_children,
+        raw_policies,
+        raw_triggers,
+        raw_index_stats,
+    );
+
+    let content_hash = compute_content_hash(&HashInput {
+        pg_version: &pg_version,
+        tables: &tables,
+        enums: &enums,
+        domains: &domains,
+        composites: &composites,
+        views: &views,
+        functions: &functions,
+        extensions: &extensions,
+    });
+
+    let snapshot = SchemaSnapshot {
+        pg_version,
+        database,
+        timestamp: Utc::now(),
+        content_hash,
+        source: None,
+        tables,
+        enums,
+        domains,
+        composites,
+        views,
+        functions,
+        extensions,
+        gucs,
+        node_stats: vec![],
+    };
+
+    info!(
+        tables = snapshot.tables.len(),
+        enums = snapshot.enums.len(),
+        domains = snapshot.domains.len(),
+        composites = snapshot.composites.len(),
+        views = snapshot.views.len(),
+        functions = snapshot.functions.len(),
+        extensions = snapshot.extensions.len(),
+        hash = %snapshot.content_hash,
+        "schema introspection complete"
+    );
+
+    Ok(snapshot)
+}
+
+pub async fn fetch_stats_only(pool: &PgPool, source: &str) -> Result<NodeStats> {
+    let (raw_table_stats, raw_index_stats, raw_column_stats, is_standby) = tokio::try_join!(
+        stats::fetch_named_table_stats(pool),
+        stats::fetch_named_index_stats(pool),
+        stats::fetch_named_column_stats(pool),
+        fetch_is_standby(pool),
+    )?;
+
+    Ok(NodeStats {
+        source: source.to_string(),
+        timestamp: Utc::now(),
+        is_standby,
+        table_stats: raw_table_stats,
+        index_stats: raw_index_stats,
+        column_stats: raw_column_stats,
+    })
+}
+
+pub async fn fetch_is_standby(pool: &PgPool) -> Result<bool> {
+    let row: PgRow = sqlx::query("SELECT pg_catalog.pg_is_in_recovery() AS is_standby")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.get("is_standby"))
+}
+
+// ---------------------------------------------------------------------------
+// Assembly: merge parts into Table structs
+// ---------------------------------------------------------------------------
+
+use raw_types::*;
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_tables(
+    raw_tables: Vec<RawTable>,
+    raw_columns: Vec<RawColumn>,
+    raw_constraints: Vec<RawConstraint>,
+    table_comments: Vec<RawTableComment>,
+    column_comments: Vec<RawColumnComment>,
+    raw_indexes: Vec<RawIndex>,
+    raw_table_stats: Vec<RawTableStats>,
+    raw_column_stats: Vec<RawColumnStats>,
+    raw_partitions: Vec<RawPartitionInfo>,
+    raw_partition_children: Vec<RawPartitionChild>,
+    raw_policies: Vec<RawPolicy>,
+    raw_triggers: Vec<RawTrigger>,
+    raw_index_stats: Vec<RawIndexStats>,
+) -> Vec<Table> {
+    // --- Columns ---
+    let mut columns_by_oid: HashMap<u32, Vec<Column>> = HashMap::new();
+    for rc in raw_columns {
+        columns_by_oid
+            .entry(rc.table_oid)
+            .or_default()
+            .push(Column {
+                name: rc.name,
+                ordinal: rc.ordinal,
+                type_name: rc.type_name,
+                nullable: rc.nullable,
+                default: rc.default,
+                identity: rc.identity,
+                generated: rc.generated,
+                comment: None,
+                statistics_target: rc.statistics_target,
+                stats: None,
+            });
+    }
+
+    // --- Constraints ---
+    let mut constraints_by_oid: HashMap<u32, Vec<Constraint>> = HashMap::new();
+    for rc in raw_constraints {
+        let kind = match ConstraintKind::from_pg_contype(&rc.contype) {
+            Some(k) => k,
+            None => continue,
+        };
+        constraints_by_oid
+            .entry(rc.table_oid)
+            .or_default()
+            .push(Constraint {
+                name: rc.name,
+                kind,
+                columns: rc.columns,
+                definition: rc.definition,
+                fk_table: rc.fk_table,
+                fk_columns: rc.fk_columns,
+                backing_index: rc.backing_index,
+                comment: rc.comment,
+            });
+    }
+
+    // --- Table comments ---
+    let table_comment_map: HashMap<u32, String> = table_comments
+        .into_iter()
+        .map(|tc| (tc.table_oid, tc.comment))
+        .collect();
+
+    // --- Column comments ---
+    let col_comment_map: HashMap<(u32, String), String> = column_comments
+        .into_iter()
+        .map(|cc| ((cc.table_oid, cc.column_name), cc.comment))
+        .collect();
+
+    for (oid, cols) in &mut columns_by_oid {
+        for col in cols.iter_mut() {
+            if let Some(comment) = col_comment_map.get(&(*oid, col.name.clone())) {
+                col.comment = Some(comment.clone());
+            }
+        }
+    }
+
+    // --- Column stats ---
+    let mut col_stats_map: HashMap<(u32, String), ColumnStats> = HashMap::new();
+    for cs in raw_column_stats {
+        col_stats_map.insert(
+            (cs.table_oid, cs.column_name),
+            ColumnStats {
+                null_frac: cs.null_frac,
+                n_distinct: cs.n_distinct,
+                most_common_vals: cs.most_common_vals,
+                most_common_freqs: cs.most_common_freqs,
+                histogram_bounds: cs.histogram_bounds,
+                correlation: cs.correlation,
+            },
+        );
+    }
+
+    for (oid, cols) in &mut columns_by_oid {
+        for col in cols.iter_mut() {
+            if let Some(stats) = col_stats_map.remove(&(*oid, col.name.clone())) {
+                col.stats = Some(stats);
+            }
+        }
+    }
+
+    // --- Index stats ---
+    let mut idx_stats_map: HashMap<(u32, String), IndexStats> = HashMap::new();
+    for ris in raw_index_stats {
+        idx_stats_map.insert(
+            (ris.table_oid, ris.index_name),
+            IndexStats {
+                idx_scan: ris.idx_scan,
+                idx_tup_read: ris.idx_tup_read,
+                idx_tup_fetch: ris.idx_tup_fetch,
+                size: ris.size,
+                relpages: ris.relpages,
+                reltuples: ris.reltuples,
+            },
+        );
+    }
+
+    // --- Indexes ---
+    let mut indexes_by_oid: HashMap<u32, Vec<Index>> = HashMap::new();
+    for ri in raw_indexes {
+        let stats = idx_stats_map.remove(&(ri.table_oid, ri.name.clone()));
+        indexes_by_oid.entry(ri.table_oid).or_default().push(Index {
+            name: ri.name,
+            columns: ri.columns,
+            include_columns: ri.include_columns,
+            index_type: ri.index_type,
+            is_unique: ri.is_unique,
+            is_primary: ri.is_primary,
+            predicate: ri.predicate,
+            definition: ri.definition,
+            is_valid: ri.is_valid,
+            backs_constraint: ri.backs_constraint,
+            stats,
+        });
+    }
+
+    // --- Table stats ---
+    let stats_by_oid: HashMap<u32, TableStats> = raw_table_stats
+        .into_iter()
+        .map(|s| {
+            (
+                s.table_oid,
+                TableStats {
+                    reltuples: s.reltuples,
+                    relpages: s.relpages,
+                    dead_tuples: s.dead_tuples,
+                    last_vacuum: s.last_vacuum,
+                    last_autovacuum: s.last_autovacuum,
+                    last_analyze: s.last_analyze,
+                    last_autoanalyze: s.last_autoanalyze,
+                    seq_scan: s.seq_scan,
+                    idx_scan: s.idx_scan,
+                    table_size: s.table_size,
+                },
+            )
+        })
+        .collect();
+
+    // --- Partition info ---
+    let mut children_by_parent: HashMap<u32, Vec<PartitionChild>> = HashMap::new();
+    for pc in raw_partition_children {
+        children_by_parent
+            .entry(pc.parent_oid)
+            .or_default()
+            .push(PartitionChild {
+                schema: pc.schema,
+                name: pc.name,
+                bound: pc.bound,
+            });
+    }
+
+    let partition_info_by_oid: HashMap<u32, PartitionInfo> = raw_partitions
+        .into_iter()
+        .filter_map(|rp| {
+            let strategy = PartitionStrategy::from_pg_partstrat(&rp.strategy)?;
+            Some((
+                rp.table_oid,
+                PartitionInfo {
+                    strategy,
+                    key: rp.key,
+                    children: children_by_parent.remove(&rp.table_oid).unwrap_or_default(),
+                },
+            ))
+        })
+        .collect();
+
+    // --- Policies ---
+    let mut policies_by_oid: HashMap<u32, Vec<RlsPolicy>> = HashMap::new();
+    for rp in raw_policies {
+        policies_by_oid
+            .entry(rp.table_oid)
+            .or_default()
+            .push(RlsPolicy {
+                name: rp.name,
+                command: rp.command,
+                permissive: rp.permissive,
+                roles: rp.roles,
+                using_expr: rp.using_expr,
+                with_check_expr: rp.with_check_expr,
+            });
+    }
+
+    // --- Triggers ---
+    let mut triggers_by_oid: HashMap<u32, Vec<Trigger>> = HashMap::new();
+    for rt in raw_triggers {
+        triggers_by_oid
+            .entry(rt.table_oid)
+            .or_default()
+            .push(Trigger {
+                name: rt.name,
+                definition: rt.definition,
+            });
+    }
+
+    // --- Assemble ---
+    raw_tables
+        .into_iter()
+        .map(|rt| Table {
+            oid: rt.oid,
+            schema: rt.schema,
+            name: rt.name,
+            columns: columns_by_oid.remove(&rt.oid).unwrap_or_default(),
+            constraints: constraints_by_oid.remove(&rt.oid).unwrap_or_default(),
+            indexes: indexes_by_oid.remove(&rt.oid).unwrap_or_default(),
+            comment: table_comment_map.get(&rt.oid).cloned(),
+            stats: stats_by_oid.get(&rt.oid).cloned(),
+            partition_info: partition_info_by_oid.get(&rt.oid).cloned(),
+            policies: policies_by_oid.remove(&rt.oid).unwrap_or_default(),
+            triggers: triggers_by_oid.remove(&rt.oid).unwrap_or_default(),
+            reloptions: rt.reloptions,
+            rls_enabled: rt.rls_enabled,
+        })
+        .collect()
+}

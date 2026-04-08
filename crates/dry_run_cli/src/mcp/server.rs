@@ -6,19 +6,21 @@ use rmcp::{
     model::*,
     tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
 };
-use serde::Deserialize;
 use tokio::sync::RwLock;
 use tracing::info;
 
 use dry_run_core::audit::AuditConfig;
 use dry_run_core::lint::LintConfig;
 use dry_run_core::schema::{
-    ConstraintKind, NodeStats, detect_seq_scan_imbalance, detect_stale_stats,
+    ConstraintKind, detect_seq_scan_imbalance, detect_stale_stats,
     detect_unused_indexes, effective_table_stats,
 };
 use dry_run_core::{DryRun, HistoryStore, SchemaSnapshot};
 
 use crate::pgmustard::PgMustardClient;
+
+use super::helpers::{format_node_table_breakdown, format_number, to_mcp_err};
+use super::params::*;
 
 #[derive(Clone)]
 pub struct DryRunServer {
@@ -159,158 +161,6 @@ impl DryRunServer {
         }
         obj.insert("_meta".into(), meta);
     }
-}
-
-// parameter types
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListTablesParams {
-    #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
-    pub schema: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Sort by: 'name' (default), 'rows', or 'size'.")]
-    pub sort: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Maximum number of results (default 50).")]
-    pub limit: Option<usize>,
-    #[serde(default)]
-    #[schemars(description = "Skip N results (default 0).")]
-    pub offset: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct DescribeTableParams {
-    pub table: String,
-    #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
-    pub schema: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Detail level: 'summary' (default, compact with profiles), 'full' (all raw stats), 'stats' (only profiles and stats).")]
-    pub detail: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SearchSchemaParams {
-    #[schemars(description = "Case-insensitive substring to search for across all schema objects.")]
-    pub query: String,
-    #[serde(default)]
-    #[schemars(description = "Maximum number of results (default 30).")]
-    pub limit: Option<usize>,
-    #[serde(default)]
-    #[schemars(description = "Skip N results (default 0).")]
-    pub offset: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct FindRelatedParams {
-    pub table: String,
-    #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
-    pub schema: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SchemaDiffParams {
-    #[serde(default)]
-    #[schemars(description = "Content hash of the base snapshot. Omit to use the latest saved snapshot.")]
-    pub from: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Content hash of the target snapshot. Omit to compare against current live schema.")]
-    pub to: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ValidateQueryParams {
-    #[schemars(description = "SQL query to validate against the schema.")]
-    pub sql: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ExplainQueryParams {
-    pub sql: String,
-    #[serde(default)]
-    #[schemars(description = "Run EXPLAIN ANALYZE (actually executes the query). Default: false.")]
-    pub analyze: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AdviseParams {
-    pub sql: String,
-    #[serde(default)]
-    #[schemars(description = "Run EXPLAIN ANALYZE (actually executes the query). Default: false.")]
-    pub analyze: Option<bool>,
-    #[serde(default = "default_true")]
-    pub include_index_suggestions: Option<bool>,
-}
-
-fn default_true() -> Option<bool> {
-    Some(true)
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CheckMigrationParams {
-    #[schemars(description = "DDL statement(s) to check for migration safety (e.g. ALTER TABLE, CREATE INDEX).")]
-    pub ddl: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LintSchemaParams {
-    #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
-    pub schema: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Table name to lint a single table. Omit to include all tables.")]
-    pub table: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Scope: 'conventions' (lint only), 'audit' (audit only), or 'all' (default, both).")]
-    pub scope: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct DetectParams {
-    #[serde(default)]
-    #[schemars(description = "Detection kind: stale_stats, unused_indexes, bloated_indexes, or all (default).")]
-    pub kind: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Bloat ratio threshold (default 1.5).")]
-    pub threshold: Option<f64>,
-    #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
-    pub schema: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Table name to check a single table. Omit to include all tables.")]
-    pub table: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct VacuumHealthParams {
-    #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
-    pub schema: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Table name to check a single table. Omit to include all tables.")]
-    pub table: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CompareNodesParams {
-    #[schemars(description = "Table name (without schema prefix).")]
-    pub table: String,
-    #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
-    pub schema: Option<String>,
-}
-
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AnalyzePlanParams {
-    #[schemars(description = "The original SQL query text.")]
-    pub sql: String,
-    #[schemars(description = "EXPLAIN output in PostgreSQL JSON format (the output of EXPLAIN (FORMAT JSON) or EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)).")]
-    pub plan_json: serde_json::Value,
-    #[serde(default = "default_true")]
-    pub include_index_suggestions: Option<bool>,
 }
 
 // tool implementations
@@ -1292,76 +1142,6 @@ impl DryRunServer {
             None,
         ))
     }
-}
-
-fn to_mcp_err(e: dry_run_core::Error) -> McpError {
-    McpError::internal_error(e.to_string(), None)
-}
-
-fn format_number(n: i64) -> String {
-    if n.abs() < 1_000 {
-        return n.to_string();
-    }
-    let s = n.abs().to_string();
-    let mut result = String::new();
-    for (i, ch) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(ch);
-    }
-    if n < 0 {
-        result.push('-');
-    }
-    result.chars().rev().collect()
-}
-
-fn format_node_table_breakdown(node_stats: &[NodeStats], schema: &str, table: &str) -> Option<String> {
-    if node_stats.is_empty() {
-        return None;
-    }
-
-    let newest = node_stats.iter().map(|ns| ns.timestamp).max();
-    let stale_threshold = newest.map(|t| t - chrono::TimeDelta::days(7));
-
-    let mut lines: Vec<String> = Vec::new();
-    lines.push(format!(
-        "\nPer-node breakdown ({} node(s)):\n",
-        node_stats.len()
-    ));
-    lines.push(format!(
-        "{:<16} {:>12} {:>10} {:>10} {:>10} {:>12}  {}",
-        "", "reltuples", "relpages", "seq_scan", "idx_scan", "table_size", "collected"
-    ));
-
-    for ns in node_stats {
-        let ts = ns
-            .table_stats
-            .iter()
-            .find(|t| t.table == table && t.schema == schema);
-
-        if let Some(ts) = ts {
-            let size_mb = ts.stats.table_size / (1024 * 1024);
-            let collected = ns.timestamp.format("%Y-%m-%d %H:%M");
-            let stale = stale_threshold
-                .is_some_and(|threshold| ns.timestamp < threshold);
-            lines.push(format!(
-                "{:<16} {:>12} {:>10} {:>10} {:>10} {:>9} MB  {}{}",
-                ns.source,
-                format_number(ts.stats.reltuples as i64),
-                format_number(ts.stats.relpages),
-                format_number(ts.stats.seq_scan),
-                format_number(ts.stats.idx_scan),
-                format_number(size_mb),
-                collected,
-                if stale { " (stale)" } else { "" },
-            ));
-        } else {
-            lines.push(format!("{:<16} (no data for this table)", ns.source));
-        }
-    }
-
-    Some(lines.join("\n"))
 }
 
 #[cfg(test)]
