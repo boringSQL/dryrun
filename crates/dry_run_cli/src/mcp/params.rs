@@ -3,7 +3,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTablesParams {
     #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
+    #[schemars(description = "Schema filter (default: all schemas).")]
     pub schema: Option<String>,
     #[serde(default)]
     #[schemars(description = "Sort by: 'name' (default), 'rows', or 'size'.")]
@@ -20,7 +20,7 @@ pub struct ListTablesParams {
 pub struct DescribeTableParams {
     pub table: String,
     #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
+    #[schemars(description = "Schema filter (default: all schemas).")]
     pub schema: Option<String>,
     #[serde(default)]
     #[schemars(description = "Detail level: 'summary' (default, compact with profiles), 'full' (all raw stats), 'stats' (only profiles and stats).")]
@@ -29,7 +29,7 @@ pub struct DescribeTableParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchSchemaParams {
-    #[schemars(description = "Case-insensitive substring to search for across all schema objects.")]
+    #[schemars(description = "Case-insensitive substring.")]
     pub query: String,
     #[serde(default)]
     #[schemars(description = "Maximum number of results (default 30).")]
@@ -43,7 +43,7 @@ pub struct SearchSchemaParams {
 pub struct FindRelatedParams {
     pub table: String,
     #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
+    #[schemars(description = "Schema filter (default: all schemas).")]
     pub schema: Option<String>,
 }
 
@@ -67,7 +67,7 @@ pub struct ValidateQueryParams {
 pub struct ExplainQueryParams {
     pub sql: String,
     #[serde(default)]
-    #[schemars(description = "Run EXPLAIN ANALYZE (actually executes the query). Default: false.")]
+    #[schemars(description = "Run EXPLAIN ANALYZE (executes the query).")]
     pub analyze: Option<bool>,
 }
 
@@ -75,7 +75,7 @@ pub struct ExplainQueryParams {
 pub struct AdviseParams {
     pub sql: String,
     #[serde(default)]
-    #[schemars(description = "Run EXPLAIN ANALYZE (actually executes the query). Default: false.")]
+    #[schemars(description = "Run EXPLAIN ANALYZE (executes the query).")]
     pub analyze: Option<bool>,
     #[serde(default = "default_true")]
     pub include_index_suggestions: Option<bool>,
@@ -94,10 +94,10 @@ pub struct CheckMigrationParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LintSchemaParams {
     #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
+    #[schemars(description = "Schema filter (default: all schemas).")]
     pub schema: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Table name to lint a single table. Omit to include all tables.")]
+    #[schemars(description = "Table filter (default: all tables).")]
     pub table: Option<String>,
     #[serde(default)]
     #[schemars(description = "Scope: 'conventions' (lint only), 'audit' (audit only), or 'all' (default, both).")]
@@ -113,29 +113,28 @@ pub struct DetectParams {
     #[schemars(description = "Bloat ratio threshold (default 1.5).")]
     pub threshold: Option<f64>,
     #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
+    #[schemars(description = "Schema filter (default: all schemas).")]
     pub schema: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Table name to check a single table. Omit to include all tables.")]
+    #[schemars(description = "Table filter (default: all tables).")]
     pub table: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct VacuumHealthParams {
     #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
+    #[schemars(description = "Schema filter (default: all schemas).")]
     pub schema: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Table name to check a single table. Omit to include all tables.")]
+    #[schemars(description = "Table filter (default: all tables).")]
     pub table: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CompareNodesParams {
-    #[schemars(description = "Table name (without schema prefix).")]
     pub table: String,
     #[serde(default)]
-    #[schemars(description = "PostgreSQL schema name to filter by. Omit to include all schemas.")]
+    #[schemars(description = "Schema filter (default: all schemas).")]
     pub schema: Option<String>,
 }
 
@@ -143,7 +142,7 @@ pub struct CompareNodesParams {
 pub struct AnalyzePlanParams {
     #[schemars(description = "The original SQL query text.")]
     pub sql: String,
-    #[schemars(description = "EXPLAIN output in PostgreSQL JSON format (the output of EXPLAIN (FORMAT JSON) or EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)).")]
+    #[schemars(description = "EXPLAIN output in JSON format (EXPLAIN (FORMAT JSON)).")]
     pub plan_json: serde_json::Value,
     #[serde(default = "default_true")]
     pub include_index_suggestions: Option<bool>,

@@ -240,7 +240,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Describe a table in detail: columns, types, constraints, indexes, stats. Includes per-node breakdown when multi-node stats are available.")]
+    #[tool(description = "Table columns, types, constraints, indexes and stats. Per-node stats when present.")]
     async fn describe_table(
         &self,
         Parameters(params): Parameters<DescribeTableParams>,
@@ -367,7 +367,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Search across tables, columns, views, functions, enums, indexes, and comments by substring")]
+    #[tool(description = "Substring search over tables, columns, views, functions, enums, indexes, comments.")]
     async fn search_schema(
         &self,
         Parameters(params): Parameters<SearchSchemaParams>,
@@ -459,7 +459,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Find tables related via foreign keys — outgoing and incoming FKs with sample JOIN patterns")]
+    #[tool(description = "Incoming and outgoing foreign keys for a table, with sample JOINs.")]
     async fn find_related(
         &self,
         Parameters(params): Parameters<FindRelatedParams>,
@@ -521,7 +521,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Show schema changes between two saved snapshots, or between the latest saved snapshot and the current live schema. Requires history store (--history).")]
+    #[tool(description = "Diff two snapshots, or the latest snapshot against the live schema. Needs --history.")]
     async fn schema_diff(
         &self,
         Parameters(params): Parameters<SchemaDiffParams>,
@@ -571,7 +571,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Parse and validate a SQL query against the schema — checks table/column existence, detects anti-patterns. Uses aggregated multi-node stats when available.")]
+    #[tool(description = "Parse SQL and check it against the schema. Flags missing tables or columns and common anti-patterns. Offline.")]
     async fn validate_query(
         &self,
         Parameters(params): Parameters<ValidateQueryParams>,
@@ -598,7 +598,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Run EXPLAIN on a SQL query — returns structured plan with cost estimates and performance warnings. Requires live DB connection. Set analyze=true to execute the query (EXPLAIN ANALYZE).")]
+    #[tool(description = "Run EXPLAIN on a query. Pass analyze=true to run EXPLAIN ANALYZE. Needs live DB.")]
     async fn explain_query(
         &self,
         Parameters(params): Parameters<ExplainQueryParams>,
@@ -626,7 +626,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Analyze a query: run EXPLAIN (when live DB available), detect plan anti-patterns, suggest indexes from query structure. Works offline with static SQL analysis.")]
+    #[tool(description = "Plan analysis, anti-pattern checks and index suggestions for a query. Uses EXPLAIN when a live DB is available, static analysis otherwise.")]
     async fn advise(
         &self,
         Parameters(params): Parameters<AdviseParams>,
@@ -685,7 +685,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Analyze a pre-existing EXPLAIN plan — accepts plan JSON (from autoexplain, monitoring tools, or manual EXPLAIN output) plus the original SQL. Returns schema-enriched warnings, index suggestions, and migration safety advice. No live DB required.")]
+    #[tool(description = "Analyze an existing EXPLAIN plan (JSON) against the schema. Returns warnings, index and safety hints. Offline.")]
     async fn analyze_plan(
         &self,
         Parameters(params): Parameters<AnalyzePlanParams>,
@@ -784,7 +784,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Check DDL migration safety — analyzes lock types, duration, table size impact, provides safe alternatives")]
+    #[tool(description = "Check a DDL statement for lock level, duration, table-size impact, and suggest safer alternatives.")]
     async fn check_migration(
         &self,
         Parameters(params): Parameters<CheckMigrationParams>,
@@ -819,7 +819,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Schema quality checks. Scope: 'conventions' (naming, types, timestamps), 'audit' (indexes, FKs, structure), or 'all' (default, both). Works offline.")]
+    #[tool(description = "Schema quality checks. scope=conventions, audit, or all (default). Offline.")]
     async fn lint_schema(
         &self,
         Parameters(params): Parameters<LintSchemaParams>,
@@ -876,7 +876,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Analyze autovacuum health. Shows trigger thresholds, dead tuple progress, and recommendations for tuning. Works offline. Filter by schema/table or omit for all.")]
+    #[tool(description = "Autovacuum status with thresholds, dead tuples and tuning hints. Offline.")]
     async fn vacuum_health(
         &self,
         Parameters(params): Parameters<VacuumHealthParams>,
@@ -906,7 +906,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Run health detection checks. Kinds: stale_stats, unused_indexes, anomalies, bloated_indexes, all (default). Works offline from imported node_stats.")]
+    #[tool(description = "Health checks. kind=stale_stats, unused_indexes, anomalies, bloated_indexes, or all (default). Offline.")]
     async fn detect(
         &self,
         Parameters(params): Parameters<DetectParams>,
@@ -993,7 +993,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Compare per-node stats for a table across all nodes — shows reltuples, relpages, seq/idx scans, table size, and per-index breakdowns. Works offline from imported node_stats.")]
+    #[tool(description = "Per-node stats for a table. Shows reltuples, relpages, scans, size and per-index numbers. Offline.")]
     async fn compare_nodes(
         &self,
         Parameters(params): Parameters<CompareNodesParams>,
@@ -1070,7 +1070,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Compare the live local database against the loaded production schema snapshot. Classifies each difference as ahead (local has extra — your pending migration), behind (prod has something local doesn't — you need to catch up), or diverged (both differ — potential conflict). Requires live DB connection.")]
+    #[tool(description = "Compare the live local DB against the loaded production snapshot. Each diff is tagged ahead, behind or diverged. Needs live DB.")]
     async fn check_drift(&self) -> Result<CallToolResult, McpError> {
         let ctx = self.require_live_db()?;
         let prod_snapshot = self.get_schema().await?;
@@ -1107,7 +1107,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Reload schema from disk. Use after running `dryrun dump-schema` to pick up the schema without restarting the server.")]
+    #[tool(description = "Reload the on-disk schema without restarting. Run after `dryrun dump-schema`.")]
     async fn reload_schema(&self) -> Result<CallToolResult, McpError> {
         for candidate in &self.schema_candidates {
             if !candidate.exists() {
