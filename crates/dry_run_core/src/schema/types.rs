@@ -950,6 +950,75 @@ mod tests {
         let result = detect_unused_indexes(&[], &[]);
         assert!(result.is_empty());
     }
+
+    fn make_empty_snapshot() -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "16.0".into(),
+            database: "test".into(),
+            timestamp: chrono::Utc::now(),
+            content_hash: String::new(),
+            source: None,
+            tables: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
+    #[test]
+    fn to_structural_strips_inline_and_node_stats() {
+        let mut snap = make_empty_snapshot();
+        let mut table = make_table("t", vec![
+            make_index("i", false, false, Some(make_index_stats(1, 100))),
+        ]);
+        table.stats = Some(TableStats {
+            reltuples: 1.0, relpages: 1, dead_tuples: 0,
+            last_vacuum: None, last_autovacuum: None, last_analyze: None, last_autoanalyze: None,
+            seq_scan: 0, idx_scan: 0, table_size: 0,
+        });
+        snap.tables.push(table);
+        snap.node_stats.push(NodeStats {
+            source: "prod".into(), timestamp: chrono::Utc::now(), is_standby: false,
+            table_stats: vec![], index_stats: vec![], column_stats: vec![],
+        });
+
+        let structural = snap.to_structural();
+        assert!(structural.node_stats.is_empty());
+        assert!(structural.tables[0].stats.is_none());
+        assert!(structural.tables[0].indexes[0].stats.is_none());
+        assert!(structural.validate_structural_only().is_ok());
+    }
+
+    #[test]
+    fn validate_structural_only_rejects_inline_stats() {
+        let mut snap = make_empty_snapshot();
+        let mut table = make_table("t", vec![]);
+        table.stats = Some(TableStats {
+            reltuples: 0.0, relpages: 0, dead_tuples: 0,
+            last_vacuum: None, last_autovacuum: None, last_analyze: None, last_autoanalyze: None,
+            seq_scan: 0, idx_scan: 0, table_size: 0,
+        });
+        snap.tables.push(table);
+
+        let err = snap.validate_structural_only().unwrap_err();
+        assert!(err.contains("dump-schema"), "{err}");
+    }
+
+    #[test]
+    fn validate_structural_only_rejects_node_stats() {
+        let mut snap = make_empty_snapshot();
+        snap.node_stats.push(NodeStats {
+            source: "prod".into(), timestamp: chrono::Utc::now(), is_standby: false,
+            table_stats: vec![], index_stats: vec![], column_stats: vec![],
+        });
+        let err = snap.validate_structural_only().unwrap_err();
+        assert!(err.contains("node_stats"), "{err}");
+    }
 }
 
 // use aggregated multi-node stats over table-level stats

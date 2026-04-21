@@ -49,3 +49,100 @@ pub fn load_schema_file(path: &Path) -> Result<SchemaSnapshot> {
 
     Ok(snapshot)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::types::*;
+
+    fn tmpdir() -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "dryrun-load-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn minimal_snapshot() -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "16.0".into(),
+            database: "t".into(),
+            timestamp: chrono::Utc::now(),
+            content_hash: "abc".into(),
+            source: None,
+            tables: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
+    #[test]
+    fn loads_schema_and_merges_sibling_stats() {
+        let dir = tmpdir();
+        let schema_path = dir.join("schema.json");
+        std::fs::write(
+            &schema_path,
+            serde_json::to_string(&minimal_snapshot()).unwrap(),
+        )
+        .unwrap();
+
+        let ns_a = NodeStats {
+            source: "a".into(),
+            timestamp: chrono::Utc::now(),
+            is_standby: false,
+            table_stats: vec![],
+            index_stats: vec![],
+            column_stats: vec![],
+        };
+        let ns_b = NodeStats {
+            source: "b".into(),
+            timestamp: chrono::Utc::now(),
+            is_standby: true,
+            table_stats: vec![],
+            index_stats: vec![],
+            column_stats: vec![],
+        };
+        std::fs::write(dir.join("a-stats.json"), serde_json::to_string(&ns_a).unwrap()).unwrap();
+        std::fs::write(dir.join("b-stats.json"), serde_json::to_string(&ns_b).unwrap()).unwrap();
+
+        let loaded = load_schema_file(&schema_path).unwrap();
+        assert_eq!(loaded.node_stats.len(), 2);
+        // deterministic order (filename sort)
+        assert_eq!(loaded.node_stats[0].source, "a");
+        assert_eq!(loaded.node_stats[1].source, "b");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_legacy_combined_schema() {
+        let dir = tmpdir();
+        let schema_path = dir.join("schema.json");
+
+        let mut snap = minimal_snapshot();
+        snap.node_stats.push(NodeStats {
+            source: "legacy".into(),
+            timestamp: chrono::Utc::now(),
+            is_standby: false,
+            table_stats: vec![],
+            index_stats: vec![],
+            column_stats: vec![],
+        });
+        std::fs::write(&schema_path, serde_json::to_string(&snap).unwrap()).unwrap();
+
+        let err = load_schema_file(&schema_path).unwrap_err().to_string();
+        assert!(err.contains("dump-schema"), "{err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
