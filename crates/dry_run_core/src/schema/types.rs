@@ -29,6 +29,57 @@ pub struct SchemaSnapshot {
     pub node_stats: Vec<NodeStats>,
 }
 
+impl SchemaSnapshot {
+    /// Returns a copy with all inline stats stripped and node_stats cleared —
+    /// the form written to disk as schema.json under the split layout.
+    pub fn to_structural(&self) -> Self {
+        let mut out = self.clone();
+        out.node_stats.clear();
+        for table in &mut out.tables {
+            table.stats = None;
+            for col in &mut table.columns {
+                col.stats = None;
+            }
+            for idx in &mut table.indexes {
+                idx.stats = None;
+            }
+        }
+        out
+    }
+
+    /// Returns Err if the snapshot carries any stats. Used by the loader to
+    /// reject legacy combined schema.json files (hard cutover).
+    pub fn validate_structural_only(&self) -> std::result::Result<(), String> {
+        if !self.node_stats.is_empty() {
+            return Err(
+                "contains embedded node_stats — re-run `dryrun dump-schema` to regenerate the split format"
+                    .into(),
+            );
+        }
+        for table in &self.tables {
+            if table.stats.is_some() {
+                return Err(format!(
+                    "contains inline table stats for {}.{} — re-run `dryrun dump-schema` to regenerate the split format",
+                    table.schema, table.name
+                ));
+            }
+            if let Some(col) = table.columns.iter().find(|c| c.stats.is_some()) {
+                return Err(format!(
+                    "contains inline column stats for {}.{}.{} — re-run `dryrun dump-schema` to regenerate the split format",
+                    table.schema, table.name, col.name
+                ));
+            }
+            if let Some(idx) = table.indexes.iter().find(|i| i.stats.is_some()) {
+                return Err(format!(
+                    "contains inline index stats for {}.{}.{} — re-run `dryrun dump-schema` to regenerate the split format",
+                    table.schema, table.name, idx.name
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
     pub oid: u32,

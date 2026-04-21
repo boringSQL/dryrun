@@ -237,10 +237,10 @@ async fn cmd_dump_schema(
         return Ok(());
     }
 
-    let mut snapshot = ctx.introspect_schema().await?;
-    snapshot.source = name;
+    let snapshot = ctx.introspect_schema().await?;
 
-    if let Some(ref source) = snapshot.source {
+    // build a single NodeStats from inline stats when --name was provided
+    let node_stats = if let Some(ref source) = name {
         let mut table_stats = Vec::new();
         let mut index_stats = Vec::new();
         let mut column_stats = Vec::new();
@@ -277,28 +277,65 @@ async fn cmd_dump_schema(
 
         let is_standby = ctx.is_standby().await?;
 
-        snapshot.node_stats = vec![NodeStats {
+        Some(NodeStats {
             source: source.clone(),
             timestamp: snapshot.timestamp,
             is_standby,
             table_stats,
             index_stats,
             column_stats,
-        }];
-    }
-
-    let json = if pretty {
-        serde_json::to_string_pretty(&snapshot)?
+        })
     } else {
-        serde_json::to_string(&snapshot)?
+        None
     };
 
-    if let Some(path) = &output {
-        std::fs::write(path, &json)?;
-        eprintln!("Schema written to {}", path.display());
+    // structural-only schema gets written to schema.json
+    let mut structural = snapshot.to_structural();
+    structural.source = name.clone();
+
+    let schema_json = if pretty {
+        serde_json::to_string_pretty(&structural)?
     } else {
-        println!("{json}");
+        serde_json::to_string(&structural)?
+    };
+
+    match (&output, node_stats) {
+        (Some(path), Some(ns)) => {
+            std::fs::write(path, &schema_json)?;
+            eprintln!("Schema written to {}", path.display());
+
+            let stats_filename = format!("{}-stats.json", ns.source);
+            let stats_path = path
+                .parent()
+                .map(|p| p.join(&stats_filename))
+                .unwrap_or_else(|| PathBuf::from(&stats_filename));
+            let stats_json = if pretty {
+                serde_json::to_string_pretty(&ns)?
+            } else {
+                serde_json::to_string(&ns)?
+            };
+            std::fs::write(&stats_path, &stats_json)?;
+            eprintln!(
+                "Stats written to {} ({} tables, {} indexes, {} columns)",
+                stats_path.display(),
+                ns.table_stats.len(),
+                ns.index_stats.len(),
+                ns.column_stats.len(),
+            );
+        }
+        (Some(path), None) => {
+            std::fs::write(path, &schema_json)?;
+            eprintln!("Schema written to {}", path.display());
+            eprintln!("(no --name given; stats not written)");
+        }
+        (None, _) => {
+            println!("{schema_json}");
+            if name.is_some() {
+                eprintln!("(stats file requires --output; not written to stdout)");
+            }
+        }
     }
+
     Ok(())
 }
 
@@ -566,39 +603,102 @@ async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::
     let mut snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("invalid schema JSON in '{}': {e}", file.display()))?;
 
-    if !stats_files.is_empty() {
-        for stats_path in stats_files {
-            let stats_json = std::fs::read_to_string(stats_path)?;
-            let node_stats: dry_run_core::NodeStats = serde_json::from_str(&stats_json)
-                .map_err(|e| anyhow::anyhow!(
-                    "invalid stats JSON in '{}': {e}",
-                    stats_path.display()
-                ))?;
-            eprintln!(
-                "  merging stats from '{}' ({} tables, {} indexes)",
-                node_stats.source,
-                node_stats.table_stats.len(),
-                node_stats.index_stats.len()
-            );
-            snapshot.node_stats.push(node_stats);
+    // absorb inline stats (from a legacy combined dump) into node_stats before splitting
+    let has_inline = snapshot.tables.iter().any(|t| {
+        t.stats.is_some()
+            || t.columns.iter().any(|c| c.stats.is_some())
+            || t.indexes.iter().any(|i| i.stats.is_some())
+    });
+    if has_inline {
+        let source = snapshot
+            .source
+            .clone()
+            .unwrap_or_else(|| "imported".to_string());
+        let mut table_stats = Vec::new();
+        let mut index_stats = Vec::new();
+        let mut column_stats = Vec::new();
+        for table in &snapshot.tables {
+            if let Some(ref ts) = table.stats {
+                table_stats.push(NodeTableStats {
+                    schema: table.schema.clone(),
+                    table: table.name.clone(),
+                    stats: ts.clone(),
+                });
+            }
+            for idx in &table.indexes {
+                if let Some(ref is) = idx.stats {
+                    index_stats.push(NodeIndexStats {
+                        schema: table.schema.clone(),
+                        table: table.name.clone(),
+                        index_name: idx.name.clone(),
+                        stats: is.clone(),
+                    });
+                }
+            }
+            for col in &table.columns {
+                if let Some(ref cs) = col.stats {
+                    column_stats.push(NodeColumnStats {
+                        schema: table.schema.clone(),
+                        table: table.name.clone(),
+                        column: col.name.clone(),
+                        stats: cs.clone(),
+                    });
+                }
+            }
         }
+        // only push if the source isn't already present in node_stats
+        if !snapshot.node_stats.iter().any(|ns| ns.source == source) {
+            snapshot.node_stats.push(NodeStats {
+                source,
+                timestamp: snapshot.timestamp,
+                is_standby: false,
+                table_stats,
+                index_stats,
+                column_stats,
+            });
+        }
+    }
+
+    for stats_path in stats_files {
+        let stats_json = std::fs::read_to_string(stats_path)?;
+        let node_stats: dry_run_core::NodeStats = serde_json::from_str(&stats_json)
+            .map_err(|e| anyhow::anyhow!(
+                "invalid stats JSON in '{}': {e}",
+                stats_path.display()
+            ))?;
+        eprintln!(
+            "  merging stats from '{}' ({} tables, {} indexes)",
+            node_stats.source,
+            node_stats.table_stats.len(),
+            node_stats.index_stats.len()
+        );
+        snapshot.node_stats.push(node_stats);
     }
 
     let data_dir = dry_run_core::history::default_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
 
+    // write structural-only schema.json
+    let structural = snapshot.to_structural();
     let out_path = data_dir.join("schema.json");
-    let out_json = serde_json::to_string_pretty(&snapshot)?;
-    std::fs::write(&out_path, &out_json)?;
+    std::fs::write(&out_path, serde_json::to_string_pretty(&structural)?)?;
+
+    // write one <source>-stats.json per node
+    let mut stats_written = 0;
+    for ns in &snapshot.node_stats {
+        let stats_path = data_dir.join(format!("{}-stats.json", ns.source));
+        std::fs::write(&stats_path, serde_json::to_string_pretty(ns)?)?;
+        stats_written += 1;
+    }
 
     eprintln!(
         "Imported {} tables to {}{}",
         snapshot.tables.len(),
         out_path.display(),
-        if snapshot.node_stats.is_empty() {
+        if stats_written == 0 {
             String::new()
         } else {
-            format!(" (with {} node stats)", snapshot.node_stats.len())
+            format!(" (+ {stats_written} stats file(s))")
         }
     );
     Ok(())
@@ -769,8 +869,7 @@ fn resolve_schema(
 }
 
 fn load_schema_file(path: &std::path::Path) -> anyhow::Result<dry_run_core::SchemaSnapshot> {
-    let json = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&json)?)
+    Ok(dry_run_core::schema::load_schema_file(path)?)
 }
 
 fn open_history_store(path: Option<&std::path::Path>) -> anyhow::Result<HistoryStore> {
@@ -813,8 +912,7 @@ async fn cmd_mcp_serve(
 
     let server = match schema_path_result {
         Ok(schema_file) => {
-            let json = std::fs::read_to_string(&schema_file)?;
-            let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)?;
+            let snapshot = load_schema_file(&schema_file)?;
             eprintln!(
                 "dryrun: loaded schema from {} ({} tables)",
                 schema_file.display(), snapshot.tables.len()

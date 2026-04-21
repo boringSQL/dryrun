@@ -1113,10 +1113,8 @@ impl DryRunServer {
             if !candidate.exists() {
                 continue;
             }
-            let json = std::fs::read_to_string(candidate)
-                .map_err(|e| McpError::internal_error(format!("failed to read {}: {e}", candidate.display()), None))?;
-            let snapshot: SchemaSnapshot = serde_json::from_str(&json)
-                .map_err(|e| McpError::internal_error(format!("failed to parse {}: {e}", candidate.display()), None))?;
+            let snapshot = dry_run_core::schema::load_schema_file(candidate)
+                .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
 
             let body = format!(
                 "Schema loaded from {}: {} tables, {} views, {} functions",
