@@ -391,7 +391,8 @@ async fn lookup_column_meta(
     table: &str,
     column: &str,
 ) -> Result<Option<ColumnMeta>> {
-    let row: Option<(i64, i16, i64, Option<i64>, Option<i64>)> = sqlx::query_as(
+    type ColumnMetaRow = (i64, i16, i64, Option<i64>, Option<i64>);
+    let row: Option<ColumnMetaRow> = sqlx::query_as(
         "SELECT a.attrelid::bigint, \
                 a.attnum::smallint, \
                 a.atttypid::bigint, \
@@ -482,35 +483,31 @@ async fn inject_column_stats(
     // MCV slot (stakind = 1)
     if let (Some(mcv_vals), Some(mcv_freqs)) =
         (&stats.most_common_vals, &stats.most_common_freqs)
-    {
-        if let Some(eq_op) = meta.eq_opr {
+        && let Some(eq_op) = meta.eq_opr {
             slot_kinds[slot_idx] = 1;
             slot_ops[slot_idx] = eq_op;
             slot_numbers[slot_idx] = Some(mcv_freqs.clone());
             slot_values[slot_idx] = Some(mcv_vals.clone());
             slot_idx += 1;
         }
-    }
 
     // Histogram slot (stakind = 2)
-    if let Some(ref hist) = stats.histogram_bounds {
-        if let Some(lt_op) = meta.lt_opr {
+    if let Some(ref hist) = stats.histogram_bounds
+        && let Some(lt_op) = meta.lt_opr {
             slot_kinds[slot_idx] = 2;
             slot_ops[slot_idx] = lt_op;
             slot_values[slot_idx] = Some(hist.clone());
             slot_idx += 1;
         }
-    }
 
     // Correlation slot (stakind = 3)
-    if let Some(corr) = stats.correlation {
-        if let Some(lt_op) = meta.lt_opr {
+    if let Some(corr) = stats.correlation
+        && let Some(lt_op) = meta.lt_opr {
             slot_kinds[slot_idx] = 3;
             slot_ops[slot_idx] = lt_op;
             slot_numbers[slot_idx] = Some(format!("{{{corr}}}"));
             // no stavalues for correlation
         }
-    }
 
     // Build dynamic INSERT — we need dynamic SQL because stavalues is anyarray
     // and we need to cast to the actual column type

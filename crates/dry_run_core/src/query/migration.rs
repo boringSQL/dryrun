@@ -43,13 +43,11 @@ pub fn check_migration(
             NodeRef::AlterTableStmt(stmt) => {
                 for cmd_node in &stmt.cmds {
                     if let Some(pg_query::protobuf::node::Node::AlterTableCmd(cmd)) = &cmd_node.node
-                    {
-                        if let Some(check) =
+                        && let Some(check) =
                             analyze_alter_table_cmd(cmd, &result, schema, pg_version)
                         {
                             checks.push(check);
                         }
-                    }
                 }
             }
             NodeRef::IndexStmt(idx) => {
@@ -62,11 +60,10 @@ pub fn check_migration(
         }
     }
 
-    if checks.is_empty() {
-        if let Some(check) = fallback_keyword_check(ddl, schema, pg_version) {
+    if checks.is_empty()
+        && let Some(check) = fallback_keyword_check(ddl, schema, pg_version) {
             checks.push(check);
         }
-    }
 
     Ok(checks)
 }
@@ -177,9 +174,9 @@ fn analyze_alter_table_cmd(
             let mut rec = e.to_string();
 
             // check column stats for null_frac context
-            if !cmd.name.is_empty() {
-                if let Some(col) = find_column(schema, &table_name, &cmd.name) {
-                    if let Some(nf) = col.stats.as_ref().and_then(|s| s.null_frac) {
+            if !cmd.name.is_empty()
+                && let Some(col) = find_column(schema, &table_name, &cmd.name)
+                    && let Some(nf) = col.stats.as_ref().and_then(|s| s.null_frac) {
                         if nf == 0.0 {
                             rec.push_str("\n\nDATA CHECK: Column currently has 0% NULLs. The scan will pass, but ACCESS EXCLUSIVE lock is still held.");
                         } else if let Some(rows) = row_estimate {
@@ -190,8 +187,6 @@ fn analyze_alter_table_cmd(
                             ));
                         }
                     }
-                }
-            }
 
             Some(MigrationCheck {
                 operation: "SET NOT NULL".into(),

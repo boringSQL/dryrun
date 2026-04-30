@@ -187,7 +187,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
 async fn cmd_probe(db: Option<&str>) -> anyhow::Result<()> {
     let db_url = require_db_url(db)?;
-    let ctx = DryRun::connect(&db_url).await?;
+    let ctx = DryRun::connect(db_url).await?;
 
     let result = ctx.probe().await?;
     println!("PostgreSQL {}", result.version);
@@ -209,7 +209,7 @@ async fn cmd_dump_schema(
     name: Option<String>,
 ) -> anyhow::Result<()> {
     let db_url = require_db_url(source)?;
-    let ctx = DryRun::connect(&db_url).await?;
+    let ctx = DryRun::connect(db_url).await?;
 
     if stats_only {
         let source = name.ok_or_else(|| {
@@ -437,11 +437,11 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
     match action {
         SnapshotAction::Take { db, history_db } => {
             let db_url = require_db_url(db.as_deref())?;
-            let ctx = DryRun::connect(&db_url).await?;
+            let ctx = DryRun::connect(db_url).await?;
             let store = open_history_store(history_db.as_deref())?;
             let snapshot = ctx.introspect_schema().await?;
 
-            match store.save_snapshot(&db_url, &snapshot)? {
+            match store.save_snapshot(db_url, &snapshot)? {
                 true => {
                     println!("Snapshot saved: {}", snapshot.content_hash);
                     println!(
@@ -458,7 +458,7 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
         SnapshotAction::List { db, history_db } => {
             let db_url = require_db_url(db.as_deref())?;
             let store = open_history_store(history_db.as_deref())?;
-            let snapshots = store.list_snapshots(&db_url)?;
+            let snapshots = store.list_snapshots(db_url)?;
 
             if snapshots.is_empty() {
                 println!("No snapshots found for this database.");
@@ -479,14 +479,14 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
             db, from, to, latest, history_db, pretty,
         } => {
             let db_url = require_db_url(db.as_deref())?;
-            let ctx = DryRun::connect(&db_url).await?;
+            let ctx = DryRun::connect(db_url).await?;
             let store = open_history_store(history_db.as_deref())?;
 
             let from_snapshot = if let Some(hash) = &from {
                 store.load_snapshot(hash)?
                     .ok_or_else(|| anyhow::anyhow!("snapshot with hash '{hash}' not found"))?
             } else if *latest {
-                store.latest_snapshot(&db_url)?
+                store.latest_snapshot(db_url)?
                     .ok_or_else(|| anyhow::anyhow!("no saved snapshots found for this database"))?
             } else {
                 anyhow::bail!("specify --from <hash> or --latest");
@@ -524,11 +524,10 @@ fn cmd_profile(cli: &Cli, action: &ProfileAction) -> anyhow::Result<()> {
     match action {
         ProfileAction::List => {
             println!("Config: {}", config_path.display());
-            if let Some(default) = &config.default {
-                if let Some(profile) = &default.profile {
+            if let Some(default) = &config.default
+                && let Some(profile) = &default.profile {
                     println!("Default profile: {profile}");
                 }
-            }
             println!();
 
             if config.profiles.is_empty() {
@@ -611,7 +610,7 @@ async fn cmd_stats(action: &StatsAction) -> anyhow::Result<()> {
 
             let snapshot = resolve_schema(schema_file.as_deref(), None, None)?;
 
-            let ctx = DryRun::connect(&db_url).await?;
+            let ctx = DryRun::connect(db_url).await?;
 
             let result = dry_run_core::schema::apply_stats(
                 ctx.pool(),
@@ -733,13 +732,11 @@ fn schema_candidate_paths(
 
     let cwd = std::env::current_dir().unwrap_or_default();
 
-    if let Some(config) = project_config {
-        if let Ok(resolved) = config.resolve_profile(None, None, profile, &cwd) {
-            if let Some(sf) = resolved.schema_file {
+    if let Some(config) = project_config
+        && let Ok(resolved) = config.resolve_profile(None, None, profile, &cwd)
+            && let Some(sf) = resolved.schema_file {
                 candidates.push(sf);
             }
-        }
-    }
 
     if let Ok(data_dir) = dry_run_core::history::default_data_dir() {
         candidates.push(data_dir.join("schema.json"));
@@ -822,11 +819,10 @@ async fn cmd_mcp_serve(
 
             // optional --db enables live tools (explain_query, refresh_schema)
             let effective_db = db.map(|s| s.to_string()).or_else(|| {
-                if let Some(ref config) = project_config {
-                    if let Ok(resolved) = config.resolve_profile(None, None, cli.profile.as_deref(), &cwd) {
+                if let Some(ref config) = project_config
+                    && let Ok(resolved) = config.resolve_profile(None, None, cli.profile.as_deref(), &cwd) {
                         return resolved.db_url;
                     }
-                }
                 None
             });
 

@@ -115,14 +115,12 @@ fn validate_filter_columns(
                     .tables
                     .iter()
                     .find(|t| t.name == table_ref.name && t.schema == schema_name)
-                {
-                    if !table.columns.iter().any(|c| c.name == *col_name) {
+                    && !table.columns.iter().any(|c| c.name == *col_name) {
                         errors.push(format!(
                             "column '{col_name}' does not exist on table '{}.{}'",
                             table.schema, table.name
                         ));
                     }
-                }
             }
         }
     }

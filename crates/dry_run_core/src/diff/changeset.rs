@@ -299,8 +299,8 @@ fn diff_views(from: &[View], to: &[View], changes: &mut Vec<Change>) {
         }
     }
     for (key, old) in &from_map {
-        if let Some(new) = to_map.get(key) {
-            if old.definition != new.definition {
+        if let Some(new) = to_map.get(key)
+            && old.definition != new.definition {
                 changes.push(Change {
                     kind: ChangeKind::Modified,
                     object_type: "view".into(),
@@ -309,7 +309,6 @@ fn diff_views(from: &[View], to: &[View], changes: &mut Vec<Change>) {
                     details: vec!["definition changed".into()],
                 });
             }
-        }
     }
 }
 
@@ -416,8 +415,8 @@ fn diff_named<T: Serialize + PartialEq>(
         }
     }
     for (key, old) in &from_map {
-        if let Some(new) = to_map.get(key) {
-            if old != new {
+        if let Some(new) = to_map.get(key)
+            && old != new {
                 changes.push(Change {
                     kind: ChangeKind::Modified,
                     object_type: object_type.into(),
@@ -426,6 +425,5 @@ fn diff_named<T: Serialize + PartialEq>(
                     details: vec!["definition changed".into()],
                 });
             }
-        }
     }
 }

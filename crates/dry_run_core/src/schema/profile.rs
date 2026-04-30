@@ -67,11 +67,10 @@ pub fn has_skewed_distribution(
     let freqs = stats.most_common_freqs.as_deref().map(parse_pg_array)?;
 
     for (v, f_str) in vals.iter().zip(freqs.iter()) {
-        if let Ok(f) = f_str.parse::<f64>() {
-            if f > threshold {
+        if let Ok(f) = f_str.parse::<f64>()
+            && f > threshold {
                 return Some((v.clone(), f));
             }
-        }
     }
     None
 }
@@ -211,33 +210,30 @@ fn parse_top_values(s: &ColumnStats, limit: usize) -> Vec<String> {
 
 fn profile_note(col: &Column, s: &ColumnStats, table_rows: f64) -> Option<String> {
     // low-cardinality text column -> suggest enum
-    if let Some(nd) = s.n_distinct {
-        if nd > 0.0 && nd <= 10.0 {
+    if let Some(nd) = s.n_distinct
+        && nd > 0.0 && nd <= 10.0 {
             let t = col.type_name.to_lowercase();
             if t.contains("text") || t.contains("varchar") || t.contains("character varying") {
                 return Some("Consider using an enum type".to_string());
             }
         }
-    }
 
     // very high null ratio
-    if let Some(nf) = s.null_frac {
-        if nf > 0.8 {
+    if let Some(nf) = s.null_frac
+        && nf > 0.8 {
             return Some(
                 "Very high null ratio; partial index WHERE col IS NOT NULL recommended"
                     .to_string(),
             );
         }
-    }
 
     // low physical correlation on large table
-    if let Some(corr) = s.correlation {
-        if corr.abs() < 0.3 && table_rows > 100_000.0 {
+    if let Some(corr) = s.correlation
+        && corr.abs() < 0.3 && table_rows > 100_000.0 {
             return Some(
                 "Low physical correlation; BRIN index will be ineffective, use btree".to_string(),
             );
         }
-    }
 
     None
 }

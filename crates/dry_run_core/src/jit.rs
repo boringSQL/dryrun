@@ -47,7 +47,6 @@ pub fn strip_schema(qualified: &str) -> &str {
 // Migration safety
 // ---------------------------------------------------------------------------
 
-#[must_use]
 pub fn add_column_volatile_default(
     table: &str,
     col: &str,
@@ -68,7 +67,6 @@ pub fn add_column_volatile_default(
     }
 }
 
-#[must_use]
 pub fn add_column_pre_pg11(
     table: &str,
     col: &str,
@@ -89,7 +87,6 @@ pub fn add_column_pre_pg11(
     }
 }
 
-#[must_use]
 pub fn alter_column_type(table: &str, col: &str, new_type: &str) -> Entry {
     Entry {
         status: "unsafe".into(),
@@ -110,7 +107,6 @@ pub fn alter_column_type(table: &str, col: &str, new_type: &str) -> Entry {
     }
 }
 
-#[must_use]
 pub fn set_not_null(table: &str, col: &str, pg_major: u32) -> Entry {
     if pg_major >= 12 {
         Entry {
@@ -146,7 +142,6 @@ pub fn set_not_null(table: &str, col: &str, pg_major: u32) -> Entry {
     }
 }
 
-#[must_use]
 pub fn add_foreign_key_unsafe(
     table: &str,
     col: &str,
@@ -167,7 +162,6 @@ pub fn add_foreign_key_unsafe(
     }
 }
 
-#[must_use]
 pub fn add_check_constraint_unsafe(table: &str, constraint_expr: &str) -> Entry {
     Entry {
         status: "unsafe".into(),
@@ -183,7 +177,6 @@ pub fn add_check_constraint_unsafe(table: &str, constraint_expr: &str) -> Entry 
     }
 }
 
-#[must_use]
 pub fn create_index_blocking(
     table: &str,
     idx_name: &str,
@@ -202,7 +195,6 @@ pub fn create_index_blocking(
     }
 }
 
-#[must_use]
 pub fn rename(old_name: &str, new_name: &str) -> Entry {
     Entry {
         status: "unsafe".into(),
@@ -223,7 +215,6 @@ pub fn rename(old_name: &str, new_name: &str) -> Entry {
 // Plan warnings
 // ---------------------------------------------------------------------------
 
-#[must_use]
 pub fn cte_materialized(cte_name: &str, rows: i64) -> Entry {
     Entry {
         status: "warning".into(),
@@ -241,7 +232,6 @@ pub fn cte_materialized(cte_name: &str, rows: i64) -> Entry {
     }
 }
 
-#[must_use]
 pub fn cte_over_partitioned_table(cte_name: &str, table: &str) -> Entry {
     Entry {
         status: "warning".into(),
@@ -258,7 +248,6 @@ pub fn cte_over_partitioned_table(cte_name: &str, table: &str) -> Entry {
     }
 }
 
-#[must_use]
 pub fn no_partition_pruning(
     table: &str,
     partition_key: &str,
@@ -283,7 +272,6 @@ pub fn no_partition_pruning(
 // Index advice
 // ---------------------------------------------------------------------------
 
-#[must_use]
 pub fn suggest_gin(table: &str, col: &str, col_type: &str) -> Entry {
     Entry {
         status: "advice".into(),
@@ -297,7 +285,6 @@ pub fn suggest_gin(table: &str, col: &str, col_type: &str) -> Entry {
     }
 }
 
-#[must_use]
 pub fn suggest_gist(table: &str, col: &str, col_type: &str) -> Entry {
     Entry {
         status: "advice".into(),
@@ -311,7 +298,6 @@ pub fn suggest_gist(table: &str, col: &str, col_type: &str) -> Entry {
     }
 }
 
-#[must_use]
 pub fn suggest_partial_index(table: &str, col: &str, predicate: &str) -> Entry {
     Entry {
         status: "advice".into(),
@@ -329,7 +315,6 @@ pub fn suggest_partial_index(table: &str, col: &str, predicate: &str) -> Entry {
 // Lint fixes
 // ---------------------------------------------------------------------------
 
-#[must_use]
 pub fn missing_primary_key(table: &str) -> Entry {
     Entry {
         status: "lint".into(),
@@ -346,7 +331,6 @@ pub fn missing_primary_key(table: &str) -> Entry {
     }
 }
 
-#[must_use]
 pub fn text_over_varchar(table: &str, col: &str) -> Entry {
     Entry {
         status: "lint".into(),
@@ -360,7 +344,6 @@ pub fn text_over_varchar(table: &str, col: &str) -> Entry {
     }
 }
 
-#[must_use]
 pub fn timestamp_to_timestamptz(table: &str, col: &str) -> Entry {
     Entry {
         status: "lint".into(),
@@ -374,7 +357,6 @@ pub fn timestamp_to_timestamptz(table: &str, col: &str) -> Entry {
     }
 }
 
-#[must_use]
 pub fn missing_timestamp(table: &str, col_name: &str) -> Entry {
     Entry {
         status: "lint".into(),
@@ -388,7 +370,6 @@ pub fn missing_timestamp(table: &str, col_name: &str) -> Entry {
     }
 }
 
-#[must_use]
 pub fn partition_too_many_children(table: &str, count: usize) -> Entry {
     Entry {
         status: "lint".into(),
@@ -400,7 +381,6 @@ pub fn partition_too_many_children(table: &str, count: usize) -> Entry {
     }
 }
 
-#[must_use]
 pub fn partition_range_gap(parent: &str, from_bound: &str, to_bound: &str) -> Entry {
     Entry {
         status: "lint".into(),
@@ -416,7 +396,6 @@ pub fn partition_range_gap(parent: &str, from_bound: &str, to_bound: &str) -> En
     }
 }
 
-#[must_use]
 pub fn partition_no_default(parent: &str) -> Entry {
     Entry {
         status: "lint".into(),

@@ -56,8 +56,8 @@ pub fn check_timestamptz(table: &Table, qualified: &str, violations: &mut Vec<Li
 
 pub fn check_no_serial(table: &Table, qualified: &str, violations: &mut Vec<LintViolation>) {
     for col in &table.columns {
-        if let Some(default) = &col.default {
-            if default.to_lowercase().contains("nextval(") {
+        if let Some(default) = &col.default
+            && default.to_lowercase().contains("nextval(") {
                 violations.push(LintViolation {
                     rule: "types/no_serial".into(),
                     severity: Severity::Warning,
@@ -73,7 +73,6 @@ pub fn check_no_serial(table: &Table, qualified: &str, violations: &mut Vec<Lint
             convention_doc: "types".into(),
                 });
             }
-        }
     }
 }
 

@@ -44,17 +44,17 @@ fn suggest_from_plan(
     schema: &SchemaSnapshot,
     suggestions: &mut Vec<IndexSuggestion>,
 ) {
-    if node.node_type == "Seq Scan" && node.plan_rows >= 1000.0 {
-        if let Some(table_name) = &node.relation_name {
+    if node.node_type == "Seq Scan" && node.plan_rows >= 1000.0
+        && let Some(table_name) = &node.relation_name {
             let schema_name = node.schema.as_deref().unwrap_or("public");
             let table = schema
                 .tables
                 .iter()
                 .find(|t| t.name == *table_name && t.schema == schema_name);
 
-            if let Some(filter) = &node.filter {
-                if let Some(col) = extract_filter_column(filter) {
-                    if !has_leading_index(table, &col) {
+            if let Some(filter) = &node.filter
+                && let Some(col) = extract_filter_column(filter)
+                    && !has_leading_index(table, &col) {
                         let idx_type = choose_index_type(table, &col);
                         let qualified = format!("{schema_name}.{table_name}");
                         let idx_name = format!("idx_{table_name}_{col}");
@@ -74,14 +74,11 @@ fn suggest_from_plan(
                             estimated_impact: estimate_impact(node.plan_rows),
                         });
                     }
-                }
-            }
         }
-    }
 
-    if node.node_type == "Sort" && node.plan_rows >= 5000.0 {
-        if let Some(sort_keys) = &node.sort_key {
-            if let Some((schema_name, table_name)) = find_table_in_subtree(node) {
+    if node.node_type == "Sort" && node.plan_rows >= 5000.0
+        && let Some(sort_keys) = &node.sort_key
+            && let Some((schema_name, table_name)) = find_table_in_subtree(node) {
                 let cols: Vec<String> = sort_keys
                     .iter()
                     .map(|k| k.split_whitespace().next().unwrap_or(k).to_string())
@@ -109,8 +106,6 @@ fn suggest_from_plan(
                     estimated_impact: "eliminates sort step".into(),
                 });
             }
-        }
-    }
 
     for child in &node.children {
         suggest_from_plan(child, schema, suggestions);
@@ -202,8 +197,8 @@ fn has_leading_index(table: Option<&Table>, col: &str) -> bool {
 }
 
 fn choose_index_type<'a>(table: Option<&Table>, col: &str) -> &'a str {
-    if let Some(table) = table {
-        if let Some(column) = table.columns.iter().find(|c| c.name == col) {
+    if let Some(table) = table
+        && let Some(column) = table.columns.iter().find(|c| c.name == col) {
             let ct = column.type_name.to_lowercase();
             if ct == "jsonb" || ct == "tsvector" {
                 return "gin";
@@ -212,7 +207,6 @@ fn choose_index_type<'a>(table: Option<&Table>, col: &str) -> &'a str {
                 return "gist";
             }
         }
-    }
     "btree"
 }
 

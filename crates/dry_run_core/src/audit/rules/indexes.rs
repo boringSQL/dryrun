@@ -39,11 +39,9 @@ pub fn check_duplicate_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                                 "Indexes '{}' and '{}' have identical columns [{}] but both back constraints",
                                 a.name, b.name, a.columns.join(", "),
                             ),
-                            recommendation: format!(
-                                "One index is redundant but a FK depends on it — \
+                            recommendation: "One index is redundant but a FK depends on it — \
                                  drop the FK first, then the extra index, then re-create the FK \
-                                 so PG picks the remaining index"
-                            ),
+                                 so PG picks the remaining index".to_string(),
                             ddl_fix: None,
                             min_pg_version: None,
                         });
@@ -239,8 +237,8 @@ pub fn check_bloated_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
     for table in &schema.tables {
         let qualified = format!("{}.{}", table.schema, table.name);
         for idx in &table.indexes {
-            if let Some(est) = crate::schema::bloat::estimate_index_bloat(idx, table) {
-                if est.bloat_ratio > DEFAULT_BLOAT_THRESHOLD {
+            if let Some(est) = crate::schema::bloat::estimate_index_bloat(idx, table)
+                && est.bloat_ratio > DEFAULT_BLOAT_THRESHOLD {
                     findings.push(AuditFinding {
                         rule: "indexes/bloated".into(),
                         category: AuditCategory::Storage,
@@ -255,7 +253,6 @@ pub fn check_bloated_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         min_pg_version: None,
                     });
                 }
-            }
         }
     }
 
