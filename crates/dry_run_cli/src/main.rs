@@ -5,6 +5,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use dry_run_core::schema::{NodeColumnStats, NodeIndexStats, NodeStats, NodeTableStats};
+use dry_run_core::history::{
+    DatabaseId, ProjectId, PutOutcome, SnapshotKey, SnapshotStore, TimeRange,
+};
 use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
 use rmcp::ServiceExt;
 
@@ -350,6 +353,11 @@ schema_file = ".dryrun/schema.json"
             eprintln!("warning: could not save snapshot: {e}");
         }
 
+        let key = derive_snapshot_key(&snapshot.database);
+        if let Err(e) = store.put(&key, &snapshot).await {
+            eprintln!("warning: could not put keyed snapshot: {e}");
+        }
+
         eprintln!(
             "Captured schema: {} tables, {} views, {} functions",
             snapshot.tables.len(),
@@ -357,6 +365,7 @@ schema_file = ".dryrun/schema.json"
             snapshot.functions.len()
         );
         eprintln!("  Schema: {}", schema_path.display());
+        eprintln!("  Keyed:  project={} database={}", key.project_id.0, key.database_id.0);
     } else {
         eprintln!("Run 'dryrun init --db <url>' to capture a schema snapshot");
     }
@@ -453,25 +462,64 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
                     println!("Schema unchanged (hash: {})", snapshot.content_hash);
                 }
             }
+
+            // also write a trait-keyed row so multi-DB grouping shows up in `list`
+            let key = derive_snapshot_key(&snapshot.database);
+            match store.put(&key, &snapshot).await? {
+                PutOutcome::Inserted => println!(
+                    "  keyed: project={} database={}",
+                    key.project_id.0, key.database_id.0
+                ),
+                PutOutcome::Deduped => println!(
+                    "  keyed: unchanged (project={} database={})",
+                    key.project_id.0, key.database_id.0
+                ),
+            }
             Ok(())
         }
         SnapshotAction::List { db, history_db } => {
             let db_url = require_db_url(db.as_deref())?;
             let store = open_history_store(history_db.as_deref())?;
-            let snapshots = store.list_snapshots(db_url)?;
+            let legacy = store.list_snapshots(db_url)?;
 
-            if snapshots.is_empty() {
+            if legacy.is_empty() {
                 println!("No snapshots found for this database.");
             } else {
-                for s in &snapshots {
+                println!("Legacy (URL-keyed):");
+                for s in &legacy {
                     println!(
-                        "{}  {}  {}",
+                        "  {}  {}  {}",
                         s.timestamp.format("%Y-%m-%d %H:%M:%S"),
                         &s.content_hash[..16.min(s.content_hash.len())],
                         s.database,
                     );
                 }
-                println!("\n{} snapshot(s) total", snapshots.len());
+                println!("  {} snapshot(s) total", legacy.len());
+            }
+
+            // also surface trait-keyed streams for any database name we've seen
+            let mut databases: Vec<String> =
+                legacy.iter().map(|s| s.database.clone()).collect();
+            databases.sort();
+            databases.dedup();
+            for db_name in &databases {
+                let key = derive_snapshot_key(db_name);
+                let rows = store.list(&key, TimeRange::default()).await?;
+                if !rows.is_empty() {
+                    println!(
+                        "\nKeyed: project={} database={}",
+                        key.project_id.0, key.database_id.0
+                    );
+                    for s in &rows {
+                        println!(
+                            "  {}  {}  {}",
+                            s.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                            &s.content_hash[..16.min(s.content_hash.len())],
+                            s.database,
+                        );
+                    }
+                    println!("  {} snapshot(s) total", rows.len());
+                }
             }
             Ok(())
         }
@@ -777,6 +825,18 @@ fn open_history_store(path: Option<&std::path::Path>) -> anyhow::Result<HistoryS
         HistoryStore::open_default()?
     };
     Ok(store)
+}
+
+// derives a SnapshotKey from cwd + database name; placeholder until config plumbing lands
+fn derive_snapshot_key(database: &str) -> SnapshotKey {
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "default".to_string());
+    SnapshotKey {
+        project_id: ProjectId(project),
+        database_id: DatabaseId(database.to_string()),
+    }
 }
 
 async fn cmd_mcp_serve(

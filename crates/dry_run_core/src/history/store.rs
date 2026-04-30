@@ -1,15 +1,20 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
+use crate::history::snapshot_store::{
+    PutOutcome, SnapshotKey, SnapshotRef, SnapshotStore, TimeRange,
+};
 use crate::schema::SchemaSnapshot;
 
 pub struct HistoryStore {
-    conn: Connection,
+    conn: Arc<Mutex<Connection>>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,7 +38,7 @@ impl HistoryStore {
         let conn = Connection::open(path)
             .map_err(|e| Error::History(format!("cannot open history db: {e}")))?;
 
-        let store = Self { conn };
+        let store = Self { conn: Arc::new(Mutex::new(conn)) };
         store.migrate()?;
 
         debug!(path = %path.display(), "history store opened");
@@ -47,10 +52,10 @@ impl HistoryStore {
 
     // saves snapshot, returns false if content_hash unchanged from latest
     pub fn save_snapshot(&self, db_url: &str, snapshot: &SchemaSnapshot) -> Result<bool> {
+        let conn = lock_conn(&self.conn)?;
         let db_url_hash = hash_url(db_url);
 
-        let latest_hash: Option<String> = self
-            .conn
+        let latest_hash: Option<String> = conn
             .query_row(
                 "SELECT content_hash FROM snapshots
                   WHERE db_url_hash = ?1
@@ -68,19 +73,18 @@ impl HistoryStore {
         let json = serde_json::to_string(snapshot)
             .map_err(|e| Error::History(format!("cannot serialize snapshot: {e}")))?;
 
-        self.conn
-            .execute(
-                "INSERT INTO snapshots (db_url_hash, timestamp, content_hash, database_name, snapshot_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    db_url_hash,
-                    snapshot.timestamp.to_rfc3339(),
-                    snapshot.content_hash,
-                    snapshot.database,
-                    json,
-                ],
-            )
-            .map_err(|e| Error::History(format!("cannot save snapshot: {e}")))?;
+        conn.execute(
+            "INSERT INTO snapshots (db_url_hash, timestamp, content_hash, database_name, snapshot_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                db_url_hash,
+                snapshot.timestamp.to_rfc3339(),
+                snapshot.content_hash,
+                snapshot.database,
+                json,
+            ],
+        )
+        .map_err(|e| Error::History(format!("cannot save snapshot: {e}")))?;
 
         info!(
             hash = %snapshot.content_hash,
@@ -91,8 +95,8 @@ impl HistoryStore {
     }
 
     pub fn load_snapshot(&self, content_hash: &str) -> Result<Option<SchemaSnapshot>> {
-        let json: Option<String> = self
-            .conn
+        let conn = lock_conn(&self.conn)?;
+        let json: Option<String> = conn
             .query_row(
                 "SELECT snapshot_json FROM snapshots WHERE content_hash = ?1 LIMIT 1",
                 params![content_hash],
@@ -111,41 +115,20 @@ impl HistoryStore {
     }
 
     pub fn list_snapshots(&self, db_url: &str) -> Result<Vec<SnapshotSummary>> {
+        let conn = lock_conn(&self.conn)?;
         let db_url_hash = hash_url(db_url);
 
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT id, db_url_hash, timestamp, content_hash, database_name,
-                        project_id, database_id
-                   FROM snapshots
-                  WHERE db_url_hash = ?1
-                  ORDER BY timestamp DESC",
-            )
-            .map_err(|e| Error::History(e.to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, db_url_hash, timestamp, content_hash, database_name,
+                    project_id, database_id
+               FROM snapshots
+              WHERE db_url_hash = ?1
+              ORDER BY timestamp DESC",
+        )?;
 
-        let rows = stmt
-            .query_map(params![db_url_hash], |row| {
-                let ts_str: String = row.get(2)?;
-                Ok(SnapshotSummary {
-                    id: row.get(0)?,
-                    db_url_hash: row.get(1)?,
-                    timestamp: DateTime::parse_from_rfc3339(&ts_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_default(),
-                    content_hash: row.get(3)?,
-                    database: row.get(4)?,
-                    project_id: row.get(5)?,
-                    database_id: row.get(6)?,
-                })
-            })
-            .map_err(|e| Error::History(e.to_string()))?;
-
-        let mut summaries = Vec::new();
-        for row in rows {
-            summaries.push(row.map_err(|e| Error::History(e.to_string()))?);
-        }
-        Ok(summaries)
+        stmt.query_map(params![db_url_hash], row_to_summary)?
+            .map(|r| r.map_err(Error::from))
+            .collect()
     }
 
     pub fn snapshots_since(
@@ -153,38 +136,31 @@ impl HistoryStore {
         db_url: &str,
         since: DateTime<Utc>,
     ) -> Result<Vec<SchemaSnapshot>> {
+        let conn = lock_conn(&self.conn)?;
         let db_url_hash = hash_url(db_url);
 
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT snapshot_json FROM snapshots
-                  WHERE db_url_hash = ?1 AND timestamp >= ?2
-                  ORDER BY timestamp ASC",
-            )
-            .map_err(|e| Error::History(e.to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT snapshot_json FROM snapshots
+              WHERE db_url_hash = ?1 AND timestamp >= ?2
+              ORDER BY timestamp ASC",
+        )?;
 
-        let rows = stmt
-            .query_map(params![db_url_hash, since.to_rfc3339()], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| Error::History(e.to_string()))?;
-
-        let mut snapshots = Vec::new();
-        for row in rows {
-            let json = row.map_err(|e| Error::History(e.to_string()))?;
-            let snapshot: SchemaSnapshot = serde_json::from_str(&json)
-                .map_err(|e| Error::History(format!("corrupt snapshot JSON: {e}")))?;
-            snapshots.push(snapshot);
-        }
-        Ok(snapshots)
+        stmt.query_map(params![db_url_hash, since.to_rfc3339()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .map(|r| {
+            let json = r?;
+            serde_json::from_str(&json)
+                .map_err(|e| Error::History(format!("corrupt snapshot JSON: {e}")))
+        })
+        .collect()
     }
 
     pub fn latest_snapshot(&self, db_url: &str) -> Result<Option<SchemaSnapshot>> {
+        let conn = lock_conn(&self.conn)?;
         let db_url_hash = hash_url(db_url);
 
-        let json: Option<String> = self
-            .conn
+        let json: Option<String> = conn
             .query_row(
                 "SELECT snapshot_json FROM snapshots
                   WHERE db_url_hash = ?1
@@ -205,8 +181,8 @@ impl HistoryStore {
     }
 
     fn migrate(&self) -> Result<()> {
-        self.conn
-            .execute_batch(
+        let conn = lock_conn(&self.conn)?;
+        conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS snapshots (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
                     db_url_hash   TEXT NOT NULL,
@@ -246,6 +222,196 @@ fn hash_url(url: &str) -> String {
         s
     });
     hex[..16].to_string()
+}
+
+fn synthetic_db_url_hash(key: &SnapshotKey) -> String {
+    let input = format!("dryrun-key:{}:{}", key.project_id.0, key.database_id.0);
+    let digest = Sha256::digest(input.as_bytes());
+    let hex: String = digest.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write;
+        write!(s, "{b:02x}").expect("write to String cannot fail");
+        s
+    });
+    hex[..16].to_string()
+}
+
+fn lock_conn(conn: &Mutex<Connection>) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    conn.lock()
+        .map_err(|e| Error::History(format!("lock poisoned: {e}")))
+}
+
+fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SnapshotSummary> {
+    let ts_str: String = row.get(2)?;
+    Ok(SnapshotSummary {
+        id: row.get(0)?,
+        db_url_hash: row.get(1)?,
+        timestamp: DateTime::parse_from_rfc3339(&ts_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_default(),
+        content_hash: row.get(3)?,
+        database: row.get(4)?,
+        project_id: row.get(5)?,
+        database_id: row.get(6)?,
+    })
+}
+
+async fn run_blocking<F, T>(conn: &Arc<Mutex<Connection>>, f: F) -> Result<T>
+where
+    F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let conn = conn.clone();
+    tokio::task::spawn_blocking(move || -> Result<T> {
+        let conn = conn
+            .lock()
+            .map_err(|e| Error::History(format!("lock poisoned: {e}")))?;
+        f(&conn)
+    })
+    .await
+    .map_err(|e| Error::History(format!("blocking task failed: {e}")))?
+}
+
+#[async_trait]
+impl SnapshotStore for HistoryStore {
+    async fn put(&self, key: &SnapshotKey, snap: &SchemaSnapshot) -> Result<PutOutcome> {
+        let key = key.clone();
+        let snap = snap.clone();
+        run_blocking(&self.conn, move |conn| {
+            let pid = &key.project_id.0;
+            let did = &key.database_id.0;
+
+            let latest: Option<String> = conn
+                .query_row(
+                    "SELECT content_hash FROM snapshots
+                      WHERE project_id = ?1 AND database_id = ?2
+                      ORDER BY timestamp DESC LIMIT 1",
+                    params![pid, did],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            if latest.as_deref() == Some(snap.content_hash.as_str()) {
+                debug!(hash = %snap.content_hash, "schema unchanged, skipping put");
+                return Ok(PutOutcome::Deduped);
+            }
+
+            let json = serde_json::to_string(&snap)
+                .map_err(|e| Error::History(format!("cannot serialize snapshot: {e}")))?;
+
+            conn.execute(
+                "INSERT INTO snapshots (db_url_hash, timestamp, content_hash, database_name,
+                                        snapshot_json, project_id, database_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    synthetic_db_url_hash(&key),
+                    snap.timestamp.to_rfc3339(),
+                    snap.content_hash,
+                    snap.database,
+                    json,
+                    pid,
+                    did,
+                ],
+            )?;
+
+            info!(hash = %snap.content_hash, project = %pid, database = %did, "snapshot put");
+            Ok(PutOutcome::Inserted)
+        })
+        .await
+    }
+
+    async fn get(&self, key: &SnapshotKey, at: SnapshotRef) -> Result<SchemaSnapshot> {
+        let pid = key.project_id.0.clone();
+        let did = key.database_id.0.clone();
+        run_blocking(&self.conn, move |conn| {
+            let row = match &at {
+                SnapshotRef::Latest => conn.query_row(
+                    "SELECT snapshot_json FROM snapshots
+                      WHERE project_id = ?1 AND database_id = ?2
+                      ORDER BY timestamp DESC LIMIT 1",
+                    params![pid, did],
+                    |r| r.get::<_, String>(0),
+                ),
+                SnapshotRef::At(ts) => conn.query_row(
+                    "SELECT snapshot_json FROM snapshots
+                      WHERE project_id = ?1 AND database_id = ?2 AND timestamp <= ?3
+                      ORDER BY timestamp DESC LIMIT 1",
+                    params![pid, did, ts.to_rfc3339()],
+                    |r| r.get::<_, String>(0),
+                ),
+                SnapshotRef::Hash(h) => conn.query_row(
+                    "SELECT snapshot_json FROM snapshots
+                      WHERE project_id = ?1 AND database_id = ?2 AND content_hash = ?3
+                      LIMIT 1",
+                    params![pid, did, h],
+                    |r| r.get::<_, String>(0),
+                ),
+            };
+
+            let json = match row {
+                Ok(j) => j,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    let detail = match at {
+                        SnapshotRef::Latest => "latest".to_string(),
+                        SnapshotRef::At(ts) => format!("at-or-before {ts}"),
+                        SnapshotRef::Hash(h) => format!("hash {h}"),
+                    };
+                    return Err(Error::History(format!("snapshot not found ({detail})")));
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            serde_json::from_str(&json)
+                .map_err(|e| Error::History(format!("corrupt snapshot JSON: {e}")))
+        })
+        .await
+    }
+
+    async fn list(&self, key: &SnapshotKey, range: TimeRange) -> Result<Vec<SnapshotSummary>> {
+        let pid = key.project_id.0.clone();
+        let did = key.database_id.0.clone();
+        run_blocking(&self.conn, move |conn| {
+            let mut sql = String::from(
+                "SELECT id, db_url_hash, timestamp, content_hash, database_name,
+                        project_id, database_id
+                   FROM snapshots
+                  WHERE project_id = ?1 AND database_id = ?2",
+            );
+            let mut bound: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(pid), Box::new(did)];
+            if let Some(from) = range.from {
+                sql += &format!(" AND timestamp >= ?{}", bound.len() + 1);
+                bound.push(Box::new(from.to_rfc3339()));
+            }
+            if let Some(to) = range.to {
+                sql += &format!(" AND timestamp < ?{}", bound.len() + 1);
+                bound.push(Box::new(to.to_rfc3339()));
+            }
+            sql += " ORDER BY timestamp DESC";
+
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
+            stmt.query_map(params.as_slice(), row_to_summary)?
+                .map(|r| r.map_err(Error::from))
+                .collect()
+        })
+        .await
+    }
+
+    async fn latest(&self, key: &SnapshotKey) -> Result<Option<SnapshotSummary>> {
+        Ok(self.list(key, TimeRange::default()).await?.into_iter().next())
+    }
+
+    async fn delete_before(&self, key: &SnapshotKey, cutoff: DateTime<Utc>) -> Result<usize> {
+        let pid = key.project_id.0.clone();
+        let did = key.database_id.0.clone();
+        run_blocking(&self.conn, move |conn| {
+            Ok(conn.execute(
+                "DELETE FROM snapshots
+                  WHERE project_id = ?1 AND database_id = ?2 AND timestamp < ?3",
+                params![pid, did, cutoff.to_rfc3339()],
+            )?)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
