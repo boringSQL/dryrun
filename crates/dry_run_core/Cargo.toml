@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 chrono = { workspace = true }
 pg_query = { workspace = true }
 regex = { workspace = true }
