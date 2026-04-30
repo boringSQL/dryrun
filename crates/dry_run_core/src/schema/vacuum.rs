@@ -97,26 +97,22 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
         let mut analyze_scale_factor = defaults.analyze_scale_factor;
         let mut av_enabled = defaults.enabled;
 
-        if let Some(v) = opts.get("autovacuum_vacuum_threshold") {
-            if let Ok(parsed) = v.parse::<i64>() {
+        if let Some(v) = opts.get("autovacuum_vacuum_threshold")
+            && let Ok(parsed) = v.parse::<i64>() {
                 threshold = parsed;
             }
-        }
-        if let Some(v) = opts.get("autovacuum_vacuum_scale_factor") {
-            if let Ok(parsed) = v.parse::<f64>() {
+        if let Some(v) = opts.get("autovacuum_vacuum_scale_factor")
+            && let Ok(parsed) = v.parse::<f64>() {
                 scale_factor = parsed;
             }
-        }
-        if let Some(v) = opts.get("autovacuum_analyze_threshold") {
-            if let Ok(parsed) = v.parse::<i64>() {
+        if let Some(v) = opts.get("autovacuum_analyze_threshold")
+            && let Ok(parsed) = v.parse::<i64>() {
                 analyze_threshold = parsed;
             }
-        }
-        if let Some(v) = opts.get("autovacuum_analyze_scale_factor") {
-            if let Ok(parsed) = v.parse::<f64>() {
+        if let Some(v) = opts.get("autovacuum_analyze_scale_factor")
+            && let Ok(parsed) = v.parse::<f64>() {
                 analyze_scale_factor = parsed;
             }
-        }
         if let Some(v) = opts.get("autovacuum_enabled") {
             av_enabled = v == "on" || v == "true";
         }

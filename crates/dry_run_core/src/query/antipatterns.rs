@@ -49,8 +49,8 @@ fn detect_unbounded_query(
         {
             let reltuples = effective_table_stats(table, schema).map(|s| s.reltuples);
 
-            if let Some(rows) = reltuples {
-                if rows > LARGE_TABLE_THRESHOLD {
+            if let Some(rows) = reltuples
+                && rows > LARGE_TABLE_THRESHOLD {
                     warnings.push(ValidationWarning {
                         severity: WarningSeverity::Warning,
                         message: format!(
@@ -60,7 +60,6 @@ fn detect_unbounded_query(
                         ),
                     });
                 }
-            }
         }
     }
 }

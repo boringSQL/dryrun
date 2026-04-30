@@ -140,19 +140,16 @@ fn advise_seq_scan(
         let mut recommendation = rec;
 
         // stats-aware refinements
-        if let Some(col) = col_obj {
-            if col.stats.is_some() {
+        if let Some(col) = col_obj
+            && col.stats.is_some() {
                 let mut table_rows = node.plan_rows;
-                if let Some(t) = table {
-                    if let Some(s) = &t.stats {
-                        if s.reltuples > table_rows {
+                if let Some(t) = table
+                    && let Some(s) = &t.stats
+                        && s.reltuples > table_rows {
                             table_rows = s.reltuples;
                         }
-                    }
-                }
                 recommendation.push_str(&stats_aware_advice(col, filter_col_name, table_rows));
             }
-        }
 
         let idx_name = format!("idx_{table_name}_{filter_col_name}");
 
@@ -356,25 +353,23 @@ fn stats_aware_advice(col: &Column, filter_col: &str, table_rows: f64) -> String
     }
 
     // high null fraction
-    if let Some(nf) = stats.null_frac {
-        if nf > 0.5 {
+    if let Some(nf) = stats.null_frac
+        && nf > 0.5 {
             let null_rows = (nf * table_rows) as i64;
             parts.push(format!(
                 "Column is {:.0}% NULL (~{} rows). Use a partial index WHERE {} IS NOT NULL to index only the non-null rows.",
                 nf * 100.0, null_rows, filter_col
             ));
         }
-    }
 
     // correlation warning for range scans
-    if let Some(c) = stats.correlation {
-        if c > -0.3 && c < 0.3 && table_rows > 10_000.0 {
+    if let Some(c) = stats.correlation
+        && c > -0.3 && c < 0.3 && table_rows > 10_000.0 {
             parts.push(format!(
                 "Physical ordering is random (correlation: {:.2}); index range scans will cause random I/O.",
                 c
             ));
         }
-    }
 
     parts.join(" ")
 }

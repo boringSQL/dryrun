@@ -3,8 +3,12 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+dbg_macro = "deny"
 
 [workspace.dependencies]
 dry_run_core = { path = "crates/dry_run_core" }

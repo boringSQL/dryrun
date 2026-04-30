@@ -71,8 +71,8 @@ fn detect_nested_loop_seq_scan(node: &PlanNode, warnings: &mut Vec<PlanWarning>)
         return;
     }
 
-    if let Some(inner) = node.children.get(1) {
-        if inner.node_type == "Seq Scan" && inner.plan_rows > 100.0 {
+    if let Some(inner) = node.children.get(1)
+        && inner.node_type == "Seq Scan" && inner.plan_rows > 100.0 {
             let table_name = inner.relation_name.as_deref().unwrap_or("unknown");
             warnings.push(PlanWarning {
                 severity: "warning".into(),
@@ -85,7 +85,6 @@ fn detect_nested_loop_seq_scan(node: &PlanNode, warnings: &mut Vec<PlanWarning>)
                 detail: None,
             });
         }
-    }
 }
 
 fn detect_sort_without_index(node: &PlanNode, warnings: &mut Vec<PlanWarning>) {
@@ -112,9 +111,9 @@ fn detect_sort_without_index(node: &PlanNode, warnings: &mut Vec<PlanWarning>) {
 }
 
 fn detect_high_rows_removed(node: &PlanNode, warnings: &mut Vec<PlanWarning>) {
-    if let Some(removed) = node.rows_removed_by_filter {
-        if let Some(actual) = node.actual_rows {
-            if removed > 0.0 && actual > 0.0 && removed / (removed + actual) > 0.9 {
+    if let Some(removed) = node.rows_removed_by_filter
+        && let Some(actual) = node.actual_rows
+            && removed > 0.0 && actual > 0.0 && removed / (removed + actual) > 0.9 {
                 warnings.push(PlanWarning {
                     severity: "warning".into(),
                     message: format!(
@@ -125,8 +124,6 @@ fn detect_high_rows_removed(node: &PlanNode, warnings: &mut Vec<PlanWarning>) {
                     detail: node.filter.clone(),
                 });
             }
-        }
-    }
 }
 
 fn detect_partition_pruning_issues(
@@ -219,13 +216,12 @@ fn detect_cte_materialized(
         for child in &node.children {
             if child.node_type == "Append" || child.node_type == "Merge Append" {
                 for grandchild in &child.children {
-                    if let Some(rel) = &grandchild.relation_name {
-                        if let Some(p) = find_partition_parent(rel, schema) {
+                    if let Some(rel) = &grandchild.relation_name
+                        && let Some(p) = find_partition_parent(rel, schema) {
                             let qualified = format!("{}.{}", p.schema, p.name);
                             e = jit::cte_over_partitioned_table(cte_name, &qualified);
                             break;
                         }
-                    }
                 }
             }
         }

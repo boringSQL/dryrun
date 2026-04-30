@@ -315,10 +315,8 @@ pub fn check_vacuum_large_table_defaults(schema: &SchemaSnapshot) -> Vec<AuditFi
                     qualified,
                     stats.reltuples as i64 / 1_000_000
                 ),
-                recommendation: format!(
-                    "consider tuning autovacuum for large tables — \
-                     lower scale factors alone aren't enough without explicit thresholds"
-                ),
+                recommendation: "consider tuning autovacuum for large tables — \
+                     lower scale factors alone aren't enough without explicit thresholds".to_string(),
                 ddl_fix: Some(format!(
                     "ALTER TABLE {qualified} SET (\n  \
                        autovacuum_vacuum_scale_factor = {vac_sf},\n  \

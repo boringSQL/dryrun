@@ -21,12 +21,11 @@ impl FkGraph {
             nodes.insert(source.clone());
 
             for constraint in &table.constraints {
-                if constraint.kind == ConstraintKind::ForeignKey {
-                    if let Some(ref target) = constraint.fk_table {
+                if constraint.kind == ConstraintKind::ForeignKey
+                    && let Some(ref target) = constraint.fk_table {
                         nodes.insert(target.clone());
                         edges.entry(source.clone()).or_default().insert(target.clone());
                     }
-                }
             }
         }
 

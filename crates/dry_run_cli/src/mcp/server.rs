@@ -214,7 +214,7 @@ impl DryRunServer {
 
         match sort_by {
             "rows" => entries.sort_by(|a, b| b.rows.partial_cmp(&a.rows).unwrap_or(std::cmp::Ordering::Equal)),
-            "size" => entries.sort_by(|a, b| b.size.cmp(&a.size)),
+            "size" => entries.sort_by_key(|b| std::cmp::Reverse(b.size)),
             _ => entries.sort_by(|a, b| a.name.cmp(&b.name)),
         }
 
@@ -280,11 +280,10 @@ impl DryRunServer {
             "full" => {
                 let mut v = serde_json::to_value(table)
                     .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
-                if let Some(obj) = v.as_object_mut() {
-                    if !profiles.is_empty() {
+                if let Some(obj) = v.as_object_mut()
+                    && !profiles.is_empty() {
                         obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
                     }
-                }
                 v
             }
             "stats" => {
@@ -293,11 +292,10 @@ impl DryRunServer {
                     "name": table.name,
                     "stats": table.stats,
                 });
-                if let Some(obj) = result.as_object_mut() {
-                    if !profiles.is_empty() {
+                if let Some(obj) = result.as_object_mut()
+                    && !profiles.is_empty() {
                         obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
                     }
-                }
                 result
             }
             _ => {
@@ -340,11 +338,10 @@ impl DryRunServer {
                     "stats": table.stats,
                     "partition_info": table.partition_info,
                 });
-                if let Some(obj) = result.as_object_mut() {
-                    if !profiles.is_empty() {
+                if let Some(obj) = result.as_object_mut()
+                    && !profiles.is_empty() {
                         obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
                     }
-                }
                 result
             }
         };
@@ -388,25 +385,22 @@ impl DryRunServer {
                 if col.name.to_lowercase().contains(&query) {
                     results.push(format!("COLUMN {qualified}.{} ({})", col.name, col.type_name));
                 }
-                if let Some(comment) = &col.comment {
-                    if comment.to_lowercase().contains(&query) {
+                if let Some(comment) = &col.comment
+                    && comment.to_lowercase().contains(&query) {
                         results.push(format!("COLUMN COMMENT {qualified}.{}: {comment}", col.name));
                     }
-                }
             }
 
-            if let Some(comment) = &table.comment {
-                if comment.to_lowercase().contains(&query) && !table.name.to_lowercase().contains(&query) {
+            if let Some(comment) = &table.comment
+                && comment.to_lowercase().contains(&query) && !table.name.to_lowercase().contains(&query) {
                     results.push(format!("TABLE COMMENT {qualified}: {comment}"));
                 }
-            }
 
             for con in &table.constraints {
-                if let Some(def) = &con.definition {
-                    if def.to_lowercase().contains(&query) {
+                if let Some(def) = &con.definition
+                    && def.to_lowercase().contains(&query) {
                         results.push(format!("CONSTRAINT {qualified}.{} ({:?}): {def}", con.name, con.kind));
                     }
-                }
             }
 
             for idx in &table.indexes {
@@ -496,15 +490,14 @@ impl DryRunServer {
         for other in &snapshot.tables {
             for fk in &other.constraints {
                 if fk.kind != ConstraintKind::ForeignKey { continue; }
-                if let Some(ref_table) = &fk.fk_table {
-                    if ref_table == &qualified {
+                if let Some(ref_table) = &fk.fk_table
+                    && ref_table == &qualified {
                         let other_qualified = format!("{}.{}", other.schema, other.name);
                         let local_cols = fk.columns.join(", ");
                         let ref_cols = fk.fk_columns.join(", ");
                         incoming.push(format!("  {other_qualified}({local_cols}) -> {qualified}({ref_cols})"));
                         incoming.push(format!("    JOIN: SELECT * FROM {qualified} JOIN {other_qualified} ON {qualified}.{ref_cols} = {other_qualified}.{local_cols}"));
                     }
-                }
             }
         }
 

@@ -550,8 +550,8 @@ pub fn detect_bloated_indexes(tables: &[Table], threshold: f64) -> Vec<BloatedIn
 
     for table in tables {
         for idx in &table.indexes {
-            if let Some(est) = super::bloat::estimate_index_bloat(idx, table) {
-                if est.bloat_ratio > threshold {
+            if let Some(est) = super::bloat::estimate_index_bloat(idx, table)
+                && est.bloat_ratio > threshold {
                     entries.push(BloatedIndexEntry {
                         schema: table.schema.clone(),
                         table: table.name.clone(),
@@ -562,7 +562,6 @@ pub fn detect_bloated_indexes(tables: &[Table], threshold: f64) -> Vec<BloatedIn
                         definition: idx.definition.clone(),
                     });
                 }
-            }
         }
     }
 
@@ -585,8 +584,8 @@ pub fn detect_unused_indexes(node_stats: &[NodeStats], tables: &[Table]) -> Vec<
                 if idx.is_primary {
                     continue;
                 }
-                if let Some(ref stats) = idx.stats {
-                    if stats.idx_scan == 0 {
+                if let Some(ref stats) = idx.stats
+                    && stats.idx_scan == 0 {
                         entries.push(UnusedIndexEntry {
                             schema: t.schema.clone(),
                             table: t.name.clone(),
@@ -597,7 +596,6 @@ pub fn detect_unused_indexes(node_stats: &[NodeStats], tables: &[Table]) -> Vec<
                             definition: idx.definition.clone(),
                         });
                     }
-                }
             }
         }
     } else {
@@ -658,7 +656,7 @@ pub fn detect_unused_indexes(node_stats: &[NodeStats], tables: &[Table]) -> Vec<
     }
 
     // sort by size descending (biggest waste first)
-    entries.sort_by(|a, b| b.total_size_bytes.cmp(&a.total_size_bytes));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.total_size_bytes));
     entries
 }
 
@@ -903,11 +901,10 @@ mod tests {
 
 // use aggregated multi-node stats over table-level stats
 pub fn effective_table_stats(table: &Table, schema: &SchemaSnapshot) -> Option<TableStats> {
-    if !schema.node_stats.is_empty() {
-        if let Some(agg) = aggregate_table_stats(&schema.node_stats, &table.schema, &table.name) {
+    if !schema.node_stats.is_empty()
+        && let Some(agg) = aggregate_table_stats(&schema.node_stats, &table.schema, &table.name) {
             return Some(agg);
         }
-    }
     table.stats.clone()
 }
 

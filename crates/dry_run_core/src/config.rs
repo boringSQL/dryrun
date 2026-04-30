@@ -105,11 +105,10 @@ impl ProjectConfig {
         let mut dir = start_dir.to_path_buf();
         loop {
             let candidate = dir.join("dryrun.toml");
-            if candidate.is_file() {
-                if let Ok(config) = Self::load(&candidate) {
+            if candidate.is_file()
+                && let Ok(config) = Self::load(&candidate) {
                     return Some((candidate, config));
                 }
-            }
             if dir.join(".git").exists() {
                 return None;
             }
@@ -263,10 +262,7 @@ fn resolve_profile_config(
 
 pub fn expand_env_vars(input: &str) -> String {
     let mut result = input.to_string();
-    loop {
-        let Some(start) = result.find("${") else {
-            break;
-        };
+    while let Some(start) = result.find("${") {
         let Some(end) = result[start..].find('}') else {
             break;
         };
