@@ -517,3 +517,313 @@ mod tests {
         assert_eq!(list2[0].content_hash, "h2");
     }
 }
+
+#[cfg(test)]
+mod trait_tests {
+    use chrono::Duration;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::history::snapshot_store::{DatabaseId, ProjectId};
+
+    fn make_snap(hash: &str, database: &str) -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: database.into(),
+            timestamp: Utc::now(),
+            content_hash: hash.into(),
+            source: None,
+            tables: vec![], enums: vec![], domains: vec![], composites: vec![],
+            views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
+    fn key(proj: &str, db: &str) -> SnapshotKey {
+        SnapshotKey {
+            project_id: ProjectId(proj.into()),
+            database_id: DatabaseId(db.into()),
+        }
+    }
+
+    fn temp_store() -> (TempDir, HistoryStore) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test_history.db");
+        let store = HistoryStore::open(&path).unwrap();
+        (dir, store)
+    }
+
+    #[tokio::test]
+    async fn put_inserts_then_dedupes() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+        let snap = make_snap("h1", "auth");
+
+        assert_eq!(store.put(&k, &snap).await.unwrap(), PutOutcome::Inserted);
+        assert_eq!(store.put(&k, &snap).await.unwrap(), PutOutcome::Deduped);
+    }
+
+    #[tokio::test]
+    async fn put_isolates_across_databases() {
+        let (_dir, store) = temp_store();
+        let auth = key("p", "auth");
+        let billing = key("p", "billing");
+
+        // same content_hash under different database_id should not dedupe
+        assert_eq!(
+            store.put(&auth, &make_snap("same", "auth")).await.unwrap(),
+            PutOutcome::Inserted
+        );
+        assert_eq!(
+            store.put(&billing, &make_snap("same", "billing")).await.unwrap(),
+            PutOutcome::Inserted
+        );
+
+        let auth_rows = store.list(&auth, TimeRange::default()).await.unwrap();
+        let billing_rows = store.list(&billing, TimeRange::default()).await.unwrap();
+        assert_eq!(auth_rows.len(), 1);
+        assert_eq!(billing_rows.len(), 1);
+        assert_eq!(auth_rows[0].database_id.as_deref(), Some("auth"));
+        assert_eq!(billing_rows[0].database_id.as_deref(), Some("billing"));
+    }
+
+    #[tokio::test]
+    async fn put_isolates_across_projects() {
+        let (_dir, store) = temp_store();
+        let a = key("a", "x");
+        let b = key("b", "x");
+        store.put(&a, &make_snap("h", "x")).await.unwrap();
+        store.put(&b, &make_snap("h", "x")).await.unwrap();
+
+        let a_rows = store.list(&a, TimeRange::default()).await.unwrap();
+        let b_rows = store.list(&b, TimeRange::default()).await.unwrap();
+        assert_eq!(a_rows.len(), 1);
+        assert_eq!(b_rows.len(), 1);
+        assert_eq!(a_rows[0].project_id.as_deref(), Some("a"));
+        assert_eq!(b_rows[0].project_id.as_deref(), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn list_orders_newest_first() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "x");
+        let mut s1 = make_snap("h1", "x");
+        s1.timestamp = Utc::now() - Duration::hours(2);
+        let mut s2 = make_snap("h2", "x");
+        s2.timestamp = Utc::now() - Duration::hours(1);
+        store.put(&k, &s1).await.unwrap();
+        store.put(&k, &s2).await.unwrap();
+
+        let rows = store.list(&k, TimeRange::default()).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].content_hash, "h2");
+        assert_eq!(rows[1].content_hash, "h1");
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_time_range() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "x");
+        let now = Utc::now();
+        for (i, hash) in ["h0", "h1", "h2"].iter().enumerate() {
+            let mut s = make_snap(hash, "x");
+            s.timestamp = now - Duration::hours(2 - i as i64);
+            store.put(&k, &s).await.unwrap();
+        }
+
+        // from = -90min: h0 at -2h is excluded, h1 at -1h and h2 at 0 included
+        let rows = store
+            .list(
+                &k,
+                TimeRange {
+                    from: Some(now - Duration::minutes(90)),
+                    to: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].content_hash, "h2");
+        assert_eq!(rows[1].content_hash, "h1");
+
+        // to = -30min (exclusive): h2 at 0 excluded, h0 and h1 included
+        let rows = store
+            .list(
+                &k,
+                TimeRange {
+                    from: None,
+                    to: Some(now - Duration::minutes(30)),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].content_hash, "h1");
+        assert_eq!(rows[1].content_hash, "h0");
+    }
+
+    #[tokio::test]
+    async fn latest_returns_most_recent_or_none() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "x");
+        assert!(store.latest(&k).await.unwrap().is_none());
+
+        let mut s1 = make_snap("old", "x");
+        s1.timestamp = Utc::now() - Duration::hours(1);
+        let s2 = make_snap("new", "x");
+        store.put(&k, &s1).await.unwrap();
+        store.put(&k, &s2).await.unwrap();
+
+        let latest = store.latest(&k).await.unwrap().unwrap();
+        assert_eq!(latest.content_hash, "new");
+    }
+
+    #[tokio::test]
+    async fn get_latest_returns_most_recent() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "x");
+        let mut s1 = make_snap("old", "x");
+        s1.timestamp = Utc::now() - Duration::hours(1);
+        let s2 = make_snap("new", "x");
+        store.put(&k, &s1).await.unwrap();
+        store.put(&k, &s2).await.unwrap();
+
+        let got = store.get(&k, SnapshotRef::Latest).await.unwrap();
+        assert_eq!(got.content_hash, "new");
+    }
+
+    #[tokio::test]
+    async fn get_at_returns_at_or_before() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "x");
+        let now = Utc::now();
+        let mut s1 = make_snap("h1", "x");
+        s1.timestamp = now - Duration::hours(2);
+        let mut s2 = make_snap("h2", "x");
+        s2.timestamp = now;
+        store.put(&k, &s1).await.unwrap();
+        store.put(&k, &s2).await.unwrap();
+
+        // at -1h: h2 is in the future, only h1 qualifies
+        let got = store
+            .get(&k, SnapshotRef::At(now - Duration::hours(1)))
+            .await
+            .unwrap();
+        assert_eq!(got.content_hash, "h1");
+    }
+
+    #[tokio::test]
+    async fn get_hash_returns_matching_scoped_to_key() {
+        let (_dir, store) = temp_store();
+        let a = key("p", "auth");
+        let b = key("p", "billing");
+        store.put(&a, &make_snap("shared", "auth")).await.unwrap();
+
+        // direct lookup under correct key works
+        let got = store
+            .get(&a, SnapshotRef::Hash("shared".into()))
+            .await
+            .unwrap();
+        assert_eq!(got.content_hash, "shared");
+
+        // same hash under different key fails — content_hash lookup is key-scoped
+        let result = store.get(&b, SnapshotRef::Hash("shared".into())).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_missing_returns_error() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "x");
+        assert!(store.get(&k, SnapshotRef::Latest).await.is_err());
+        assert!(store.get(&k, SnapshotRef::Hash("nope".into())).await.is_err());
+        assert!(store
+            .get(&k, SnapshotRef::At(Utc::now()))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_before_returns_count_and_removes_old() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "x");
+        let now = Utc::now();
+        for (i, hash) in ["h0", "h1", "h2", "h3"].iter().enumerate() {
+            let mut s = make_snap(hash, "x");
+            s.timestamp = now - Duration::hours(3 - i as i64);
+            store.put(&k, &s).await.unwrap();
+        }
+
+        let deleted = store
+            .delete_before(&k, now - Duration::minutes(90))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2); // h0 (-3h) and h1 (-2h)
+
+        let remaining = store.list(&k, TimeRange::default()).await.unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].content_hash, "h3");
+        assert_eq!(remaining[1].content_hash, "h2");
+    }
+
+    #[tokio::test]
+    async fn delete_before_scoped_to_key() {
+        let (_dir, store) = temp_store();
+        let a = key("p", "auth");
+        let b = key("p", "billing");
+        let mut s = make_snap("h", "auth");
+        s.timestamp = Utc::now() - Duration::hours(2);
+        store.put(&a, &s).await.unwrap();
+        let mut s = make_snap("h", "billing");
+        s.timestamp = Utc::now() - Duration::hours(2);
+        store.put(&b, &s).await.unwrap();
+
+        // delete in `a` should not touch `b`
+        let deleted = store
+            .delete_before(&a, Utc::now() - Duration::hours(1))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(store.list(&a, TimeRange::default()).await.unwrap().len(), 0);
+        assert_eq!(store.list(&b, TimeRange::default()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_save_and_trait_put_coexist() {
+        let (_dir, store) = temp_store();
+        let url = "postgres://user@host/mydb";
+        let k = key("p", "mydb");
+
+        store.save_snapshot(url, &make_snap("legacy", "mydb")).unwrap();
+        store.put(&k, &make_snap("trait_row", "mydb")).await.unwrap();
+
+        // legacy listing finds only the legacy row
+        let legacy = store.list_snapshots(url).unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].content_hash, "legacy");
+        assert!(legacy[0].project_id.is_none());
+
+        // trait listing finds only the trait row
+        let trait_rows = store.list(&k, TimeRange::default()).await.unwrap();
+        assert_eq!(trait_rows.len(), 1);
+        assert_eq!(trait_rows[0].content_hash, "trait_row");
+        assert_eq!(trait_rows[0].project_id.as_deref(), Some("p"));
+        assert_eq!(trait_rows[0].database_id.as_deref(), Some("mydb"));
+    }
+
+    #[tokio::test]
+    async fn synthetic_db_url_hash_is_deterministic_and_disjoint() {
+        let k1 = key("p", "auth");
+        let k2 = key("p", "billing");
+
+        // deterministic
+        assert_eq!(synthetic_db_url_hash(&k1), synthetic_db_url_hash(&k1));
+        // distinct keys produce distinct hashes
+        assert_ne!(synthetic_db_url_hash(&k1), synthetic_db_url_hash(&k2));
+        // disjoint from real URL hashes
+        assert_ne!(
+            synthetic_db_url_hash(&k1),
+            hash_url("postgres://user@host/auth")
+        );
+    }
+}
