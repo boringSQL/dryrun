@@ -19,6 +19,8 @@ pub struct SnapshotSummary {
     pub timestamp: DateTime<Utc>,
     pub content_hash: String,
     pub database: String,
+    pub project_id: Option<String>,
+    pub database_id: Option<String>,
 }
 
 impl HistoryStore {
@@ -114,7 +116,8 @@ impl HistoryStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, db_url_hash, timestamp, content_hash, database_name
+                "SELECT id, db_url_hash, timestamp, content_hash, database_name,
+                        project_id, database_id
                    FROM snapshots
                   WHERE db_url_hash = ?1
                   ORDER BY timestamp DESC",
@@ -132,6 +135,8 @@ impl HistoryStore {
                         .unwrap_or_default(),
                     content_hash: row.get(3)?,
                     database: row.get(4)?,
+                    project_id: row.get(5)?,
+                    database_id: row.get(6)?,
                 })
             })
             .map_err(|e| Error::History(e.to_string()))?;
@@ -208,7 +213,9 @@ impl HistoryStore {
                     timestamp     TEXT NOT NULL,
                     content_hash  TEXT NOT NULL,
                     database_name TEXT NOT NULL,
-                    snapshot_json TEXT NOT NULL
+                    snapshot_json TEXT NOT NULL,
+                    project_id    TEXT,
+                    database_id   TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_snapshots_db_url_hash
                     ON snapshots(db_url_hash, timestamp DESC);

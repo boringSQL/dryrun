@@ -13,6 +13,7 @@ dbg_macro = "deny"
 
 [workspace.dependencies]
 dry_run_core = { path = "crates/dry_run_core" }
+async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 pg_query = "6.1"
