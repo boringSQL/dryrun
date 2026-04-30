@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+gituse std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -462,5 +462,115 @@ schema_file = ".dryrun/staging.json"
     fn discover_returns_none_for_nonexistent() {
         let result = ProjectConfig::discover(Path::new("/nonexistent/path/that/doesnt/exist"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_with_project_section() {
+        let toml = r#"
+[project]
+id = "myapp"
+
+[profiles.dev]
+schema_file = ".dryrun/schema.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        assert_eq!(config.project.unwrap().id.as_deref(), Some("myapp"));
+    }
+
+    #[test]
+    fn parse_with_database_id_per_profile() {
+        let toml = r#"
+[profiles.prod-auth]
+schema_file = ".dryrun/auth.json"
+database_id = "auth"
+
+[profiles.prod-billing]
+schema_file = ".dryrun/billing.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        assert_eq!(
+            config.profiles["prod-auth"].database_id.as_deref(),
+            Some("auth")
+        );
+        assert!(config.profiles["prod-billing"].database_id.is_none());
+    }
+
+    #[test]
+    fn resolve_profile_uses_configured_project_id() {
+        let toml = r#"
+[project]
+id = "myapp"
+
+[profiles.dev]
+schema_file = ".dryrun/schema.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("dev"), Path::new("/tmp/some-folder"))
+            .unwrap();
+        assert_eq!(resolved.project_id.0, "myapp");
+    }
+
+    #[test]
+    fn resolve_profile_falls_back_to_cwd_basename() {
+        let toml = r#"
+[profiles.dev]
+schema_file = ".dryrun/schema.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("dev"), Path::new("/tmp/test-myapp"))
+            .unwrap();
+        assert_eq!(resolved.project_id.0, "test-myapp");
+    }
+
+    #[test]
+    fn resolve_profile_database_id_defaults_to_profile_name() {
+        let toml = r#"
+[profiles.staging]
+schema_file = ".dryrun/staging.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("staging"), Path::new("/project"))
+            .unwrap();
+        assert_eq!(resolved.database_id.as_ref().map(|d| d.0.as_str()), Some("staging"));
+    }
+
+    #[test]
+    fn resolve_profile_database_id_from_config() {
+        let toml = r#"
+[profiles.prod-auth]
+schema_file = ".dryrun/auth.json"
+database_id = "auth"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("prod-auth"), Path::new("/project"))
+            .unwrap();
+        assert_eq!(resolved.database_id.as_ref().map(|d| d.0.as_str()), Some("auth"));
+    }
+
+    #[test]
+    fn cli_profile_has_no_database_id() {
+        let config = ProjectConfig::parse("").unwrap();
+        let resolved = config
+            .resolve_profile(
+                Some("postgres://localhost/test"),
+                None,
+                None,
+                Path::new("/tmp/myproj"),
+            )
+            .unwrap();
+        assert_eq!(resolved.name, "<cli>");
+        assert!(resolved.database_id.is_none());
+        assert_eq!(resolved.project_id.0, "myproj");
+    }
+
+    #[test]
+    fn project_id_falls_back_to_default_for_root_path() {
+        let config = ProjectConfig::parse("").unwrap();
+        // root path has no file_name; falls back to "default"
+        assert_eq!(config.project_id(Path::new("/")).0, "default");
     }
 }
