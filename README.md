@@ -107,7 +107,7 @@ If you can connect to a PostgreSQL instance (local, dev, or production), one com
 dryrun init --db "$DATABASE_URL"
 ```
 
-This creates `dryrun.toml`, the `.dryrun/` data directory, and introspects the database into `.dryrun/schema.json`. You're ready to go.
+This creates `dryrun.toml` (with `[project] id` and a default profile), the `.dryrun/` data directory, and introspects the database into `.dryrun/schema.json`. Snapshots are keyed by `(project_id, database_id)`; set `database_id` per profile when a project has multiple databases (e.g. `auth`, `billing`).
 
 ### Option B: Someone else has database access
 
