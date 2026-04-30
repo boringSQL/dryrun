@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use dry_run_core::schema::{NodeColumnStats, NodeIndexStats, NodeStats, NodeTableStats};
 use dry_run_core::history::{
-    DatabaseId, ProjectId, PutOutcome, SnapshotKey, SnapshotStore, TimeRange,
+    DatabaseId, PutOutcome, SnapshotKey, SnapshotStore, TimeRange,
 };
 use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
 use rmcp::ServiceExt;
@@ -307,23 +307,29 @@ async fn cmd_dump_schema(
 
 async fn cmd_init(db: Option<&str>) -> anyhow::Result<()> {
     let config_path = PathBuf::from("dryrun.toml");
+    let cwd = std::env::current_dir().unwrap_or_default();
 
     // scaffold config file
     if !config_path.exists() {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let profile_name = cwd
+        let project_id = cwd
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("default");
+        let profile_name = project_id;
         let content = format!(
-            r#"[default]
+            r#"[project]
+id = "{project_id}"
+
+[default]
 profile = "{profile_name}"
 
 [profiles.{profile_name}]
 schema_file = ".dryrun/schema.json"
+# database_id = "{profile_name}"   # defaults to profile name; override to e.g. "auth", "billing"
 
 # [profiles.dev]
 # db_url = "${{DATABASE_URL}}"
+# database_id = "dev"
 
 # [conventions]
 # See: https://boringsql.com/dryrun/docs/dryrun-toml
@@ -353,7 +359,11 @@ schema_file = ".dryrun/schema.json"
             eprintln!("warning: could not save snapshot: {e}");
         }
 
-        let key = derive_snapshot_key(&snapshot.database);
+        let config = ProjectConfig::discover(&cwd)
+            .map(|(_, c)| Ok(c))
+            .unwrap_or_else(|| ProjectConfig::parse(""))?;
+        let resolved = config.resolve_profile(Some(db_url), None, None, &cwd)?;
+        let key = complete_key(&resolved, &snapshot.database);
         if let Err(e) = store.put(&key, &snapshot).await {
             eprintln!("warning: could not put keyed snapshot: {e}");
         }
@@ -464,7 +474,12 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
             }
 
             // also write a trait-keyed row so multi-DB grouping shows up in `list`
-            let key = derive_snapshot_key(&snapshot.database);
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let config = ProjectConfig::discover(&cwd)
+                .map(|(_, c)| Ok(c))
+                .unwrap_or_else(|| ProjectConfig::parse(""))?;
+            let resolved = config.resolve_profile(Some(db_url), None, None, &cwd)?;
+            let key = complete_key(&resolved, &snapshot.database);
             match store.put(&key, &snapshot).await? {
                 PutOutcome::Inserted => println!(
                     "  keyed: project={} database={}",
@@ -498,12 +513,22 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
             }
 
             // also surface trait-keyed streams for any database name we've seen
+            // TODO(commit-5): use the resolved profile's snapshot key instead of the
+            // cwd-basename + snapshot.database heuristic — needs profile-aware list flow.
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let config = ProjectConfig::discover(&cwd)
+                .map(|(_, c)| Ok(c))
+                .unwrap_or_else(|| ProjectConfig::parse(""))?;
+            let project_id = config.project_id(&cwd);
             let mut databases: Vec<String> =
                 legacy.iter().map(|s| s.database.clone()).collect();
             databases.sort();
             databases.dedup();
             for db_name in &databases {
-                let key = derive_snapshot_key(db_name);
+                let key = SnapshotKey {
+                    project_id: project_id.clone(),
+                    database_id: DatabaseId(db_name.clone()),
+                };
                 let rows = store.list(&key, TimeRange::default()).await?;
                 if !rows.is_empty() {
                     println!(
@@ -827,15 +852,18 @@ fn open_history_store(path: Option<&std::path::Path>) -> anyhow::Result<HistoryS
     Ok(store)
 }
 
-// derives a SnapshotKey from cwd + database name; placeholder until config plumbing lands
-fn derive_snapshot_key(database: &str) -> SnapshotKey {
-    let project = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "default".to_string());
+// completes a SnapshotKey from a resolved profile; falls back to snapshot.database
+// when the profile didn't declare a database_id (the <cli>/<auto> case).
+fn complete_key(
+    resolved: &dry_run_core::ResolvedProfile,
+    snapshot_database: &str,
+) -> SnapshotKey {
     SnapshotKey {
-        project_id: ProjectId(project),
-        database_id: DatabaseId(database.to_string()),
+        project_id: resolved.project_id.clone(),
+        database_id: resolved
+            .database_id
+            .clone()
+            .unwrap_or_else(|| DatabaseId(snapshot_database.to_string())),
     }
 }
 

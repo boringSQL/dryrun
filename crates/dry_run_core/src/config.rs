@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::history::{DatabaseId, ProjectId};
 use crate::lint::{LintConfig, Severity};
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,9 @@ impl ConnectionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
     #[serde(default)]
+    pub project: Option<ProjectMeta>,
+
+    #[serde(default)]
     pub default: Option<DefaultConfig>,
 
     #[serde(default)]
@@ -37,6 +41,12 @@ pub struct ProjectConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMeta {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefaultConfig {
     pub profile: Option<String>,
 }
@@ -45,6 +55,8 @@ pub struct DefaultConfig {
 pub struct ProfileConfig {
     pub db_url: Option<String>,
     pub schema_file: Option<String>,
+    #[serde(default)]
+    pub database_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +100,8 @@ pub struct ResolvedProfile {
     pub name: String,
     pub db_url: Option<String>,
     pub schema_file: Option<PathBuf>,
+    pub project_id: ProjectId,
+    pub database_id: Option<DatabaseId>,
 }
 
 impl ProjectConfig {
@@ -131,11 +145,15 @@ impl ProjectConfig {
         cli_profile: Option<&str>,
         project_root: &Path,
     ) -> Result<ResolvedProfile> {
+        let project_id = self.project_id(project_root);
+
         if let Some(db) = cli_db {
             return Ok(ResolvedProfile {
                 name: "<cli>".into(),
                 db_url: Some(expand_env_vars(db)),
                 schema_file: None,
+                project_id,
+                database_id: None,
             });
         }
         if let Some(schema) = cli_schema {
@@ -143,6 +161,8 @@ impl ProjectConfig {
                 name: "<cli>".into(),
                 db_url: None,
                 schema_file: Some(schema.to_path_buf()),
+                project_id,
+                database_id: None,
             });
         }
 
@@ -155,7 +175,7 @@ impl ProjectConfig {
             let profile = self.profiles.get(&name).ok_or_else(|| {
                 Error::Config(format!("profile '{name}' not found in dryrun.toml"))
             })?;
-            return Ok(resolve_profile_config(&name, profile, project_root));
+            return Ok(resolve_profile_config(&name, profile, project_root, project_id));
         }
 
         let auto_schema = project_root.join(".dryrun/schema.json");
@@ -164,6 +184,8 @@ impl ProjectConfig {
                 name: "<auto>".into(),
                 db_url: None,
                 schema_file: Some(auto_schema),
+                project_id,
+                database_id: None,
             });
         }
 
@@ -173,6 +195,16 @@ impl ProjectConfig {
              or place a schema at .dryrun/schema.json"
                 .into(),
         ))
+    }
+
+    pub fn project_id(&self, project_root: &Path) -> ProjectId {
+        if let Some(meta) = &self.project
+            && let Some(id) = &meta.id
+            && !id.is_empty()
+        {
+            return ProjectId(id.clone());
+        }
+        default_project_id(project_root)
     }
 
     pub fn pgmustard_api_key(&self) -> Option<String> {
@@ -242,6 +274,7 @@ fn resolve_profile_config(
     name: &str,
     profile: &ProfileConfig,
     project_root: &Path,
+    project_id: ProjectId,
 ) -> ResolvedProfile {
     let db_url = profile.db_url.as_ref().map(|u| expand_env_vars(u));
     let schema_file = profile.schema_file.as_ref().map(|p| {
@@ -252,12 +285,28 @@ fn resolve_profile_config(
             project_root.join(path)
         }
     });
+    let database_id = Some(DatabaseId(
+        profile
+            .database_id
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| name.to_string()),
+    ));
 
     ResolvedProfile {
         name: name.to_string(),
         db_url,
         schema_file,
+        project_id,
+        database_id,
     }
+}
+
+fn default_project_id(project_root: &Path) -> ProjectId {
+    project_root
+        .file_name()
+        .map(|n| ProjectId(n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| ProjectId("default".into()))
 }
 
 pub fn expand_env_vars(input: &str) -> String {
