@@ -972,6 +972,174 @@ mod tests {
         let result = detect_unused_indexes(&[], &[]);
         assert!(result.is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // Snapshot-split types: serde round-trip + identity checks.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn qualified_name_displays_schema_dot_name() {
+        let qn = QualifiedName::new("public", "orders");
+        assert_eq!(qn.to_string(), "public.orders");
+    }
+
+    #[test]
+    fn qualified_name_round_trips_through_serde() {
+        let qn = QualifiedName::new("public", "orders");
+        let json = serde_json::to_string(&qn).unwrap();
+        let back: QualifiedName = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, qn);
+    }
+
+    fn sample_planner_stats() -> PlannerStatsSnapshot {
+        PlannerStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "accounts".into(),
+            timestamp: Utc::now(),
+            content_hash: "abc123".into(),
+            schema_ref_hash: "def456".into(),
+            tables: vec![TableSizingEntry {
+                table: QualifiedName::new("public", "orders"),
+                sizing: TableSizing {
+                    reltuples: 1234.0,
+                    relpages: 42,
+                    table_size: 1_000_000,
+                    total_size: Some(2_000_000),
+                    index_size: Some(1_000_000),
+                },
+            }],
+            columns: vec![ColumnStatsEntry {
+                table: QualifiedName::new("public", "orders"),
+                column: "user_id".into(),
+                stats: ColumnStats {
+                    null_frac: Some(0.0),
+                    n_distinct: Some(-0.5),
+                    most_common_vals: None,
+                    most_common_freqs: None,
+                    histogram_bounds: None,
+                    correlation: Some(0.1),
+                },
+            }],
+            indexes: vec![IndexSizingEntry {
+                index: QualifiedName::new("public", "orders_pkey"),
+                sizing: IndexSizing {
+                    size: 8192,
+                    relpages: 1,
+                    reltuples: 1234.0,
+                },
+            }],
+        }
+    }
+
+    fn sample_activity_stats() -> ActivityStatsSnapshot {
+        ActivityStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "accounts".into(),
+            timestamp: Utc::now(),
+            content_hash: "h1".into(),
+            schema_ref_hash: "h2".into(),
+            node: NodeIdentity {
+                label: "primary".into(),
+                host: "10.0.0.1".into(),
+                is_standby: false,
+                replication_lag_bytes: None,
+                stats_reset: None,
+            },
+            tables: vec![TableActivityEntry {
+                table: QualifiedName::new("public", "orders"),
+                activity: TableActivity {
+                    seq_scan: 7,
+                    idx_scan: 100,
+                    n_live_tup: 1000,
+                    n_dead_tup: 5,
+                    last_vacuum: None,
+                    last_autovacuum: None,
+                    last_analyze: None,
+                    last_autoanalyze: None,
+                    vacuum_count: 0,
+                    autovacuum_count: 1,
+                    analyze_count: 0,
+                    autoanalyze_count: 1,
+                },
+            }],
+            indexes: vec![IndexActivityEntry {
+                index: QualifiedName::new("public", "orders_pkey"),
+                activity: IndexActivity {
+                    idx_scan: 100,
+                    idx_tup_read: 200,
+                    idx_tup_fetch: 150,
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn planner_stats_round_trips_through_json() {
+        let snap = sample_planner_stats();
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: PlannerStatsSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tables.len(), 1);
+        assert_eq!(back.tables[0].table, snap.tables[0].table);
+        assert_eq!(back.columns.len(), 1);
+        assert_eq!(back.columns[0].column, "user_id");
+        assert_eq!(back.indexes.len(), 1);
+        assert_eq!(back.indexes[0].index.name, "orders_pkey");
+        assert_eq!(back.schema_ref_hash, "def456");
+    }
+
+    #[test]
+    fn activity_stats_round_trips_through_json() {
+        let snap = sample_activity_stats();
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: ActivityStatsSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.node.label, "primary");
+        assert!(!back.node.is_standby);
+        assert_eq!(back.tables[0].activity.seq_scan, 7);
+        assert_eq!(back.indexes[0].activity.idx_scan, 100);
+    }
+
+    #[test]
+    fn activity_stats_accepts_missing_optional_fields() {
+        // Older payloads without the *_count fields and without lag should still load.
+        let json = r#"{
+            "pg_version": "PostgreSQL 17.0",
+            "database": "accounts",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "content_hash": "h1",
+            "schema_ref_hash": "h2",
+            "node": {
+                "label": "replica1",
+                "host": "10.0.0.2",
+                "is_standby": true
+            },
+            "tables": [{
+                "table": {"schema": "public", "name": "orders"},
+                "activity": {
+                    "seq_scan": 1,
+                    "idx_scan": 2,
+                    "last_vacuum": null,
+                    "last_autovacuum": null,
+                    "last_analyze": null,
+                    "last_autoanalyze": null
+                }
+            }],
+            "indexes": []
+        }"#;
+        let back: ActivityStatsSnapshot = serde_json::from_str(json).unwrap();
+        assert!(back.node.is_standby);
+        assert!(back.node.replication_lag_bytes.is_none());
+        assert_eq!(back.tables[0].activity.n_live_tup, 0);
+        assert_eq!(back.tables[0].activity.vacuum_count, 0);
+    }
+
+    #[test]
+    fn node_selector_variants_are_constructable() {
+        let _ = NodeSelector::All;
+        match NodeSelector::Some(vec!["primary".into(), "replica1".into()]) {
+            NodeSelector::Some(v) => assert_eq!(v.len(), 2),
+            NodeSelector::All => panic!("wrong variant"),
+        }
+    }
 }
 
 // use aggregated multi-node stats over table-level stats

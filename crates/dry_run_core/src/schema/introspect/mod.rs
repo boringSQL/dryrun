@@ -552,3 +552,45 @@ fn assemble_tables(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    fn fixed_planner() -> PlannerStatsSnapshot {
+        PlannerStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "accounts".into(),
+            timestamp: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            content_hash: String::new(),
+            schema_ref_hash: "schema-h1".into(),
+            tables: vec![],
+            columns: vec![],
+            indexes: vec![],
+        }
+    }
+
+    #[test]
+    fn hash_payload_is_deterministic_for_identical_inputs() {
+        let a = fixed_planner();
+        let b = fixed_planner();
+        assert_eq!(hash_payload(&a).unwrap(), hash_payload(&b).unwrap());
+    }
+
+    #[test]
+    fn hash_payload_changes_when_payload_changes() {
+        let a = fixed_planner();
+        let mut b = fixed_planner();
+        b.schema_ref_hash = "schema-h2".into();
+        assert_ne!(hash_payload(&a).unwrap(), hash_payload(&b).unwrap());
+    }
+
+    #[test]
+    fn hash_payload_emits_hex_sha256() {
+        let h = hash_payload(&fixed_planner()).unwrap();
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}
