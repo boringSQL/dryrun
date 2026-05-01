@@ -171,7 +171,7 @@ async fn main() {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Probe { ref db } => cmd_probe(db.as_deref()).await,
+        Command::Probe { ref db } => cmd_probe(&cli, db.as_deref()).await,
         Command::DumpSchema {
             ref source,
             pretty,
@@ -180,6 +180,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             ref name,
         } => {
             cmd_dump_schema(
+                &cli,
                 source.as_deref(),
                 pretty,
                 output.clone(),
@@ -192,7 +193,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Import {
             ref file,
             ref stats,
-        } => cmd_import(file, stats).await,
+        } => cmd_import(&cli, file, stats).await,
         Command::Lint {
             ref schema_name,
             pretty,
@@ -200,13 +201,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => cmd_lint(&cli, schema_name.as_deref(), pretty, json).await,
         Command::Snapshot { ref action } => cmd_snapshot(&cli, action).await,
         Command::Profile { ref action } => cmd_profile(&cli, action),
-        Command::Stats { ref action } => cmd_stats(action).await,
+        Command::Stats { ref action } => cmd_stats(&cli, action).await,
         Command::Drift {
             ref db,
             ref against,
             pretty,
             json,
-        } => cmd_drift(db.as_deref(), against.as_deref(), pretty, json).await,
+        } => cmd_drift(&cli, db.as_deref(), against.as_deref(), pretty, json).await,
         Command::McpServe {
             ref db,
             ref schema_file,
@@ -216,8 +217,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
-async fn cmd_probe(db: Option<&str>) -> anyhow::Result<()> {
-    let db_url = require_db_url(db)?;
+async fn cmd_probe(cli: &Cli, db: Option<&str>) -> anyhow::Result<()> {
+    let resolved = active_resolved_profile(cli, db, None)?;
+    let db_url = resolved
+        .db_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--db or a profile with db_url is required"))?;
     let ctx = DryRun::connect(db_url).await?;
 
     let result = ctx.probe().await?;
@@ -250,13 +255,19 @@ async fn cmd_probe(db: Option<&str>) -> anyhow::Result<()> {
 }
 
 async fn cmd_dump_schema(
+    cli: &Cli,
     source: Option<&str>,
     pretty: bool,
     output: Option<PathBuf>,
     stats_only: bool,
     name: Option<String>,
 ) -> anyhow::Result<()> {
-    let db_url = require_db_url(source)?;
+    let resolved = active_resolved_profile(cli, source, None)?;
+    let db_url = resolved
+        .db_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--source or a profile with db_url is required"))?;
+    let name = name.or_else(|| resolved.database_id.as_ref().map(|d| d.0.clone()));
     let ctx = DryRun::connect(db_url).await?;
 
     if stats_only {
@@ -684,7 +695,11 @@ fn cmd_profile(cli: &Cli, action: &ProfileAction) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::Result<()> {
+async fn cmd_import(
+    cli: &Cli,
+    file: &std::path::Path,
+    stats_files: &[PathBuf],
+) -> anyhow::Result<()> {
     let json = std::fs::read_to_string(file)?;
     let mut snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("invalid schema JSON in '{}': {e}", file.display()))?;
@@ -709,7 +724,15 @@ async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::
     let data_dir = dry_run_core::history::default_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
 
-    let out_path = data_dir.join("schema.json");
+    // route to the resolved profile's schema_file when one is configured;
+    // fall back to .dryrun/schema.json
+    let out_path = active_resolved_profile(cli, None, None)
+        .ok()
+        .and_then(|r| r.schema_file)
+        .unwrap_or_else(|| data_dir.join("schema.json"));
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let out_json = serde_json::to_string_pretty(&snapshot)?;
     std::fs::write(&out_path, &out_json)?;
 
@@ -726,16 +749,23 @@ async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::
     Ok(())
 }
 
-async fn cmd_stats(action: &StatsAction) -> anyhow::Result<()> {
+async fn cmd_stats(cli: &Cli, action: &StatsAction) -> anyhow::Result<()> {
     match action {
         StatsAction::Apply {
             db,
             schema_file,
             node,
         } => {
-            let db_url = require_db_url(db.as_deref())?;
+            let resolved = active_resolved_profile(cli, db.as_deref(), schema_file.as_deref())?;
+            let db_url = resolved
+                .db_url
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--db or a profile with db_url is required"))?;
 
-            let snapshot = resolve_schema(schema_file.as_deref(), None, None)?;
+            let snapshot = match resolved.schema_file.as_deref() {
+                Some(path) => load_schema_file(path)?,
+                None => resolve_schema(schema_file.as_deref(), None, None)?,
+            };
 
             let ctx = DryRun::connect(db_url).await?;
 
@@ -774,13 +804,22 @@ async fn cmd_stats(action: &StatsAction) -> anyhow::Result<()> {
 }
 
 async fn cmd_drift(
+    cli: &Cli,
     db: Option<&str>,
     against: Option<&std::path::Path>,
     pretty: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    let db_url = require_db_url(db)?;
-    let prod_snapshot = resolve_schema(against, None, None)?;
+    let resolved = active_resolved_profile(cli, db, against)?;
+    let db_url = resolved
+        .db_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--db or a profile with db_url is required"))?;
+
+    let prod_snapshot = match resolved.schema_file.as_deref() {
+        Some(path) => load_schema_file(path)?,
+        None => resolve_schema(against, None, None)?,
+    };
 
     let ctx = DryRun::connect(db_url).await?;
     let local_snapshot = ctx.introspect_schema().await?;
@@ -833,6 +872,18 @@ async fn cmd_drift(
 
 fn require_db_url(db: Option<&str>) -> anyhow::Result<&str> {
     db.ok_or_else(|| anyhow::anyhow!("--db or DATABASE_URL is required"))
+}
+
+fn active_resolved_profile(
+    cli: &Cli,
+    cli_db: Option<&str>,
+    cli_schema: Option<&std::path::Path>,
+) -> anyhow::Result<dry_run_core::ResolvedProfile> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let config = ProjectConfig::discover(&cwd)
+        .map(|(_, c)| Ok(c))
+        .unwrap_or_else(|| ProjectConfig::parse(""))?;
+    Ok(config.resolve_profile(cli_db, cli_schema, cli.profile.as_deref(), &cwd)?)
 }
 
 fn load_project_config(cli: &Cli, cwd: &std::path::Path) -> Option<ProjectConfig> {
