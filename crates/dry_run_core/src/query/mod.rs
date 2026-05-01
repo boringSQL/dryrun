@@ -8,11 +8,11 @@ mod plan_warnings;
 mod suggest;
 mod validate;
 
-pub use advise::{advise, advise_with_index_suggestions, Advice, AdviseResult};
-pub use explain::{explain_query, ExplainResult, PlanWarning};
-pub use migration::{check_migration, MigrationCheck, SafetyRating};
+pub use advise::{Advice, AdviseResult, advise, advise_with_index_suggestions};
+pub use explain::{ExplainResult, PlanWarning, explain_query};
+pub use migration::{MigrationCheck, SafetyRating, check_migration};
 pub use parse::{FuncWrappedColumn, ParsedQuery, QueryInfo, ReferencedTable};
 pub use plan::{PlanNode, parse_plan_json};
 pub use plan_warnings::detect_plan_warnings;
 pub use suggest::IndexSuggestion;
-pub use validate::{validate_query, ValidationResult, ValidationWarning};
+pub use validate::{ValidationResult, ValidationWarning, validate_query};

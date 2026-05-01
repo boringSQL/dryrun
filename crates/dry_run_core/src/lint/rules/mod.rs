@@ -212,17 +212,29 @@ mod tests {
 
     fn make_col(name: &str, type_name: &str) -> Column {
         Column {
-            name: name.into(), ordinal: 0, type_name: type_name.into(),
-            nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None,
+            name: name.into(),
+            ordinal: 0,
+            type_name: type_name.into(),
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            comment: None,
+            statistics_target: None,
+            stats: None,
         }
     }
 
     fn make_fk(name: &str, columns: &[&str], fk_table: &str) -> Constraint {
         Constraint {
-            name: name.into(), kind: ConstraintKind::ForeignKey,
+            name: name.into(),
+            kind: ConstraintKind::ForeignKey,
             columns: columns.iter().map(|s| s.to_string()).collect(),
-            definition: None, fk_table: Some(fk_table.into()),
-            fk_columns: vec!["id".into()], backing_index: None, comment: None,
+            definition: None,
+            fk_table: Some(fk_table.into()),
+            fk_columns: vec!["id".into()],
+            backing_index: None,
+            comment: None,
         }
     }
 
@@ -230,8 +242,11 @@ mod tests {
         Index {
             name: name.into(),
             columns: columns.iter().map(|s| s.to_string()).collect(),
-            include_columns: vec![], index_type: "btree".into(),
-            is_unique: false, is_primary: false, predicate: None,
+            include_columns: vec![],
+            index_type: "btree".into(),
+            is_unique: false,
+            is_primary: false,
+            predicate: None,
             definition: format!("CREATE INDEX {name} ON ..."),
             is_valid: true,
             backs_constraint: false,
@@ -246,19 +261,37 @@ mod tests {
         indexes: Vec<Index>,
     ) -> Table {
         Table {
-            oid: 0, schema: "public".into(), name: name.into(),
-            columns, constraints, indexes,
-            comment: None, stats: None, partition_info: None,
-            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+            oid: 0,
+            schema: "public".into(),
+            name: name.into(),
+            columns,
+            constraints,
+            indexes,
+            comment: None,
+            stats: None,
+            partition_info: None,
+            policies: vec![],
+            triggers: vec![],
+            reloptions: vec![],
+            rls_enabled: false,
         }
     }
 
     fn schema_with(tables: Vec<Table>) -> SchemaSnapshot {
         SchemaSnapshot {
-            pg_version: "PostgreSQL 17.0".into(), database: "test".into(),
-            timestamp: Utc::now(), content_hash: "abc".into(), source: None,
-            tables, enums: vec![], domains: vec![], composites: vec![],
-            views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "test".into(),
+            timestamp: Utc::now(),
+            content_hash: "abc".into(),
+            source: None,
+            tables,
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
             node_stats: vec![],
         }
     }
@@ -268,13 +301,19 @@ mod tests {
         config.min_severity = Severity::Info;
         // disable everything except fk_has_index to isolate the test
         config.disabled_rules = vec![
-            "naming/table_style".into(), "naming/column_style".into(),
-            "naming/fk_pattern".into(), "naming/index_pattern".into(),
-            "pk/exists".into(), "pk/bigint_identity".into(),
-            "types/text_over_varchar".into(), "types/timestamptz".into(),
-            "types/no_serial".into(), "types/bigint_pk_fk".into(),
+            "naming/table_style".into(),
+            "naming/column_style".into(),
+            "naming/fk_pattern".into(),
+            "naming/index_pattern".into(),
+            "pk/exists".into(),
+            "pk/bigint_identity".into(),
+            "types/text_over_varchar".into(),
+            "types/timestamptz".into(),
+            "types/no_serial".into(),
+            "types/bigint_pk_fk".into(),
             "constraints/unnamed".into(),
-            "timestamps/has_created_at".into(), "timestamps/has_updated_at".into(),
+            "timestamps/has_created_at".into(),
+            "timestamps/has_updated_at".into(),
             "timestamps/correct_type".into(),
         ];
         config
@@ -285,13 +324,28 @@ mod tests {
         // FK (order_id, product_id) covered by index (order_id, product_id, status)
         let schema = schema_with(vec![make_table_with(
             "line_item",
-            vec![make_col("order_id", "bigint"), make_col("product_id", "bigint"), make_col("status", "text")],
-            vec![make_fk("fk_line_item_order_product", &["order_id", "product_id"], "public.order")],
-            vec![make_index("idx_line_item_composite", &["order_id", "product_id", "status"])],
+            vec![
+                make_col("order_id", "bigint"),
+                make_col("product_id", "bigint"),
+                make_col("status", "text"),
+            ],
+            vec![make_fk(
+                "fk_line_item_order_product",
+                &["order_id", "product_id"],
+                "public.order",
+            )],
+            vec![make_index(
+                "idx_line_item_composite",
+                &["order_id", "product_id", "status"],
+            )],
         )]);
         let violations = run_all_rules(&schema, &only_fk_rules());
-        assert!(!violations.iter().any(|v| v.rule == "constraints/fk_has_index"),
-            "3-col index covering 2-col FK as prefix should pass");
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == "constraints/fk_has_index"),
+            "3-col index covering 2-col FK as prefix should pass"
+        );
     }
 
     #[test]
@@ -299,13 +353,27 @@ mod tests {
         // FK (order_id, product_id) but index is (product_id, order_id) — wrong prefix order
         let schema = schema_with(vec![make_table_with(
             "line_item",
-            vec![make_col("order_id", "bigint"), make_col("product_id", "bigint")],
-            vec![make_fk("fk_line_item_order_product", &["order_id", "product_id"], "public.order")],
-            vec![make_index("idx_line_item_wrong_order", &["product_id", "order_id"])],
+            vec![
+                make_col("order_id", "bigint"),
+                make_col("product_id", "bigint"),
+            ],
+            vec![make_fk(
+                "fk_line_item_order_product",
+                &["order_id", "product_id"],
+                "public.order",
+            )],
+            vec![make_index(
+                "idx_line_item_wrong_order",
+                &["product_id", "order_id"],
+            )],
         )]);
         let violations = run_all_rules(&schema, &only_fk_rules());
-        assert!(violations.iter().any(|v| v.rule == "constraints/fk_has_index"),
-            "index with swapped column order should NOT satisfy the FK");
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "constraints/fk_has_index"),
+            "index with swapped column order should NOT satisfy the FK"
+        );
     }
 
     #[test]
@@ -313,13 +381,24 @@ mod tests {
         // FK (order_id, product_id) but index only on (order_id) — not enough columns
         let schema = schema_with(vec![make_table_with(
             "line_item",
-            vec![make_col("order_id", "bigint"), make_col("product_id", "bigint")],
-            vec![make_fk("fk_line_item_order_product", &["order_id", "product_id"], "public.order")],
+            vec![
+                make_col("order_id", "bigint"),
+                make_col("product_id", "bigint"),
+            ],
+            vec![make_fk(
+                "fk_line_item_order_product",
+                &["order_id", "product_id"],
+                "public.order",
+            )],
             vec![make_index("idx_line_item_order_id", &["order_id"])],
         )]);
         let violations = run_all_rules(&schema, &only_fk_rules());
-        assert!(violations.iter().any(|v| v.rule == "constraints/fk_has_index"),
-            "single-col index should NOT satisfy 2-col FK");
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "constraints/fk_has_index"),
+            "single-col index should NOT satisfy 2-col FK"
+        );
     }
 
     #[test]
@@ -327,13 +406,27 @@ mod tests {
         // FK (order_id, product_id) with index (order_id, product_id) — exact match
         let schema = schema_with(vec![make_table_with(
             "line_item",
-            vec![make_col("order_id", "bigint"), make_col("product_id", "bigint")],
-            vec![make_fk("fk_line_item_order_product", &["order_id", "product_id"], "public.order")],
-            vec![make_index("idx_line_item_order_product", &["order_id", "product_id"])],
+            vec![
+                make_col("order_id", "bigint"),
+                make_col("product_id", "bigint"),
+            ],
+            vec![make_fk(
+                "fk_line_item_order_product",
+                &["order_id", "product_id"],
+                "public.order",
+            )],
+            vec![make_index(
+                "idx_line_item_order_product",
+                &["order_id", "product_id"],
+            )],
         )]);
         let violations = run_all_rules(&schema, &only_fk_rules());
-        assert!(!violations.iter().any(|v| v.rule == "constraints/fk_has_index"),
-            "exact match index should satisfy the FK");
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == "constraints/fk_has_index"),
+            "exact match index should satisfy the FK"
+        );
     }
 
     // --- partition dedup helpers ---
@@ -348,28 +441,47 @@ mod tests {
 
     fn make_partitioned_table(name: &str, children: Vec<PartitionChild>) -> Table {
         Table {
-            oid: 0, schema: "public".into(), name: name.into(),
+            oid: 0,
+            schema: "public".into(),
+            name: name.into(),
             columns: vec![make_col("id", "integer")],
-            constraints: vec![], indexes: vec![],
-            comment: None, stats: None,
+            constraints: vec![],
+            indexes: vec![],
+            comment: None,
+            stats: None,
             partition_info: Some(PartitionInfo {
                 strategy: PartitionStrategy::Range,
                 key: "created_at".into(),
                 children,
             }),
-            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+            policies: vec![],
+            triggers: vec![],
+            reloptions: vec![],
+            rls_enabled: false,
         }
     }
 
     /// Config that only enables the given rules
     fn config_with_only(rules: &[&str]) -> LintConfig {
         let all_rules = [
-            "naming/table_style", "naming/column_style", "naming/fk_pattern",
-            "naming/index_pattern", "pk/exists", "pk/bigint_identity",
-            "types/text_over_varchar", "types/timestamptz", "types/no_serial",
-            "types/bigint_pk_fk", "constraints/fk_has_index", "constraints/unnamed",
-            "timestamps/has_created_at", "timestamps/has_updated_at", "timestamps/correct_type",
-            "partition/too_many_children", "partition/range_gaps", "partition/no_default",
+            "naming/table_style",
+            "naming/column_style",
+            "naming/fk_pattern",
+            "naming/index_pattern",
+            "pk/exists",
+            "pk/bigint_identity",
+            "types/text_over_varchar",
+            "types/timestamptz",
+            "types/no_serial",
+            "types/bigint_pk_fk",
+            "constraints/fk_has_index",
+            "constraints/unnamed",
+            "timestamps/has_created_at",
+            "timestamps/has_updated_at",
+            "timestamps/correct_type",
+            "partition/too_many_children",
+            "partition/range_gaps",
+            "partition/no_default",
             "partition/gucs",
         ];
         let mut config = LintConfig::default();
@@ -384,18 +496,29 @@ mod tests {
 
     fn make_pk(name: &str, columns: &[&str]) -> Constraint {
         Constraint {
-            name: name.into(), kind: ConstraintKind::PrimaryKey,
+            name: name.into(),
+            kind: ConstraintKind::PrimaryKey,
             columns: columns.iter().map(|s| s.to_string()).collect(),
-            definition: None, fk_table: None,
-            fk_columns: vec![], backing_index: None, comment: None,
+            definition: None,
+            fk_table: None,
+            fk_columns: vec![],
+            backing_index: None,
+            comment: None,
         }
     }
 
     fn make_col_with_default(name: &str, type_name: &str, default: &str) -> Column {
         Column {
-            name: name.into(), ordinal: 0, type_name: type_name.into(),
-            nullable: false, default: Some(default.into()), identity: None, generated: None,
-            comment: None, statistics_target: None, stats: None,
+            name: name.into(),
+            ordinal: 0,
+            type_name: type_name.into(),
+            nullable: false,
+            default: Some(default.into()),
+            identity: None,
+            generated: None,
+            comment: None,
+            statistics_target: None,
+            stats: None,
         }
     }
 
@@ -403,14 +526,32 @@ mod tests {
 
     #[test]
     fn partition_parent_with_three_children_only_parent_violations() {
-        let parent = make_partitioned_table("event", vec![
-            make_partition_child("event_2024_01"),
-            make_partition_child("event_2024_02"),
-            make_partition_child("event_2024_03"),
-        ]);
-        let child1 = make_table_with("event_2024_01", vec![make_col("id", "integer")], vec![], vec![]);
-        let child2 = make_table_with("event_2024_02", vec![make_col("id", "integer")], vec![], vec![]);
-        let child3 = make_table_with("event_2024_03", vec![make_col("id", "integer")], vec![], vec![]);
+        let parent = make_partitioned_table(
+            "event",
+            vec![
+                make_partition_child("event_2024_01"),
+                make_partition_child("event_2024_02"),
+                make_partition_child("event_2024_03"),
+            ],
+        );
+        let child1 = make_table_with(
+            "event_2024_01",
+            vec![make_col("id", "integer")],
+            vec![],
+            vec![],
+        );
+        let child2 = make_table_with(
+            "event_2024_02",
+            vec![make_col("id", "integer")],
+            vec![],
+            vec![],
+        );
+        let child3 = make_table_with(
+            "event_2024_03",
+            vec![make_col("id", "integer")],
+            vec![],
+            vec![],
+        );
 
         let schema = schema_with(vec![parent, child1, child2, child3]);
         let config = config_with_only(&["pk/exists"]);
@@ -423,23 +564,31 @@ mod tests {
 
     #[test]
     fn nested_partitions_grandchild_also_skipped() {
-        let parent = make_partitioned_table("event", vec![
-            make_partition_child("event_2024_01"),
-        ]);
+        let parent = make_partitioned_table("event", vec![make_partition_child("event_2024_01")]);
         let mid = Table {
-            oid: 0, schema: "public".into(), name: "event_2024_01".into(),
+            oid: 0,
+            schema: "public".into(),
+            name: "event_2024_01".into(),
             columns: vec![make_col("id", "integer")],
-            constraints: vec![], indexes: vec![],
-            comment: None, stats: None,
+            constraints: vec![],
+            indexes: vec![],
+            comment: None,
+            stats: None,
             partition_info: Some(PartitionInfo {
                 strategy: PartitionStrategy::Hash,
                 key: "id".into(),
                 children: vec![make_partition_child("event_2024_01_h0")],
             }),
-            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+            policies: vec![],
+            triggers: vec![],
+            reloptions: vec![],
+            rls_enabled: false,
         };
         let grandchild = make_table_with(
-            "event_2024_01_h0", vec![make_col("id", "integer")], vec![], vec![],
+            "event_2024_01_h0",
+            vec![make_col("id", "integer")],
+            vec![],
+            vec![],
         );
 
         let schema = schema_with(vec![parent, mid, grandchild]);
@@ -458,17 +607,22 @@ mod tests {
         let table = make_table_with(
             "user",
             vec![make_col("created_at", "timestamp without time zone")],
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let schema = schema_with(vec![table]);
         let config = config_with_only(&["timestamps/correct_type", "types/timestamptz"]);
         let violations = run_all_rules(&schema, &config);
 
         let rules: Vec<&str> = violations.iter().map(|v| v.rule.as_str()).collect();
-        assert!(rules.contains(&"timestamps/correct_type"),
-            "winner rule should fire");
-        assert!(!rules.contains(&"types/timestamptz"),
-            "loser rule should be suppressed");
+        assert!(
+            rules.contains(&"timestamps/correct_type"),
+            "winner rule should fire"
+        );
+        assert!(
+            !rules.contains(&"types/timestamptz"),
+            "loser rule should be suppressed"
+        );
     }
 
     #[test]
@@ -476,7 +630,11 @@ mod tests {
         // integer PK with serial default should fire pk/bigint_identity but NOT types/no_serial
         let table = make_table_with(
             "user",
-            vec![make_col_with_default("id", "integer", "nextval('user_id_seq')")],
+            vec![make_col_with_default(
+                "id",
+                "integer",
+                "nextval('user_id_seq')",
+            )],
             vec![make_pk("user_pkey", &["id"])],
             vec![],
         );
@@ -485,10 +643,14 @@ mod tests {
         let violations = run_all_rules(&schema, &config);
 
         let rules: Vec<&str> = violations.iter().map(|v| v.rule.as_str()).collect();
-        assert!(rules.contains(&"pk/bigint_identity"),
-            "winner rule should fire");
-        assert!(!rules.contains(&"types/no_serial"),
-            "loser rule should be suppressed");
+        assert!(
+            rules.contains(&"pk/bigint_identity"),
+            "winner rule should fire"
+        );
+        assert!(
+            !rules.contains(&"types/no_serial"),
+            "loser rule should be suppressed"
+        );
     }
 
     #[test]
@@ -497,14 +659,17 @@ mod tests {
         let table = make_table_with(
             "user",
             vec![make_col("created_at", "timestamp without time zone")],
-            vec![], vec![],
+            vec![],
+            vec![],
         );
         let schema = schema_with(vec![table]);
         let config = config_with_only(&["types/timestamptz"]);
         let violations = run_all_rules(&schema, &config);
 
-        assert!(violations.iter().any(|v| v.rule == "types/timestamptz"),
-            "loser should fire when winner is disabled");
+        assert!(
+            violations.iter().any(|v| v.rule == "types/timestamptz"),
+            "loser should fire when winner is disabled"
+        );
     }
 
     // --- Change 3: auto-detect table name style tests ---
@@ -547,9 +712,11 @@ mod tests {
         let violations = run_all_rules(&schema, &config);
 
         // snake_plural doesn't check for plural (just snake_case), so no violations expected
-        assert!(violations.is_empty(),
+        assert!(
+            violations.is_empty(),
             "auto-resolved to snake_plural should accept all snake_case names, got: {:?}",
-            violations.iter().map(|v| &v.table).collect::<Vec<_>>());
+            violations.iter().map(|v| &v.table).collect::<Vec<_>>()
+        );
     }
 
     // --- partition lint rules ---
@@ -592,10 +759,14 @@ mod tests {
     #[test]
     fn partition_range_gaps_detected() {
         let table = Table {
-            oid: 0, schema: "public".into(), name: "events".into(),
+            oid: 0,
+            schema: "public".into(),
+            name: "events".into(),
             columns: vec![make_col("id", "integer")],
-            constraints: vec![], indexes: vec![],
-            comment: None, stats: None,
+            constraints: vec![],
+            indexes: vec![],
+            comment: None,
+            stats: None,
             partition_info: Some(PartitionInfo {
                 strategy: PartitionStrategy::Range,
                 key: "created_at".into(),
@@ -613,7 +784,10 @@ mod tests {
                     },
                 ],
             }),
-            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+            policies: vec![],
+            triggers: vec![],
+            reloptions: vec![],
+            rls_enabled: false,
         };
         let schema = schema_with(vec![table]);
         let config = config_with_only(&["partition/range_gaps"]);
@@ -624,13 +798,14 @@ mod tests {
 
     #[test]
     fn partition_no_default_warns() {
-        let table = make_partitioned_table("orders", vec![
-            PartitionChild {
+        let table = make_partitioned_table(
+            "orders",
+            vec![PartitionChild {
                 schema: "public".into(),
                 name: "orders_q1".into(),
                 bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-04-01')".into(),
-            },
-        ]);
+            }],
+        );
         let schema = schema_with(vec![table]);
         let config = config_with_only(&["partition/no_default"]);
         let violations = run_all_rules(&schema, &config);
@@ -640,18 +815,21 @@ mod tests {
 
     #[test]
     fn partition_no_default_skips_when_default_exists() {
-        let table = make_partitioned_table("orders", vec![
-            PartitionChild {
-                schema: "public".into(),
-                name: "orders_q1".into(),
-                bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-04-01')".into(),
-            },
-            PartitionChild {
-                schema: "public".into(),
-                name: "orders_default".into(),
-                bound: "DEFAULT".into(),
-            },
-        ]);
+        let table = make_partitioned_table(
+            "orders",
+            vec![
+                PartitionChild {
+                    schema: "public".into(),
+                    name: "orders_q1".into(),
+                    bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-04-01')".into(),
+                },
+                PartitionChild {
+                    schema: "public".into(),
+                    name: "orders_default".into(),
+                    bound: "DEFAULT".into(),
+                },
+            ],
+        );
         let schema = schema_with(vec![table]);
         let config = config_with_only(&["partition/no_default"]);
         let violations = run_all_rules(&schema, &config);
@@ -669,6 +847,10 @@ mod tests {
         });
         let config = config_with_only(&["partition/gucs"]);
         let violations = run_all_rules(&schema, &config);
-        assert!(violations.iter().any(|v| v.message.contains("enable_partition_pruning")));
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.message.contains("enable_partition_pruning"))
+        );
     }
 }

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 chrono = { workspace = true }
 pg_query = { workspace = true }
 regex = { workspace = true }
@@ -13,9 +14,10 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["macros"] }
+tokio = { version = "1", features = ["macros", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

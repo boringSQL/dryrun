@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::history::{DatabaseId, ProjectId};
 use crate::lint::{LintConfig, Severity};
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,9 @@ impl ConnectionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
     #[serde(default)]
+    pub project: Option<ProjectMeta>,
+
+    #[serde(default)]
     pub default: Option<DefaultConfig>,
 
     #[serde(default)]
@@ -37,6 +41,12 @@ pub struct ProjectConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMeta {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefaultConfig {
     pub profile: Option<String>,
 }
@@ -45,6 +55,8 @@ pub struct DefaultConfig {
 pub struct ProfileConfig {
     pub db_url: Option<String>,
     pub schema_file: Option<String>,
+    #[serde(default)]
+    pub database_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +100,8 @@ pub struct ResolvedProfile {
     pub name: String,
     pub db_url: Option<String>,
     pub schema_file: Option<PathBuf>,
+    pub project_id: ProjectId,
+    pub database_id: Option<DatabaseId>,
 }
 
 impl ProjectConfig {
@@ -106,9 +120,10 @@ impl ProjectConfig {
         loop {
             let candidate = dir.join("dryrun.toml");
             if candidate.is_file()
-                && let Ok(config) = Self::load(&candidate) {
-                    return Some((candidate, config));
-                }
+                && let Ok(config) = Self::load(&candidate)
+            {
+                return Some((candidate, config));
+            }
             if dir.join(".git").exists() {
                 return None;
             }
@@ -119,11 +134,14 @@ impl ProjectConfig {
     }
 
     // resolution order:
-    // 1. explicit cli_db or cli_schema (CLI flags)
-    // 2. cli_profile flag (--profile)
-    // 3. PROFILE env var
-    // 4. [default].profile in toml
-    // 5. auto-discovery of .dryrun/schema.json
+    // 1. cli_profile flag (--profile)
+    // 2. PROFILE env var
+    // 3. [default].profile in toml
+    // 4. auto-discovery of .dryrun/schema.json
+    //
+    // CLI flags (cli_db, cli_schema) override the resolved profile's matching
+    // fields for the current invocation. So `--profile billing --db $OTHER`
+    // connects to $OTHER but keeps billing's database_id for snapshot keying.
     pub fn resolve_profile(
         &self,
         cli_db: Option<&str>,
@@ -131,11 +149,42 @@ impl ProjectConfig {
         cli_profile: Option<&str>,
         project_root: &Path,
     ) -> Result<ResolvedProfile> {
+        let project_id = self.project_id(project_root);
+
+        let explicit_profile = cli_profile
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("PROFILE").ok());
+        let default_profile = self.default.as_ref().and_then(|d| d.profile.clone());
+        let profile_name = explicit_profile.clone().or(default_profile);
+
+        if let Some(name) = profile_name {
+            if let Some(profile) = self.profiles.get(&name) {
+                let mut resolved = resolve_profile_config(&name, profile, project_root, project_id);
+                if let Some(db) = cli_db {
+                    resolved.db_url = Some(expand_env_vars(db));
+                }
+                if let Some(schema) = cli_schema {
+                    resolved.schema_file = Some(schema.to_path_buf());
+                }
+                return Ok(resolved);
+            }
+
+            // Missing profile causes error.
+            if explicit_profile.is_some() || (cli_db.is_none() && cli_schema.is_none()) {
+                return Err(Error::Config(format!(
+                    "profile '{name}' not found in dryrun.toml"
+                )));
+            }
+        }
+
+        // No profile resolved: fall back to <cli> or <auto>.
         if let Some(db) = cli_db {
             return Ok(ResolvedProfile {
                 name: "<cli>".into(),
                 db_url: Some(expand_env_vars(db)),
                 schema_file: None,
+                project_id,
+                database_id: None,
             });
         }
         if let Some(schema) = cli_schema {
@@ -143,19 +192,9 @@ impl ProjectConfig {
                 name: "<cli>".into(),
                 db_url: None,
                 schema_file: Some(schema.to_path_buf()),
+                project_id,
+                database_id: None,
             });
-        }
-
-        let profile_name = cli_profile
-            .map(|s| s.to_string())
-            .or_else(|| std::env::var("PROFILE").ok())
-            .or_else(|| self.default.as_ref().and_then(|d| d.profile.clone()));
-
-        if let Some(name) = profile_name {
-            let profile = self.profiles.get(&name).ok_or_else(|| {
-                Error::Config(format!("profile '{name}' not found in dryrun.toml"))
-            })?;
-            return Ok(resolve_profile_config(&name, profile, project_root));
         }
 
         let auto_schema = project_root.join(".dryrun/schema.json");
@@ -164,6 +203,8 @@ impl ProjectConfig {
                 name: "<auto>".into(),
                 db_url: None,
                 schema_file: Some(auto_schema),
+                project_id,
+                database_id: None,
             });
         }
 
@@ -173,6 +214,16 @@ impl ProjectConfig {
              or place a schema at .dryrun/schema.json"
                 .into(),
         ))
+    }
+
+    pub fn project_id(&self, project_root: &Path) -> ProjectId {
+        if let Some(meta) = &self.project
+            && let Some(id) = &meta.id
+            && !id.is_empty()
+        {
+            return ProjectId(id.clone());
+        }
+        default_project_id(project_root)
     }
 
     pub fn pgmustard_api_key(&self) -> Option<String> {
@@ -242,6 +293,7 @@ fn resolve_profile_config(
     name: &str,
     profile: &ProfileConfig,
     project_root: &Path,
+    project_id: ProjectId,
 ) -> ResolvedProfile {
     let db_url = profile.db_url.as_ref().map(|u| expand_env_vars(u));
     let schema_file = profile.schema_file.as_ref().map(|p| {
@@ -252,12 +304,28 @@ fn resolve_profile_config(
             project_root.join(path)
         }
     });
+    let database_id = Some(DatabaseId(
+        profile
+            .database_id
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| name.to_string()),
+    ));
 
     ResolvedProfile {
         name: name.to_string(),
         db_url,
         schema_file,
+        project_id,
+        database_id,
     }
+}
+
+fn default_project_id(project_root: &Path) -> ProjectId {
+    project_root
+        .file_name()
+        .map(|n| ProjectId(n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| ProjectId("default".into()))
 }
 
 pub fn expand_env_vars(input: &str) -> String {
@@ -308,7 +376,10 @@ table_name_regex = "^[a-z][a-z0-9_]*$"
 "#;
 
         let config = ProjectConfig::parse(toml).unwrap();
-        assert_eq!(config.default.as_ref().unwrap().profile.as_deref(), Some("production"));
+        assert_eq!(
+            config.default.as_ref().unwrap().profile.as_deref(),
+            Some("production")
+        );
         assert_eq!(config.profiles.len(), 3);
         assert!(config.profiles.contains_key("development"));
         assert!(config.profiles.contains_key("staging"));
@@ -389,10 +460,18 @@ rules = ["pk/exists"]
     fn resolve_profile_cli_db_wins() {
         let config = ProjectConfig::parse("[default]\nprofile = \"prod\"").unwrap();
         let resolved = config
-            .resolve_profile(Some("postgres://localhost/test"), None, None, Path::new("/tmp"))
+            .resolve_profile(
+                Some("postgres://localhost/test"),
+                None,
+                None,
+                Path::new("/tmp"),
+            )
             .unwrap();
         assert_eq!(resolved.name, "<cli>");
-        assert_eq!(resolved.db_url.as_deref(), Some("postgres://localhost/test"));
+        assert_eq!(
+            resolved.db_url.as_deref(),
+            Some("postgres://localhost/test")
+        );
     }
 
     #[test]
@@ -406,12 +485,389 @@ schema_file = ".dryrun/staging.json"
             .resolve_profile(None, None, Some("staging"), Path::new("/project"))
             .unwrap();
         assert_eq!(resolved.name, "staging");
-        assert_eq!(resolved.schema_file.unwrap(), PathBuf::from("/project/.dryrun/staging.json"));
+        assert_eq!(
+            resolved.schema_file.unwrap(),
+            PathBuf::from("/project/.dryrun/staging.json")
+        );
     }
 
     #[test]
     fn discover_returns_none_for_nonexistent() {
         let result = ProjectConfig::discover(Path::new("/nonexistent/path/that/doesnt/exist"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_with_project_section() {
+        let toml = r#"
+[project]
+id = "myapp"
+
+[profiles.dev]
+schema_file = ".dryrun/schema.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        assert_eq!(config.project.unwrap().id.as_deref(), Some("myapp"));
+    }
+
+    #[test]
+    fn parse_with_database_id_per_profile() {
+        let toml = r#"
+[profiles.prod-auth]
+schema_file = ".dryrun/auth.json"
+database_id = "auth"
+
+[profiles.prod-billing]
+schema_file = ".dryrun/billing.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        assert_eq!(
+            config.profiles["prod-auth"].database_id.as_deref(),
+            Some("auth")
+        );
+        assert!(config.profiles["prod-billing"].database_id.is_none());
+    }
+
+    #[test]
+    fn resolve_profile_uses_configured_project_id() {
+        let toml = r#"
+[project]
+id = "myapp"
+
+[profiles.dev]
+schema_file = ".dryrun/schema.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("dev"), Path::new("/tmp/some-folder"))
+            .unwrap();
+        assert_eq!(resolved.project_id.0, "myapp");
+    }
+
+    #[test]
+    fn resolve_profile_falls_back_to_cwd_basename() {
+        let toml = r#"
+[profiles.dev]
+schema_file = ".dryrun/schema.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("dev"), Path::new("/tmp/test-myapp"))
+            .unwrap();
+        assert_eq!(resolved.project_id.0, "test-myapp");
+    }
+
+    #[test]
+    fn resolve_profile_database_id_defaults_to_profile_name() {
+        let toml = r#"
+[profiles.staging]
+schema_file = ".dryrun/staging.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("staging"), Path::new("/project"))
+            .unwrap();
+        assert_eq!(
+            resolved.database_id.as_ref().map(|d| d.0.as_str()),
+            Some("staging")
+        );
+    }
+
+    #[test]
+    fn resolve_profile_database_id_from_config() {
+        let toml = r#"
+[profiles.prod-auth]
+schema_file = ".dryrun/auth.json"
+database_id = "auth"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("prod-auth"), Path::new("/project"))
+            .unwrap();
+        assert_eq!(
+            resolved.database_id.as_ref().map(|d| d.0.as_str()),
+            Some("auth")
+        );
+    }
+
+    #[test]
+    fn cli_profile_has_no_database_id() {
+        let config = ProjectConfig::parse("").unwrap();
+        let resolved = config
+            .resolve_profile(
+                Some("postgres://localhost/test"),
+                None,
+                None,
+                Path::new("/tmp/myproj"),
+            )
+            .unwrap();
+        assert_eq!(resolved.name, "<cli>");
+        assert!(resolved.database_id.is_none());
+        assert_eq!(resolved.project_id.0, "myproj");
+    }
+
+    #[test]
+    fn cli_db_overrides_profile_db_url_keeps_database_id() {
+        let toml = r#"
+[profiles.billing]
+db_url = "postgres://prod/billing"
+database_id = "billing"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(
+                Some("postgres://localhost/other"),
+                None,
+                Some("billing"),
+                Path::new("/project"),
+            )
+            .unwrap();
+        assert_eq!(resolved.name, "billing");
+        assert_eq!(
+            resolved.db_url.as_deref(),
+            Some("postgres://localhost/other")
+        );
+        assert_eq!(
+            resolved.database_id.as_ref().map(|d| d.0.as_str()),
+            Some("billing")
+        );
+    }
+
+    #[test]
+    fn cli_schema_overrides_profile_schema_file_keeps_database_id() {
+        let toml = r#"
+[profiles.staging]
+schema_file = ".dryrun/staging.json"
+database_id = "stg"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let override_path = PathBuf::from("/tmp/other-schema.json");
+        let resolved = config
+            .resolve_profile(
+                None,
+                Some(&override_path),
+                Some("staging"),
+                Path::new("/project"),
+            )
+            .unwrap();
+        assert_eq!(resolved.name, "staging");
+        assert_eq!(
+            resolved.schema_file.as_deref(),
+            Some(override_path.as_path())
+        );
+        assert_eq!(
+            resolved.database_id.as_ref().map(|d| d.0.as_str()),
+            Some("stg")
+        );
+    }
+
+    #[test]
+    fn explicit_profile_missing_errors() {
+        let config = ProjectConfig::parse("").unwrap();
+        let result = config.resolve_profile(None, None, Some("nope"), Path::new("/tmp"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("'nope'"), "got: {err}");
+    }
+
+    #[test]
+    fn default_profile_missing_with_cli_db_falls_back_to_cli() {
+        let config = ProjectConfig::parse("[default]\nprofile = \"prod\"").unwrap();
+        let resolved = config
+            .resolve_profile(
+                Some("postgres://localhost/x"),
+                None,
+                None,
+                Path::new("/tmp"),
+            )
+            .unwrap();
+        assert_eq!(resolved.name, "<cli>");
+        assert!(resolved.database_id.is_none());
+    }
+
+    #[test]
+    fn default_profile_missing_without_cli_args_errors() {
+        let config = ProjectConfig::parse("[default]\nprofile = \"missing\"").unwrap();
+        let result = config.resolve_profile(None, None, None, Path::new("/tmp"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("'missing'"), "got: {err}");
+    }
+
+    #[test]
+    fn project_id_falls_back_to_default_for_root_path() {
+        let config = ProjectConfig::parse("").unwrap();
+        // root path has no file_name; falls back to "default"
+        assert_eq!(config.project_id(Path::new("/")).0, "default");
+    }
+
+    #[test]
+    fn explicit_profile_overrides_default_profile() {
+        let toml = r#"
+[default]
+profile = "prod"
+
+[profiles.prod]
+schema_file = "prod.json"
+
+[profiles.dev]
+schema_file = "dev.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("dev"), Path::new("/p"))
+            .unwrap();
+        assert_eq!(resolved.name, "dev");
+        assert_eq!(resolved.schema_file.unwrap(), PathBuf::from("/p/dev.json"));
+    }
+
+    #[test]
+    fn resolve_profile_absolute_schema_path_kept_as_is() {
+        let toml = r#"
+[profiles.dev]
+schema_file = "/abs/schema.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("dev"), Path::new("/project"))
+            .unwrap();
+        assert_eq!(
+            resolved.schema_file.unwrap(),
+            PathBuf::from("/abs/schema.json")
+        );
+    }
+
+    #[test]
+    fn resolve_profile_empty_database_id_falls_back_to_profile_name() {
+        let toml = r#"
+[profiles.staging]
+schema_file = "x.json"
+database_id = ""
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("staging"), Path::new("/p"))
+            .unwrap();
+        assert_eq!(
+            resolved.database_id.as_ref().map(|d| d.0.as_str()),
+            Some("staging")
+        );
+    }
+
+    #[test]
+    fn resolve_profile_auto_discovers_schema_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dryrun_dir = dir.path().join(".dryrun");
+        std::fs::create_dir_all(&dryrun_dir).unwrap();
+        std::fs::write(dryrun_dir.join("schema.json"), "{}").unwrap();
+
+        let config = ProjectConfig::parse("").unwrap();
+        let resolved = config
+            .resolve_profile(None, None, None, dir.path())
+            .unwrap();
+        assert_eq!(resolved.name, "<auto>");
+        assert!(resolved.database_id.is_none());
+        assert_eq!(
+            resolved.schema_file.unwrap(),
+            dir.path().join(".dryrun/schema.json")
+        );
+    }
+
+    #[test]
+    fn resolve_profile_cli_schema_without_profile_falls_back() {
+        let config = ProjectConfig::parse("").unwrap();
+        let p = PathBuf::from("/some/where.json");
+        let resolved = config
+            .resolve_profile(None, Some(&p), None, Path::new("/p"))
+            .unwrap();
+        assert_eq!(resolved.name, "<cli>");
+        assert_eq!(resolved.schema_file.as_deref(), Some(p.as_path()));
+        assert!(resolved.db_url.is_none());
+    }
+
+    #[test]
+    fn resolve_profile_no_profile_no_schema_no_cli_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = ProjectConfig::parse("").unwrap();
+        let result = config.resolve_profile(None, None, None, dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn expand_env_vars_multiple_in_one_string() {
+        // SAFETY: test-only, single-threaded test runner
+        unsafe {
+            std::env::set_var("DRYRUN_A", "alpha");
+            std::env::set_var("DRYRUN_B", "beta");
+        }
+        assert_eq!(expand_env_vars("${DRYRUN_A}-${DRYRUN_B}"), "alpha-beta");
+        unsafe {
+            std::env::remove_var("DRYRUN_A");
+            std::env::remove_var("DRYRUN_B");
+        }
+    }
+
+    #[test]
+    fn expand_env_vars_unterminated_brace_left_alone() {
+        // no closing brace — should not loop forever, return as-is
+        assert_eq!(expand_env_vars("foo ${UNCLOSED bar"), "foo ${UNCLOSED bar");
+    }
+
+    #[test]
+    fn discover_finds_config_in_parent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // simulate repo root
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join("dryrun.toml"),
+            "[profiles.dev]\nschema_file = \"x.json\"\n",
+        )
+        .unwrap();
+
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let (path, config) = ProjectConfig::discover(&nested).unwrap();
+        assert_eq!(path, dir.path().join("dryrun.toml"));
+        assert!(config.profiles.contains_key("dev"));
+    }
+
+    #[test]
+    fn discover_stops_at_git_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // .git in inner dir, dryrun.toml only above it — discovery must NOT cross the boundary
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().parent().unwrap().join("dryrun.toml"),
+            "[profiles.dev]\n",
+        )
+        .ok();
+        // discovery from the git root should not find the parent's dryrun.toml
+        assert!(ProjectConfig::discover(dir.path()).is_none());
+    }
+
+    #[test]
+    fn pgmustard_api_key_from_config_expands_env() {
+        // SAFETY: test-only, single-threaded test runner
+        unsafe { std::env::set_var("DRYRUN_PGM_KEY", "sk-test-123") };
+        let toml = r#"
+[services]
+pgmustard_api_key = "${DRYRUN_PGM_KEY}"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        assert_eq!(config.pgmustard_api_key().as_deref(), Some("sk-test-123"));
+        unsafe { std::env::remove_var("DRYRUN_PGM_KEY") };
+    }
+
+    #[test]
+    fn pgmustard_api_key_empty_after_expansion_falls_through() {
+        // SAFETY: test-only, single-threaded test runner
+        unsafe {
+            std::env::remove_var("DRYRUN_PGM_MISSING");
+            std::env::remove_var("PGMUSTARD_API_KEY");
+        }
+        let toml = r#"
+[services]
+pgmustard_api_key = "${DRYRUN_PGM_MISSING}"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        assert!(config.pgmustard_api_key().is_none());
     }
 }

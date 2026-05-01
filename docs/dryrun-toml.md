@@ -5,6 +5,9 @@ Project configuration. dryrun finds this file by walking up from the current dir
 ## Minimal example
 
 ```toml
+[project]
+id = "myapp"
+
 [default]
 profile = "offline"
 
@@ -13,6 +16,15 @@ schema_file = ".dryrun/schema.json"
 ```
 
 That's it. Everything else has sensible defaults.
+
+## Project
+
+```toml
+[project]
+id = "myapp"
+```
+
+Identifies the project. Snapshots are keyed by `(project_id, database_id)` so a single store can hold history for multiple projects without collisions. Defaults to the cwd basename if absent.
 
 ## Profiles
 
@@ -27,7 +39,13 @@ db_url = "postgresql://dev:dev@localhost:5432/myapp"
 
 [profiles.staging]
 db_url = "${STAGING_DATABASE_URL}"    # environment variables work
+
+[profiles.prod-auth]
+db_url = "${PROD_AUTH_DATABASE_URL}"
+database_id = "auth"                  # set when a project has multiple databases
 ```
+
+`database_id` defaults to the profile name. Override it when you want the snapshot stream named differently from the profile (e.g. profile `prod-auth` → stream `auth`).
 
 Pick one with `--profile`, or set a default:
 
@@ -38,12 +56,16 @@ profile = "offline"
 
 ### Resolution order
 
-1. `--db` flag (CLI only, bypasses profiles entirely)
-2. `--schema-file` flag (CLI only)
-3. `--profile` flag
-4. `PROFILE` environment variable
-5. `[default].profile` in dryrun.toml
-6. Auto-discovery of `.dryrun/schema.json`
+A profile is selected from:
+
+1. `--profile` flag
+2. `PROFILE` environment variable
+3. `[default].profile` in dryrun.toml
+4. Auto-discovery of `.dryrun/schema.json` (no profile, just a schema)
+
+CLI flags `--db` and `--schema-file` override the resolved profile's matching fields for that invocation; they don't bypass the profile, so `database_id` and `project_id` are still taken from it. `--profile billing --db $OTHER` connects to `$OTHER` but keys snapshots under billing's `database_id`.
+
+Every DB command (`init`, `import`, `probe`, `dump-schema`, `lint`, `drift`, `stats apply`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` / `schema_file` when the corresponding CLI flag is omitted.
 
 Relative paths in `schema_file` are resolved from the project root (the directory containing `dryrun.toml`). Absolute paths work too.
 

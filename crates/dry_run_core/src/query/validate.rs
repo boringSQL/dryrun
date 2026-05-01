@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::antipatterns::detect_antipatterns;
-use super::parse::{parse_sql, ParsedQuery, ReferencedTable};
+use super::parse::{ParsedQuery, ReferencedTable, parse_sql};
 use crate::error::Result;
 use crate::schema::SchemaSnapshot;
 
@@ -115,12 +115,13 @@ fn validate_filter_columns(
                     .tables
                     .iter()
                     .find(|t| t.name == table_ref.name && t.schema == schema_name)
-                    && !table.columns.iter().any(|c| c.name == *col_name) {
-                        errors.push(format!(
-                            "column '{col_name}' does not exist on table '{}.{}'",
-                            table.schema, table.name
-                        ));
-                    }
+                    && !table.columns.iter().any(|c| c.name == *col_name)
+                {
+                    errors.push(format!(
+                        "column '{col_name}' does not exist on table '{}.{}'",
+                        table.schema, table.name
+                    ));
+                }
             }
         }
     }

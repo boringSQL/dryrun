@@ -84,7 +84,7 @@ pub fn check_timestamp_type(
                 ),
                 recommendation: "use timestamptz for timestamp columns".into(),
                 ddl_fix: None,
-            convention_doc: "timestamps".into(),
+                convention_doc: "timestamps".into(),
             });
         }
     }

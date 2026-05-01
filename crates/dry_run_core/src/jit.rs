@@ -67,12 +67,7 @@ pub fn add_column_volatile_default(
     }
 }
 
-pub fn add_column_pre_pg11(
-    table: &str,
-    col: &str,
-    col_type: &str,
-    default_expr: &str,
-) -> Entry {
+pub fn add_column_pre_pg11(table: &str, col: &str, col_type: &str, default_expr: &str) -> Entry {
     Entry {
         status: "unsafe".into(),
         reason: format!(
@@ -142,12 +137,7 @@ pub fn set_not_null(table: &str, col: &str, pg_major: u32) -> Entry {
     }
 }
 
-pub fn add_foreign_key_unsafe(
-    table: &str,
-    col: &str,
-    ref_table: &str,
-    ref_col: &str,
-) -> Entry {
+pub fn add_foreign_key_unsafe(table: &str, col: &str, ref_table: &str, ref_col: &str) -> Entry {
     Entry {
         status: "unsafe".into(),
         reason: format!(
@@ -177,12 +167,7 @@ pub fn add_check_constraint_unsafe(table: &str, constraint_expr: &str) -> Entry 
     }
 }
 
-pub fn create_index_blocking(
-    table: &str,
-    idx_name: &str,
-    method: &str,
-    columns: &str,
-) -> Entry {
+pub fn create_index_blocking(table: &str, idx_name: &str, method: &str, columns: &str) -> Entry {
     Entry {
         status: "unsafe".into(),
         reason: format!(
@@ -278,9 +263,7 @@ pub fn suggest_gin(table: &str, col: &str, col_type: &str) -> Entry {
         reason: format!(
             "Column `{table}.{col}` ({col_type}) would benefit from a GIN index for containment and existence queries."
         ),
-        fix: format!(
-            "CREATE INDEX CONCURRENTLY ON {table} USING gin ({col});"
-        ),
+        fix: format!("CREATE INDEX CONCURRENTLY ON {table} USING gin ({col});"),
         note: Some("GIN indexes are ideal for JSONB, arrays, and full-text search columns.".into()),
     }
 }
@@ -291,10 +274,10 @@ pub fn suggest_gist(table: &str, col: &str, col_type: &str) -> Entry {
         reason: format!(
             "Column `{table}.{col}` ({col_type}) would benefit from a GiST index for range or spatial queries."
         ),
-        fix: format!(
-            "CREATE INDEX CONCURRENTLY ON {table} USING gist ({col});"
+        fix: format!("CREATE INDEX CONCURRENTLY ON {table} USING gist ({col});"),
+        note: Some(
+            "GiST indexes are ideal for range types, geometric types, and inet/cidr.".into(),
         ),
-        note: Some("GiST indexes are ideal for range types, geometric types, and inet/cidr.".into()),
     }
 }
 
@@ -304,9 +287,7 @@ pub fn suggest_partial_index(table: &str, col: &str, predicate: &str) -> Entry {
         reason: format!(
             "Column `{table}.{col}` is mostly filtered with `{predicate}`. A partial index avoids indexing irrelevant rows."
         ),
-        fix: format!(
-            "CREATE INDEX CONCURRENTLY ON {table} ({col}) WHERE {predicate};"
-        ),
+        fix: format!("CREATE INDEX CONCURRENTLY ON {table} ({col}) WHERE {predicate};"),
         note: None,
     }
 }
@@ -402,9 +383,7 @@ pub fn partition_no_default(parent: &str) -> Entry {
         reason: format!(
             "Partitioned table `{parent}` has no DEFAULT partition. Rows that don't match any partition boundary will be rejected."
         ),
-        fix: format!(
-            "CREATE TABLE {parent}_default PARTITION OF {parent} DEFAULT;"
-        ),
+        fix: format!("CREATE TABLE {parent}_default PARTITION OF {parent} DEFAULT;"),
         note: None,
     }
 }

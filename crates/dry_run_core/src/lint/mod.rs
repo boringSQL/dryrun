@@ -72,8 +72,7 @@ pub fn compact_report(report: &LintReport, max_examples: usize) -> LintReportCom
             .then(b.count.cmp(&a.count))
     });
 
-    let total_violations =
-        report.summary.errors + report.summary.warnings + report.summary.info;
+    let total_violations = report.summary.errors + report.summary.warnings + report.summary.info;
 
     LintReportCompact {
         tables_checked: report.tables_checked,

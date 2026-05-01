@@ -15,7 +15,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use tracing::info;
 
-use super::hash::{compute_content_hash, HashInput};
+use super::hash::{HashInput, compute_content_hash};
 use super::types::*;
 use crate::error::Result;
 
@@ -60,19 +60,21 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
     )?;
 
     // Group 2: top-level objects.
-    let (enums, domains, composites, views, functions, extensions, gucs, is_standby) =
-        tokio::try_join!(
-            catalog::fetch_enums(pool),
-            catalog::fetch_domains(pool),
-            catalog::fetch_composites(pool),
-            objects::fetch_views(pool),
-            objects::fetch_functions(pool),
-            objects::fetch_extensions(pool),
-            objects::fetch_gucs(pool),
-            fetch_is_standby(pool),
-        )?;
+    let (enums, domains, composites, views, functions, extensions, gucs, is_standby) = tokio::try_join!(
+        catalog::fetch_enums(pool),
+        catalog::fetch_domains(pool),
+        catalog::fetch_composites(pool),
+        objects::fetch_views(pool),
+        objects::fetch_functions(pool),
+        objects::fetch_extensions(pool),
+        objects::fetch_gucs(pool),
+        fetch_is_standby(pool),
+    )?;
 
-    let with_vacuum = raw_table_stats.iter().filter(|s| s.last_autovacuum.is_some()).count();
+    let with_vacuum = raw_table_stats
+        .iter()
+        .filter(|s| s.last_autovacuum.is_some())
+        .count();
     if with_vacuum == 0 && !raw_table_stats.is_empty() {
         if is_standby {
             info!("all vacuum timestamps are null;expected on standby");

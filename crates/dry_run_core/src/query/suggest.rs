@@ -44,68 +44,71 @@ fn suggest_from_plan(
     schema: &SchemaSnapshot,
     suggestions: &mut Vec<IndexSuggestion>,
 ) {
-    if node.node_type == "Seq Scan" && node.plan_rows >= 1000.0
-        && let Some(table_name) = &node.relation_name {
-            let schema_name = node.schema.as_deref().unwrap_or("public");
-            let table = schema
-                .tables
-                .iter()
-                .find(|t| t.name == *table_name && t.schema == schema_name);
+    if node.node_type == "Seq Scan"
+        && node.plan_rows >= 1000.0
+        && let Some(table_name) = &node.relation_name
+    {
+        let schema_name = node.schema.as_deref().unwrap_or("public");
+        let table = schema
+            .tables
+            .iter()
+            .find(|t| t.name == *table_name && t.schema == schema_name);
 
-            if let Some(filter) = &node.filter
-                && let Some(col) = extract_filter_column(filter)
-                    && !has_leading_index(table, &col) {
-                        let idx_type = choose_index_type(table, &col);
-                        let qualified = format!("{schema_name}.{table_name}");
-                        let idx_name = format!("idx_{table_name}_{col}");
-                        suggestions.push(IndexSuggestion {
-                            table: qualified.clone(),
-                            index_type: idx_type.to_string(),
-                            columns: vec![col.clone()],
-                            include_columns: vec![],
-                            partial_predicate: None,
-                            ddl: format!(
-                                "CREATE INDEX CONCURRENTLY {idx_name} ON {qualified} USING {idx_type}({col});"
-                            ),
-                            rationale: format!(
-                                "Seq scan on '{qualified}' filtering on '{col}' (~{} rows)",
-                                node.plan_rows as i64
-                            ),
-                            estimated_impact: estimate_impact(node.plan_rows),
-                        });
-                    }
+        if let Some(filter) = &node.filter
+            && let Some(col) = extract_filter_column(filter)
+            && !has_leading_index(table, &col)
+        {
+            let idx_type = choose_index_type(table, &col);
+            let qualified = format!("{schema_name}.{table_name}");
+            let idx_name = format!("idx_{table_name}_{col}");
+            suggestions.push(IndexSuggestion {
+                table: qualified.clone(),
+                index_type: idx_type.to_string(),
+                columns: vec![col.clone()],
+                include_columns: vec![],
+                partial_predicate: None,
+                ddl: format!(
+                    "CREATE INDEX CONCURRENTLY {idx_name} ON {qualified} USING {idx_type}({col});"
+                ),
+                rationale: format!(
+                    "Seq scan on '{qualified}' filtering on '{col}' (~{} rows)",
+                    node.plan_rows as i64
+                ),
+                estimated_impact: estimate_impact(node.plan_rows),
+            });
         }
+    }
 
-    if node.node_type == "Sort" && node.plan_rows >= 5000.0
+    if node.node_type == "Sort"
+        && node.plan_rows >= 5000.0
         && let Some(sort_keys) = &node.sort_key
-            && let Some((schema_name, table_name)) = find_table_in_subtree(node) {
-                let cols: Vec<String> = sort_keys
-                    .iter()
-                    .map(|k| k.split_whitespace().next().unwrap_or(k).to_string())
-                    .collect();
-                let qualified = format!("{schema_name}.{table_name}");
-                let col_list = cols.join(", ");
-                let idx_name = format!(
-                    "idx_{table_name}_{}",
-                    cols.first().unwrap_or(&"sort".into())
-                );
+        && let Some((schema_name, table_name)) = find_table_in_subtree(node)
+    {
+        let cols: Vec<String> = sort_keys
+            .iter()
+            .map(|k| k.split_whitespace().next().unwrap_or(k).to_string())
+            .collect();
+        let qualified = format!("{schema_name}.{table_name}");
+        let col_list = cols.join(", ");
+        let idx_name = format!(
+            "idx_{table_name}_{}",
+            cols.first().unwrap_or(&"sort".into())
+        );
 
-                suggestions.push(IndexSuggestion {
-                    table: qualified.clone(),
-                    index_type: "btree".into(),
-                    columns: cols,
-                    include_columns: vec![],
-                    partial_predicate: None,
-                    ddl: format!(
-                        "CREATE INDEX CONCURRENTLY {idx_name} ON {qualified}({col_list});"
-                    ),
-                    rationale: format!(
-                        "Sort on ~{} rows could be avoided with an index on ({})",
-                        node.plan_rows as i64, col_list
-                    ),
-                    estimated_impact: "eliminates sort step".into(),
-                });
-            }
+        suggestions.push(IndexSuggestion {
+            table: qualified.clone(),
+            index_type: "btree".into(),
+            columns: cols,
+            include_columns: vec![],
+            partial_predicate: None,
+            ddl: format!("CREATE INDEX CONCURRENTLY {idx_name} ON {qualified}({col_list});"),
+            rationale: format!(
+                "Sort on ~{} rows could be avoided with an index on ({})",
+                node.plan_rows as i64, col_list
+            ),
+            estimated_impact: "eliminates sort step".into(),
+        });
+    }
 
     for child in &node.children {
         suggest_from_plan(child, schema, suggestions);
@@ -149,10 +152,7 @@ fn suggest_from_query_structure(
                     let idx_type = choose_index_type(Some(table), col_name);
                     let qualified = format!("{}.{}", table.schema, table.name);
                     let idx_name = format!("idx_{}_{col_name}", table.name);
-                    let reltuples = effective_stats
-                        .as_ref()
-                        .map(|s| s.reltuples)
-                        .unwrap_or(0.0);
+                    let reltuples = effective_stats.as_ref().map(|s| s.reltuples).unwrap_or(0.0);
 
                     suggestions.push(IndexSuggestion {
                         table: qualified.clone(),
@@ -198,15 +198,16 @@ fn has_leading_index(table: Option<&Table>, col: &str) -> bool {
 
 fn choose_index_type<'a>(table: Option<&Table>, col: &str) -> &'a str {
     if let Some(table) = table
-        && let Some(column) = table.columns.iter().find(|c| c.name == col) {
-            let ct = column.type_name.to_lowercase();
-            if ct == "jsonb" || ct == "tsvector" {
-                return "gin";
-            }
-            if ct.contains("geometry") || ct.contains("geography") || ct.contains("range") {
-                return "gist";
-            }
+        && let Some(column) = table.columns.iter().find(|c| c.name == col)
+    {
+        let ct = column.type_name.to_lowercase();
+        if ct == "jsonb" || ct == "tsvector" {
+            return "gin";
         }
+        if ct.contains("geometry") || ct.contains("geography") || ct.contains("range") {
+            return "gist";
+        }
+    }
     "btree"
 }
 
@@ -259,21 +260,71 @@ mod tests {
                 schema: "public".into(),
                 name: "users".into(),
                 columns: vec![
-                    Column { name: "id".into(), ordinal: 1, type_name: "bigint".into(), nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None },
-                    Column { name: "email".into(), ordinal: 2, type_name: "text".into(), nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None },
-                    Column { name: "data".into(), ordinal: 3, type_name: "jsonb".into(), nullable: true, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None },
+                    Column {
+                        name: "id".into(),
+                        ordinal: 1,
+                        type_name: "bigint".into(),
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        comment: None,
+                        statistics_target: None,
+                        stats: None,
+                    },
+                    Column {
+                        name: "email".into(),
+                        ordinal: 2,
+                        type_name: "text".into(),
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        comment: None,
+                        statistics_target: None,
+                        stats: None,
+                    },
+                    Column {
+                        name: "data".into(),
+                        ordinal: 3,
+                        type_name: "jsonb".into(),
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        comment: None,
+                        statistics_target: None,
+                        stats: None,
+                    },
                 ],
                 constraints: vec![],
                 indexes: vec![],
                 comment: None,
-                stats: Some(TableStats { reltuples: 500_000.0, relpages: 6250, dead_tuples: 0, last_vacuum: None, last_autovacuum: None, last_analyze: None, last_autoanalyze: None, seq_scan: 0, idx_scan: 0, table_size: 50_000_000 }),
+                stats: Some(TableStats {
+                    reltuples: 500_000.0,
+                    relpages: 6250,
+                    dead_tuples: 0,
+                    last_vacuum: None,
+                    last_autovacuum: None,
+                    last_analyze: None,
+                    last_autoanalyze: None,
+                    seq_scan: 0,
+                    idx_scan: 0,
+                    table_size: 50_000_000,
+                }),
                 partition_info: None,
                 policies: vec![],
                 triggers: vec![],
                 reloptions: vec![],
                 rls_enabled: false,
             }],
-            enums: vec![], domains: vec![], composites: vec![], views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
             node_stats: vec![],
         }
     }
@@ -281,7 +332,13 @@ mod tests {
     #[test]
     fn suggest_from_where_clause() {
         let schema = test_schema();
-        let suggestions = suggest_index("SELECT * FROM users WHERE email = 'test@example.com'", &schema, None, None).unwrap();
+        let suggestions = suggest_index(
+            "SELECT * FROM users WHERE email = 'test@example.com'",
+            &schema,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!suggestions.is_empty());
         assert_eq!(suggestions[0].table, "public.users");
         assert!(suggestions[0].columns.contains(&"email".to_string()));
@@ -292,8 +349,16 @@ mod tests {
     #[test]
     fn suggest_gin_for_jsonb() {
         let schema = test_schema();
-        let suggestions = suggest_index("SELECT * FROM users u WHERE u.data = '{}'", &schema, None, None).unwrap();
-        let jsonb = suggestions.iter().find(|s| s.columns.contains(&"data".to_string()));
+        let suggestions = suggest_index(
+            "SELECT * FROM users u WHERE u.data = '{}'",
+            &schema,
+            None,
+            None,
+        )
+        .unwrap();
+        let jsonb = suggestions
+            .iter()
+            .find(|s| s.columns.contains(&"data".to_string()));
         assert!(jsonb.is_some());
         assert_eq!(jsonb.unwrap().index_type, "gin");
     }
@@ -302,7 +367,8 @@ mod tests {
     fn no_suggestion_for_small_table() {
         let mut schema = test_schema();
         schema.tables[0].stats.as_mut().unwrap().reltuples = 50.0;
-        let suggestions = suggest_index("SELECT * FROM users WHERE email = 'x'", &schema, None, None).unwrap();
+        let suggestions =
+            suggest_index("SELECT * FROM users WHERE email = 'x'", &schema, None, None).unwrap();
         assert!(suggestions.is_empty());
     }
 
@@ -310,15 +376,44 @@ mod tests {
     fn no_duplicate_suggestions() {
         let schema = test_schema();
         let plan = PlanNode {
-            node_type: "Seq Scan".into(), relation_name: Some("users".into()), schema: Some("public".into()),
-            alias: None, startup_cost: 0.0, total_cost: 500.0, plan_rows: 100_000.0, plan_width: 64,
-            actual_rows: None, actual_loops: None, actual_startup_time: None, actual_total_time: None,
-            shared_hit_blocks: None, shared_read_blocks: None, index_name: None, index_cond: None,
-            filter: Some("(email = 'test@example.com')".into()), rows_removed_by_filter: None,
-            sort_key: None, sort_method: None, hash_cond: None, join_type: None, subplans_removed: None, cte_name: None, parent_relationship: None, children: vec![],
+            node_type: "Seq Scan".into(),
+            relation_name: Some("users".into()),
+            schema: Some("public".into()),
+            alias: None,
+            startup_cost: 0.0,
+            total_cost: 500.0,
+            plan_rows: 100_000.0,
+            plan_width: 64,
+            actual_rows: None,
+            actual_loops: None,
+            actual_startup_time: None,
+            actual_total_time: None,
+            shared_hit_blocks: None,
+            shared_read_blocks: None,
+            index_name: None,
+            index_cond: None,
+            filter: Some("(email = 'test@example.com')".into()),
+            rows_removed_by_filter: None,
+            sort_key: None,
+            sort_method: None,
+            hash_cond: None,
+            join_type: None,
+            subplans_removed: None,
+            cte_name: None,
+            parent_relationship: None,
+            children: vec![],
         };
-        let suggestions = suggest_index("SELECT * FROM users WHERE email = 'test@example.com'", &schema, Some(&plan), None).unwrap();
-        let email_count = suggestions.iter().filter(|s| s.columns.contains(&"email".to_string())).count();
+        let suggestions = suggest_index(
+            "SELECT * FROM users WHERE email = 'test@example.com'",
+            &schema,
+            Some(&plan),
+            None,
+        )
+        .unwrap();
+        let email_count = suggestions
+            .iter()
+            .filter(|s| s.columns.contains(&"email".to_string()))
+            .count();
         assert_eq!(email_count, 1, "should deduplicate");
     }
 }
