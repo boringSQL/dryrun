@@ -934,14 +934,8 @@ fn write_snapshot_export(
     key: &SnapshotKey,
     snap: &dry_run_core::SchemaSnapshot,
 ) -> anyhow::Result<PathBuf> {
-    let path = out_root
-        .join(&key.project_id.0)
-        .join(&key.database_id.0)
-        .join(format!(
-            "{}-{}.json.zst",
-            snap.timestamp.format("%Y%m%dT%H%M%SZ"),
-            snap.content_hash,
-        ));
+    let path =
+        dry_run_core::history::snapshot_path(out_root, key, snap.timestamp, &snap.content_hash);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
