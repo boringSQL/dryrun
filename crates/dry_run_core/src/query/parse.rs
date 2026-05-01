@@ -97,21 +97,19 @@ pub fn parse_sql(sql: &str) -> Result<ParsedQuery> {
                 for target in &s.target_list {
                     if let Some(pg_query::protobuf::node::Node::ResTarget(rt)) = &target.node
                         && let Some(val) = &rt.val
-                            && let Some(pg_query::protobuf::node::Node::ColumnRef(cr)) = &val.node {
-                                for field in &cr.fields {
-                                    if let Some(pg_query::protobuf::node::Node::AStar(_)) =
-                                        &field.node
-                                    {
-                                        has_select_star = true;
-                                    }
-                                }
+                        && let Some(pg_query::protobuf::node::Node::ColumnRef(cr)) = &val.node
+                    {
+                        for field in &cr.fields {
+                            if let Some(pg_query::protobuf::node::Node::AStar(_)) = &field.node {
+                                has_select_star = true;
                             }
+                        }
+                    }
                 }
             }
-            NodeRef::InsertStmt(_)
-                if statement_type.is_empty() => {
-                    statement_type = "INSERT".into();
-                }
+            NodeRef::InsertStmt(_) if statement_type.is_empty() => {
+                statement_type = "INSERT".into();
+            }
             NodeRef::UpdateStmt(u) => {
                 if statement_type.is_empty() {
                     statement_type = "UPDATE".into();
@@ -125,9 +123,10 @@ pub fn parse_sql(sql: &str) -> Result<ParsedQuery> {
                 }
                 for tl in &u.target_list {
                     if let Some(pg_query::protobuf::node::Node::ResTarget(rt)) = &tl.node
-                        && !rt.name.is_empty() {
-                            update_targets.push(rt.name.clone());
-                        }
+                        && !rt.name.is_empty()
+                    {
+                        update_targets.push(rt.name.clone());
+                    }
                 }
             }
             NodeRef::DeleteStmt(d) => {

@@ -145,7 +145,13 @@ mod tests {
                 "Plan Width": 48
             }
         }]);
-        let plan_value = json.as_array().unwrap().first().unwrap().get("Plan").unwrap();
+        let plan_value = json
+            .as_array()
+            .unwrap()
+            .first()
+            .unwrap()
+            .get("Plan")
+            .unwrap();
         let plan = parse_plan_json(plan_value).unwrap();
         assert_eq!(plan.node_type, "Seq Scan");
         assert_eq!(plan.relation_name.as_deref(), Some("orders"));

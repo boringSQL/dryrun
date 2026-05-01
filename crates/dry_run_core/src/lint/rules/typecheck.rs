@@ -25,7 +25,7 @@ pub fn check_text_over_varchar(
                 message: format!("column '{}' uses {} — prefer text", col.name, col.type_name),
                 recommendation: e.reason,
                 ddl_fix: Some(e.fix),
-            convention_doc: "types".into(),
+                convention_doc: "types".into(),
             });
         }
     }
@@ -48,7 +48,7 @@ pub fn check_timestamptz(table: &Table, qualified: &str, violations: &mut Vec<Li
                 message: format!("column '{}' uses timestamp without time zone", col.name),
                 recommendation: rec,
                 ddl_fix: Some(e.fix),
-            convention_doc: "types".into(),
+                convention_doc: "types".into(),
             });
         }
     }
@@ -57,26 +57,31 @@ pub fn check_timestamptz(table: &Table, qualified: &str, violations: &mut Vec<Li
 pub fn check_no_serial(table: &Table, qualified: &str, violations: &mut Vec<LintViolation>) {
     for col in &table.columns {
         if let Some(default) = &col.default
-            && default.to_lowercase().contains("nextval(") {
-                violations.push(LintViolation {
-                    rule: "types/no_serial".into(),
-                    severity: Severity::Warning,
-                    table: qualified.into(),
-                    column: Some(col.name.clone()),
-                    message: format!(
-                        "column '{}' uses serial/sequence default ({})",
-                        col.name, default
-                    ),
-                    recommendation: "use bigint GENERATED ALWAYS AS IDENTITY instead of serial"
-                        .into(),
-                    ddl_fix: None,
-            convention_doc: "types".into(),
-                });
-            }
+            && default.to_lowercase().contains("nextval(")
+        {
+            violations.push(LintViolation {
+                rule: "types/no_serial".into(),
+                severity: Severity::Warning,
+                table: qualified.into(),
+                column: Some(col.name.clone()),
+                message: format!(
+                    "column '{}' uses serial/sequence default ({})",
+                    col.name, default
+                ),
+                recommendation: "use bigint GENERATED ALWAYS AS IDENTITY instead of serial".into(),
+                ddl_fix: None,
+                convention_doc: "types".into(),
+            });
+        }
     }
 }
 
-pub fn check_bigint_pk_fk(table: &Table, qualified: &str, config: &LintConfig, violations: &mut Vec<LintViolation>) {
+pub fn check_bigint_pk_fk(
+    table: &Table,
+    qualified: &str,
+    config: &LintConfig,
+    violations: &mut Vec<LintViolation>,
+) {
     let pk_cols: Vec<&str> = table
         .constraints
         .iter()
@@ -104,10 +109,7 @@ pub fn check_bigint_pk_fk(table: &Table, qualified: &str, config: &LintConfig, v
         if is_int && config.pk_type == "int_identity" {
             continue;
         }
-        if is_int
-            || type_lower == "smallint"
-            || type_lower == "int2"
-        {
+        if is_int || type_lower == "smallint" || type_lower == "int2" {
             violations.push(LintViolation {
                 rule: "types/bigint_pk_fk".into(),
                 severity: Severity::Warning,
@@ -119,7 +121,7 @@ pub fn check_bigint_pk_fk(table: &Table, qualified: &str, config: &LintConfig, v
                 ),
                 recommendation: "use bigint for PK and FK columns".into(),
                 ddl_fix: None,
-            convention_doc: "types".into(),
+                convention_doc: "types".into(),
             });
         }
     }

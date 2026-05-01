@@ -23,7 +23,9 @@ pub struct DescribeTableParams {
     #[schemars(description = "Schema filter (default: all schemas).")]
     pub schema: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Detail level: 'summary' (default, compact with profiles), 'full' (all raw stats), 'stats' (only profiles and stats).")]
+    #[schemars(
+        description = "Detail level: 'summary' (default, compact with profiles), 'full' (all raw stats), 'stats' (only profiles and stats)."
+    )]
     pub detail: Option<String>,
 }
 
@@ -50,10 +52,14 @@ pub struct FindRelatedParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SchemaDiffParams {
     #[serde(default)]
-    #[schemars(description = "Content hash of the base snapshot. Omit to use the latest saved snapshot.")]
+    #[schemars(
+        description = "Content hash of the base snapshot. Omit to use the latest saved snapshot."
+    )]
     pub from: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Content hash of the target snapshot. Omit to compare against current live schema.")]
+    #[schemars(
+        description = "Content hash of the target snapshot. Omit to compare against current live schema."
+    )]
     pub to: Option<String>,
 }
 
@@ -87,7 +93,9 @@ fn default_true() -> Option<bool> {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CheckMigrationParams {
-    #[schemars(description = "DDL statement(s) to check for migration safety (e.g. ALTER TABLE, CREATE INDEX).")]
+    #[schemars(
+        description = "DDL statement(s) to check for migration safety (e.g. ALTER TABLE, CREATE INDEX)."
+    )]
     pub ddl: String,
 }
 
@@ -100,14 +108,18 @@ pub struct LintSchemaParams {
     #[schemars(description = "Table filter (default: all tables).")]
     pub table: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Scope: 'conventions' (lint only), 'audit' (audit only), or 'all' (default, both).")]
+    #[schemars(
+        description = "Scope: 'conventions' (lint only), 'audit' (audit only), or 'all' (default, both)."
+    )]
     pub scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DetectParams {
     #[serde(default)]
-    #[schemars(description = "Detection kind: stale_stats, unused_indexes, bloated_indexes, or all (default).")]
+    #[schemars(
+        description = "Detection kind: stale_stats, unused_indexes, bloated_indexes, or all (default)."
+    )]
     pub kind: Option<String>,
     #[serde(default)]
     #[schemars(description = "Bloat ratio threshold (default 1.5).")]

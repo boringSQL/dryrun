@@ -11,7 +11,7 @@ pub mod schema;
 pub mod version;
 
 pub use audit::AuditConfig;
-pub use config::{ConnectionConfig, ProjectConfig};
+pub use config::{ConnectionConfig, ProjectConfig, ResolvedProfile};
 pub use connection::{DryRun, PrivilegeReport, ProbeResult};
 pub use diff::SchemaChangeset;
 pub use error::{Error, Result};

@@ -28,4 +28,10 @@ pub enum Error {
     Database(#[from] sqlx::Error),
 }
 
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Self {
+        Error::History(e.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

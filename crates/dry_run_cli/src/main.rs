@@ -4,6 +4,9 @@ mod pgmustard;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use dry_run_core::history::{
+    DatabaseId, PutOutcome, SnapshotKey, SnapshotRef, SnapshotStore, TimeRange,
+};
 use dry_run_core::schema::{NodeColumnStats, NodeIndexStats, NodeStats, NodeTableStats};
 use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
 use rmcp::ServiceExt;
@@ -134,6 +137,12 @@ enum SnapshotAction {
         #[arg(long)]
         pretty: bool,
     },
+    Export {
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        history_db: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -162,31 +171,58 @@ async fn main() {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Probe { ref db } => cmd_probe(db.as_deref()).await,
-        Command::DumpSchema { ref source, pretty, ref output, stats_only, ref name } => {
-            cmd_dump_schema(source.as_deref(), pretty, output.clone(), stats_only, name.clone()).await
+        Command::Probe { ref db } => cmd_probe(&cli, db.as_deref()).await,
+        Command::DumpSchema {
+            ref source,
+            pretty,
+            ref output,
+            stats_only,
+            ref name,
+        } => {
+            cmd_dump_schema(
+                &cli,
+                source.as_deref(),
+                pretty,
+                output.clone(),
+                stats_only,
+                name.clone(),
+            )
+            .await
         }
         Command::Init { ref db } => cmd_init(db.as_deref()).await,
-        Command::Import { ref file, ref stats } => cmd_import(file, stats).await,
+        Command::Import {
+            ref file,
+            ref stats,
+        } => cmd_import(&cli, file, stats).await,
         Command::Lint {
             ref schema_name,
             pretty,
             json,
         } => cmd_lint(&cli, schema_name.as_deref(), pretty, json).await,
-        Command::Snapshot { ref action } => cmd_snapshot(action).await,
+        Command::Snapshot { ref action } => cmd_snapshot(&cli, action).await,
         Command::Profile { ref action } => cmd_profile(&cli, action),
-        Command::Stats { ref action } => cmd_stats(action).await,
-        Command::Drift { ref db, ref against, pretty, json } => {
-            cmd_drift(db.as_deref(), against.as_deref(), pretty, json).await
-        }
-        Command::McpServe { ref db, ref schema_file, ref transport, port } => {
-            cmd_mcp_serve(&cli, db.as_deref(), schema_file.as_deref(), transport, port).await
-        }
+        Command::Stats { ref action } => cmd_stats(&cli, action).await,
+        Command::Drift {
+            ref db,
+            ref against,
+            pretty,
+            json,
+        } => cmd_drift(&cli, db.as_deref(), against.as_deref(), pretty, json).await,
+        Command::McpServe {
+            ref db,
+            ref schema_file,
+            ref transport,
+            port,
+        } => cmd_mcp_serve(&cli, db.as_deref(), schema_file.as_deref(), transport, port).await,
     }
 }
 
-async fn cmd_probe(db: Option<&str>) -> anyhow::Result<()> {
-    let db_url = require_db_url(db)?;
+async fn cmd_probe(cli: &Cli, db: Option<&str>) -> anyhow::Result<()> {
+    let resolved = active_resolved_profile(cli, db, None)?;
+    let db_url = resolved
+        .db_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--db or a profile with db_url is required"))?;
     let ctx = DryRun::connect(db_url).await?;
 
     let result = ctx.probe().await?;
@@ -195,26 +231,48 @@ async fn cmd_probe(db: Option<&str>) -> anyhow::Result<()> {
 
     let report = ctx.check_privileges().await?;
     println!("Privileges:");
-    println!("  pg_catalog:           {}", if report.pg_catalog { "ok" } else { "DENIED" });
-    println!("  information_schema:   {}", if report.information_schema { "ok" } else { "DENIED" });
-    println!("  pg_stat_user_tables:  {}", if report.pg_stat_user_tables { "ok" } else { "DENIED" });
+    println!(
+        "  pg_catalog:           {}",
+        if report.pg_catalog { "ok" } else { "DENIED" }
+    );
+    println!(
+        "  information_schema:   {}",
+        if report.information_schema {
+            "ok"
+        } else {
+            "DENIED"
+        }
+    );
+    println!(
+        "  pg_stat_user_tables:  {}",
+        if report.pg_stat_user_tables {
+            "ok"
+        } else {
+            "DENIED"
+        }
+    );
     Ok(())
 }
 
 async fn cmd_dump_schema(
+    cli: &Cli,
     source: Option<&str>,
     pretty: bool,
     output: Option<PathBuf>,
     stats_only: bool,
     name: Option<String>,
 ) -> anyhow::Result<()> {
-    let db_url = require_db_url(source)?;
+    let resolved = active_resolved_profile(cli, source, None)?;
+    let db_url = resolved
+        .db_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--source or a profile with db_url is required"))?;
+    let name = name.or_else(|| resolved.database_id.as_ref().map(|d| d.0.clone()));
     let ctx = DryRun::connect(db_url).await?;
 
     if stats_only {
-        let source = name.ok_or_else(|| {
-            anyhow::anyhow!("--name is required when using --stats-only")
-        })?;
+        let source =
+            name.ok_or_else(|| anyhow::anyhow!("--name is required when using --stats-only"))?;
         let node_stats = ctx.introspect_stats_only(&source).await?;
 
         let json = if pretty {
@@ -304,30 +362,39 @@ async fn cmd_dump_schema(
 
 async fn cmd_init(db: Option<&str>) -> anyhow::Result<()> {
     let config_path = PathBuf::from("dryrun.toml");
+    let cwd = std::env::current_dir().unwrap_or_default();
 
     // scaffold config file
     if !config_path.exists() {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let profile_name = cwd
+        let project_id = cwd
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("default");
+        let profile_name = project_id;
         let content = format!(
-            r#"[default]
+            r#"[project]
+id = "{project_id}"
+
+[default]
 profile = "{profile_name}"
 
 [profiles.{profile_name}]
 schema_file = ".dryrun/schema.json"
+# database_id = "{profile_name}"   # defaults to profile name; override to e.g. "auth", "billing"
 
 # [profiles.dev]
 # db_url = "${{DATABASE_URL}}"
+# database_id = "dev"
 
 # [conventions]
 # See: https://boringsql.com/dryrun/docs/dryrun-toml
 "#
         );
         std::fs::write(&config_path, &content)?;
-        eprintln!("Created {} (profile \"{profile_name}\")", config_path.display());
+        eprintln!(
+            "Created {} (profile \"{profile_name}\")",
+            config_path.display()
+        );
     } else {
         eprintln!("{} already exists, skipping", config_path.display());
     }
@@ -346,9 +413,12 @@ schema_file = ".dryrun/schema.json"
         std::fs::write(&schema_path, &json)?;
 
         let store = open_history_store(None)?;
-        if let Err(e) = store.save_snapshot(db_url, &snapshot) {
-            eprintln!("warning: could not save snapshot: {e}");
-        }
+        let config = ProjectConfig::discover(&cwd)
+            .map(|(_, c)| Ok(c))
+            .unwrap_or_else(|| ProjectConfig::parse(""))?;
+        let resolved = config.resolve_profile(Some(db_url), None, None, &cwd)?;
+        let key = complete_key(&resolved, &snapshot.database);
+        store.put(&key, &snapshot).await?;
 
         eprintln!(
             "Captured schema: {} tables, {} views, {} functions",
@@ -357,6 +427,10 @@ schema_file = ".dryrun/schema.json"
             snapshot.functions.len()
         );
         eprintln!("  Schema: {}", schema_path.display());
+        eprintln!(
+            "  project={} database={}",
+            key.project_id.0, key.database_id.0
+        );
     } else {
         eprintln!("Run 'dryrun init --db <url>' to capture a schema snapshot");
     }
@@ -399,7 +473,10 @@ async fn cmd_lint(
         println!("{output}");
     } else {
         if report.violations.is_empty() {
-            println!("No lint violations found ({} tables checked).", report.tables_checked);
+            println!(
+                "No lint violations found ({} tables checked).",
+                report.tables_checked
+            );
         } else {
             for v in &report.violations {
                 let location = if let Some(col) = &v.column {
@@ -433,7 +510,8 @@ async fn cmd_lint(
     Ok(())
 }
 
-async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
+async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> {
+    let profile = cli.profile.as_deref();
     match action {
         SnapshotAction::Take { db, history_db } => {
             let db_url = require_db_url(db.as_deref())?;
@@ -441,29 +519,49 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
             let store = open_history_store(history_db.as_deref())?;
             let snapshot = ctx.introspect_schema().await?;
 
-            match store.save_snapshot(db_url, &snapshot)? {
-                true => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let config = ProjectConfig::discover(&cwd)
+                .map(|(_, c)| Ok(c))
+                .unwrap_or_else(|| ProjectConfig::parse(""))?;
+            let resolved = config.resolve_profile(Some(db_url), None, profile, &cwd)?;
+            let key = complete_key(&resolved, &snapshot.database);
+
+            match store.put(&key, &snapshot).await? {
+                PutOutcome::Inserted => {
                     println!("Snapshot saved: {}", snapshot.content_hash);
                     println!(
                         "  {} tables, {} views, {} functions",
-                        snapshot.tables.len(), snapshot.views.len(), snapshot.functions.len()
+                        snapshot.tables.len(),
+                        snapshot.views.len(),
+                        snapshot.functions.len()
+                    );
+                    println!(
+                        "  project={} database={}",
+                        key.project_id.0, key.database_id.0
                     );
                 }
-                false => {
+                PutOutcome::Deduped => {
                     println!("Schema unchanged (hash: {})", snapshot.content_hash);
+                    println!(
+                        "  project={} database={}",
+                        key.project_id.0, key.database_id.0
+                    );
                 }
             }
             Ok(())
         }
         SnapshotAction::List { db, history_db } => {
-            let db_url = require_db_url(db.as_deref())?;
             let store = open_history_store(history_db.as_deref())?;
-            let snapshots = store.list_snapshots(db_url)?;
+            let key = resolve_read_key(db.as_deref(), profile).await?;
+            let rows = store.list(&key, TimeRange::default()).await?;
 
-            if snapshots.is_empty() {
-                println!("No snapshots found for this database.");
+            if rows.is_empty() {
+                println!(
+                    "No snapshots found (project={} database={})",
+                    key.project_id.0, key.database_id.0
+                );
             } else {
-                for s in &snapshots {
+                for s in &rows {
                     println!(
                         "{}  {}  {}",
                         s.timestamp.format("%Y-%m-%d %H:%M:%S"),
@@ -471,30 +569,38 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
                         s.database,
                     );
                 }
-                println!("\n{} snapshot(s) total", snapshots.len());
+                println!(
+                    "\n{} snapshot(s) total (project={} database={})",
+                    rows.len(),
+                    key.project_id.0,
+                    key.database_id.0
+                );
             }
             Ok(())
         }
         SnapshotAction::Diff {
-            db, from, to, latest, history_db, pretty,
+            db,
+            from,
+            to,
+            latest,
+            history_db,
+            pretty,
         } => {
             let db_url = require_db_url(db.as_deref())?;
             let ctx = DryRun::connect(db_url).await?;
             let store = open_history_store(history_db.as_deref())?;
+            let key = resolve_read_key(Some(db_url), profile).await?;
 
             let from_snapshot = if let Some(hash) = &from {
-                store.load_snapshot(hash)?
-                    .ok_or_else(|| anyhow::anyhow!("snapshot with hash '{hash}' not found"))?
+                store.get(&key, SnapshotRef::Hash(hash.clone())).await?
             } else if *latest {
-                store.latest_snapshot(db_url)?
-                    .ok_or_else(|| anyhow::anyhow!("no saved snapshots found for this database"))?
+                store.get(&key, SnapshotRef::Latest).await?
             } else {
                 anyhow::bail!("specify --from <hash> or --latest");
             };
 
             let to_snapshot = if let Some(hash) = &to {
-                store.load_snapshot(hash)?
-                    .ok_or_else(|| anyhow::anyhow!("snapshot with hash '{hash}' not found"))?
+                store.get(&key, SnapshotRef::Hash(hash.clone())).await?
             } else {
                 ctx.introspect_schema().await?
             };
@@ -508,6 +614,33 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
             println!("{json}");
             Ok(())
         }
+        SnapshotAction::Export { out, history_db } => {
+            let store = open_history_store(history_db.as_deref())?;
+            let out_root = out.clone().unwrap_or_else(|| {
+                dry_run_core::history::default_data_dir()
+                    .map(|d| d.join("snapshots"))
+                    .unwrap_or_else(|_| PathBuf::from(".dryrun/snapshots"))
+            });
+
+            let keys = store.list_keys()?;
+            let mut written = 0usize;
+            for key in &keys {
+                let summaries = store.list(key, TimeRange::default()).await?;
+                for s in &summaries {
+                    let snap = store
+                        .get(key, SnapshotRef::Hash(s.content_hash.clone()))
+                        .await?;
+                    write_snapshot_export(&out_root, key, &snap)?;
+                    written += 1;
+                }
+            }
+            println!(
+                "Exported {written} snapshot(s) from {} stream(s) to {}",
+                keys.len(),
+                out_root.display(),
+            );
+            Ok(())
+        }
     }
 }
 
@@ -517,17 +650,17 @@ fn cmd_profile(cli: &Cli, action: &ProfileAction) -> anyhow::Result<()> {
         let config = ProjectConfig::load(config_path)?;
         (config_path.clone(), config)
     } else {
-        ProjectConfig::discover(&cwd)
-            .ok_or_else(|| anyhow::anyhow!("no dryrun.toml found"))?
+        ProjectConfig::discover(&cwd).ok_or_else(|| anyhow::anyhow!("no dryrun.toml found"))?
     };
 
     match action {
         ProfileAction::List => {
             println!("Config: {}", config_path.display());
             if let Some(default) = &config.default
-                && let Some(profile) = &default.profile {
-                    println!("Default profile: {profile}");
-                }
+                && let Some(profile) = &default.profile
+            {
+                println!("Default profile: {profile}");
+            }
             println!();
 
             if config.profiles.is_empty() {
@@ -546,7 +679,9 @@ fn cmd_profile(cli: &Cli, action: &ProfileAction) -> anyhow::Result<()> {
             }
         }
         ProfileAction::Show { name } => {
-            let profile = config.profiles.get(name)
+            let profile = config
+                .profiles
+                .get(name)
                 .ok_or_else(|| anyhow::anyhow!("profile '{name}' not found"))?;
             println!("Profile: {name}");
             if let Some(url) = &profile.db_url {
@@ -560,7 +695,11 @@ fn cmd_profile(cli: &Cli, action: &ProfileAction) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::Result<()> {
+async fn cmd_import(
+    cli: &Cli,
+    file: &std::path::Path,
+    stats_files: &[PathBuf],
+) -> anyhow::Result<()> {
     let json = std::fs::read_to_string(file)?;
     let mut snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("invalid schema JSON in '{}': {e}", file.display()))?;
@@ -568,11 +707,10 @@ async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::
     if !stats_files.is_empty() {
         for stats_path in stats_files {
             let stats_json = std::fs::read_to_string(stats_path)?;
-            let node_stats: dry_run_core::NodeStats = serde_json::from_str(&stats_json)
-                .map_err(|e| anyhow::anyhow!(
-                    "invalid stats JSON in '{}': {e}",
-                    stats_path.display()
-                ))?;
+            let node_stats: dry_run_core::NodeStats =
+                serde_json::from_str(&stats_json).map_err(|e| {
+                    anyhow::anyhow!("invalid stats JSON in '{}': {e}", stats_path.display())
+                })?;
             eprintln!(
                 "  merging stats from '{}' ({} tables, {} indexes)",
                 node_stats.source,
@@ -586,7 +724,15 @@ async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::
     let data_dir = dry_run_core::history::default_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
 
-    let out_path = data_dir.join("schema.json");
+    // route to the resolved profile's schema_file when one is configured;
+    // fall back to .dryrun/schema.json
+    let out_path = active_resolved_profile(cli, None, None)
+        .ok()
+        .and_then(|r| r.schema_file)
+        .unwrap_or_else(|| data_dir.join("schema.json"));
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let out_json = serde_json::to_string_pretty(&snapshot)?;
     std::fs::write(&out_path, &out_json)?;
 
@@ -603,21 +749,28 @@ async fn cmd_import(file: &std::path::Path, stats_files: &[PathBuf]) -> anyhow::
     Ok(())
 }
 
-async fn cmd_stats(action: &StatsAction) -> anyhow::Result<()> {
+async fn cmd_stats(cli: &Cli, action: &StatsAction) -> anyhow::Result<()> {
     match action {
-        StatsAction::Apply { db, schema_file, node } => {
-            let db_url = require_db_url(db.as_deref())?;
+        StatsAction::Apply {
+            db,
+            schema_file,
+            node,
+        } => {
+            let resolved = active_resolved_profile(cli, db.as_deref(), schema_file.as_deref())?;
+            let db_url = resolved
+                .db_url
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--db or a profile with db_url is required"))?;
 
-            let snapshot = resolve_schema(schema_file.as_deref(), None, None)?;
+            let snapshot = match resolved.schema_file.as_deref() {
+                Some(path) => load_schema_file(path)?,
+                None => resolve_schema(schema_file.as_deref(), None, None)?,
+            };
 
             let ctx = DryRun::connect(db_url).await?;
 
-            let result = dry_run_core::schema::apply_stats(
-                ctx.pool(),
-                &snapshot,
-                node.as_deref(),
-            )
-            .await?;
+            let result =
+                dry_run_core::schema::apply_stats(ctx.pool(), &snapshot, node.as_deref()).await?;
 
             // pg_regresql warning
             if !result.regresql_loaded {
@@ -651,13 +804,22 @@ async fn cmd_stats(action: &StatsAction) -> anyhow::Result<()> {
 }
 
 async fn cmd_drift(
+    cli: &Cli,
     db: Option<&str>,
     against: Option<&std::path::Path>,
     pretty: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    let db_url = require_db_url(db)?;
-    let prod_snapshot = resolve_schema(against, None, None)?;
+    let resolved = active_resolved_profile(cli, db, against)?;
+    let db_url = resolved
+        .db_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--db or a profile with db_url is required"))?;
+
+    let prod_snapshot = match resolved.schema_file.as_deref() {
+        Some(path) => load_schema_file(path)?,
+        None => resolve_schema(against, None, None)?,
+    };
 
     let ctx = DryRun::connect(db_url).await?;
     let local_snapshot = ctx.introspect_schema().await?;
@@ -681,10 +843,13 @@ async fn cmd_drift(
                     dry_run_core::diff::DriftDirection::Behind => "BEHIND",
                     dry_run_core::diff::DriftDirection::Diverged => "DIVERGED",
                 };
-                let location = entry.change.schema.as_deref().map_or(
-                    entry.change.name.clone(),
-                    |s| format!("{s}.{}", entry.change.name),
-                );
+                let location = entry
+                    .change
+                    .schema
+                    .as_deref()
+                    .map_or(entry.change.name.clone(), |s| {
+                        format!("{s}.{}", entry.change.name)
+                    });
                 println!("[{arrow:>8}] {}: {location}", entry.change.object_type);
                 for detail in &entry.change.details {
                     println!("           {detail}");
@@ -707,6 +872,18 @@ async fn cmd_drift(
 
 fn require_db_url(db: Option<&str>) -> anyhow::Result<&str> {
     db.ok_or_else(|| anyhow::anyhow!("--db or DATABASE_URL is required"))
+}
+
+fn active_resolved_profile(
+    cli: &Cli,
+    cli_db: Option<&str>,
+    cli_schema: Option<&std::path::Path>,
+) -> anyhow::Result<dry_run_core::ResolvedProfile> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let config = ProjectConfig::discover(&cwd)
+        .map(|(_, c)| Ok(c))
+        .unwrap_or_else(|| ProjectConfig::parse(""))?;
+    Ok(config.resolve_profile(cli_db, cli_schema, cli.profile.as_deref(), &cwd)?)
 }
 
 fn load_project_config(cli: &Cli, cwd: &std::path::Path) -> Option<ProjectConfig> {
@@ -734,9 +911,10 @@ fn schema_candidate_paths(
 
     if let Some(config) = project_config
         && let Ok(resolved) = config.resolve_profile(None, None, profile, &cwd)
-            && let Some(sf) = resolved.schema_file {
-                candidates.push(sf);
-            }
+        && let Some(sf) = resolved.schema_file
+    {
+        candidates.push(sf);
+    }
 
     if let Ok(data_dir) = dry_run_core::history::default_data_dir() {
         candidates.push(data_dir.join("schema.json"));
@@ -753,7 +931,9 @@ fn resolve_schema_path(
     schema_candidate_paths(schema_file, project_config, profile)
         .into_iter()
         .find(|p| p.exists())
-        .ok_or_else(|| anyhow::anyhow!("no schema found — run dump-schema first or pass --schema-file"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("no schema found — run dump-schema first or pass --schema-file")
+        })
 }
 
 fn resolve_schema(
@@ -779,6 +959,68 @@ fn open_history_store(path: Option<&std::path::Path>) -> anyhow::Result<HistoryS
     Ok(store)
 }
 
+// completes a SnapshotKey from a resolved profile; falls back to snapshot.database
+// when the profile didn't declare a database_id (the <cli>/<auto> case).
+fn write_snapshot_export(
+    out_root: &std::path::Path,
+    key: &SnapshotKey,
+    snap: &dry_run_core::SchemaSnapshot,
+) -> anyhow::Result<PathBuf> {
+    let path = out_root
+        .join(&key.project_id.0)
+        .join(&key.database_id.0)
+        .join(format!(
+            "{}-{}.json.zst",
+            snap.timestamp.format("%Y%m%dT%H%M%SZ"),
+            snap.content_hash,
+        ));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_vec(snap)?;
+    let compressed = zstd::encode_all(json.as_slice(), 3)?;
+    std::fs::write(&path, compressed)?;
+    Ok(path)
+}
+
+fn complete_key(resolved: &dry_run_core::ResolvedProfile, snapshot_database: &str) -> SnapshotKey {
+    SnapshotKey {
+        project_id: resolved.project_id.clone(),
+        database_id: resolved
+            .database_id
+            .clone()
+            .unwrap_or_else(|| DatabaseId(snapshot_database.to_string())),
+    }
+}
+
+async fn resolve_read_key(
+    db_url: Option<&str>,
+    profile: Option<&str>,
+) -> anyhow::Result<SnapshotKey> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let config = ProjectConfig::discover(&cwd)
+        .map(|(_, c)| Ok(c))
+        .unwrap_or_else(|| ProjectConfig::parse(""))?;
+    let resolved = config.resolve_profile(db_url, None, profile, &cwd)?;
+
+    if let Some(database_id) = resolved.database_id {
+        return Ok(SnapshotKey {
+            project_id: resolved.project_id,
+            database_id,
+        });
+    }
+
+    let url = resolved
+        .db_url
+        .ok_or_else(|| anyhow::anyhow!("no profile and no --db; cannot determine snapshot key"))?;
+    let ctx = DryRun::connect(&url).await?;
+    let dbname = ctx.current_database().await?;
+    Ok(SnapshotKey {
+        project_id: resolved.project_id,
+        database_id: DatabaseId(dbname),
+    })
+}
+
 async fn cmd_mcp_serve(
     cli: &Cli,
     db: Option<&str>,
@@ -794,19 +1036,15 @@ async fn cmd_mcp_serve(
         .map(|c| c.lint_config())
         .unwrap_or_default();
 
-    let pgmustard_api_key = project_config
-        .as_ref()
-        .and_then(|c| c.pgmustard_api_key());
+    let pgmustard_api_key = project_config.as_ref().and_then(|c| c.pgmustard_api_key());
 
-    let candidates = schema_candidate_paths(
-        schema_path, project_config.as_ref(), cli.profile.as_deref(),
-    );
+    let candidates =
+        schema_candidate_paths(schema_path, project_config.as_ref(), cli.profile.as_deref());
 
     // try to load schema — if missing, start in uninitialized mode;
     // if file exists but is broken, propagate the error
-    let schema_path_result = resolve_schema_path(
-        schema_path, project_config.as_ref(), cli.profile.as_deref(),
-    );
+    let schema_path_result =
+        resolve_schema_path(schema_path, project_config.as_ref(), cli.profile.as_deref());
 
     let server = match schema_path_result {
         Ok(schema_file) => {
@@ -814,15 +1052,18 @@ async fn cmd_mcp_serve(
             let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)?;
             eprintln!(
                 "dryrun: loaded schema from {} ({} tables)",
-                schema_file.display(), snapshot.tables.len()
+                schema_file.display(),
+                snapshot.tables.len()
             );
 
             // optional --db enables live tools (explain_query, refresh_schema)
             let effective_db = db.map(|s| s.to_string()).or_else(|| {
                 if let Some(ref config) = project_config
-                    && let Ok(resolved) = config.resolve_profile(None, None, cli.profile.as_deref(), &cwd) {
-                        return resolved.db_url;
-                    }
+                    && let Ok(resolved) =
+                        config.resolve_profile(None, None, cli.profile.as_deref(), &cwd)
+                {
+                    return resolved.db_url;
+                }
                 None
             });
 
@@ -836,7 +1077,11 @@ async fn cmd_mcp_serve(
             };
 
             mcp::DryRunServer::from_snapshot_with_db(
-                snapshot, db_connection, lint_config, pgmustard_api_key, get_version(),
+                snapshot,
+                db_connection,
+                lint_config,
+                pgmustard_api_key,
+                get_version(),
                 candidates,
             )
         }
@@ -869,4 +1114,180 @@ async fn cmd_mcp_serve(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use dry_run_core::history::{DatabaseId, ProjectId};
+    use dry_run_core::{ResolvedProfile, SchemaSnapshot};
+    use tempfile::TempDir;
+
+    fn make_snap(hash: &str, database: &str) -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: database.into(),
+            timestamp: Utc.with_ymd_and_hms(2026, 4, 30, 14, 22, 11).unwrap(),
+            content_hash: hash.into(),
+            source: None,
+            tables: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
+    fn key(proj: &str, db: &str) -> SnapshotKey {
+        SnapshotKey {
+            project_id: ProjectId(proj.into()),
+            database_id: DatabaseId(db.into()),
+        }
+    }
+
+    #[test]
+    fn complete_key_uses_resolved_database_id_when_set() {
+        let resolved = ResolvedProfile {
+            name: "prod".into(),
+            db_url: None,
+            schema_file: None,
+            project_id: ProjectId("clusterity".into()),
+            database_id: Some(DatabaseId("auth".into())),
+        };
+        let key = complete_key(&resolved, "fallback_db");
+        assert_eq!(key.project_id.0, "clusterity");
+        assert_eq!(key.database_id.0, "auth");
+    }
+
+    #[test]
+    fn complete_key_falls_back_to_snapshot_database() {
+        let resolved = ResolvedProfile {
+            name: "<cli>".into(),
+            db_url: None,
+            schema_file: None,
+            project_id: ProjectId("myproj".into()),
+            database_id: None,
+        };
+        let key = complete_key(&resolved, "actual_db");
+        assert_eq!(key.project_id.0, "myproj");
+        assert_eq!(key.database_id.0, "actual_db");
+    }
+
+    #[test]
+    fn write_snapshot_export_roundtrips() {
+        let dir = TempDir::new().unwrap();
+        let k = key("myproj", "auth");
+        let snap = make_snap("abc123def456", "auth");
+
+        let path = write_snapshot_export(dir.path(), &k, &snap).unwrap();
+
+        // path layout
+        let expected = dir
+            .path()
+            .join("myproj")
+            .join("auth")
+            .join("20260430T142211Z-abc123def456.json.zst");
+        assert_eq!(path, expected);
+        assert!(path.exists());
+
+        // round-trip: decompress and parse
+        let bytes = std::fs::read(&path).unwrap();
+        let json = zstd::decode_all(bytes.as_slice()).unwrap();
+        let restored: SchemaSnapshot = serde_json::from_slice(&json).unwrap();
+        assert_eq!(restored.content_hash, "abc123def456");
+        assert_eq!(restored.database, "auth");
+    }
+
+    #[test]
+    fn schema_candidate_paths_explicit_first_then_profile_then_default() {
+        // explicit --schema-file path goes first; then resolved profile's path;
+        // the default-data-dir fallback is appended last
+        let toml = r#"
+[profiles.dev]
+schema_file = "from-profile.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let explicit = PathBuf::from("/tmp/explicit.json");
+        let candidates = schema_candidate_paths(Some(&explicit), Some(&config), Some("dev"));
+        assert!(candidates.len() >= 2);
+        assert_eq!(candidates[0], explicit);
+        // second candidate is the resolved profile path (relative to cwd)
+        let cwd = std::env::current_dir().unwrap_or_default();
+        assert_eq!(candidates[1], cwd.join("from-profile.json"));
+    }
+
+    #[test]
+    fn schema_candidate_paths_no_inputs_still_includes_default_dir() {
+        let candidates = schema_candidate_paths(None, None, None);
+        // expect at least the default data-dir fallback
+        assert!(!candidates.is_empty());
+        assert!(candidates.last().unwrap().ends_with(".dryrun/schema.json"));
+    }
+
+    #[test]
+    fn resolve_schema_path_picks_first_existing() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.json");
+        let present = dir.path().join("present.json");
+        std::fs::write(&present, "{}").unwrap();
+
+        // explicit path that doesn't exist; profile-resolved path that does
+        let toml = format!("[profiles.dev]\nschema_file = \"{}\"\n", present.display());
+        let config = ProjectConfig::parse(&toml).unwrap();
+        let resolved = resolve_schema_path(Some(&missing), Some(&config), Some("dev")).unwrap();
+        assert_eq!(resolved, present);
+    }
+
+    #[test]
+    fn resolve_schema_path_errors_when_nothing_exists() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nope.json");
+        let result = resolve_schema_path(Some(&missing), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_schema_file_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let snap = make_snap("h1", "auth");
+        let path = dir.path().join("schema.json");
+        std::fs::write(&path, serde_json::to_string(&snap).unwrap()).unwrap();
+        let restored = load_schema_file(&path).unwrap();
+        assert_eq!(restored.content_hash, "h1");
+        assert_eq!(restored.database, "auth");
+    }
+
+    #[test]
+    fn load_schema_file_errors_on_invalid_json() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("broken.json");
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(load_schema_file(&path).is_err());
+    }
+
+    #[test]
+    fn write_snapshot_export_isolates_streams() {
+        let dir = TempDir::new().unwrap();
+        let auth = key("p", "auth");
+        let billing = key("p", "billing");
+
+        write_snapshot_export(dir.path(), &auth, &make_snap("h1", "auth")).unwrap();
+        write_snapshot_export(dir.path(), &billing, &make_snap("h2", "billing")).unwrap();
+
+        assert!(dir.path().join("p/auth").is_dir());
+        assert!(dir.path().join("p/billing").is_dir());
+        let auth_files: Vec<_> = std::fs::read_dir(dir.path().join("p/auth"))
+            .unwrap()
+            .collect();
+        let billing_files: Vec<_> = std::fs::read_dir(dir.path().join("p/billing"))
+            .unwrap()
+            .collect();
+        assert_eq!(auth_files.len(), 1);
+        assert_eq!(billing_files.len(), 1);
+    }
 }

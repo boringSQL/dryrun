@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use super::plan::{parse_plan_json, PlanNode};
+use super::plan::{PlanNode, parse_plan_json};
 use super::plan_warnings::detect_plan_warnings;
 use crate::error::{Error, Result};
 use crate::schema::SchemaSnapshot;
