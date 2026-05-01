@@ -137,6 +137,12 @@ enum SnapshotAction {
         #[arg(long)]
         pretty: bool,
     },
+    Export {
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        history_db: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -595,6 +601,46 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
                 serde_json::to_string(&changeset)?
             };
             println!("{json}");
+            Ok(())
+        }
+        SnapshotAction::Export { out, history_db } => {
+            let store = open_history_store(history_db.as_deref())?;
+            let out_root = out.clone().unwrap_or_else(|| {
+                dry_run_core::history::default_data_dir()
+                    .map(|d| d.join("snapshots"))
+                    .unwrap_or_else(|_| PathBuf::from(".dryrun/snapshots"))
+            });
+
+            let keys = store.list_keys()?;
+            let mut written = 0usize;
+            for key in &keys {
+                let summaries = store.list(key, TimeRange::default()).await?;
+                for s in &summaries {
+                    let snap = store
+                        .get(key, SnapshotRef::Hash(s.content_hash.clone()))
+                        .await?;
+                    let path = out_root
+                        .join(&key.project_id.0)
+                        .join(&key.database_id.0)
+                        .join(format!(
+                            "{}-{}.json.zst",
+                            s.timestamp.format("%Y%m%dT%H%M%SZ"),
+                            s.content_hash,
+                        ));
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let json = serde_json::to_vec(&snap)?;
+                    let compressed = zstd::encode_all(json.as_slice(), 3)?;
+                    std::fs::write(&path, compressed)?;
+                    written += 1;
+                }
+            }
+            println!(
+                "Exported {written} snapshot(s) from {} stream(s) to {}",
+                keys.len(),
+                out_root.display(),
+            );
             Ok(())
         }
     }

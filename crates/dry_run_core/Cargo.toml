@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

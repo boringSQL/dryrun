@@ -50,6 +50,25 @@ impl HistoryStore {
         Self::open(&path)
     }
 
+    pub fn list_keys(&self) -> Result<Vec<SnapshotKey>> {
+        let conn = lock_conn(&self.conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT project_id, database_id
+               FROM snapshots
+              WHERE project_id IS NOT NULL AND database_id IS NOT NULL
+              ORDER BY project_id, database_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let pid: String = row.get(0)?;
+            let did: String = row.get(1)?;
+            Ok(SnapshotKey {
+                project_id: crate::history::ProjectId(pid),
+                database_id: crate::history::DatabaseId(did),
+            })
+        })?;
+        rows.map(|r| r.map_err(Error::from)).collect()
+    }
+
     fn migrate(&self) -> Result<()> {
         let conn = lock_conn(&self.conn)?;
         conn.execute_batch(
