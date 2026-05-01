@@ -169,7 +169,7 @@ See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for all profile options.
 
 Every DB-related command (`init`, `import`, `probe`, `dump-schema`, `lint`, `drift`, `stats apply`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` and `schema_file` when the corresponding CLI flag is not provider.
 
-> **Note:** the MCP server is currently single-database. Using the default profile. Or the option is to run one `dryrun mcp-serve` process per database. Native multi-database support inside one MCP process is tracked in [#4](https://github.com/boringSQL/dryrun/issues/4).
+> **Note:** the MCP server is currently single-database. Using the default profile. Or the option is to run one `dryrun mcp-serve` process per database. Native multi-database support inside one MCP process is tracked in [#4](https://github.com/boringSQL/dryrun/issues/7).
 
 ## MCP server
 
