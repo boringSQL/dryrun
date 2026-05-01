@@ -619,20 +619,7 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
                     let snap = store
                         .get(key, SnapshotRef::Hash(s.content_hash.clone()))
                         .await?;
-                    let path = out_root
-                        .join(&key.project_id.0)
-                        .join(&key.database_id.0)
-                        .join(format!(
-                            "{}-{}.json.zst",
-                            s.timestamp.format("%Y%m%dT%H%M%SZ"),
-                            s.content_hash,
-                        ));
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    let json = serde_json::to_vec(&snap)?;
-                    let compressed = zstd::encode_all(json.as_slice(), 3)?;
-                    std::fs::write(&path, compressed)?;
+                    write_snapshot_export(&out_root, key, &snap)?;
                     written += 1;
                 }
             }
@@ -923,6 +910,28 @@ fn open_history_store(path: Option<&std::path::Path>) -> anyhow::Result<HistoryS
 
 // completes a SnapshotKey from a resolved profile; falls back to snapshot.database
 // when the profile didn't declare a database_id (the <cli>/<auto> case).
+fn write_snapshot_export(
+    out_root: &std::path::Path,
+    key: &SnapshotKey,
+    snap: &dry_run_core::SchemaSnapshot,
+) -> anyhow::Result<PathBuf> {
+    let path = out_root
+        .join(&key.project_id.0)
+        .join(&key.database_id.0)
+        .join(format!(
+            "{}-{}.json.zst",
+            snap.timestamp.format("%Y%m%dT%H%M%SZ"),
+            snap.content_hash,
+        ));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_vec(snap)?;
+    let compressed = zstd::encode_all(json.as_slice(), 3)?;
+    std::fs::write(&path, compressed)?;
+    Ok(path)
+}
+
 fn complete_key(resolved: &dry_run_core::ResolvedProfile, snapshot_database: &str) -> SnapshotKey {
     SnapshotKey {
         project_id: resolved.project_id.clone(),
@@ -1054,4 +1063,113 @@ async fn cmd_mcp_serve(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use dry_run_core::history::{DatabaseId, ProjectId};
+    use dry_run_core::{ResolvedProfile, SchemaSnapshot};
+    use tempfile::TempDir;
+
+    fn make_snap(hash: &str, database: &str) -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: database.into(),
+            timestamp: Utc.with_ymd_and_hms(2026, 4, 30, 14, 22, 11).unwrap(),
+            content_hash: hash.into(),
+            source: None,
+            tables: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
+    fn key(proj: &str, db: &str) -> SnapshotKey {
+        SnapshotKey {
+            project_id: ProjectId(proj.into()),
+            database_id: DatabaseId(db.into()),
+        }
+    }
+
+    #[test]
+    fn complete_key_uses_resolved_database_id_when_set() {
+        let resolved = ResolvedProfile {
+            name: "prod".into(),
+            db_url: None,
+            schema_file: None,
+            project_id: ProjectId("clusterity".into()),
+            database_id: Some(DatabaseId("auth".into())),
+        };
+        let key = complete_key(&resolved, "fallback_db");
+        assert_eq!(key.project_id.0, "clusterity");
+        assert_eq!(key.database_id.0, "auth");
+    }
+
+    #[test]
+    fn complete_key_falls_back_to_snapshot_database() {
+        let resolved = ResolvedProfile {
+            name: "<cli>".into(),
+            db_url: None,
+            schema_file: None,
+            project_id: ProjectId("myproj".into()),
+            database_id: None,
+        };
+        let key = complete_key(&resolved, "actual_db");
+        assert_eq!(key.project_id.0, "myproj");
+        assert_eq!(key.database_id.0, "actual_db");
+    }
+
+    #[test]
+    fn write_snapshot_export_roundtrips() {
+        let dir = TempDir::new().unwrap();
+        let k = key("myproj", "auth");
+        let snap = make_snap("abc123def456", "auth");
+
+        let path = write_snapshot_export(dir.path(), &k, &snap).unwrap();
+
+        // path layout
+        let expected = dir
+            .path()
+            .join("myproj")
+            .join("auth")
+            .join("20260430T142211Z-abc123def456.json.zst");
+        assert_eq!(path, expected);
+        assert!(path.exists());
+
+        // round-trip: decompress and parse
+        let bytes = std::fs::read(&path).unwrap();
+        let json = zstd::decode_all(bytes.as_slice()).unwrap();
+        let restored: SchemaSnapshot = serde_json::from_slice(&json).unwrap();
+        assert_eq!(restored.content_hash, "abc123def456");
+        assert_eq!(restored.database, "auth");
+    }
+
+    #[test]
+    fn write_snapshot_export_isolates_streams() {
+        let dir = TempDir::new().unwrap();
+        let auth = key("p", "auth");
+        let billing = key("p", "billing");
+
+        write_snapshot_export(dir.path(), &auth, &make_snap("h1", "auth")).unwrap();
+        write_snapshot_export(dir.path(), &billing, &make_snap("h2", "billing")).unwrap();
+
+        assert!(dir.path().join("p/auth").is_dir());
+        assert!(dir.path().join("p/billing").is_dir());
+        let auth_files: Vec<_> = std::fs::read_dir(dir.path().join("p/auth"))
+            .unwrap()
+            .collect();
+        let billing_files: Vec<_> = std::fs::read_dir(dir.path().join("p/billing"))
+            .unwrap()
+            .collect();
+        assert_eq!(auth_files.len(), 1);
+        assert_eq!(billing_files.len(), 1);
+    }
 }

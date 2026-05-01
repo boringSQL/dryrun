@@ -561,4 +561,54 @@ mod trait_tests {
         assert_eq!(store.list(&a, TimeRange::default()).await.unwrap().len(), 0);
         assert_eq!(store.list(&b, TimeRange::default()).await.unwrap().len(), 1);
     }
+
+    #[tokio::test]
+    async fn list_keys_returns_distinct_streams_ordered() {
+        let (_dir, store) = temp_store();
+        // empty store
+        assert!(store.list_keys().unwrap().is_empty());
+
+        // put under three streams, with one stream getting two snapshots
+        store
+            .put(&key("p", "billing"), &make_snap("h1", "billing"))
+            .await
+            .unwrap();
+        store
+            .put(&key("p", "auth"), &make_snap("h2", "auth"))
+            .await
+            .unwrap();
+        store
+            .put(&key("p", "auth"), &make_snap("h3", "auth"))
+            .await
+            .unwrap();
+        store
+            .put(&key("other", "auth"), &make_snap("h4", "auth"))
+            .await
+            .unwrap();
+
+        let keys = store.list_keys().unwrap();
+        // three distinct (project, database) pairs, ordered by project then database
+        assert_eq!(keys.len(), 3);
+        assert_eq!(
+            (
+                keys[0].project_id.0.as_str(),
+                keys[0].database_id.0.as_str()
+            ),
+            ("other", "auth")
+        );
+        assert_eq!(
+            (
+                keys[1].project_id.0.as_str(),
+                keys[1].database_id.0.as_str()
+            ),
+            ("p", "auth")
+        );
+        assert_eq!(
+            (
+                keys[2].project_id.0.as_str(),
+                keys[2].database_id.0.as_str()
+            ),
+            ("p", "billing")
+        );
+    }
 }
