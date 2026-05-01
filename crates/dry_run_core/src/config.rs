@@ -607,6 +607,92 @@ database_id = "auth"
     }
 
     #[test]
+    fn cli_db_overrides_profile_db_url_keeps_database_id() {
+        let toml = r#"
+[profiles.billing]
+db_url = "postgres://prod/billing"
+database_id = "billing"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(
+                Some("postgres://localhost/other"),
+                None,
+                Some("billing"),
+                Path::new("/project"),
+            )
+            .unwrap();
+        assert_eq!(resolved.name, "billing");
+        assert_eq!(
+            resolved.db_url.as_deref(),
+            Some("postgres://localhost/other")
+        );
+        assert_eq!(
+            resolved.database_id.as_ref().map(|d| d.0.as_str()),
+            Some("billing")
+        );
+    }
+
+    #[test]
+    fn cli_schema_overrides_profile_schema_file_keeps_database_id() {
+        let toml = r#"
+[profiles.staging]
+schema_file = ".dryrun/staging.json"
+database_id = "stg"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let override_path = PathBuf::from("/tmp/other-schema.json");
+        let resolved = config
+            .resolve_profile(
+                None,
+                Some(&override_path),
+                Some("staging"),
+                Path::new("/project"),
+            )
+            .unwrap();
+        assert_eq!(resolved.name, "staging");
+        assert_eq!(
+            resolved.schema_file.as_deref(),
+            Some(override_path.as_path())
+        );
+        assert_eq!(
+            resolved.database_id.as_ref().map(|d| d.0.as_str()),
+            Some("stg")
+        );
+    }
+
+    #[test]
+    fn explicit_profile_missing_errors() {
+        let config = ProjectConfig::parse("").unwrap();
+        let result = config.resolve_profile(None, None, Some("nope"), Path::new("/tmp"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("'nope'"), "got: {err}");
+    }
+
+    #[test]
+    fn default_profile_missing_with_cli_db_falls_back_to_cli() {
+        let config = ProjectConfig::parse("[default]\nprofile = \"prod\"").unwrap();
+        let resolved = config
+            .resolve_profile(
+                Some("postgres://localhost/x"),
+                None,
+                None,
+                Path::new("/tmp"),
+            )
+            .unwrap();
+        assert_eq!(resolved.name, "<cli>");
+        assert!(resolved.database_id.is_none());
+    }
+
+    #[test]
+    fn default_profile_missing_without_cli_args_errors() {
+        let config = ProjectConfig::parse("[default]\nprofile = \"missing\"").unwrap();
+        let result = config.resolve_profile(None, None, None, Path::new("/tmp"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("'missing'"), "got: {err}");
+    }
+
+    #[test]
     fn project_id_falls_back_to_default_for_root_path() {
         let config = ProjectConfig::parse("").unwrap();
         // root path has no file_name; falls back to "default"
