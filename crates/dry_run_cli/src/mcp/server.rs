@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use dry_run_core::audit::AuditConfig;
+use dry_run_core::history::{SnapshotKey, SnapshotRef, SnapshotStore};
 use dry_run_core::lint::LintConfig;
 use dry_run_core::schema::{
     ConstraintKind, detect_seq_scan_imbalance, detect_stale_stats,
@@ -25,12 +26,12 @@ use super::params::*;
 #[derive(Clone)]
 pub struct DryRunServer {
     ctx: Option<Arc<DryRun>>,
-    db_url: String,
     app_version: String,
     pg_version_display: String,
     database_name: String,
     schema: Arc<RwLock<Option<SchemaSnapshot>>>,
-    history: Option<Arc<std::sync::Mutex<HistoryStore>>>,
+    history: Option<Arc<HistoryStore>>,
+    snapshot_key: Option<SnapshotKey>,
     lint_config: LintConfig,
     audit_config: AuditConfig,
     pgmustard: Option<PgMustardClient>,
@@ -47,10 +48,7 @@ impl DryRunServer {
         app_version: &str,
         schema_candidates: Vec<PathBuf>,
     ) -> Self {
-        let (ctx, db_url) = match db {
-            Some((url, ctx)) => (Some(Arc::new(ctx)), url.to_string()),
-            None => (None, String::new()),
-        };
+        let ctx = db.map(|(_url, ctx)| Arc::new(ctx));
 
         let pg_version_display = dry_run_core::PgVersion::parse_from_version_string(&snapshot.pg_version)
             .map(|v| format!("{}.{}.{}", v.major, v.minor, v.patch))
@@ -66,12 +64,12 @@ impl DryRunServer {
 
         Self {
             ctx,
-            db_url,
             app_version: app_version.to_string(),
             pg_version_display,
             database_name,
             schema: Arc::new(RwLock::new(Some(snapshot))),
             history: None,
+            snapshot_key: None,
             lint_config,
             audit_config: AuditConfig::default(),
             pgmustard: Self::resolve_pgmustard(pgmustard_api_key),
@@ -97,18 +95,25 @@ impl DryRunServer {
     ) -> Self {
         Self {
             ctx: None,
-            db_url: String::new(),
             app_version: app_version.to_string(),
             pg_version_display: String::new(),
             database_name: String::new(),
             schema: Arc::new(RwLock::new(None)),
             history: None,
+            snapshot_key: None,
             lint_config,
             audit_config: AuditConfig::default(),
             pgmustard: None,
             schema_candidates,
             tool_router: Self::tool_router(),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_history(mut self, store: HistoryStore, key: Option<SnapshotKey>) -> Self {
+        self.history = Some(Arc::new(store));
+        self.snapshot_key = key;
+        self
     }
 
     async fn get_schema(&self) -> Result<SchemaSnapshot, McpError> {
@@ -519,32 +524,24 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<SchemaDiffParams>,
     ) -> Result<CallToolResult, McpError> {
-        let history_arc = self.history.as_ref()
+        let store = self.history.as_ref()
             .ok_or_else(|| McpError::internal_error("history store not configured", None))?;
+        let key = self.snapshot_key.as_ref()
+            .ok_or_else(|| McpError::internal_error(
+                "schema_diff needs a snapshot key — pass --db or set [default].profile",
+                None,
+            ))?;
 
-        let (from_snapshot, to_hash) = {
-            let history = history_arc.lock().map_err(|e| McpError::internal_error(format!("history lock poisoned: {e}"), None))?;
-
-            let from = if let Some(hash) = &params.from {
-                history.load_snapshot(hash).map_err(to_mcp_err)?
-                    .ok_or_else(|| McpError::invalid_params(format!("snapshot '{hash}' not found"), None))?
-            } else {
-                history.latest_snapshot(&self.db_url).map_err(to_mcp_err)?
-                    .ok_or_else(|| McpError::invalid_params("no saved snapshots found — run snapshot first", None))?
-            };
-
-            let to = if let Some(hash) = &params.to {
-                Some(history.load_snapshot(hash).map_err(to_mcp_err)?
-                    .ok_or_else(|| McpError::invalid_params(format!("snapshot '{hash}' not found"), None))?)
-            } else {
-                None
-            };
-
-            (from, to)
+        let from_snapshot = match &params.from {
+            Some(hash) => store.get(key, SnapshotRef::Hash(hash.clone())).await
+                .map_err(to_mcp_err)?,
+            None => store.get(key, SnapshotRef::Latest).await
+                .map_err(to_mcp_err)?,
         };
 
-        let to_snapshot = match to_hash {
-            Some(s) => s,
+        let to_snapshot = match &params.to {
+            Some(hash) => store.get(key, SnapshotRef::Hash(hash.clone())).await
+                .map_err(to_mcp_err)?,
             None => self.get_schema().await?,
         };
 
