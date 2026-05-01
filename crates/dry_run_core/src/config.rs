@@ -134,11 +134,14 @@ impl ProjectConfig {
     }
 
     // resolution order:
-    // 1. explicit cli_db or cli_schema (CLI flags)
-    // 2. cli_profile flag (--profile)
-    // 3. PROFILE env var
-    // 4. [default].profile in toml
-    // 5. auto-discovery of .dryrun/schema.json
+    // 1. cli_profile flag (--profile)
+    // 2. PROFILE env var
+    // 3. [default].profile in toml
+    // 4. auto-discovery of .dryrun/schema.json
+    //
+    // CLI flags (cli_db, cli_schema) override the resolved profile's matching
+    // fields for the current invocation. So `--profile billing --db $OTHER`
+    // connects to $OTHER but keeps billing's database_id for snapshot keying.
     pub fn resolve_profile(
         &self,
         cli_db: Option<&str>,
@@ -148,6 +151,33 @@ impl ProjectConfig {
     ) -> Result<ResolvedProfile> {
         let project_id = self.project_id(project_root);
 
+        let explicit_profile = cli_profile
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("PROFILE").ok());
+        let default_profile = self.default.as_ref().and_then(|d| d.profile.clone());
+        let profile_name = explicit_profile.clone().or(default_profile);
+
+        if let Some(name) = profile_name {
+            if let Some(profile) = self.profiles.get(&name) {
+                let mut resolved = resolve_profile_config(&name, profile, project_root, project_id);
+                if let Some(db) = cli_db {
+                    resolved.db_url = Some(expand_env_vars(db));
+                }
+                if let Some(schema) = cli_schema {
+                    resolved.schema_file = Some(schema.to_path_buf());
+                }
+                return Ok(resolved);
+            }
+
+            // Missing profile causes error.
+            if explicit_profile.is_some() || (cli_db.is_none() && cli_schema.is_none()) {
+                return Err(Error::Config(format!(
+                    "profile '{name}' not found in dryrun.toml"
+                )));
+            }
+        }
+
+        // No profile resolved: fall back to <cli> or <auto>.
         if let Some(db) = cli_db {
             return Ok(ResolvedProfile {
                 name: "<cli>".into(),
@@ -165,23 +195,6 @@ impl ProjectConfig {
                 project_id,
                 database_id: None,
             });
-        }
-
-        let profile_name = cli_profile
-            .map(|s| s.to_string())
-            .or_else(|| std::env::var("PROFILE").ok())
-            .or_else(|| self.default.as_ref().and_then(|d| d.profile.clone()));
-
-        if let Some(name) = profile_name {
-            let profile = self.profiles.get(&name).ok_or_else(|| {
-                Error::Config(format!("profile '{name}' not found in dryrun.toml"))
-            })?;
-            return Ok(resolve_profile_config(
-                &name,
-                profile,
-                project_root,
-                project_id,
-            ));
         }
 
         let auto_schema = project_root.join(".dryrun/schema.json");
