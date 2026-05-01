@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 use crate::history::snapshot_store::{
@@ -27,22 +27,65 @@ pub struct SnapshotSummary {
 }
 
 impl HistoryStore {
+    const SCHEMA_VERSION: i32 = 2;
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| Error::History(format!("cannot create directory: {e}")))?;
         }
 
+        let existed = path.exists();
+
         let conn = Connection::open(path)
             .map_err(|e| Error::History(format!("cannot open history db: {e}")))?;
+
+        let conn = if existed {
+            let version: i32 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .map_err(|e| Error::History(format!("cannot read user_version: {e}")))?;
+
+            match version.cmp(&Self::SCHEMA_VERSION) {
+                std::cmp::Ordering::Equal => conn,
+                std::cmp::Ordering::Less => {
+                    warn!(
+                        path = %path.display(),
+                        from = version,
+                        to = Self::SCHEMA_VERSION,
+                        "history db on stale schema version; resetting",
+                    );
+                    drop(conn);
+                    std::fs::remove_file(path).map_err(|e| {
+                        Error::History(format!("cannot remove stale history db: {e}"))
+                    })?;
+                    Connection::open(path)
+                        .map_err(|e| Error::History(format!("cannot reopen history db: {e}")))?
+                }
+                std::cmp::Ordering::Greater => {
+                    return Err(Error::History(
+                        "history db is from a newer version of dryrun".into(),
+                    ));
+                }
+            }
+        } else {
+            conn
+        };
 
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
         store.migrate()?;
+        store.set_user_version(Self::SCHEMA_VERSION)?;
 
         debug!(path = %path.display(), "history store opened");
         Ok(store)
+    }
+
+    fn set_user_version(&self, version: i32) -> Result<()> {
+        let conn = lock_conn(&self.conn)?;
+        conn.pragma_update(None, "user_version", version)
+            .map_err(|e| Error::History(format!("cannot set user_version: {e}")))?;
+        Ok(())
     }
 
     pub fn open_default() -> Result<Self> {
@@ -73,16 +116,24 @@ impl HistoryStore {
         let conn = lock_conn(&self.conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS snapshots (
-                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp     TEXT NOT NULL,
-                    content_hash  TEXT NOT NULL,
-                    database_name TEXT NOT NULL,
-                    snapshot_json TEXT NOT NULL,
-                    project_id    TEXT,
-                    database_id   TEXT
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind            TEXT NOT NULL DEFAULT 'schema'
+                                        CHECK (kind IN ('schema','planner_stats','activity_stats')),
+                    timestamp       TEXT NOT NULL,
+                    content_hash    TEXT NOT NULL,
+                    schema_ref_hash TEXT,
+                    node_label      TEXT,
+                    database_name   TEXT NOT NULL,
+                    snapshot_json   TEXT NOT NULL,
+                    project_id      TEXT,
+                    database_id     TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_snapshots_content_hash
-                    ON snapshots(content_hash);",
+                    ON snapshots(content_hash);
+                CREATE INDEX IF NOT EXISTS idx_snapshots_kind_schema_ref
+                    ON snapshots(kind, schema_ref_hash);
+                CREATE INDEX IF NOT EXISTS idx_snapshots_kind_node_ts
+                    ON snapshots(kind, node_label, timestamp DESC);",
         )
         .map_err(|e| Error::History(format!("migration failed: {e}")))?;
         Ok(())
