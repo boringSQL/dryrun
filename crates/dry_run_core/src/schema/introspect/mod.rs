@@ -15,9 +15,11 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use tracing::info;
 
+use sha2::{Digest, Sha256};
+
 use super::hash::{HashInput, compute_content_hash};
 use super::types::*;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
     let pg_version: String = sqlx::query_scalar("SELECT version()")
@@ -168,6 +170,145 @@ pub async fn fetch_is_standby(pool: &PgPool) -> Result<bool> {
         .fetch_one(pool)
         .await?;
     Ok(row.get("is_standby"))
+}
+
+// Snapshot split: planner-only and per-node activity captures
+
+pub async fn introspect_planner_stats(
+    pool: &PgPool,
+    schema_ref_hash: &str,
+) -> Result<PlannerStatsSnapshot> {
+    if fetch_is_standby(pool).await? {
+        return Err(Error::Introspection(
+            "planner stats must be captured from the primary; \
+             use `dryrun snapshot activity --from <replica>` for per-node activity"
+                .into(),
+        ));
+    }
+
+    let pg_version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(pool)
+        .await?;
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await?;
+
+    let (table_sizing, index_sizing, raw_column_stats) = tokio::try_join!(
+        stats::fetch_named_table_sizing(pool),
+        stats::fetch_named_index_sizing(pool),
+        stats::fetch_named_column_stats(pool),
+    )?;
+
+    let columns = raw_column_stats
+        .into_iter()
+        .map(|c| ColumnStatsEntry {
+            table: QualifiedName::new(c.schema, c.table),
+            column: c.column,
+            stats: c.stats,
+        })
+        .collect();
+
+    let mut snapshot = PlannerStatsSnapshot {
+        pg_version,
+        database,
+        timestamp: Utc::now(),
+        content_hash: String::new(),
+        schema_ref_hash: schema_ref_hash.to_string(),
+        tables: table_sizing,
+        columns,
+        indexes: index_sizing,
+    };
+    snapshot.content_hash = hash_payload(&snapshot)?;
+
+    info!(
+        tables = snapshot.tables.len(),
+        columns = snapshot.columns.len(),
+        indexes = snapshot.indexes.len(),
+        hash = %snapshot.content_hash,
+        schema_ref = %snapshot.schema_ref_hash,
+        "planner stats introspection complete"
+    );
+
+    Ok(snapshot)
+}
+
+pub async fn introspect_activity_stats(
+    pool: &PgPool,
+    schema_ref_hash: &str,
+    label: &str,
+) -> Result<ActivityStatsSnapshot> {
+    let pg_version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(pool)
+        .await?;
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await?;
+
+    let (node, table_activity, index_activity) = tokio::try_join!(
+        resolve_node_identity(pool, label),
+        stats::fetch_named_table_activity(pool),
+        stats::fetch_named_index_activity(pool),
+    )?;
+
+    let mut snapshot = ActivityStatsSnapshot {
+        pg_version,
+        database,
+        timestamp: Utc::now(),
+        content_hash: String::new(),
+        schema_ref_hash: schema_ref_hash.to_string(),
+        node,
+        tables: table_activity,
+        indexes: index_activity,
+    };
+    snapshot.content_hash = hash_payload(&snapshot)?;
+
+    info!(
+        label = %snapshot.node.label,
+        is_standby = snapshot.node.is_standby,
+        tables = snapshot.tables.len(),
+        indexes = snapshot.indexes.len(),
+        hash = %snapshot.content_hash,
+        schema_ref = %snapshot.schema_ref_hash,
+        "activity stats introspection complete"
+    );
+
+    Ok(snapshot)
+}
+
+async fn resolve_node_identity(pool: &PgPool, label: &str) -> Result<NodeIdentity> {
+    let row: PgRow = sqlx::query(
+        r#"
+        SELECT pg_catalog.pg_is_in_recovery()                           AS is_standby,
+               COALESCE(host(pg_catalog.inet_server_addr())::text, '')  AS host,
+               (SELECT stats_reset
+                  FROM pg_catalog.pg_stat_database
+                 WHERE datname = current_database())                    AS stats_reset,
+               CASE
+                 WHEN pg_catalog.pg_is_in_recovery()
+                   THEN pg_catalog.pg_wal_lsn_diff(
+                          pg_catalog.pg_last_wal_receive_lsn(),
+                          pg_catalog.pg_last_wal_replay_lsn())::int8
+                 ELSE NULL
+               END                                                      AS lag_bytes
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(NodeIdentity {
+        label: label.to_string(),
+        host: row.get::<String, _>("host"),
+        is_standby: row.get("is_standby"),
+        replication_lag_bytes: row.get::<Option<i64>, _>("lag_bytes"),
+        stats_reset: row.get("stats_reset"),
+    })
+}
+
+fn hash_payload<T: serde::Serialize>(value: &T) -> Result<String> {
+    let json = serde_json::to_vec(value)
+        .map_err(|e| Error::Introspection(format!("cannot serialize for hashing: {e}")))?;
+    let digest = Sha256::digest(&json);
+    Ok(format!("{digest:x}"))
 }
 
 // ---------------------------------------------------------------------------
