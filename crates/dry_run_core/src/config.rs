@@ -698,4 +698,176 @@ database_id = "stg"
         // root path has no file_name; falls back to "default"
         assert_eq!(config.project_id(Path::new("/")).0, "default");
     }
+
+    #[test]
+    fn explicit_profile_overrides_default_profile() {
+        let toml = r#"
+[default]
+profile = "prod"
+
+[profiles.prod]
+schema_file = "prod.json"
+
+[profiles.dev]
+schema_file = "dev.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("dev"), Path::new("/p"))
+            .unwrap();
+        assert_eq!(resolved.name, "dev");
+        assert_eq!(resolved.schema_file.unwrap(), PathBuf::from("/p/dev.json"));
+    }
+
+    #[test]
+    fn resolve_profile_absolute_schema_path_kept_as_is() {
+        let toml = r#"
+[profiles.dev]
+schema_file = "/abs/schema.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("dev"), Path::new("/project"))
+            .unwrap();
+        assert_eq!(
+            resolved.schema_file.unwrap(),
+            PathBuf::from("/abs/schema.json")
+        );
+    }
+
+    #[test]
+    fn resolve_profile_empty_database_id_falls_back_to_profile_name() {
+        let toml = r#"
+[profiles.staging]
+schema_file = "x.json"
+database_id = ""
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let resolved = config
+            .resolve_profile(None, None, Some("staging"), Path::new("/p"))
+            .unwrap();
+        assert_eq!(
+            resolved.database_id.as_ref().map(|d| d.0.as_str()),
+            Some("staging")
+        );
+    }
+
+    #[test]
+    fn resolve_profile_auto_discovers_schema_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dryrun_dir = dir.path().join(".dryrun");
+        std::fs::create_dir_all(&dryrun_dir).unwrap();
+        std::fs::write(dryrun_dir.join("schema.json"), "{}").unwrap();
+
+        let config = ProjectConfig::parse("").unwrap();
+        let resolved = config
+            .resolve_profile(None, None, None, dir.path())
+            .unwrap();
+        assert_eq!(resolved.name, "<auto>");
+        assert!(resolved.database_id.is_none());
+        assert_eq!(
+            resolved.schema_file.unwrap(),
+            dir.path().join(".dryrun/schema.json")
+        );
+    }
+
+    #[test]
+    fn resolve_profile_cli_schema_without_profile_falls_back() {
+        let config = ProjectConfig::parse("").unwrap();
+        let p = PathBuf::from("/some/where.json");
+        let resolved = config
+            .resolve_profile(None, Some(&p), None, Path::new("/p"))
+            .unwrap();
+        assert_eq!(resolved.name, "<cli>");
+        assert_eq!(resolved.schema_file.as_deref(), Some(p.as_path()));
+        assert!(resolved.db_url.is_none());
+    }
+
+    #[test]
+    fn resolve_profile_no_profile_no_schema_no_cli_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = ProjectConfig::parse("").unwrap();
+        let result = config.resolve_profile(None, None, None, dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn expand_env_vars_multiple_in_one_string() {
+        // SAFETY: test-only, single-threaded test runner
+        unsafe {
+            std::env::set_var("DRYRUN_A", "alpha");
+            std::env::set_var("DRYRUN_B", "beta");
+        }
+        assert_eq!(expand_env_vars("${DRYRUN_A}-${DRYRUN_B}"), "alpha-beta");
+        unsafe {
+            std::env::remove_var("DRYRUN_A");
+            std::env::remove_var("DRYRUN_B");
+        }
+    }
+
+    #[test]
+    fn expand_env_vars_unterminated_brace_left_alone() {
+        // no closing brace — should not loop forever, return as-is
+        assert_eq!(expand_env_vars("foo ${UNCLOSED bar"), "foo ${UNCLOSED bar");
+    }
+
+    #[test]
+    fn discover_finds_config_in_parent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // simulate repo root
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join("dryrun.toml"),
+            "[profiles.dev]\nschema_file = \"x.json\"\n",
+        )
+        .unwrap();
+
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let (path, config) = ProjectConfig::discover(&nested).unwrap();
+        assert_eq!(path, dir.path().join("dryrun.toml"));
+        assert!(config.profiles.contains_key("dev"));
+    }
+
+    #[test]
+    fn discover_stops_at_git_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // .git in inner dir, dryrun.toml only above it — discovery must NOT cross the boundary
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().parent().unwrap().join("dryrun.toml"),
+            "[profiles.dev]\n",
+        )
+        .ok();
+        // discovery from the git root should not find the parent's dryrun.toml
+        assert!(ProjectConfig::discover(dir.path()).is_none());
+    }
+
+    #[test]
+    fn pgmustard_api_key_from_config_expands_env() {
+        // SAFETY: test-only, single-threaded test runner
+        unsafe { std::env::set_var("DRYRUN_PGM_KEY", "sk-test-123") };
+        let toml = r#"
+[services]
+pgmustard_api_key = "${DRYRUN_PGM_KEY}"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        assert_eq!(config.pgmustard_api_key().as_deref(), Some("sk-test-123"));
+        unsafe { std::env::remove_var("DRYRUN_PGM_KEY") };
+    }
+
+    #[test]
+    fn pgmustard_api_key_empty_after_expansion_falls_through() {
+        // SAFETY: test-only, single-threaded test runner
+        unsafe {
+            std::env::remove_var("DRYRUN_PGM_MISSING");
+            std::env::remove_var("PGMUSTARD_API_KEY");
+        }
+        let toml = r#"
+[services]
+pgmustard_api_key = "${DRYRUN_PGM_MISSING}"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        assert!(config.pgmustard_api_key().is_none());
+    }
 }

@@ -1204,6 +1204,73 @@ mod tests {
     }
 
     #[test]
+    fn schema_candidate_paths_explicit_first_then_profile_then_default() {
+        // explicit --schema-file path goes first; then resolved profile's path;
+        // the default-data-dir fallback is appended last
+        let toml = r#"
+[profiles.dev]
+schema_file = "from-profile.json"
+"#;
+        let config = ProjectConfig::parse(toml).unwrap();
+        let explicit = PathBuf::from("/tmp/explicit.json");
+        let candidates = schema_candidate_paths(Some(&explicit), Some(&config), Some("dev"));
+        assert!(candidates.len() >= 2);
+        assert_eq!(candidates[0], explicit);
+        // second candidate is the resolved profile path (relative to cwd)
+        let cwd = std::env::current_dir().unwrap_or_default();
+        assert_eq!(candidates[1], cwd.join("from-profile.json"));
+    }
+
+    #[test]
+    fn schema_candidate_paths_no_inputs_still_includes_default_dir() {
+        let candidates = schema_candidate_paths(None, None, None);
+        // expect at least the default data-dir fallback
+        assert!(!candidates.is_empty());
+        assert!(candidates.last().unwrap().ends_with(".dryrun/schema.json"));
+    }
+
+    #[test]
+    fn resolve_schema_path_picks_first_existing() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.json");
+        let present = dir.path().join("present.json");
+        std::fs::write(&present, "{}").unwrap();
+
+        // explicit path that doesn't exist; profile-resolved path that does
+        let toml = format!("[profiles.dev]\nschema_file = \"{}\"\n", present.display());
+        let config = ProjectConfig::parse(&toml).unwrap();
+        let resolved = resolve_schema_path(Some(&missing), Some(&config), Some("dev")).unwrap();
+        assert_eq!(resolved, present);
+    }
+
+    #[test]
+    fn resolve_schema_path_errors_when_nothing_exists() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nope.json");
+        let result = resolve_schema_path(Some(&missing), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_schema_file_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let snap = make_snap("h1", "auth");
+        let path = dir.path().join("schema.json");
+        std::fs::write(&path, serde_json::to_string(&snap).unwrap()).unwrap();
+        let restored = load_schema_file(&path).unwrap();
+        assert_eq!(restored.content_hash, "h1");
+        assert_eq!(restored.database, "auth");
+    }
+
+    #[test]
+    fn load_schema_file_errors_on_invalid_json() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("broken.json");
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(load_schema_file(&path).is_err());
+    }
+
+    #[test]
     fn write_snapshot_export_isolates_streams() {
         let dir = TempDir::new().unwrap();
         let auth = key("p", "auth");
