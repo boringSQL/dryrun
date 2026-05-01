@@ -5,6 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.6.0"
 edition = "2024"
+repository = "https://github.com/boringSQL/dryrun"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
@@ -29,3 +30,8 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 rmcp = { version = "0.8", features = ["server", "transport-io", "transport-sse-server", "macros"] }
 schemars = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
