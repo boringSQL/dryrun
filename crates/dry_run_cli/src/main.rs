@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use dry_run_core::schema::{NodeColumnStats, NodeIndexStats, NodeStats, NodeTableStats};
 use dry_run_core::history::{
-    DatabaseId, PutOutcome, SnapshotKey, SnapshotStore, TimeRange,
+    DatabaseId, PutOutcome, SnapshotKey, SnapshotRef, SnapshotStore, TimeRange,
 };
 use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
 use rmcp::ServiceExt;
@@ -176,7 +176,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             pretty,
             json,
         } => cmd_lint(&cli, schema_name.as_deref(), pretty, json).await,
-        Command::Snapshot { ref action } => cmd_snapshot(action).await,
+        Command::Snapshot { ref action } => cmd_snapshot(&cli, action).await,
         Command::Profile { ref action } => cmd_profile(&cli, action),
         Command::Stats { ref action } => cmd_stats(action).await,
         Command::Drift { ref db, ref against, pretty, json } => {
@@ -355,18 +355,12 @@ schema_file = ".dryrun/schema.json"
         std::fs::write(&schema_path, &json)?;
 
         let store = open_history_store(None)?;
-        if let Err(e) = store.save_snapshot(db_url, &snapshot) {
-            eprintln!("warning: could not save snapshot: {e}");
-        }
-
         let config = ProjectConfig::discover(&cwd)
             .map(|(_, c)| Ok(c))
             .unwrap_or_else(|| ProjectConfig::parse(""))?;
         let resolved = config.resolve_profile(Some(db_url), None, None, &cwd)?;
         let key = complete_key(&resolved, &snapshot.database);
-        if let Err(e) = store.put(&key, &snapshot).await {
-            eprintln!("warning: could not put keyed snapshot: {e}");
-        }
+        store.put(&key, &snapshot).await?;
 
         eprintln!(
             "Captured schema: {} tables, {} views, {} functions",
@@ -375,7 +369,7 @@ schema_file = ".dryrun/schema.json"
             snapshot.functions.len()
         );
         eprintln!("  Schema: {}", schema_path.display());
-        eprintln!("  Keyed:  project={} database={}", key.project_id.0, key.database_id.0);
+        eprintln!("  project={} database={}", key.project_id.0, key.database_id.0);
     } else {
         eprintln!("Run 'dryrun init --db <url>' to capture a schema snapshot");
     }
@@ -452,7 +446,8 @@ async fn cmd_lint(
     Ok(())
 }
 
-async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
+async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> {
+    let profile = cli.profile.as_deref();
     match action {
         SnapshotAction::Take { db, history_db } => {
             let db_url = require_db_url(db.as_deref())?;
@@ -460,91 +455,56 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
             let store = open_history_store(history_db.as_deref())?;
             let snapshot = ctx.introspect_schema().await?;
 
-            match store.save_snapshot(db_url, &snapshot)? {
-                true => {
-                    println!("Snapshot saved: {}", snapshot.content_hash);
-                    println!(
-                        "  {} tables, {} views, {} functions",
-                        snapshot.tables.len(), snapshot.views.len(), snapshot.functions.len()
-                    );
-                }
-                false => {
-                    println!("Schema unchanged (hash: {})", snapshot.content_hash);
-                }
-            }
-
-            // also write a trait-keyed row so multi-DB grouping shows up in `list`
             let cwd = std::env::current_dir().unwrap_or_default();
             let config = ProjectConfig::discover(&cwd)
                 .map(|(_, c)| Ok(c))
                 .unwrap_or_else(|| ProjectConfig::parse(""))?;
-            let resolved = config.resolve_profile(Some(db_url), None, None, &cwd)?;
+            let resolved = config.resolve_profile(Some(db_url), None, profile, &cwd)?;
             let key = complete_key(&resolved, &snapshot.database);
+
             match store.put(&key, &snapshot).await? {
-                PutOutcome::Inserted => println!(
-                    "  keyed: project={} database={}",
-                    key.project_id.0, key.database_id.0
-                ),
-                PutOutcome::Deduped => println!(
-                    "  keyed: unchanged (project={} database={})",
-                    key.project_id.0, key.database_id.0
-                ),
+                PutOutcome::Inserted => {
+                    println!("Snapshot saved: {}", snapshot.content_hash);
+                    println!(
+                        "  {} tables, {} views, {} functions",
+                        snapshot.tables.len(),
+                        snapshot.views.len(),
+                        snapshot.functions.len()
+                    );
+                    println!("  project={} database={}", key.project_id.0, key.database_id.0);
+                }
+                PutOutcome::Deduped => {
+                    println!("Schema unchanged (hash: {})", snapshot.content_hash);
+                    println!("  project={} database={}", key.project_id.0, key.database_id.0);
+                }
             }
             Ok(())
         }
         SnapshotAction::List { db, history_db } => {
-            let db_url = require_db_url(db.as_deref())?;
             let store = open_history_store(history_db.as_deref())?;
-            let legacy = store.list_snapshots(db_url)?;
+            let key = resolve_read_key(db.as_deref(), profile).await?;
+            let rows = store.list(&key, TimeRange::default()).await?;
 
-            if legacy.is_empty() {
-                println!("No snapshots found for this database.");
+            if rows.is_empty() {
+                println!(
+                    "No snapshots found (project={} database={})",
+                    key.project_id.0, key.database_id.0
+                );
             } else {
-                println!("Legacy (URL-keyed):");
-                for s in &legacy {
+                for s in &rows {
                     println!(
-                        "  {}  {}  {}",
+                        "{}  {}  {}",
                         s.timestamp.format("%Y-%m-%d %H:%M:%S"),
                         &s.content_hash[..16.min(s.content_hash.len())],
                         s.database,
                     );
                 }
-                println!("  {} snapshot(s) total", legacy.len());
-            }
-
-            // also surface trait-keyed streams for any database name we've seen
-            // TODO(commit-5): use the resolved profile's snapshot key instead of the
-            // cwd-basename + snapshot.database heuristic — needs profile-aware list flow.
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let config = ProjectConfig::discover(&cwd)
-                .map(|(_, c)| Ok(c))
-                .unwrap_or_else(|| ProjectConfig::parse(""))?;
-            let project_id = config.project_id(&cwd);
-            let mut databases: Vec<String> =
-                legacy.iter().map(|s| s.database.clone()).collect();
-            databases.sort();
-            databases.dedup();
-            for db_name in &databases {
-                let key = SnapshotKey {
-                    project_id: project_id.clone(),
-                    database_id: DatabaseId(db_name.clone()),
-                };
-                let rows = store.list(&key, TimeRange::default()).await?;
-                if !rows.is_empty() {
-                    println!(
-                        "\nKeyed: project={} database={}",
-                        key.project_id.0, key.database_id.0
-                    );
-                    for s in &rows {
-                        println!(
-                            "  {}  {}  {}",
-                            s.timestamp.format("%Y-%m-%d %H:%M:%S"),
-                            &s.content_hash[..16.min(s.content_hash.len())],
-                            s.database,
-                        );
-                    }
-                    println!("  {} snapshot(s) total", rows.len());
-                }
+                println!(
+                    "\n{} snapshot(s) total (project={} database={})",
+                    rows.len(),
+                    key.project_id.0,
+                    key.database_id.0
+                );
             }
             Ok(())
         }
@@ -554,20 +514,18 @@ async fn cmd_snapshot(action: &SnapshotAction) -> anyhow::Result<()> {
             let db_url = require_db_url(db.as_deref())?;
             let ctx = DryRun::connect(db_url).await?;
             let store = open_history_store(history_db.as_deref())?;
+            let key = resolve_read_key(Some(db_url), profile).await?;
 
             let from_snapshot = if let Some(hash) = &from {
-                store.load_snapshot(hash)?
-                    .ok_or_else(|| anyhow::anyhow!("snapshot with hash '{hash}' not found"))?
+                store.get(&key, SnapshotRef::Hash(hash.clone())).await?
             } else if *latest {
-                store.latest_snapshot(db_url)?
-                    .ok_or_else(|| anyhow::anyhow!("no saved snapshots found for this database"))?
+                store.get(&key, SnapshotRef::Latest).await?
             } else {
                 anyhow::bail!("specify --from <hash> or --latest");
             };
 
             let to_snapshot = if let Some(hash) = &to {
-                store.load_snapshot(hash)?
-                    .ok_or_else(|| anyhow::anyhow!("snapshot with hash '{hash}' not found"))?
+                store.get(&key, SnapshotRef::Hash(hash.clone())).await?
             } else {
                 ctx.introspect_schema().await?
             };
@@ -865,6 +823,34 @@ fn complete_key(
             .clone()
             .unwrap_or_else(|| DatabaseId(snapshot_database.to_string())),
     }
+}
+
+async fn resolve_read_key(
+    db_url: Option<&str>,
+    profile: Option<&str>,
+) -> anyhow::Result<SnapshotKey> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let config = ProjectConfig::discover(&cwd)
+        .map(|(_, c)| Ok(c))
+        .unwrap_or_else(|| ProjectConfig::parse(""))?;
+    let resolved = config.resolve_profile(db_url, None, profile, &cwd)?;
+
+    if let Some(database_id) = resolved.database_id {
+        return Ok(SnapshotKey {
+            project_id: resolved.project_id,
+            database_id,
+        });
+    }
+
+    let url = resolved.db_url.ok_or_else(|| {
+        anyhow::anyhow!("no profile and no --db; cannot determine snapshot key")
+    })?;
+    let ctx = DryRun::connect(&url).await?;
+    let dbname = ctx.current_database().await?;
+    Ok(SnapshotKey {
+        project_id: resolved.project_id,
+        database_id: DatabaseId(dbname),
+    })
 }
 
 async fn cmd_mcp_serve(

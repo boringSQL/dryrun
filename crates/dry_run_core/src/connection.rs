@@ -89,6 +89,13 @@ impl DryRun {
         crate::schema::fetch_is_standby(&self.pool).await
     }
 
+    pub async fn current_database(&self) -> Result<String> {
+        let dbname: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(dbname)
+    }
+
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
