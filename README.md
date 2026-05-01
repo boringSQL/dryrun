@@ -167,6 +167,10 @@ dryrun --profile billing snapshot diff --latest
 
 See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for all profile options.
 
+Every DB-related command (`init`, `import`, `probe`, `dump-schema`, `lint`, `drift`, `stats apply`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` and `schema_file` when the corresponding CLI flag is not provider.
+
+> **Note:** the MCP server is currently single-database. Using the default profile. Or the option is to run one `dryrun mcp-serve` process per database. Native multi-database support inside one MCP process is tracked in [#4](https://github.com/boringSQL/dryrun/issues/4).
+
 ## MCP server
 
 Add `dryrun` to your AI assistant. If you installed via Homebrew, `dryrun` is already on your PATH:
@@ -182,6 +186,8 @@ claude mcp add dryrun -- /path/to/dryrun mcp-serve
 ```
 
 That's it. The server auto-discovers `.dryrun/schema.json` in the current project. No database credentials needed, your AI assistant gets full schema intelligence from the offline snapshot.
+
+For projects with multiple databases, run one `dryrun mcp-serve` per database and add an entry per server in your client config. Native multi-database serving inside one MCP process is tracked in [#4](https://github.com/boringSQL/dryrun/issues/4).
 
 See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Claude Desktop configuration.
 

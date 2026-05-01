@@ -56,12 +56,16 @@ profile = "offline"
 
 ### Resolution order
 
-1. `--db` flag (CLI only, bypasses profiles entirely)
-2. `--schema-file` flag (CLI only)
-3. `--profile` flag
-4. `PROFILE` environment variable
-5. `[default].profile` in dryrun.toml
-6. Auto-discovery of `.dryrun/schema.json`
+A profile is selected from:
+
+1. `--profile` flag
+2. `PROFILE` environment variable
+3. `[default].profile` in dryrun.toml
+4. Auto-discovery of `.dryrun/schema.json` (no profile, just a schema)
+
+CLI flags `--db` and `--schema-file` override the resolved profile's matching fields for that invocation; they don't bypass the profile, so `database_id` and `project_id` are still taken from it. `--profile billing --db $OTHER` connects to `$OTHER` but keys snapshots under billing's `database_id`.
+
+Every DB command (`init`, `import`, `probe`, `dump-schema`, `lint`, `drift`, `stats apply`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` / `schema_file` when the corresponding CLI flag is omitted.
 
 Relative paths in `schema_file` are resolved from the project root (the directory containing `dryrun.toml`). Absolute paths work too.
 
