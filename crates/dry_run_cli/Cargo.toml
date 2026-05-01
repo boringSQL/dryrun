@@ -2,6 +2,7 @@
 name = "dry_run_cli"
 version.workspace = true
 edition.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "dryrun"
