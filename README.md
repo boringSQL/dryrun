@@ -12,7 +12,6 @@ LLM/AI coding assistants are very good in writing code/SQL queries. But they are
 
 Some PostgreSQL MCP server ask you for the database connection. And to perform the administrative tasks you might need SUPERUSER permission. But that's like asking for problem.
 
-
 We've already seen where this leads: [production databases wiped by AI agents](https://fortune.com/2025/07/23/ai-coding-tool-replit-wiped-database-called-it-a-catastrophic-failure/), and [SQL injection in MCP servers](https://securitylabs.datadoghq.com/articles/mcp-vulnerability-case-study-SQL-injection-in-the-postgresql-mcp-server/) that were supposed to be read-only.
 
 The model doesn't need to *query* your database. It needs to *understand* your schema: the structure, constraints, statistics, and version-specific behavior. That knowledge is structural. It changes when you deploy a migration, not between queries.
@@ -107,7 +106,7 @@ If you can connect to a PostgreSQL instance (local, dev, or production), one com
 dryrun init --db "$DATABASE_URL"
 ```
 
-This creates `dryrun.toml` (with `[project] id` and a default profile), the `.dryrun/` data directory, and introspects the database into `.dryrun/schema.json`. Snapshots are keyed by `(project_id, database_id)`; set `database_id` per profile when a project has multiple databases (e.g. `auth`, `billing`).
+This creates `dryrun.toml` (with `[project] id` and default profile), the `.dryrun/` data directory, and introspects the database into `.dryrun/schema.json`. Snapshots are keyed by `(project_id, database_id)`; set `database_id` per profile when a project has multiple databases (e.g. `auth`, `billing`). See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for the full config reference.
 
 ### Option B: Someone else has database access
 
@@ -133,6 +132,40 @@ dryrun lint
 ```
 
 All commands work offline from the schema file. Each project has its own `dryrun.toml` and `.dryrun/`, there is no global state. Add `.dryrun/` to your `.gitignore`.
+
+### Multiple databases per project
+
+`dryrun snapshot take` keys snapshots by `(project_id, database_id)`. The defaults work — `project_id` is your folder name, `database_id` is the actual database name from `current_database()`:
+
+```sh
+dryrun init --db "$AUTH_DB"            # captures auth
+dryrun snapshot take --db "$BILLING_DB" # captures billing into its own stream
+dryrun snapshot list --db "$AUTH_DB"    # only auth snapshots
+```
+
+For stable refs (and so `list` / `diff` can run without retyping URLs), declare profiles in `dryrun.toml`:
+
+```toml
+[project]
+id = "myapp"
+
+[profiles.auth]
+db_url = "${AUTH_DATABASE_URL}"
+database_id = "auth"
+
+[profiles.billing]
+db_url = "${BILLING_DATABASE_URL}"
+database_id = "billing"
+```
+
+Then:
+
+```sh
+dryrun --profile billing snapshot list
+dryrun --profile billing snapshot diff --latest
+```
+
+See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for all profile options.
 
 ## MCP server
 

@@ -5,6 +5,9 @@ Project configuration. dryrun finds this file by walking up from the current dir
 ## Minimal example
 
 ```toml
+[project]
+id = "myapp"
+
 [default]
 profile = "offline"
 
@@ -13,6 +16,15 @@ schema_file = ".dryrun/schema.json"
 ```
 
 That's it. Everything else has sensible defaults.
+
+## Project
+
+```toml
+[project]
+id = "myapp"
+```
+
+Identifies the project. Snapshots are keyed by `(project_id, database_id)` so a single store can hold history for multiple projects without collisions. Defaults to the cwd basename if absent.
 
 ## Profiles
 
@@ -27,7 +39,13 @@ db_url = "postgresql://dev:dev@localhost:5432/myapp"
 
 [profiles.staging]
 db_url = "${STAGING_DATABASE_URL}"    # environment variables work
+
+[profiles.prod-auth]
+db_url = "${PROD_AUTH_DATABASE_URL}"
+database_id = "auth"                  # set when a project has multiple databases
 ```
+
+`database_id` defaults to the profile name. Override it when you want the snapshot stream named differently from the profile (e.g. profile `prod-auth` → stream `auth`).
 
 Pick one with `--profile`, or set a default:
 
