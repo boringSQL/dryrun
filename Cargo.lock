@@ -487,7 +487,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dry_run_cli"
-version = "0.5.0-dev"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "dry_run_core"
-version = "0.5.0-dev"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "pg_query",
