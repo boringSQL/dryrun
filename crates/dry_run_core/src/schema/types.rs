@@ -1018,3 +1018,175 @@ pub struct NodeColumnStats {
     pub column: String,
     pub stats: ColumnStats,
 }
+
+//
+// Snapshot split: schema / planner_stats / activity_stats
+//
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct QualifiedName {
+    pub schema: String,
+    pub name: String,
+}
+
+impl QualifiedName {
+    pub fn new(schema: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            schema: schema.into(),
+            name: name.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for QualifiedName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.schema, self.name)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableSizing {
+    pub reltuples: f64,
+    #[serde(default)]
+    pub relpages: i64,
+    pub table_size: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_size: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableActivity {
+    pub seq_scan: i64,
+    pub idx_scan: i64,
+    #[serde(default)]
+    pub n_live_tup: i64,
+    #[serde(default)]
+    pub n_dead_tup: i64,
+    pub last_vacuum: Option<DateTime<Utc>>,
+    pub last_autovacuum: Option<DateTime<Utc>>,
+    pub last_analyze: Option<DateTime<Utc>>,
+    pub last_autoanalyze: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub vacuum_count: i64,
+    #[serde(default)]
+    pub autovacuum_count: i64,
+    #[serde(default)]
+    pub analyze_count: i64,
+    #[serde(default)]
+    pub autoanalyze_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexSizing {
+    pub size: i64,
+    #[serde(default)]
+    pub relpages: i64,
+    #[serde(default)]
+    pub reltuples: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexActivity {
+    pub idx_scan: i64,
+    pub idx_tup_read: i64,
+    pub idx_tup_fetch: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeIdentity {
+    pub label: String,
+    pub host: String,
+    pub is_standby: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication_lag_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats_reset: Option<DateTime<Utc>>,
+}
+
+// Vec<...Entry> rather than HashMap<QualifiedName, _> in the persisted shape:
+// JSON map keys must be strings, and a tuple key (table, column) does not
+// round-trip through serde_json. Readers build a HashMap on load.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableSizingEntry {
+    pub table: QualifiedName,
+    pub sizing: TableSizing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableActivityEntry {
+    pub table: QualifiedName,
+    pub activity: TableActivity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnStatsEntry {
+    pub table: QualifiedName,
+    pub column: String,
+    pub stats: ColumnStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexSizingEntry {
+    pub index: QualifiedName,
+    pub sizing: IndexSizing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexActivityEntry {
+    pub index: QualifiedName,
+    pub activity: IndexActivity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannerStatsSnapshot {
+    pub pg_version: String,
+    pub database: String,
+    pub timestamp: DateTime<Utc>,
+    pub content_hash: String,
+    pub schema_ref_hash: String,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub tables: Vec<TableSizingEntry>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub columns: Vec<ColumnStatsEntry>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub indexes: Vec<IndexSizingEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityStatsSnapshot {
+    pub pg_version: String,
+    pub database: String,
+    pub timestamp: DateTime<Utc>,
+    pub content_hash: String,
+    pub schema_ref_hash: String,
+    pub node: NodeIdentity,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub tables: Vec<TableActivityEntry>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub indexes: Vec<IndexActivityEntry>,
+}
+
+// In-memory views — never persisted, so no serde derive.
+
+#[derive(Debug, Clone)]
+pub enum NodeSelector {
+    All,
+    Some(Vec<String>),
+}
+
+#[derive(Debug)]
+pub struct AnnotatedSchema<'a> {
+    pub schema: &'a SchemaSnapshot,
+    pub planner: Option<&'a PlannerStatsSnapshot>,
+    pub activity: Option<&'a ActivityStatsSnapshot>,
+    pub merged: Option<MergedActivity<'a>>,
+}
+
+#[derive(Debug)]
+pub struct MergedActivity<'a> {
+    pub schema_ref_hash: String,
+    pub nodes: Vec<&'a ActivityStatsSnapshot>,
+    pub window_start: DateTime<Utc>,
+    pub partial: bool,
+}
