@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};

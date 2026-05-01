@@ -72,9 +72,11 @@ fn detect_nested_loop_seq_scan(node: &PlanNode, warnings: &mut Vec<PlanWarning>)
     }
 
     if let Some(inner) = node.children.get(1)
-        && inner.node_type == "Seq Scan" && inner.plan_rows > 100.0 {
-            let table_name = inner.relation_name.as_deref().unwrap_or("unknown");
-            warnings.push(PlanWarning {
+        && inner.node_type == "Seq Scan"
+        && inner.plan_rows > 100.0
+    {
+        let table_name = inner.relation_name.as_deref().unwrap_or("unknown");
+        warnings.push(PlanWarning {
                 severity: "warning".into(),
                 message: format!(
                     "nested loop with sequential scan on inner side '{}' (~{} rows) — this executes once per outer row",
@@ -84,7 +86,7 @@ fn detect_nested_loop_seq_scan(node: &PlanNode, warnings: &mut Vec<PlanWarning>)
                 node_type: "Nested Loop".into(),
                 detail: None,
             });
-        }
+    }
 }
 
 fn detect_sort_without_index(node: &PlanNode, warnings: &mut Vec<PlanWarning>) {
@@ -113,8 +115,11 @@ fn detect_sort_without_index(node: &PlanNode, warnings: &mut Vec<PlanWarning>) {
 fn detect_high_rows_removed(node: &PlanNode, warnings: &mut Vec<PlanWarning>) {
     if let Some(removed) = node.rows_removed_by_filter
         && let Some(actual) = node.actual_rows
-            && removed > 0.0 && actual > 0.0 && removed / (removed + actual) > 0.9 {
-                warnings.push(PlanWarning {
+        && removed > 0.0
+        && actual > 0.0
+        && removed / (removed + actual) > 0.9
+    {
+        warnings.push(PlanWarning {
                     severity: "warning".into(),
                     message: format!(
                         "'{}' filter removed {:.0} rows, kept {:.0} — index on the filter column would help",
@@ -123,7 +128,7 @@ fn detect_high_rows_removed(node: &PlanNode, warnings: &mut Vec<PlanWarning>) {
                     node_type: node.node_type.clone(),
                     detail: node.filter.clone(),
                 });
-            }
+    }
 }
 
 fn detect_partition_pruning_issues(
@@ -217,11 +222,12 @@ fn detect_cte_materialized(
             if child.node_type == "Append" || child.node_type == "Merge Append" {
                 for grandchild in &child.children {
                     if let Some(rel) = &grandchild.relation_name
-                        && let Some(p) = find_partition_parent(rel, schema) {
-                            let qualified = format!("{}.{}", p.schema, p.name);
-                            e = jit::cte_over_partitioned_table(cte_name, &qualified);
-                            break;
-                        }
+                        && let Some(p) = find_partition_parent(rel, schema)
+                    {
+                        let qualified = format!("{}.{}", p.schema, p.name);
+                        e = jit::cte_over_partitioned_table(cte_name, &qualified);
+                        break;
+                    }
                 }
             }
         }
@@ -240,9 +246,9 @@ fn find_partition_parent<'a>(
     schema: &'a SchemaSnapshot,
 ) -> Option<&'a crate::schema::Table> {
     schema.tables.iter().find(|t| {
-        t.partition_info.as_ref().is_some_and(|pi| {
-            pi.children.iter().any(|c| c.name == child_table_name)
-        })
+        t.partition_info
+            .as_ref()
+            .is_some_and(|pi| pi.children.iter().any(|c| c.name == child_table_name))
     })
 }
 
@@ -285,14 +291,22 @@ mod tests {
     fn seq_scan_large_table() {
         let plan = make_seq_scan("users", 100_000.0);
         let warnings = detect_plan_warnings(&plan, None);
-        assert!(warnings.iter().any(|w| w.message.contains("sequential scan")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("sequential scan"))
+        );
     }
 
     #[test]
     fn seq_scan_small_table_no_warning() {
         let plan = make_seq_scan("config", 10.0);
         let warnings = detect_plan_warnings(&plan, None);
-        assert!(!warnings.iter().any(|w| w.message.contains("sequential scan")));
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.message.contains("sequential scan"))
+        );
     }
 
     #[test]
@@ -346,17 +360,41 @@ mod tests {
                     strategy: PartitionStrategy::Range,
                     key: "created_at".into(),
                     children: vec![
-                        PartitionChild { schema: "public".into(), name: "orders_q1".into(), bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-04-01')".into() },
-                        PartitionChild { schema: "public".into(), name: "orders_q2".into(), bound: "FOR VALUES FROM ('2024-04-01') TO ('2024-07-01')".into() },
-                        PartitionChild { schema: "public".into(), name: "orders_q3".into(), bound: "FOR VALUES FROM ('2024-07-01') TO ('2024-10-01')".into() },
-                        PartitionChild { schema: "public".into(), name: "orders_q4".into(), bound: "FOR VALUES FROM ('2024-10-01') TO ('2025-01-01')".into() },
+                        PartitionChild {
+                            schema: "public".into(),
+                            name: "orders_q1".into(),
+                            bound: "FOR VALUES FROM ('2024-01-01') TO ('2024-04-01')".into(),
+                        },
+                        PartitionChild {
+                            schema: "public".into(),
+                            name: "orders_q2".into(),
+                            bound: "FOR VALUES FROM ('2024-04-01') TO ('2024-07-01')".into(),
+                        },
+                        PartitionChild {
+                            schema: "public".into(),
+                            name: "orders_q3".into(),
+                            bound: "FOR VALUES FROM ('2024-07-01') TO ('2024-10-01')".into(),
+                        },
+                        PartitionChild {
+                            schema: "public".into(),
+                            name: "orders_q4".into(),
+                            bound: "FOR VALUES FROM ('2024-10-01') TO ('2025-01-01')".into(),
+                        },
                     ],
                 }),
-                policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+                policies: vec![],
+                triggers: vec![],
+                reloptions: vec![],
+                rls_enabled: false,
             }],
-            enums: vec![], domains: vec![], composites: vec![],
-            views: vec![], functions: vec![], extensions: vec![],
-            gucs: vec![], node_stats: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
+            node_stats: vec![],
         }
     }
 
@@ -375,8 +413,11 @@ mod tests {
             ..make_seq_scan("", 0.0)
         };
         let warnings = detect_plan_warnings(&plan, Some(&schema));
-        assert!(warnings.iter().any(|w|
-            w.message.contains("no pruning") && w.message.contains("4/4")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("no pruning") && w.message.contains("4/4"))
+        );
     }
 
     #[test]
@@ -390,7 +431,11 @@ mod tests {
             ..make_seq_scan("", 0.0)
         };
         let warnings = detect_plan_warnings(&plan, Some(&schema));
-        assert!(!warnings.iter().any(|w| w.message.contains("partition pruning")));
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.message.contains("partition pruning"))
+        );
     }
 
     #[test]
@@ -408,6 +453,10 @@ mod tests {
             ..make_seq_scan("", 0.0)
         };
         let warnings = detect_plan_warnings(&plan, Some(&schema));
-        assert!(warnings.iter().any(|w| w.message.contains("partial pruning")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("partial pruning"))
+        );
     }
 }

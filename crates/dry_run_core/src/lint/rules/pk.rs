@@ -76,7 +76,7 @@ pub fn check_pk_type(
                 ),
                 recommendation: format!("use {expected} for primary keys"),
                 ddl_fix: None,
-            convention_doc: "primary_keys".into(),
+                convention_doc: "primary_keys".into(),
             });
         }
     }

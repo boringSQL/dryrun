@@ -10,13 +10,74 @@ const BOOL_PREFIXES: &[&str] = &["is_", "has_", "can_", "should_", "was_", "will
 
 // Top ~50 most problematic SQL reserved words
 const RESERVED_WORDS: &[&str] = &[
-    "all", "alter", "and", "any", "as", "asc", "between", "by", "case", "check", "column",
-    "constraint", "create", "cross", "current", "default", "delete", "desc", "distinct", "drop",
-    "else", "end", "exists", "false", "fetch", "for", "foreign", "from", "full", "grant", "group",
-    "having", "in", "index", "inner", "insert", "into", "is", "join", "key", "left", "like",
-    "limit", "not", "null", "offset", "on", "or", "order", "outer", "primary", "references",
-    "right", "select", "set", "table", "then", "to", "true", "union", "unique", "update", "user",
-    "using", "values", "when", "where", "with",
+    "all",
+    "alter",
+    "and",
+    "any",
+    "as",
+    "asc",
+    "between",
+    "by",
+    "case",
+    "check",
+    "column",
+    "constraint",
+    "create",
+    "cross",
+    "current",
+    "default",
+    "delete",
+    "desc",
+    "distinct",
+    "drop",
+    "else",
+    "end",
+    "exists",
+    "false",
+    "fetch",
+    "for",
+    "foreign",
+    "from",
+    "full",
+    "grant",
+    "group",
+    "having",
+    "in",
+    "index",
+    "inner",
+    "insert",
+    "into",
+    "is",
+    "join",
+    "key",
+    "left",
+    "like",
+    "limit",
+    "not",
+    "null",
+    "offset",
+    "on",
+    "or",
+    "order",
+    "outer",
+    "primary",
+    "references",
+    "right",
+    "select",
+    "set",
+    "table",
+    "then",
+    "to",
+    "true",
+    "union",
+    "unique",
+    "update",
+    "user",
+    "using",
+    "values",
+    "when",
+    "where",
+    "with",
 ];
 
 #[must_use]
@@ -79,10 +140,7 @@ pub fn check_bool_prefix(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         "Boolean column '{}' missing prefix (is_, has_, can_, ...)",
                         col.name,
                     ),
-                    recommendation: format!(
-                        "Rename to 'is_{}' or similar for clarity",
-                        col.name,
-                    ),
+                    recommendation: format!("Rename to 'is_{}' or similar for clarity", col.name,),
                     ddl_fix: Some(format!(
                         "ALTER TABLE {} RENAME COLUMN {} TO is_{};",
                         qualified, col.name, col.name,
@@ -131,10 +189,7 @@ pub fn check_reserved_words(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         "Column '{}' in table '{}' is a SQL reserved word",
                         col.name, table.name,
                     ),
-                    recommendation: format!(
-                        "Rename column '{}' to avoid quoting hell",
-                        col.name,
-                    ),
+                    recommendation: format!("Rename column '{}' to avoid quoting hell", col.name,),
                     ddl_fix: None,
                     min_pg_version: None,
                 });
@@ -198,7 +253,11 @@ pub fn check_id_mismatch(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                 message: format!(
                     "Table '{}' referenced inconsistently: {} used as FK column names",
                     target_table,
-                    names.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "),
+                    names
+                        .iter()
+                        .map(|n| format!("'{n}'"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 ),
                 recommendation: "Standardize FK column naming for consistency".into(),
                 ddl_fix: None,
@@ -233,10 +292,7 @@ pub fn check_no_comment(schema: &SchemaSnapshot, config: &AuditConfig) -> Vec<Au
                     table.name,
                     table.columns.len(),
                 ),
-                recommendation: format!(
-                    "Add comment: COMMENT ON TABLE {} IS '...';",
-                    qualified,
-                ),
+                recommendation: format!("Add comment: COMMENT ON TABLE {} IS '...';", qualified,),
                 ddl_fix: None,
                 min_pg_version: None,
             });
@@ -263,7 +319,11 @@ pub fn check_no_comment(schema: &SchemaSnapshot, config: &AuditConfig) -> Vec<Au
                     if uncommented.len() <= 5 {
                         uncommented.join(", ")
                     } else {
-                        format!("{}, ... and {} more", uncommented[..3].join(", "), uncommented.len() - 3)
+                        format!(
+                            "{}, ... and {} more",
+                            uncommented[..3].join(", "),
+                            uncommented.len() - 3
+                        )
                     },
                 ),
                 recommendation: "Add COMMENT ON COLUMN for documentation".into(),
@@ -316,7 +376,8 @@ pub fn check_vacuum_large_table_defaults(schema: &SchemaSnapshot) -> Vec<AuditFi
                     stats.reltuples as i64 / 1_000_000
                 ),
                 recommendation: "consider tuning autovacuum for large tables — \
-                     lower scale factors alone aren't enough without explicit thresholds".to_string(),
+                     lower scale factors alone aren't enough without explicit thresholds"
+                    .to_string(),
                 ddl_fix: Some(format!(
                     "ALTER TABLE {qualified} SET (\n  \
                        autovacuum_vacuum_scale_factor = {vac_sf},\n  \
@@ -341,52 +402,93 @@ mod tests {
 
     fn make_col(name: &str, type_name: &str) -> Column {
         Column {
-            name: name.into(), ordinal: 0, type_name: type_name.into(),
-            nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None,
+            name: name.into(),
+            ordinal: 0,
+            type_name: type_name.into(),
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            comment: None,
+            statistics_target: None,
+            stats: None,
         }
     }
 
     fn make_col_with_comment(name: &str, type_name: &str, comment: &str) -> Column {
         Column {
-            name: name.into(), ordinal: 0, type_name: type_name.into(),
-            nullable: false, default: None, identity: None, generated: None,
-            comment: Some(comment.into()), statistics_target: None, stats: None,
+            name: name.into(),
+            ordinal: 0,
+            type_name: type_name.into(),
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            comment: Some(comment.into()),
+            statistics_target: None,
+            stats: None,
         }
     }
 
     fn make_pk(name: &str, columns: &[&str]) -> Constraint {
         Constraint {
-            name: name.into(), kind: ConstraintKind::PrimaryKey,
+            name: name.into(),
+            kind: ConstraintKind::PrimaryKey,
             columns: columns.iter().map(|s| s.to_string()).collect(),
-            definition: None, fk_table: None, fk_columns: vec![], backing_index: None, comment: None,
+            definition: None,
+            fk_table: None,
+            fk_columns: vec![],
+            backing_index: None,
+            comment: None,
         }
     }
 
     fn make_fk(name: &str, columns: &[&str], fk_table: &str, fk_columns: &[&str]) -> Constraint {
         Constraint {
-            name: name.into(), kind: ConstraintKind::ForeignKey,
+            name: name.into(),
+            kind: ConstraintKind::ForeignKey,
             columns: columns.iter().map(|s| s.to_string()).collect(),
-            definition: None, fk_table: Some(fk_table.into()),
+            definition: None,
+            fk_table: Some(fk_table.into()),
             fk_columns: fk_columns.iter().map(|s| s.to_string()).collect(),
-            backing_index: None, comment: None,
+            backing_index: None,
+            comment: None,
         }
     }
 
     fn make_table(name: &str, columns: Vec<Column>, constraints: Vec<Constraint>) -> Table {
         Table {
-            oid: 0, schema: "public".into(), name: name.into(),
-            columns, constraints, indexes: vec![],
-            comment: None, stats: None, partition_info: None,
-            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+            oid: 0,
+            schema: "public".into(),
+            name: name.into(),
+            columns,
+            constraints,
+            indexes: vec![],
+            comment: None,
+            stats: None,
+            partition_info: None,
+            policies: vec![],
+            triggers: vec![],
+            reloptions: vec![],
+            rls_enabled: false,
         }
     }
 
     fn schema_with(tables: Vec<Table>) -> SchemaSnapshot {
         SchemaSnapshot {
-            pg_version: "PostgreSQL 17.0".into(), database: "test".into(),
-            timestamp: Utc::now(), content_hash: "abc".into(), source: None,
-            tables, enums: vec![], domains: vec![], composites: vec![],
-            views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "test".into(),
+            timestamp: Utc::now(),
+            content_hash: "abc".into(),
+            source: None,
+            tables,
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
             node_stats: vec![],
         }
     }
@@ -472,20 +574,26 @@ mod tests {
     #[test]
     fn detects_inconsistent_fk_naming() {
         let schema = schema_with(vec![
-            make_table(
-                "users",
-                vec![make_col("user_id", "bigint")],
-                vec![],
-            ),
+            make_table("users", vec![make_col("user_id", "bigint")], vec![]),
             make_table(
                 "orders",
                 vec![make_col("id", "bigint"), make_col("user_id", "bigint")],
-                vec![make_fk("fk_orders_user", &["user_id"], "public.users", &["user_id"])],
+                vec![make_fk(
+                    "fk_orders_user",
+                    &["user_id"],
+                    "public.users",
+                    &["user_id"],
+                )],
             ),
             make_table(
                 "comments",
                 vec![make_col("id", "bigint"), make_col("uid", "bigint")],
-                vec![make_fk("fk_comments_user", &["uid"], "public.users", &["user_id"])],
+                vec![make_fk(
+                    "fk_comments_user",
+                    &["uid"],
+                    "public.users",
+                    &["user_id"],
+                )],
             ),
         ]);
         let findings = check_id_mismatch(&schema);
@@ -535,15 +643,15 @@ mod tests {
     fn skips_small_tables_for_comments() {
         let schema = schema_with(vec![make_table(
             "config",
-            vec![
-                make_col("key", "text"),
-                make_col("value", "text"),
-            ],
+            vec![make_col("key", "text"), make_col("value", "text")],
             vec![],
         )]);
         let config = AuditConfig::default();
         let findings = check_no_comment(&schema, &config);
-        assert!(findings.is_empty(), "tables with < 5 columns should be skipped");
+        assert!(
+            findings.is_empty(),
+            "tables with < 5 columns should be skipped"
+        );
     }
 
     #[test]

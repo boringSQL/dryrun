@@ -96,7 +96,10 @@ fn lookup_type_width(type_name: &str) -> usize {
         "double precision" | "float8" => 8,
         "boolean" | "bool" => 1,
         "date" => 4,
-        "timestamp without time zone" | "timestamp" | "timestamp with time zone" | "timestamptz" => 8,
+        "timestamp without time zone"
+        | "timestamp"
+        | "timestamp with time zone"
+        | "timestamptz" => 8,
         "uuid" => 16,
         "inet" | "cidr" => 19,
         "macaddr" => 6,
@@ -149,13 +152,7 @@ mod tests {
     #[test]
     fn estimate_bloat_ratio() {
         let table = make_table_with_cols(vec![("id", "bigint"), ("name", "text")]);
-        let est = estimate_index_bloat_from_stats(
-            100_000.0,
-            1000,
-            &["id".into()],
-            &table,
-            "btree",
-        );
+        let est = estimate_index_bloat_from_stats(100_000.0, 1000, &["id".into()], &table, "btree");
         let est = est.unwrap();
         assert!(est.bloat_ratio > 0.0);
         assert_eq!(est.actual_pages, 1000);
@@ -165,13 +162,7 @@ mod tests {
     #[test]
     fn non_btree_returns_none() {
         let table = make_table_with_cols(vec![("data", "jsonb")]);
-        let est = estimate_index_bloat_from_stats(
-            100_000.0,
-            500,
-            &["data".into()],
-            &table,
-            "gin",
-        );
+        let est = estimate_index_bloat_from_stats(100_000.0, 500, &["data".into()], &table, "gin");
         assert!(est.is_none());
     }
 

@@ -54,7 +54,11 @@ pub fn check_fk_has_index(
     }
 }
 
-pub fn check_unnamed_constraints(table: &Table, qualified: &str, violations: &mut Vec<LintViolation>) {
+pub fn check_unnamed_constraints(
+    table: &Table,
+    qualified: &str,
+    violations: &mut Vec<LintViolation>,
+) {
     for constraint in &table.constraints {
         let name = &constraint.name;
         let is_auto = name.ends_with("_pkey")
@@ -72,7 +76,7 @@ pub fn check_unnamed_constraints(table: &Table, qualified: &str, violations: &mu
                 message: format!("constraint '{}' appears to be auto-generated", name),
                 recommendation: "name constraints explicitly for readable error messages".into(),
                 ddl_fix: None,
-            convention_doc: "constraints".into(),
+                convention_doc: "constraints".into(),
             });
         }
     }

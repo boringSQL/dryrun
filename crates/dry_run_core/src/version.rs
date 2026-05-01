@@ -85,7 +85,14 @@ mod tests {
             "PostgreSQL 17.2 on x86_64-pc-linux-gnu, compiled by gcc 12.2.0, 64-bit",
         )
         .unwrap();
-        assert_eq!(v, PgVersion { major: 17, minor: 2, patch: 0 });
+        assert_eq!(
+            v,
+            PgVersion {
+                major: 17,
+                minor: 2,
+                patch: 0
+            }
+        );
     }
 
     #[test]
@@ -94,19 +101,40 @@ mod tests {
             "PostgreSQL 16.1.3 (Debian 16.1.3-1) on aarch64-unknown-linux-gnu",
         )
         .unwrap();
-        assert_eq!(v, PgVersion { major: 16, minor: 1, patch: 3 });
+        assert_eq!(
+            v,
+            PgVersion {
+                major: 16,
+                minor: 1,
+                patch: 3
+            }
+        );
     }
 
     #[test]
     fn parse_pg14_beta() {
         let v = PgVersion::parse_from_version_string("PostgreSQL 14.0beta1 on x86_64").unwrap();
-        assert_eq!(v, PgVersion { major: 14, minor: 0, patch: 0 });
+        assert_eq!(
+            v,
+            PgVersion {
+                major: 14,
+                minor: 0,
+                patch: 0
+            }
+        );
     }
 
     #[test]
     fn parse_pg12_minor_only() {
         let v = PgVersion::parse_from_version_string("PostgreSQL 12.18 on aarch64").unwrap();
-        assert_eq!(v, PgVersion { major: 12, minor: 18, patch: 0 });
+        assert_eq!(
+            v,
+            PgVersion {
+                major: 12,
+                minor: 18,
+                patch: 0
+            }
+        );
     }
 
     #[test]

@@ -86,7 +86,7 @@ pub fn check_column_name_style(
                 ),
                 recommendation: format!("rename to match {} convention", config.column_name_style),
                 ddl_fix: None,
-            convention_doc: "naming".into(),
+                convention_doc: "naming".into(),
             });
         }
     }
@@ -119,7 +119,7 @@ pub fn check_fk_naming(
                 ),
                 recommendation: format!("rename constraint to '{expected}'"),
                 ddl_fix: None,
-            convention_doc: "naming".into(),
+                convention_doc: "naming".into(),
             });
         }
     }
@@ -152,7 +152,7 @@ pub fn check_index_naming(
                 ),
                 recommendation: format!("rename index to '{expected}'"),
                 ddl_fix: None,
-            convention_doc: "naming".into(),
+                convention_doc: "naming".into(),
             });
         }
     }

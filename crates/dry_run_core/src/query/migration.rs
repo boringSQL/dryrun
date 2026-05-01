@@ -45,9 +45,9 @@ pub fn check_migration(
                     if let Some(pg_query::protobuf::node::Node::AlterTableCmd(cmd)) = &cmd_node.node
                         && let Some(check) =
                             analyze_alter_table_cmd(cmd, &result, schema, pg_version)
-                        {
-                            checks.push(check);
-                        }
+                    {
+                        checks.push(check);
+                    }
                 }
             }
             NodeRef::IndexStmt(idx) => {
@@ -61,9 +61,10 @@ pub fn check_migration(
     }
 
     if checks.is_empty()
-        && let Some(check) = fallback_keyword_check(ddl, schema, pg_version) {
-            checks.push(check);
-        }
+        && let Some(check) = fallback_keyword_check(ddl, schema, pg_version)
+    {
+        checks.push(check);
+    }
 
     Ok(checks)
 }
@@ -282,7 +283,9 @@ fn analyze_add_constraint(
         )
     } else {
         let e = match operation {
-            "ADD FOREIGN KEY" => jit::add_foreign_key_unsafe(table_name, "<col>", "<ref_table>", "<ref_col>"),
+            "ADD FOREIGN KEY" => {
+                jit::add_foreign_key_unsafe(table_name, "<col>", "<ref_table>", "<ref_col>")
+            }
             "ADD CHECK CONSTRAINT" => jit::add_check_constraint_unsafe(table_name, "<expr>"),
             _ => jit::add_check_constraint_unsafe(table_name, "<expr>"),
         };
@@ -339,7 +342,11 @@ fn analyze_create_index(
             "SHARE UPDATE EXCLUSIVE".to_string(),
         )
     } else {
-        let idx_method = if idx.access_method.is_empty() { "btree" } else { &idx.access_method };
+        let idx_method = if idx.access_method.is_empty() {
+            "btree"
+        } else {
+            &idx.access_method
+        };
         let e = jit::create_index_blocking(&table_name, &idx.idxname, idx_method, "<columns>");
         (
             SafetyRating::Dangerous,
@@ -419,7 +426,11 @@ fn fallback_keyword_check(
     None
 }
 
-fn find_column<'a>(schema: &'a SchemaSnapshot, table_name: &str, col_name: &str) -> Option<&'a crate::schema::Column> {
+fn find_column<'a>(
+    schema: &'a SchemaSnapshot,
+    table_name: &str,
+    col_name: &str,
+) -> Option<&'a crate::schema::Column> {
     let (schema_part, name_part) = if let Some((s, n)) = table_name.rsplit_once('.') {
         (s, n)
     } else {
@@ -487,30 +498,58 @@ mod tests {
             content_hash: "test".into(),
             source: None,
             tables: vec![Table {
-                oid: 1, schema: "public".into(), name: "orders".into(),
-                columns: vec![], constraints: vec![], indexes: vec![],
+                oid: 1,
+                schema: "public".into(),
+                name: "orders".into(),
+                columns: vec![],
+                constraints: vec![],
+                indexes: vec![],
                 comment: None,
                 stats: Some(TableStats {
-                    reltuples: 5_000_000.0, relpages: 262144, dead_tuples: 0,
-                    last_vacuum: None, last_autovacuum: None,
-                    last_analyze: None, last_autoanalyze: None,
-                    seq_scan: 0, idx_scan: 0, table_size: 2_147_483_648,
+                    reltuples: 5_000_000.0,
+                    relpages: 262144,
+                    dead_tuples: 0,
+                    last_vacuum: None,
+                    last_autovacuum: None,
+                    last_analyze: None,
+                    last_autoanalyze: None,
+                    seq_scan: 0,
+                    idx_scan: 0,
+                    table_size: 2_147_483_648,
                 }),
-                partition_info: None, policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+                partition_info: None,
+                policies: vec![],
+                triggers: vec![],
+                reloptions: vec![],
+                rls_enabled: false,
             }],
-            enums: vec![], domains: vec![], composites: vec![], views: vec![],
-            functions: vec![], extensions: vec![], gucs: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
             node_stats: vec![],
         }
     }
 
     fn pg17() -> PgVersion {
-        PgVersion { major: 17, minor: 0, patch: 0 }
+        PgVersion {
+            major: 17,
+            minor: 0,
+            patch: 0,
+        }
     }
 
     #[test]
     fn add_column_no_default_safe() {
-        let checks = check_migration("ALTER TABLE orders ADD COLUMN notes text", &empty_schema(), Some(&pg17())).unwrap();
+        let checks = check_migration(
+            "ALTER TABLE orders ADD COLUMN notes text",
+            &empty_schema(),
+            Some(&pg17()),
+        )
+        .unwrap();
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].operation, "ADD COLUMN");
         assert_eq!(checks[0].safety, SafetyRating::Safe);
@@ -518,7 +557,12 @@ mod tests {
 
     #[test]
     fn add_column_with_default() {
-        let checks = check_migration("ALTER TABLE orders ADD COLUMN status text DEFAULT 'pending'", &empty_schema(), Some(&pg17())).unwrap();
+        let checks = check_migration(
+            "ALTER TABLE orders ADD COLUMN status text DEFAULT 'pending'",
+            &empty_schema(),
+            Some(&pg17()),
+        )
+        .unwrap();
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].safety, SafetyRating::Caution);
         assert!(checks[0].recommendation.contains("immutable"));
@@ -526,7 +570,12 @@ mod tests {
 
     #[test]
     fn create_index_without_concurrently() {
-        let checks = check_migration("CREATE INDEX idx_orders_status ON orders(status)", &empty_schema(), Some(&pg17())).unwrap();
+        let checks = check_migration(
+            "CREATE INDEX idx_orders_status ON orders(status)",
+            &empty_schema(),
+            Some(&pg17()),
+        )
+        .unwrap();
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].safety, SafetyRating::Dangerous);
         assert!(checks[0].recommendation.contains("CONCURRENTLY"));
@@ -534,15 +583,29 @@ mod tests {
 
     #[test]
     fn create_index_concurrently_safe() {
-        let checks = check_migration("CREATE INDEX CONCURRENTLY idx_orders_status ON orders(status)", &empty_schema(), Some(&pg17())).unwrap();
+        let checks = check_migration(
+            "CREATE INDEX CONCURRENTLY idx_orders_status ON orders(status)",
+            &empty_schema(),
+            Some(&pg17()),
+        )
+        .unwrap();
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].safety, SafetyRating::Safe);
     }
 
     #[test]
     fn set_not_null_caution_pg12() {
-        let pg12 = PgVersion { major: 12, minor: 0, patch: 0 };
-        let checks = check_migration("ALTER TABLE orders ALTER COLUMN status SET NOT NULL", &empty_schema(), Some(&pg12)).unwrap();
+        let pg12 = PgVersion {
+            major: 12,
+            minor: 0,
+            patch: 0,
+        };
+        let checks = check_migration(
+            "ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
+            &empty_schema(),
+            Some(&pg12),
+        )
+        .unwrap();
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].operation, "SET NOT NULL");
         assert_eq!(checks[0].safety, SafetyRating::Caution);
@@ -551,21 +614,36 @@ mod tests {
 
     #[test]
     fn alter_column_type_dangerous() {
-        let checks = check_migration("ALTER TABLE orders ALTER COLUMN id TYPE bigint", &empty_schema(), Some(&pg17())).unwrap();
+        let checks = check_migration(
+            "ALTER TABLE orders ALTER COLUMN id TYPE bigint",
+            &empty_schema(),
+            Some(&pg17()),
+        )
+        .unwrap();
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].safety, SafetyRating::Dangerous);
     }
 
     #[test]
     fn drop_column_safe() {
-        let checks = check_migration("ALTER TABLE orders DROP COLUMN legacy", &empty_schema(), Some(&pg17())).unwrap();
+        let checks = check_migration(
+            "ALTER TABLE orders DROP COLUMN legacy",
+            &empty_schema(),
+            Some(&pg17()),
+        )
+        .unwrap();
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].safety, SafetyRating::Safe);
     }
 
     #[test]
     fn includes_table_size() {
-        let checks = check_migration("ALTER TABLE orders ADD COLUMN x text", &empty_schema(), Some(&pg17())).unwrap();
+        let checks = check_migration(
+            "ALTER TABLE orders ADD COLUMN x text",
+            &empty_schema(),
+            Some(&pg17()),
+        )
+        .unwrap();
         assert!(checks[0].table_size.as_ref().unwrap().contains("GB"));
         assert_eq!(checks[0].row_estimate, Some(5_000_000.0));
     }

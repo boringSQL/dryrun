@@ -2,9 +2,7 @@ use sqlx::PgPool;
 use tracing::info;
 
 use crate::error::{Error, Result};
-use crate::schema::types::{
-    ColumnStats, IndexStats, NodeStats, SchemaSnapshot, TableStats,
-};
+use crate::schema::types::{ColumnStats, IndexStats, NodeStats, SchemaSnapshot, TableStats};
 
 #[derive(Debug)]
 pub struct ApplyResult {
@@ -53,16 +51,19 @@ pub async fn apply_stats(
         regresql_loaded,
     };
 
-    let mut tx = pool.begin().await.map_err(|e| {
-        Error::StatsInjection(format!("failed to begin transaction: {e}"))
-    })?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Error::StatsInjection(format!("failed to begin transaction: {e}")))?;
 
     // phase 1: pg_class for tables
     for (schema, table, stats) in &resolved.tables {
         match update_pg_class(&mut tx, schema, table, "r", stats.reltuples, stats.relpages).await {
             Ok(true) => result.tables_updated += 1,
             Ok(false) => {
-                result.skipped.push(format!("{schema}.{table}: not found on target"));
+                result
+                    .skipped
+                    .push(format!("{schema}.{table}: not found on target"));
             }
             Err(e) => {
                 result.skipped.push(format!("{schema}.{table}: {e}"));
@@ -72,15 +73,26 @@ pub async fn apply_stats(
 
     // phase 2: pg_class for indexes
     for (schema, _table, index_name, stats) in &resolved.indexes {
-        match update_pg_class(&mut tx, schema, index_name, "i", stats.reltuples, stats.relpages)
-            .await
+        match update_pg_class(
+            &mut tx,
+            schema,
+            index_name,
+            "i",
+            stats.reltuples,
+            stats.relpages,
+        )
+        .await
         {
             Ok(true) => result.indexes_updated += 1,
             Ok(false) => {
-                result.skipped.push(format!("index {schema}.{index_name}: not found on target"));
+                result
+                    .skipped
+                    .push(format!("index {schema}.{index_name}: not found on target"));
             }
             Err(e) => {
-                result.skipped.push(format!("index {schema}.{index_name}: {e}"));
+                result
+                    .skipped
+                    .push(format!("index {schema}.{index_name}: {e}"));
             }
         }
     }
@@ -90,9 +102,9 @@ pub async fn apply_stats(
         let meta = match lookup_column_meta(&mut tx, schema, table, column).await {
             Ok(Some(m)) => m,
             Ok(None) => {
-                result
-                    .skipped
-                    .push(format!("{schema}.{table}.{column}: column not found on target"));
+                result.skipped.push(format!(
+                    "{schema}.{table}.{column}: column not found on target"
+                ));
                 continue;
             }
             Err(e) => {
@@ -113,9 +125,9 @@ pub async fn apply_stats(
                 continue;
             }
             Err(e) => {
-                result
-                    .skipped
-                    .push(format!("{schema}.{table}.{column}: type validation failed: {e}"));
+                result.skipped.push(format!(
+                    "{schema}.{table}.{column}: type validation failed: {e}"
+                ));
                 continue;
             }
         };
@@ -140,9 +152,9 @@ pub async fn apply_stats(
         }
     }
 
-    tx.commit().await.map_err(|e| {
-        Error::StatsInjection(format!("failed to commit: {e}"))
-    })?;
+    tx.commit()
+        .await
+        .map_err(|e| Error::StatsInjection(format!("failed to commit: {e}")))?;
 
     info!(
         tables = result.tables_updated,
@@ -210,7 +222,11 @@ fn resolve_stats(snapshot: &SchemaSnapshot, node: Option<&str>) -> Result<Resolv
             .iter()
             .find(|n| n.source == node_name)
             .ok_or_else(|| {
-                let available: Vec<&str> = snapshot.node_stats.iter().map(|n| n.source.as_str()).collect();
+                let available: Vec<&str> = snapshot
+                    .node_stats
+                    .iter()
+                    .map(|n| n.source.as_str())
+                    .collect();
                 Error::StatsInjection(format!(
                     "node '{}' not found. Available: {}",
                     node_name,
@@ -229,7 +245,11 @@ fn resolve_stats(snapshot: &SchemaSnapshot, node: Option<&str>) -> Result<Resolv
     }
 
     if !snapshot.node_stats.is_empty() {
-        let available: Vec<&str> = snapshot.node_stats.iter().map(|n| n.source.as_str()).collect();
+        let available: Vec<&str> = snapshot
+            .node_stats
+            .iter()
+            .map(|n| n.source.as_str())
+            .collect();
         return Err(Error::StatsInjection(format!(
             "multiple node stats found ({}). Use --node to select one: {}",
             snapshot.node_stats.len(),
@@ -323,7 +343,12 @@ fn resolve_from_inline(snapshot: &SchemaSnapshot) -> ResolvedStats {
     }
 }
 
-fn find_column_type(snapshot: &SchemaSnapshot, schema: &str, table: &str, column: &str) -> Option<String> {
+fn find_column_type(
+    snapshot: &SchemaSnapshot,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<String> {
     snapshot
         .tables
         .iter()
@@ -416,13 +441,15 @@ async fn lookup_column_meta(
     .fetch_optional(&mut **tx)
     .await?;
 
-    Ok(row.map(|(attrelid, attnum, _atttypid, eq_opr, lt_opr)| ColumnMeta {
-        attrelid,
-        attnum,
-        type_name: String::new(), // filled in by caller after validate_type_name
-        eq_opr,
-        lt_opr,
-    }))
+    Ok(
+        row.map(|(attrelid, attnum, _atttypid, eq_opr, lt_opr)| ColumnMeta {
+            attrelid,
+            attnum,
+            type_name: String::new(), // filled in by caller after validate_type_name
+            eq_opr,
+            lt_opr,
+        }),
+    )
 }
 
 /// Validate a type name against the target database, returning normalized form.
@@ -481,33 +508,35 @@ async fn inject_column_stats(
     let mut slot_idx = 0;
 
     // MCV slot (stakind = 1)
-    if let (Some(mcv_vals), Some(mcv_freqs)) =
-        (&stats.most_common_vals, &stats.most_common_freqs)
-        && let Some(eq_op) = meta.eq_opr {
-            slot_kinds[slot_idx] = 1;
-            slot_ops[slot_idx] = eq_op;
-            slot_numbers[slot_idx] = Some(mcv_freqs.clone());
-            slot_values[slot_idx] = Some(mcv_vals.clone());
-            slot_idx += 1;
-        }
+    if let (Some(mcv_vals), Some(mcv_freqs)) = (&stats.most_common_vals, &stats.most_common_freqs)
+        && let Some(eq_op) = meta.eq_opr
+    {
+        slot_kinds[slot_idx] = 1;
+        slot_ops[slot_idx] = eq_op;
+        slot_numbers[slot_idx] = Some(mcv_freqs.clone());
+        slot_values[slot_idx] = Some(mcv_vals.clone());
+        slot_idx += 1;
+    }
 
     // Histogram slot (stakind = 2)
     if let Some(ref hist) = stats.histogram_bounds
-        && let Some(lt_op) = meta.lt_opr {
-            slot_kinds[slot_idx] = 2;
-            slot_ops[slot_idx] = lt_op;
-            slot_values[slot_idx] = Some(hist.clone());
-            slot_idx += 1;
-        }
+        && let Some(lt_op) = meta.lt_opr
+    {
+        slot_kinds[slot_idx] = 2;
+        slot_ops[slot_idx] = lt_op;
+        slot_values[slot_idx] = Some(hist.clone());
+        slot_idx += 1;
+    }
 
     // Correlation slot (stakind = 3)
     if let Some(corr) = stats.correlation
-        && let Some(lt_op) = meta.lt_opr {
-            slot_kinds[slot_idx] = 3;
-            slot_ops[slot_idx] = lt_op;
-            slot_numbers[slot_idx] = Some(format!("{{{corr}}}"));
-            // no stavalues for correlation
-        }
+        && let Some(lt_op) = meta.lt_opr
+    {
+        slot_kinds[slot_idx] = 3;
+        slot_ops[slot_idx] = lt_op;
+        slot_numbers[slot_idx] = Some(format!("{{{corr}}}"));
+        // no stavalues for correlation
+    }
 
     // Build dynamic INSERT — we need dynamic SQL because stavalues is anyarray
     // and we need to cast to the actual column type

@@ -120,9 +120,10 @@ impl ProjectConfig {
         loop {
             let candidate = dir.join("dryrun.toml");
             if candidate.is_file()
-                && let Ok(config) = Self::load(&candidate) {
-                    return Some((candidate, config));
-                }
+                && let Ok(config) = Self::load(&candidate)
+            {
+                return Some((candidate, config));
+            }
             if dir.join(".git").exists() {
                 return None;
             }
@@ -175,7 +176,12 @@ impl ProjectConfig {
             let profile = self.profiles.get(&name).ok_or_else(|| {
                 Error::Config(format!("profile '{name}' not found in dryrun.toml"))
             })?;
-            return Ok(resolve_profile_config(&name, profile, project_root, project_id));
+            return Ok(resolve_profile_config(
+                &name,
+                profile,
+                project_root,
+                project_id,
+            ));
         }
 
         let auto_schema = project_root.join(".dryrun/schema.json");
@@ -357,7 +363,10 @@ table_name_regex = "^[a-z][a-z0-9_]*$"
 "#;
 
         let config = ProjectConfig::parse(toml).unwrap();
-        assert_eq!(config.default.as_ref().unwrap().profile.as_deref(), Some("production"));
+        assert_eq!(
+            config.default.as_ref().unwrap().profile.as_deref(),
+            Some("production")
+        );
         assert_eq!(config.profiles.len(), 3);
         assert!(config.profiles.contains_key("development"));
         assert!(config.profiles.contains_key("staging"));
@@ -438,10 +447,18 @@ rules = ["pk/exists"]
     fn resolve_profile_cli_db_wins() {
         let config = ProjectConfig::parse("[default]\nprofile = \"prod\"").unwrap();
         let resolved = config
-            .resolve_profile(Some("postgres://localhost/test"), None, None, Path::new("/tmp"))
+            .resolve_profile(
+                Some("postgres://localhost/test"),
+                None,
+                None,
+                Path::new("/tmp"),
+            )
             .unwrap();
         assert_eq!(resolved.name, "<cli>");
-        assert_eq!(resolved.db_url.as_deref(), Some("postgres://localhost/test"));
+        assert_eq!(
+            resolved.db_url.as_deref(),
+            Some("postgres://localhost/test")
+        );
     }
 
     #[test]
@@ -455,7 +472,10 @@ schema_file = ".dryrun/staging.json"
             .resolve_profile(None, None, Some("staging"), Path::new("/project"))
             .unwrap();
         assert_eq!(resolved.name, "staging");
-        assert_eq!(resolved.schema_file.unwrap(), PathBuf::from("/project/.dryrun/staging.json"));
+        assert_eq!(
+            resolved.schema_file.unwrap(),
+            PathBuf::from("/project/.dryrun/staging.json")
+        );
     }
 
     #[test]
@@ -534,7 +554,10 @@ schema_file = ".dryrun/staging.json"
         let resolved = config
             .resolve_profile(None, None, Some("staging"), Path::new("/project"))
             .unwrap();
-        assert_eq!(resolved.database_id.as_ref().map(|d| d.0.as_str()), Some("staging"));
+        assert_eq!(
+            resolved.database_id.as_ref().map(|d| d.0.as_str()),
+            Some("staging")
+        );
     }
 
     #[test]
@@ -548,7 +571,10 @@ database_id = "auth"
         let resolved = config
             .resolve_profile(None, None, Some("prod-auth"), Path::new("/project"))
             .unwrap();
-        assert_eq!(resolved.database_id.as_ref().map(|d| d.0.as_str()), Some("auth"));
+        assert_eq!(
+            resolved.database_id.as_ref().map(|d| d.0.as_str()),
+            Some("auth")
+        );
     }
 
     #[test]
