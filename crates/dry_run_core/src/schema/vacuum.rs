@@ -98,21 +98,25 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
         let mut av_enabled = defaults.enabled;
 
         if let Some(v) = opts.get("autovacuum_vacuum_threshold")
-            && let Ok(parsed) = v.parse::<i64>() {
-                threshold = parsed;
-            }
+            && let Ok(parsed) = v.parse::<i64>()
+        {
+            threshold = parsed;
+        }
         if let Some(v) = opts.get("autovacuum_vacuum_scale_factor")
-            && let Ok(parsed) = v.parse::<f64>() {
-                scale_factor = parsed;
-            }
+            && let Ok(parsed) = v.parse::<f64>()
+        {
+            scale_factor = parsed;
+        }
         if let Some(v) = opts.get("autovacuum_analyze_threshold")
-            && let Ok(parsed) = v.parse::<i64>() {
-                analyze_threshold = parsed;
-            }
+            && let Ok(parsed) = v.parse::<i64>()
+        {
+            analyze_threshold = parsed;
+        }
         if let Some(v) = opts.get("autovacuum_analyze_scale_factor")
-            && let Ok(parsed) = v.parse::<f64>() {
-                analyze_scale_factor = parsed;
-            }
+            && let Ok(parsed) = v.parse::<f64>()
+        {
+            analyze_scale_factor = parsed;
+        }
         if let Some(v) = opts.get("autovacuum_enabled") {
             av_enabled = v == "on" || v == "true";
         }
@@ -156,9 +160,7 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
             ));
         }
 
-        if stats.reltuples > 0.0
-            && stats.dead_tuples as f64 / stats.reltuples > 0.10
-        {
+        if stats.reltuples > 0.0 && stats.dead_tuples as f64 / stats.reltuples > 0.10 {
             recommendations.push(format!(
                 "high dead tuple ratio: {} dead / {}k live ({:.1}%)",
                 stats.dead_tuples,
@@ -265,7 +267,12 @@ mod tests {
         let snap = make_snap(vec![make_table_with_stats("big", 5_000_000.0, 100)]);
         let results = analyze_vacuum_health(&snap);
         assert_eq!(results.len(), 1);
-        assert!(results[0].recommendations.iter().any(|r| r.contains("large table")));
+        assert!(
+            results[0]
+                .recommendations
+                .iter()
+                .any(|r| r.contains("large table"))
+        );
     }
 
     #[test]
@@ -273,7 +280,12 @@ mod tests {
         let snap = make_snap(vec![make_table_with_stats("dirty", 100_000.0, 20_000)]);
         let results = analyze_vacuum_health(&snap);
         assert_eq!(results.len(), 1);
-        assert!(results[0].recommendations.iter().any(|r| r.contains("high dead tuple")));
+        assert!(
+            results[0]
+                .recommendations
+                .iter()
+                .any(|r| r.contains("high dead tuple"))
+        );
     }
 
     #[test]
@@ -283,17 +295,38 @@ mod tests {
         let snap = make_snap(vec![table]);
         let results = analyze_vacuum_health(&snap);
         assert_eq!(results.len(), 1);
-        assert!(results[0].recommendations.iter().any(|r| r.contains("disabled")));
+        assert!(
+            results[0]
+                .recommendations
+                .iter()
+                .any(|r| r.contains("disabled"))
+        );
         assert!(!results[0].autovacuum_enabled);
     }
 
     #[test]
     fn parses_defaults_from_gucs() {
         let gucs = vec![
-            GucSetting { name: "autovacuum_vacuum_threshold".into(), setting: "100".into(), unit: None },
-            GucSetting { name: "autovacuum_vacuum_scale_factor".into(), setting: "0.05".into(), unit: None },
-            GucSetting { name: "autovacuum_analyze_threshold".into(), setting: "200".into(), unit: None },
-            GucSetting { name: "autovacuum_analyze_scale_factor".into(), setting: "0.02".into(), unit: None },
+            GucSetting {
+                name: "autovacuum_vacuum_threshold".into(),
+                setting: "100".into(),
+                unit: None,
+            },
+            GucSetting {
+                name: "autovacuum_vacuum_scale_factor".into(),
+                setting: "0.05".into(),
+                unit: None,
+            },
+            GucSetting {
+                name: "autovacuum_analyze_threshold".into(),
+                setting: "200".into(),
+                unit: None,
+            },
+            GucSetting {
+                name: "autovacuum_analyze_scale_factor".into(),
+                setting: "0.02".into(),
+                unit: None,
+            },
         ];
         let d = parse_autovacuum_defaults(&gucs);
         assert_eq!(d.vacuum_threshold, 100);

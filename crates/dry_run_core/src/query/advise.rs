@@ -141,15 +141,17 @@ fn advise_seq_scan(
 
         // stats-aware refinements
         if let Some(col) = col_obj
-            && col.stats.is_some() {
-                let mut table_rows = node.plan_rows;
-                if let Some(t) = table
-                    && let Some(s) = &t.stats
-                        && s.reltuples > table_rows {
-                            table_rows = s.reltuples;
-                        }
-                recommendation.push_str(&stats_aware_advice(col, filter_col_name, table_rows));
+            && col.stats.is_some()
+        {
+            let mut table_rows = node.plan_rows;
+            if let Some(t) = table
+                && let Some(s) = &t.stats
+                && s.reltuples > table_rows
+            {
+                table_rows = s.reltuples;
             }
+            recommendation.push_str(&stats_aware_advice(col, filter_col_name, table_rows));
+        }
 
         let idx_name = format!("idx_{table_name}_{filter_col_name}");
 
@@ -339,7 +341,9 @@ fn stats_aware_advice(col: &Column, filter_col: &str, table_rows: f64) -> String
         } else if nd > 0.0 && nd <= 20.0 {
             parts.push(format!(
                 "\nColumn '{}' has {} distinct values (selectivity ~{:.1}%).",
-                filter_col, nd as i64, sel * 100.0
+                filter_col,
+                nd as i64,
+                sel * 100.0
             ));
         }
     }
@@ -354,22 +358,26 @@ fn stats_aware_advice(col: &Column, filter_col: &str, table_rows: f64) -> String
 
     // high null fraction
     if let Some(nf) = stats.null_frac
-        && nf > 0.5 {
-            let null_rows = (nf * table_rows) as i64;
-            parts.push(format!(
+        && nf > 0.5
+    {
+        let null_rows = (nf * table_rows) as i64;
+        parts.push(format!(
                 "Column is {:.0}% NULL (~{} rows). Use a partial index WHERE {} IS NOT NULL to index only the non-null rows.",
                 nf * 100.0, null_rows, filter_col
             ));
-        }
+    }
 
     // correlation warning for range scans
     if let Some(c) = stats.correlation
-        && c > -0.3 && c < 0.3 && table_rows > 10_000.0 {
-            parts.push(format!(
+        && c > -0.3
+        && c < 0.3
+        && table_rows > 10_000.0
+    {
+        parts.push(format!(
                 "Physical ordering is random (correlation: {:.2}); index range scans will cause random I/O.",
                 c
             ));
-        }
+    }
 
     parts.join(" ")
 }
@@ -420,8 +428,12 @@ fn suggest_index_type(table: &str, col_type: &str, col_name: &str) -> (&'static 
         };
         return ("gin", rec);
     }
-    if ct.contains("geometry") || ct.contains("geography") || ct.contains("range")
-        || ct == "tsrange" || ct == "daterange" || ct == "int4range"
+    if ct.contains("geometry")
+        || ct.contains("geography")
+        || ct.contains("range")
+        || ct == "tsrange"
+        || ct == "daterange"
+        || ct == "int4range"
     {
         let e = jit::suggest_gist(table, col_name, col_type);
         return ("gist", e.reason);
@@ -470,28 +482,96 @@ mod tests {
             content_hash: "test".into(),
             source: None,
             tables: vec![Table {
-                oid: 1, schema: "public".into(), name: "orders".into(),
+                oid: 1,
+                schema: "public".into(),
+                name: "orders".into(),
                 columns: vec![
-                    Column { name: "id".into(), ordinal: 1, type_name: "bigint".into(), nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None },
-                    Column { name: "customer_id".into(), ordinal: 2, type_name: "bigint".into(), nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None },
-                    Column { name: "data".into(), ordinal: 3, type_name: "jsonb".into(), nullable: true, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None },
+                    Column {
+                        name: "id".into(),
+                        ordinal: 1,
+                        type_name: "bigint".into(),
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        comment: None,
+                        statistics_target: None,
+                        stats: None,
+                    },
+                    Column {
+                        name: "customer_id".into(),
+                        ordinal: 2,
+                        type_name: "bigint".into(),
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        comment: None,
+                        statistics_target: None,
+                        stats: None,
+                    },
+                    Column {
+                        name: "data".into(),
+                        ordinal: 3,
+                        type_name: "jsonb".into(),
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        comment: None,
+                        statistics_target: None,
+                        stats: None,
+                    },
                 ],
-                constraints: vec![], indexes: vec![], comment: None, stats: None,
-                partition_info: None, policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+                constraints: vec![],
+                indexes: vec![],
+                comment: None,
+                stats: None,
+                partition_info: None,
+                policies: vec![],
+                triggers: vec![],
+                reloptions: vec![],
+                rls_enabled: false,
             }],
-            enums: vec![], domains: vec![], composites: vec![], views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
             node_stats: vec![],
         }
     }
 
     fn make_seq_scan(table: &str, rows: f64, filter: Option<&str>) -> PlanNode {
         PlanNode {
-            node_type: "Seq Scan".into(), relation_name: Some(table.into()), schema: Some("public".into()),
-            alias: None, startup_cost: 0.0, total_cost: rows * 0.01, plan_rows: rows, plan_width: 64,
-            actual_rows: None, actual_loops: None, actual_startup_time: None, actual_total_time: None,
-            shared_hit_blocks: None, shared_read_blocks: None, index_name: None, index_cond: None,
-            filter: filter.map(String::from), rows_removed_by_filter: None,
-            sort_key: None, sort_method: None, hash_cond: None, join_type: None, subplans_removed: None, cte_name: None, parent_relationship: None, children: vec![],
+            node_type: "Seq Scan".into(),
+            relation_name: Some(table.into()),
+            schema: Some("public".into()),
+            alias: None,
+            startup_cost: 0.0,
+            total_cost: rows * 0.01,
+            plan_rows: rows,
+            plan_width: 64,
+            actual_rows: None,
+            actual_loops: None,
+            actual_startup_time: None,
+            actual_total_time: None,
+            shared_hit_blocks: None,
+            shared_read_blocks: None,
+            index_name: None,
+            index_cond: None,
+            filter: filter.map(String::from),
+            rows_removed_by_filter: None,
+            sort_key: None,
+            sort_method: None,
+            hash_cond: None,
+            join_type: None,
+            subplans_removed: None,
+            cte_name: None,
+            parent_relationship: None,
+            children: vec![],
         }
     }
 
@@ -527,7 +607,11 @@ mod tests {
     fn advise_includes_version_note() {
         let schema = empty_schema();
         let plan = make_seq_scan("orders", 100_000.0, Some("(customer_id = 42)"));
-        let pg14 = PgVersion { major: 14, minor: 0, patch: 0 };
+        let pg14 = PgVersion {
+            major: 14,
+            minor: 0,
+            patch: 0,
+        };
         let advice = advise(&plan, &schema, Some(&pg14));
         assert!(!advice.is_empty());
         assert!(advice[0].version_note.is_some());
@@ -545,10 +629,16 @@ mod tests {
                     schema: "public".into(),
                     table: "orders".into(),
                     stats: TableStats {
-                        reltuples: 100_000.0, relpages: 1250, dead_tuples: 0,
-                        last_vacuum: None, last_autovacuum: None,
-                        last_analyze: None, last_autoanalyze: None,
-                        seq_scan: 100, idx_scan: 5000, table_size: 10_000_000,
+                        reltuples: 100_000.0,
+                        relpages: 1250,
+                        dead_tuples: 0,
+                        last_vacuum: None,
+                        last_autovacuum: None,
+                        last_analyze: None,
+                        last_autoanalyze: None,
+                        seq_scan: 100,
+                        idx_scan: 5000,
+                        table_size: 10_000_000,
                     },
                 }],
                 index_stats: vec![],
@@ -562,10 +652,16 @@ mod tests {
                     schema: "public".into(),
                     table: "orders".into(),
                     stats: TableStats {
-                        reltuples: 100_000.0, relpages: 1250, dead_tuples: 0,
-                        last_vacuum: None, last_autovacuum: None,
-                        last_analyze: None, last_autoanalyze: None,
-                        seq_scan: 42000, idx_scan: 1000, table_size: 10_000_000,
+                        reltuples: 100_000.0,
+                        relpages: 1250,
+                        dead_tuples: 0,
+                        last_vacuum: None,
+                        last_autovacuum: None,
+                        last_analyze: None,
+                        last_autoanalyze: None,
+                        seq_scan: 42000,
+                        idx_scan: 1000,
+                        table_size: 10_000_000,
                     },
                 }],
                 index_stats: vec![],
@@ -582,8 +678,17 @@ mod tests {
 
     #[test]
     fn extract_column_simple() {
-        assert_eq!(extract_column_from_filter("(customer_id = 42)"), Some("customer_id".into()));
-        assert_eq!(extract_column_from_filter("(status IS NOT NULL)"), Some("status".into()));
-        assert_eq!(extract_column_from_filter("(t.name = 'foo')"), Some("name".into()));
+        assert_eq!(
+            extract_column_from_filter("(customer_id = 42)"),
+            Some("customer_id".into())
+        );
+        assert_eq!(
+            extract_column_from_filter("(status IS NOT NULL)"),
+            Some("status".into())
+        );
+        assert_eq!(
+            extract_column_from_filter("(t.name = 'foo')"),
+            Some("name".into())
+        );
     }
 }

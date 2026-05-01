@@ -9,11 +9,7 @@ pub fn check_duplicate_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
 
     for table in &schema.tables {
         let qualified = format!("{}.{}", table.schema, table.name);
-        let non_primary: Vec<_> = table
-            .indexes
-            .iter()
-            .filter(|idx| !idx.is_primary)
-            .collect();
+        let non_primary: Vec<_> = table.indexes.iter().filter(|idx| !idx.is_primary).collect();
 
         for (i, a) in non_primary.iter().enumerate() {
             for b in non_primary.iter().skip(i + 1) {
@@ -70,7 +66,11 @@ pub fn check_duplicate_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                             "Drop '{}' — '{}'{}",
                             to_drop.name,
                             to_keep.name,
-                            if to_keep.backs_constraint { " backs a constraint" } else { " is sufficient" },
+                            if to_keep.backs_constraint {
+                                " backs a constraint"
+                            } else {
+                                " is sufficient"
+                            },
                         ),
                         ddl_fix: Some(format!("DROP INDEX {};", to_drop.name)),
                         min_pg_version: None,
@@ -238,8 +238,9 @@ pub fn check_bloated_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
         let qualified = format!("{}.{}", table.schema, table.name);
         for idx in &table.indexes {
             if let Some(est) = crate::schema::bloat::estimate_index_bloat(idx, table)
-                && est.bloat_ratio > DEFAULT_BLOAT_THRESHOLD {
-                    findings.push(AuditFinding {
+                && est.bloat_ratio > DEFAULT_BLOAT_THRESHOLD
+            {
+                findings.push(AuditFinding {
                         rule: "indexes/bloated".into(),
                         category: AuditCategory::Storage,
                         severity: Severity::Warning,
@@ -252,7 +253,7 @@ pub fn check_bloated_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
                         ddl_fix: Some(format!("REINDEX INDEX CONCURRENTLY {};", idx.name)),
                         min_pg_version: None,
                     });
-                }
+            }
         }
     }
 
@@ -267,8 +268,16 @@ mod tests {
 
     fn make_col(name: &str, type_name: &str) -> Column {
         Column {
-            name: name.into(), ordinal: 0, type_name: type_name.into(),
-            nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None,
+            name: name.into(),
+            ordinal: 0,
+            type_name: type_name.into(),
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            comment: None,
+            statistics_target: None,
+            stats: None,
         }
     }
 
@@ -276,8 +285,11 @@ mod tests {
         Index {
             name: name.into(),
             columns: columns.iter().map(|s| s.to_string()).collect(),
-            include_columns: vec![], index_type: "btree".into(),
-            is_unique: false, is_primary: false, predicate: None,
+            include_columns: vec![],
+            index_type: "btree".into(),
+            is_unique: false,
+            is_primary: false,
+            predicate: None,
             definition: format!("CREATE INDEX {name} ON ..."),
             is_valid: true,
             backs_constraint: false,
@@ -285,25 +297,39 @@ mod tests {
         }
     }
 
-    fn make_table_with(
-        name: &str,
-        columns: Vec<Column>,
-        indexes: Vec<Index>,
-    ) -> Table {
+    fn make_table_with(name: &str, columns: Vec<Column>, indexes: Vec<Index>) -> Table {
         Table {
-            oid: 0, schema: "public".into(), name: name.into(),
-            columns, constraints: vec![], indexes,
-            comment: None, stats: None, partition_info: None,
-            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+            oid: 0,
+            schema: "public".into(),
+            name: name.into(),
+            columns,
+            constraints: vec![],
+            indexes,
+            comment: None,
+            stats: None,
+            partition_info: None,
+            policies: vec![],
+            triggers: vec![],
+            reloptions: vec![],
+            rls_enabled: false,
         }
     }
 
     fn schema_with(tables: Vec<Table>) -> SchemaSnapshot {
         SchemaSnapshot {
-            pg_version: "PostgreSQL 17.0".into(), database: "test".into(),
-            timestamp: Utc::now(), content_hash: "abc".into(), source: None,
-            tables, enums: vec![], domains: vec![], composites: vec![],
-            views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "test".into(),
+            timestamp: Utc::now(),
+            content_hash: "abc".into(),
+            source: None,
+            tables,
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
             node_stats: vec![],
         }
     }
@@ -435,10 +461,7 @@ mod tests {
         let schema = schema_with(vec![make_table_with(
             "orders",
             vec![make_col("user_id", "bigint"), make_col("status", "text")],
-            vec![
-                make_index("idx_user_all", &["user_id"]),
-                partial,
-            ],
+            vec![make_index("idx_user_all", &["user_id"]), partial],
         )]);
         let findings = check_duplicate_indexes(&schema);
         assert!(findings.is_empty());
@@ -451,17 +474,21 @@ mod tests {
         let schema = schema_with(vec![make_table_with(
             "orders",
             vec![make_col("user_id", "bigint")],
-            vec![
-                make_index("idx_user_plain", &["user_id"]),
-                unique,
-            ],
+            vec![make_index("idx_user_plain", &["user_id"]), unique],
         )]);
         let findings = check_duplicate_indexes(&schema);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warning);
-        assert!(findings[0].message.contains("Non-unique index 'idx_user_plain'"));
+        assert!(
+            findings[0]
+                .message
+                .contains("Non-unique index 'idx_user_plain'")
+        );
         assert!(findings[0].message.contains("unique index 'idx_user_uniq'"));
-        assert_eq!(findings[0].ddl_fix.as_deref(), Some("DROP INDEX idx_user_plain;"));
+        assert_eq!(
+            findings[0].ddl_fix.as_deref(),
+            Some("DROP INDEX idx_user_plain;")
+        );
     }
 
     #[test]
@@ -484,7 +511,10 @@ mod tests {
         let findings = check_duplicate_indexes(&schema);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warning);
-        assert_eq!(findings[0].ddl_fix.as_deref(), Some("DROP INDEX idx_workspace_name;"));
+        assert_eq!(
+            findings[0].ddl_fix.as_deref(),
+            Some("DROP INDEX idx_workspace_name;")
+        );
     }
 
     #[test]
@@ -494,10 +524,7 @@ mod tests {
         let schema = schema_with(vec![make_table_with(
             "orders",
             vec![make_col("user_id", "bigint"), make_col("status", "text")],
-            vec![
-                make_index("idx_user_plain", &["user_id"]),
-                covering,
-            ],
+            vec![make_index("idx_user_plain", &["user_id"]), covering],
         )]);
         let findings = check_duplicate_indexes(&schema);
         assert!(findings.is_empty());
@@ -533,11 +560,13 @@ mod tests {
     fn both_back_constraints_warns_without_ddl_fix() {
         // one index owns a UNIQUE constraint, the other is used by a FK —
         // neither can be simply dropped, needs FK drop+recreate
-        let mut constraint_idx = make_index("unique_status_id_workspace_id", &["workspace_id", "id"]);
+        let mut constraint_idx =
+            make_index("unique_status_id_workspace_id", &["workspace_id", "id"]);
         constraint_idx.is_unique = true;
         constraint_idx.backs_constraint = true;
 
-        let mut fk_used_idx = make_index("idx_unique_status_id_workspace_id", &["workspace_id", "id"]);
+        let mut fk_used_idx =
+            make_index("idx_unique_status_id_workspace_id", &["workspace_id", "id"]);
         fk_used_idx.is_unique = true;
         fk_used_idx.backs_constraint = true;
 
@@ -550,7 +579,10 @@ mod tests {
         let findings = check_duplicate_indexes(&schema);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warning);
-        assert!(findings[0].ddl_fix.is_none(), "no simple DDL fix when both back constraints");
+        assert!(
+            findings[0].ddl_fix.is_none(),
+            "no simple DDL fix when both back constraints"
+        );
     }
 
     #[test]

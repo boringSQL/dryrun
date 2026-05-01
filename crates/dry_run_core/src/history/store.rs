@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
@@ -36,7 +36,9 @@ impl HistoryStore {
         let conn = Connection::open(path)
             .map_err(|e| Error::History(format!("cannot open history db: {e}")))?;
 
-        let store = Self { conn: Arc::new(Mutex::new(conn)) };
+        let store = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
         store.migrate()?;
 
         debug!(path = %path.display(), "history store opened");
@@ -48,11 +50,10 @@ impl HistoryStore {
         Self::open(&path)
     }
 
-
     fn migrate(&self) -> Result<()> {
         let conn = lock_conn(&self.conn)?;
         conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS snapshots (
+            "CREATE TABLE IF NOT EXISTS snapshots (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp     TEXT NOT NULL,
                     content_hash  TEXT NOT NULL,
@@ -63,8 +64,8 @@ impl HistoryStore {
                 );
                 CREATE INDEX IF NOT EXISTS idx_snapshots_content_hash
                     ON snapshots(content_hash);",
-            )
-            .map_err(|e| Error::History(format!("migration failed: {e}")))?;
+        )
+        .map_err(|e| Error::History(format!("migration failed: {e}")))?;
         Ok(())
     }
 }
@@ -240,7 +241,11 @@ impl SnapshotStore for HistoryStore {
     }
 
     async fn latest(&self, key: &SnapshotKey) -> Result<Option<SnapshotSummary>> {
-        Ok(self.list(key, TimeRange::default()).await?.into_iter().next())
+        Ok(self
+            .list(key, TimeRange::default())
+            .await?
+            .into_iter()
+            .next())
     }
 
     async fn delete_before(&self, key: &SnapshotKey, cutoff: DateTime<Utc>) -> Result<usize> {
@@ -272,8 +277,14 @@ mod trait_tests {
             timestamp: Utc::now(),
             content_hash: hash.into(),
             source: None,
-            tables: vec![], enums: vec![], domains: vec![], composites: vec![],
-            views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            tables: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
             node_stats: vec![],
         }
     }
@@ -314,7 +325,10 @@ mod trait_tests {
             PutOutcome::Inserted
         );
         assert_eq!(
-            store.put(&billing, &make_snap("same", "billing")).await.unwrap(),
+            store
+                .put(&billing, &make_snap("same", "billing"))
+                .await
+                .unwrap(),
             PutOutcome::Inserted
         );
 
@@ -475,11 +489,13 @@ mod trait_tests {
         let (_dir, store) = temp_store();
         let k = key("p", "x");
         assert!(store.get(&k, SnapshotRef::Latest).await.is_err());
-        assert!(store.get(&k, SnapshotRef::Hash("nope".into())).await.is_err());
-        assert!(store
-            .get(&k, SnapshotRef::At(Utc::now()))
-            .await
-            .is_err());
+        assert!(
+            store
+                .get(&k, SnapshotRef::Hash("nope".into()))
+                .await
+                .is_err()
+        );
+        assert!(store.get(&k, SnapshotRef::At(Utc::now())).await.is_err());
     }
 
     #[tokio::test]

@@ -50,16 +50,17 @@ fn detect_unbounded_query(
             let reltuples = effective_table_stats(table, schema).map(|s| s.reltuples);
 
             if let Some(rows) = reltuples
-                && rows > LARGE_TABLE_THRESHOLD {
-                    warnings.push(ValidationWarning {
-                        severity: WarningSeverity::Warning,
-                        message: format!(
-                            "unbounded query on {}.{} (~{} rows) with no WHERE or LIMIT — \
+                && rows > LARGE_TABLE_THRESHOLD
+            {
+                warnings.push(ValidationWarning {
+                    severity: WarningSeverity::Warning,
+                    message: format!(
+                        "unbounded query on {}.{} (~{} rows) with no WHERE or LIMIT — \
                              consider adding a filter or LIMIT clause",
-                            table.schema, table.name, rows as i64
-                        ),
-                    });
-                }
+                        table.schema, table.name, rows as i64
+                    ),
+                });
+            }
         }
     }
 }
@@ -217,9 +218,9 @@ fn detect_partition_key_update(
 
 fn func_wrap_rewrite_hint(func_name: &str, col: &str) -> String {
     match func_name {
-        "extract" | "::date" | "to_char" => format!(
-            "Rewrite as: WHERE {col} >= '2025-01-01' AND {col} < '2026-01-01'"
-        ),
+        "extract" | "::date" | "to_char" => {
+            format!("Rewrite as: WHERE {col} >= '2025-01-01' AND {col} < '2026-01-01'")
+        }
         "date_trunc" => format!(
             "Rewrite as: WHERE {col} >= date_trunc('month', target) \
              AND {col} < date_trunc('month', target) + interval '1 month'"
@@ -238,10 +239,8 @@ fn parse_partition_key_columns(key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{
-        PartitionChild, PartitionInfo, PartitionStrategy, Table,
-    };
     use crate::query::{QueryInfo, ReferencedTable};
+    use crate::schema::{PartitionChild, PartitionInfo, PartitionStrategy, Table};
 
     fn partitioned_snapshot() -> SchemaSnapshot {
         SchemaSnapshot {
@@ -317,7 +316,11 @@ mod tests {
         let mut warnings = Vec::new();
         detect_partition_key_antipatterns(&parsed, &snap, &mut warnings);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].message.contains("does not filter on partition key"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("does not filter on partition key")
+        );
     }
 
     #[test]
@@ -350,7 +353,11 @@ mod tests {
         let mut warnings = Vec::new();
         detect_partition_key_antipatterns(&parsed, &snap, &mut warnings);
         // should have a func-wrap warning (partition key is in filter_columns so no missing-key warning)
-        assert!(warnings.iter().any(|w| w.message.contains("wrapped in extract")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("wrapped in extract"))
+        );
         assert!(warnings.iter().any(|w| w.message.contains("Rewrite as")));
     }
 

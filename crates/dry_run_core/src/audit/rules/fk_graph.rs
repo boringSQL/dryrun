@@ -22,10 +22,14 @@ impl FkGraph {
 
             for constraint in &table.constraints {
                 if constraint.kind == ConstraintKind::ForeignKey
-                    && let Some(ref target) = constraint.fk_table {
-                        nodes.insert(target.clone());
-                        edges.entry(source.clone()).or_default().insert(target.clone());
-                    }
+                    && let Some(ref target) = constraint.fk_table
+                {
+                    nodes.insert(target.clone());
+                    edges
+                        .entry(source.clone())
+                        .or_default()
+                        .insert(target.clone());
+                }
             }
         }
 
@@ -241,44 +245,78 @@ mod tests {
 
     fn make_col(name: &str, type_name: &str) -> Column {
         Column {
-            name: name.into(), ordinal: 0, type_name: type_name.into(),
-            nullable: false, default: None, identity: None, generated: None, comment: None, statistics_target: None, stats: None,
+            name: name.into(),
+            ordinal: 0,
+            type_name: type_name.into(),
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            comment: None,
+            statistics_target: None,
+            stats: None,
         }
     }
 
     fn make_pk(name: &str, columns: &[&str]) -> Constraint {
         Constraint {
-            name: name.into(), kind: ConstraintKind::PrimaryKey,
+            name: name.into(),
+            kind: ConstraintKind::PrimaryKey,
             columns: columns.iter().map(|s| s.to_string()).collect(),
-            definition: None, fk_table: None, fk_columns: vec![], backing_index: None, comment: None,
+            definition: None,
+            fk_table: None,
+            fk_columns: vec![],
+            backing_index: None,
+            comment: None,
         }
     }
 
     fn make_fk(name: &str, columns: &[&str], fk_table: &str, fk_columns: &[&str]) -> Constraint {
         Constraint {
-            name: name.into(), kind: ConstraintKind::ForeignKey,
+            name: name.into(),
+            kind: ConstraintKind::ForeignKey,
             columns: columns.iter().map(|s| s.to_string()).collect(),
-            definition: None, fk_table: Some(fk_table.into()),
+            definition: None,
+            fk_table: Some(fk_table.into()),
             fk_columns: fk_columns.iter().map(|s| s.to_string()).collect(),
-            backing_index: None, comment: None,
+            backing_index: None,
+            comment: None,
         }
     }
 
     fn make_table(name: &str, columns: Vec<Column>, constraints: Vec<Constraint>) -> Table {
         Table {
-            oid: 0, schema: "public".into(), name: name.into(),
-            columns, constraints, indexes: vec![],
-            comment: None, stats: None, partition_info: None,
-            policies: vec![], triggers: vec![], reloptions: vec![], rls_enabled: false,
+            oid: 0,
+            schema: "public".into(),
+            name: name.into(),
+            columns,
+            constraints,
+            indexes: vec![],
+            comment: None,
+            stats: None,
+            partition_info: None,
+            policies: vec![],
+            triggers: vec![],
+            reloptions: vec![],
+            rls_enabled: false,
         }
     }
 
     fn schema_with(tables: Vec<Table>) -> SchemaSnapshot {
         SchemaSnapshot {
-            pg_version: "PostgreSQL 17.0".into(), database: "test".into(),
-            timestamp: Utc::now(), content_hash: "abc".into(), source: None,
-            tables, enums: vec![], domains: vec![], composites: vec![],
-            views: vec![], functions: vec![], extensions: vec![], gucs: vec![],
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "test".into(),
+            timestamp: Utc::now(),
+            content_hash: "abc".into(),
+            source: None,
+            tables,
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
             node_stats: vec![],
         }
     }
@@ -310,11 +348,7 @@ mod tests {
     #[test]
     fn no_cycle_in_linear_chain() {
         let schema = schema_with(vec![
-            make_table(
-                "a",
-                vec![make_col("id", "bigint")],
-                vec![],
-            ),
+            make_table("a", vec![make_col("id", "bigint")], vec![]),
             make_table(
                 "b",
                 vec![make_col("id", "bigint"), make_col("a_id", "bigint")],
@@ -333,15 +367,16 @@ mod tests {
     #[test]
     fn detects_orphan_table() {
         let schema = schema_with(vec![
-            make_table(
-                "users",
-                vec![make_col("id", "bigint")],
-                vec![],
-            ),
+            make_table("users", vec![make_col("id", "bigint")], vec![]),
             make_table(
                 "orders",
                 vec![make_col("id", "bigint"), make_col("user_id", "bigint")],
-                vec![make_fk("fk_orders_users", &["user_id"], "public.users", &["id"])],
+                vec![make_fk(
+                    "fk_orders_users",
+                    &["user_id"],
+                    "public.users",
+                    &["id"],
+                )],
             ),
             make_table(
                 "config",
@@ -365,7 +400,12 @@ mod tests {
             make_table(
                 "orders",
                 vec![make_col("id", "bigint"), make_col("user_id", "integer")],
-                vec![make_fk("fk_orders_user", &["user_id"], "public.users", &["user_id"])],
+                vec![make_fk(
+                    "fk_orders_user",
+                    &["user_id"],
+                    "public.users",
+                    &["user_id"],
+                )],
             ),
         ]);
         let findings = check_fk_type_mismatch(&schema);
@@ -384,10 +424,18 @@ mod tests {
             make_table(
                 "orders",
                 vec![make_col("id", "bigint"), make_col("user_id", "integer")],
-                vec![make_fk("fk_orders_user", &["user_id"], "public.users", &["user_id"])],
+                vec![make_fk(
+                    "fk_orders_user",
+                    &["user_id"],
+                    "public.users",
+                    &["user_id"],
+                )],
             ),
         ]);
         let findings = check_fk_type_mismatch(&schema);
-        assert!(findings.is_empty(), "int4 and integer should be treated as equivalent");
+        assert!(
+            findings.is_empty(),
+            "int4 and integer should be treated as equivalent"
+        );
     }
 }

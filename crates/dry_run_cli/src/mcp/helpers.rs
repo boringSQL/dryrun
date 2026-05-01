@@ -23,7 +23,11 @@ pub fn format_number(n: i64) -> String {
     result.chars().rev().collect()
 }
 
-pub fn format_node_table_breakdown(node_stats: &[NodeStats], schema: &str, table: &str) -> Option<String> {
+pub fn format_node_table_breakdown(
+    node_stats: &[NodeStats],
+    schema: &str,
+    table: &str,
+) -> Option<String> {
     if node_stats.is_empty() {
         return None;
     }
@@ -50,8 +54,7 @@ pub fn format_node_table_breakdown(node_stats: &[NodeStats], schema: &str, table
         if let Some(ts) = ts {
             let size_mb = ts.stats.table_size / (1024 * 1024);
             let collected = ns.timestamp.format("%Y-%m-%d %H:%M");
-            let stale = stale_threshold
-                .is_some_and(|threshold| ns.timestamp < threshold);
+            let stale = stale_threshold.is_some_and(|threshold| ns.timestamp < threshold);
             lines.push(format!(
                 "{:<16} {:>12} {:>10} {:>10} {:>10} {:>9} MB  {}{}",
                 ns.source,

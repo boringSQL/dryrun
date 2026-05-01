@@ -26,9 +26,7 @@ pub fn check_partition_too_many_children(
             severity: Severity::Warning,
             table: qualified.into(),
             column: None,
-            message: format!(
-                "table has {n} partitions; planning overhead may be significant"
-            ),
+            message: format!("table has {n} partitions; planning overhead may be significant"),
             recommendation: rec,
             ddl_fix: None,
             convention_doc: "partitioning".into(),
@@ -55,9 +53,8 @@ pub fn check_partition_range_gaps(
         .children
         .iter()
         .filter_map(|c| {
-            re.captures(&c.bound).map(|cap| {
-                (cap[1].to_string(), cap[2].to_string())
-            })
+            re.captures(&c.bound)
+                .map(|cap| (cap[1].to_string(), cap[2].to_string()))
         })
         .collect();
 
@@ -77,7 +74,7 @@ pub fn check_partition_range_gaps(
                 ),
                 recommendation: e.reason,
                 ddl_fix: Some(e.fix),
-            convention_doc: "partitioning".into(),
+                convention_doc: "partitioning".into(),
             });
         }
     }
@@ -113,10 +110,7 @@ pub fn check_partition_no_default(
 }
 
 pub fn check_partition_gucs(schema: &SchemaSnapshot, violations: &mut Vec<LintViolation>) {
-    let has_partitioned = schema
-        .tables
-        .iter()
-        .any(|t| t.partition_info.is_some());
+    let has_partitioned = schema.tables.iter().any(|t| t.partition_info.is_some());
 
     if !has_partitioned {
         return;
@@ -142,7 +136,7 @@ pub fn check_partition_gucs(schema: &SchemaSnapshot, violations: &mut Vec<LintVi
                 ),
                 recommendation: format!("ALTER SYSTEM SET {name} = '{expected}';"),
                 ddl_fix: None,
-            convention_doc: "partitioning".into(),
+                convention_doc: "partitioning".into(),
             });
         }
     }

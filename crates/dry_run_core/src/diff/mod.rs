@@ -158,8 +158,8 @@ mod tests {
         local.tables.push(shared);
 
         let report = classify_drift(&prod, &local);
-        assert_eq!(report.summary.ahead, 1);   // local_only
-        assert_eq!(report.summary.behind, 1);   // prod_only
+        assert_eq!(report.summary.ahead, 1); // local_only
+        assert_eq!(report.summary.behind, 1); // prod_only
         assert_eq!(report.summary.diverged, 1); // shared (modified)
         assert_eq!(report.entries.len(), 3);
     }
