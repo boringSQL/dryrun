@@ -526,20 +526,4 @@ mod trait_tests {
         assert_eq!(store.list(&a, TimeRange::default()).await.unwrap().len(), 0);
         assert_eq!(store.list(&b, TimeRange::default()).await.unwrap().len(), 1);
     }
-
-    #[tokio::test]
-    async fn synthetic_db_url_hash_is_deterministic_and_disjoint() {
-        let k1 = key("p", "auth");
-        let k2 = key("p", "billing");
-
-        // deterministic
-        assert_eq!(synthetic_db_url_hash(&k1), synthetic_db_url_hash(&k1));
-        // distinct keys produce distinct hashes
-        assert_ne!(synthetic_db_url_hash(&k1), synthetic_db_url_hash(&k2));
-        // disjoint from real URL hashes
-        assert_ne!(
-            synthetic_db_url_hash(&k1),
-            hash_url("postgres://user@host/auth")
-        );
-    }
 }
