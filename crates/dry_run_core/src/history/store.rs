@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -10,7 +11,9 @@ use crate::error::{Error, Result};
 use crate::history::snapshot_store::{
     PutOutcome, SnapshotKey, SnapshotRef, SnapshotStore, TimeRange,
 };
-use crate::schema::{ActivityStatsSnapshot, PlannerStatsSnapshot, SchemaSnapshot};
+use crate::schema::{
+    ActivityStatsSnapshot, AnnotatedSnapshot, PlannerStatsSnapshot, SchemaSnapshot,
+};
 
 pub struct HistoryStore {
     conn: Arc<Mutex<Connection>>,
@@ -221,6 +224,82 @@ impl HistoryStore {
         .await
     }
 
+    pub async fn get_annotated(
+        &self,
+        key: &SnapshotKey,
+        at: SnapshotRef,
+    ) -> Result<AnnotatedSnapshot> {
+        let schema = SnapshotStore::get(self, key, at.clone()).await?;
+        let schema_hash = schema.content_hash.clone();
+        let pid = key.project_id.0.clone();
+        let did = key.database_id.0.clone();
+
+        let planner = {
+            let pid = pid.clone();
+            let did = did.clone();
+            let h = schema_hash.clone();
+            run_blocking(&self.conn, move |conn| {
+                let row: rusqlite::Result<String> = conn.query_row(
+                    "SELECT snapshot_json FROM snapshots
+                      WHERE project_id = ?1 AND database_id = ?2
+                        AND kind = 'planner_stats' AND schema_ref_hash = ?3
+                      ORDER BY timestamp DESC LIMIT 1",
+                    params![pid, did, h],
+                    |r| r.get(0),
+                );
+                match row {
+                    Ok(j) => Ok(Some(
+                        serde_json::from_str::<PlannerStatsSnapshot>(&j).map_err(|e| {
+                            Error::History(format!("corrupt planner stats JSON: {e}"))
+                        })?,
+                    )),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                    Err(e) => Err(e.into()),
+                }
+            })
+            .await?
+        };
+
+        let activity_by_node: BTreeMap<String, ActivityStatsSnapshot> = {
+            let h = schema_hash.clone();
+            run_blocking(&self.conn, move |conn| {
+                // For each node_label, pick the latest row at this schema ref.
+                let mut stmt = conn.prepare(
+                    "SELECT node_label, snapshot_json FROM snapshots a
+                      WHERE project_id = ?1 AND database_id = ?2
+                        AND kind = 'activity_stats' AND schema_ref_hash = ?3
+                        AND node_label IS NOT NULL
+                        AND timestamp = (
+                            SELECT MAX(b.timestamp) FROM snapshots b
+                              WHERE b.project_id = a.project_id
+                                AND b.database_id = a.database_id
+                                AND b.kind = 'activity_stats'
+                                AND b.schema_ref_hash = a.schema_ref_hash
+                                AND b.node_label = a.node_label
+                        )",
+                )?;
+                let rows = stmt.query_map(params![pid, did, h], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                let mut out: BTreeMap<String, ActivityStatsSnapshot> = BTreeMap::new();
+                for row in rows {
+                    let (label, json) = row?;
+                    let snap: ActivityStatsSnapshot = serde_json::from_str(&json)
+                        .map_err(|e| Error::History(format!("corrupt activity stats JSON: {e}")))?;
+                    out.insert(label, snap);
+                }
+                Ok(out)
+            })
+            .await?
+        };
+
+        Ok(AnnotatedSnapshot {
+            schema,
+            planner,
+            activity_by_node,
+        })
+    }
+
     pub fn list_keys(&self) -> Result<Vec<SnapshotKey>> {
         let conn = lock_conn(&self.conn)?;
         let mut stmt = conn.prepare(
@@ -326,7 +405,7 @@ impl SnapshotStore for HistoryStore {
             let latest: Option<String> = conn
                 .query_row(
                     "SELECT content_hash FROM snapshots
-                      WHERE project_id = ?1 AND database_id = ?2
+                      WHERE project_id = ?1 AND database_id = ?2 AND kind = 'schema'
                       ORDER BY timestamp DESC LIMIT 1",
                     params![pid, did],
                     |row| row.get(0),
@@ -342,9 +421,9 @@ impl SnapshotStore for HistoryStore {
                 .map_err(|e| Error::History(format!("cannot serialize snapshot: {e}")))?;
 
             conn.execute(
-                "INSERT INTO snapshots (timestamp, content_hash, database_name,
+                "INSERT INTO snapshots (kind, timestamp, content_hash, database_name,
                                         snapshot_json, project_id, database_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 VALUES ('schema', ?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     snap.timestamp.to_rfc3339(),
                     snap.content_hash,
@@ -368,21 +447,23 @@ impl SnapshotStore for HistoryStore {
             let row = match &at {
                 SnapshotRef::Latest => conn.query_row(
                     "SELECT snapshot_json FROM snapshots
-                      WHERE project_id = ?1 AND database_id = ?2
+                      WHERE project_id = ?1 AND database_id = ?2 AND kind = 'schema'
                       ORDER BY timestamp DESC LIMIT 1",
                     params![pid, did],
                     |r| r.get::<_, String>(0),
                 ),
                 SnapshotRef::At(ts) => conn.query_row(
                     "SELECT snapshot_json FROM snapshots
-                      WHERE project_id = ?1 AND database_id = ?2 AND timestamp <= ?3
+                      WHERE project_id = ?1 AND database_id = ?2 AND kind = 'schema'
+                        AND timestamp <= ?3
                       ORDER BY timestamp DESC LIMIT 1",
                     params![pid, did, ts.to_rfc3339()],
                     |r| r.get::<_, String>(0),
                 ),
                 SnapshotRef::Hash(h) => conn.query_row(
                     "SELECT snapshot_json FROM snapshots
-                      WHERE project_id = ?1 AND database_id = ?2 AND content_hash = ?3
+                      WHERE project_id = ?1 AND database_id = ?2 AND kind = 'schema'
+                        AND content_hash = ?3
                       LIMIT 1",
                     params![pid, did, h],
                     |r| r.get::<_, String>(0),
@@ -416,7 +497,7 @@ impl SnapshotStore for HistoryStore {
                 "SELECT id, timestamp, content_hash, database_name,
                         project_id, database_id
                    FROM snapshots
-                  WHERE project_id = ?1 AND database_id = ?2",
+                  WHERE project_id = ?1 AND database_id = ?2 AND kind = 'schema'",
             );
             let mut bound: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(pid), Box::new(did)];
             if let Some(from) = range.from {
@@ -452,7 +533,8 @@ impl SnapshotStore for HistoryStore {
         run_blocking(&self.conn, move |conn| {
             Ok(conn.execute(
                 "DELETE FROM snapshots
-                  WHERE project_id = ?1 AND database_id = ?2 AND timestamp < ?3",
+                  WHERE project_id = ?1 AND database_id = ?2 AND kind = 'schema'
+                    AND timestamp < ?3",
                 params![pid, did, cutoff.to_rfc3339()],
             )?)
         })

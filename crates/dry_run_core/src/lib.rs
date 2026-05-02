@@ -17,5 +17,8 @@ pub use diff::SchemaChangeset;
 pub use error::{Error, Result};
 pub use history::HistoryStore;
 pub use lint::LintConfig;
-pub use schema::{ApplyResult, NodeStats, SchemaSnapshot};
+pub use schema::{
+    ActivityStatsSnapshot, AnnotatedSchema, AnnotatedSnapshot, ApplyResult, MergedActivity,
+    NodeIdentity, NodeSelector, NodeStats, PlannerStatsSnapshot, SchemaSnapshot,
+};
 pub use version::PgVersion;

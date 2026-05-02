@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -1357,4 +1359,129 @@ pub struct MergedActivity<'a> {
     pub nodes: Vec<&'a ActivityStatsSnapshot>,
     pub window_start: DateTime<Utc>,
     pub partial: bool,
+}
+
+impl<'a> MergedActivity<'a> {
+    pub fn idx_scan_sum(&self, ix: &QualifiedName) -> i64 {
+        self.nodes
+            .iter()
+            .filter_map(|n| {
+                n.indexes
+                    .iter()
+                    .find(|e| &e.index == ix)
+                    .map(|e| e.activity.idx_scan)
+            })
+            .sum()
+    }
+
+    pub fn idx_scan_per_node(&self, ix: &QualifiedName) -> Vec<(String, i64)> {
+        self.nodes
+            .iter()
+            .map(|n| {
+                let scan = n
+                    .indexes
+                    .iter()
+                    .find(|e| &e.index == ix)
+                    .map(|e| e.activity.idx_scan)
+                    .unwrap_or(0);
+                (n.node.label.clone(), scan)
+            })
+            .collect()
+    }
+
+    pub fn seq_scan_sum(&self, t: &QualifiedName) -> i64 {
+        self.nodes
+            .iter()
+            .filter_map(|n| {
+                n.tables
+                    .iter()
+                    .find(|e| &e.table == t)
+                    .map(|e| e.activity.seq_scan)
+            })
+            .sum()
+    }
+
+    // max across nodes of max(last_vacuum, last_autovacuum) — "did anything vacuum"
+    pub fn last_vacuum_max(&self, t: &QualifiedName) -> Option<DateTime<Utc>> {
+        self.nodes
+            .iter()
+            .filter_map(|n| {
+                n.tables.iter().find(|e| &e.table == t).and_then(|e| {
+                    match (e.activity.last_vacuum, e.activity.last_autovacuum) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (None, None) => None,
+                    }
+                })
+            })
+            .max()
+    }
+
+    pub fn n_dead_tup_sum(&self, t: &QualifiedName) -> i64 {
+        self.nodes
+            .iter()
+            .filter_map(|n| {
+                n.tables
+                    .iter()
+                    .find(|e| &e.table == t)
+                    .map(|e| e.activity.n_dead_tup)
+            })
+            .sum()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnnotatedSnapshot {
+    pub schema: SchemaSnapshot,
+    pub planner: Option<PlannerStatsSnapshot>,
+    pub activity_by_node: BTreeMap<String, ActivityStatsSnapshot>,
+}
+
+impl AnnotatedSnapshot {
+    pub fn view(&self, node_label: Option<&str>) -> AnnotatedSchema<'_> {
+        let label = node_label.unwrap_or("primary");
+        let activity = self.activity_by_node.get(label);
+        let merged = if self.activity_by_node.len() > 1 {
+            self.merged(&NodeSelector::All)
+        } else {
+            None
+        };
+        AnnotatedSchema {
+            schema: &self.schema,
+            planner: self.planner.as_ref(),
+            activity,
+            merged,
+        }
+    }
+
+    pub fn merged(&self, selector: &NodeSelector) -> Option<MergedActivity<'_>> {
+        let nodes: Vec<&ActivityStatsSnapshot> = match selector {
+            NodeSelector::All => self.activity_by_node.values().collect(),
+            NodeSelector::Some(labels) => labels
+                .iter()
+                .filter_map(|l| self.activity_by_node.get(l))
+                .collect(),
+        };
+        if nodes.is_empty() {
+            return None;
+        }
+        let schema_ref_hash = nodes[0].schema_ref_hash.clone();
+        let partial = nodes.iter().any(|n| n.node.stats_reset.is_none());
+        let window_start = nodes
+            .iter()
+            .map(|n| n.node.stats_reset.unwrap_or(n.timestamp))
+            .min()
+            .unwrap_or(nodes[0].timestamp);
+        Some(MergedActivity {
+            schema_ref_hash,
+            nodes,
+            window_start,
+            partial,
+        })
+    }
+
+    pub fn node_labels(&self) -> impl Iterator<Item = &str> {
+        self.activity_by_node.keys().map(|s| s.as_str())
+    }
 }
