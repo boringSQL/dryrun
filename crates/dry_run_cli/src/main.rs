@@ -117,6 +117,24 @@ enum SnapshotAction {
         #[arg(long)]
         history_db: Option<PathBuf>,
     },
+    /// Capture activity counters from a replica.
+    ///
+    /// Connects to `--from <url>` (a replica) and writes a single
+    /// activity_stats row tagged with `--label`. Use `dryrun snapshot take`
+    /// against the primary instead to capture schema and planner stats.
+    Activity {
+        /// Replica connection URL (must report pg_is_in_recovery() = true)
+        #[arg(long)]
+        from: String,
+        /// Label identifying this node in the history db (e.g. `replica1`)
+        #[arg(long)]
+        label: String,
+        /// Allow capture even if no schema snapshot exists for the project yet.
+        #[arg(long)]
+        allow_orphan: bool,
+        #[arg(long)]
+        history_db: Option<PathBuf>,
+    },
     List {
         #[arg(long, env = "DATABASE_URL")]
         db: Option<String>,
@@ -516,6 +534,15 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
         SnapshotAction::Take { db, history_db } => {
             let db_url = require_db_url(db.as_deref())?;
             let ctx = DryRun::connect(db_url).await?;
+
+            if ctx.is_standby().await? {
+                anyhow::bail!(
+                    "`dryrun snapshot take` must run against the primary; \
+                     use `dryrun snapshot activity --from <url> --label <name>` \
+                     to capture activity from a replica"
+                );
+            }
+
             let store = open_history_store(history_db.as_deref())?;
             let snapshot = ctx.introspect_schema().await?;
 
@@ -526,7 +553,8 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
             let resolved = config.resolve_profile(Some(db_url), None, profile, &cwd)?;
             let key = complete_key(&resolved, &snapshot.database);
 
-            match store.put(&key, &snapshot).await? {
+            let schema_outcome = store.put(&key, &snapshot).await?;
+            match schema_outcome {
                 PutOutcome::Inserted => {
                     println!("Snapshot saved: {}", snapshot.content_hash);
                     println!(
@@ -535,19 +563,116 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
                         snapshot.views.len(),
                         snapshot.functions.len()
                     );
-                    println!(
-                        "  project={} database={}",
-                        key.project_id.0, key.database_id.0
-                    );
                 }
                 PutOutcome::Deduped => {
                     println!("Schema unchanged (hash: {})", snapshot.content_hash);
+                }
+            }
+
+            let planner = ctx.introspect_planner_stats(&snapshot.content_hash).await?;
+            let planner_outcome = store.put_planner_stats(&key, &planner).await?;
+            match planner_outcome {
+                PutOutcome::Inserted => {
                     println!(
-                        "  project={} database={}",
-                        key.project_id.0, key.database_id.0
+                        "Planner stats saved: {} ({} tables, {} columns, {} indexes)",
+                        planner.content_hash,
+                        planner.tables.len(),
+                        planner.columns.len(),
+                        planner.indexes.len(),
+                    );
+                }
+                PutOutcome::Deduped => {
+                    println!("Planner stats unchanged (hash: {})", planner.content_hash);
+                }
+            }
+
+            let activity = ctx
+                .introspect_activity_stats(&snapshot.content_hash, "primary")
+                .await?;
+            let activity_outcome = store.put_activity_stats(&key, &activity).await?;
+            match activity_outcome {
+                PutOutcome::Inserted => {
+                    println!(
+                        "Activity stats saved: {} (label=primary, {} tables, {} indexes)",
+                        activity.content_hash,
+                        activity.tables.len(),
+                        activity.indexes.len(),
+                    );
+                }
+                PutOutcome::Deduped => {
+                    println!("Activity stats unchanged (hash: {})", activity.content_hash);
+                }
+            }
+
+            println!(
+                "  project={} database={}",
+                key.project_id.0, key.database_id.0
+            );
+            Ok(())
+        }
+        SnapshotAction::Activity {
+            from,
+            label,
+            allow_orphan,
+            history_db,
+        } => {
+            let ctx = DryRun::connect(from).await?;
+            if !ctx.is_standby().await? {
+                anyhow::bail!(
+                    "`dryrun snapshot activity` must run against a standby \
+                     (--from must report pg_is_in_recovery() = true); \
+                     use `dryrun snapshot take` against the primary instead"
+                );
+            }
+
+            let store = open_history_store(history_db.as_deref())?;
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let config = ProjectConfig::discover(&cwd)
+                .map(|(_, c)| Ok(c))
+                .unwrap_or_else(|| ProjectConfig::parse(""))?;
+            let resolved = config.resolve_profile(Some(from), None, profile, &cwd)?;
+            let database = ctx.current_database().await?;
+            let key = complete_key(&resolved, &database);
+
+            let schema_ref = match store.latest_schema_hash(&key).await? {
+                Some(h) => h,
+                None if *allow_orphan => String::new(),
+                None => anyhow::bail!(
+                    "no schema snapshot found for project={} database={}; \
+                     run `dryrun snapshot take` against the primary first, \
+                     or pass --allow-orphan to capture activity anyway",
+                    key.project_id.0,
+                    key.database_id.0,
+                ),
+            };
+
+            let activity = ctx.introspect_activity_stats(&schema_ref, label).await?;
+            match store.put_activity_stats(&key, &activity).await? {
+                PutOutcome::Inserted => {
+                    println!(
+                        "Activity stats saved: {} (label={}, {} tables, {} indexes)",
+                        activity.content_hash,
+                        label,
+                        activity.tables.len(),
+                        activity.indexes.len(),
+                    );
+                }
+                PutOutcome::Deduped => {
+                    println!(
+                        "Activity stats unchanged (hash: {}, label={})",
+                        activity.content_hash, label
                     );
                 }
             }
+            if schema_ref.is_empty() {
+                println!("  (orphan capture: no matching schema snapshot)");
+            } else {
+                println!("  schema_ref={schema_ref}");
+            }
+            println!(
+                "  project={} database={}",
+                key.project_id.0, key.database_id.0
+            );
             Ok(())
         }
         SnapshotAction::List { db, history_db } => {
