@@ -557,12 +557,17 @@ pub struct BloatedIndexEntry {
     pub definition: String,
 }
 
-pub fn detect_bloated_indexes(tables: &[Table], threshold: f64) -> Vec<BloatedIndexEntry> {
+pub fn detect_bloated_indexes(
+    annotated: &AnnotatedSchema<'_>,
+    threshold: f64,
+) -> Vec<BloatedIndexEntry> {
     let mut entries = Vec::new();
 
-    for table in tables {
+    for table in &annotated.schema.tables {
         for idx in &table.indexes {
-            if let Some(est) = super::bloat::estimate_index_bloat(idx, table)
+            let qn = QualifiedName::new(&table.schema, &idx.name);
+            let sizing = annotated.index_sizing(&qn);
+            if let Some(est) = super::bloat::estimate_index_bloat(idx, sizing, table)
                 && est.bloat_ratio > threshold
             {
                 entries.push(BloatedIndexEntry {
@@ -1387,6 +1392,582 @@ mod tests {
         let snap = snap_with_nodes(vec![]);
         assert!(snap.merged(&NodeSelector::All).is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // Layer A: AnnotatedSchema accessors — planner reads + activity fall-through
+    // -----------------------------------------------------------------------
+
+    fn planner_for_orders(reltuples: f64, table_size: i64) -> PlannerStatsSnapshot {
+        PlannerStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "accounts".into(),
+            timestamp: Utc::now(),
+            content_hash: "ph".into(),
+            schema_ref_hash: "schema-h".into(),
+            tables: vec![TableSizingEntry {
+                table: QualifiedName::new("public", "orders"),
+                sizing: TableSizing {
+                    reltuples,
+                    relpages: 7,
+                    table_size,
+                    total_size: None,
+                    index_size: None,
+                },
+            }],
+            columns: vec![ColumnStatsEntry {
+                table: QualifiedName::new("public", "orders"),
+                column: "user_id".into(),
+                stats: ColumnStats {
+                    null_frac: Some(0.1),
+                    n_distinct: Some(-0.5),
+                    most_common_vals: None,
+                    most_common_freqs: None,
+                    histogram_bounds: None,
+                    correlation: Some(0.5),
+                },
+            }],
+            indexes: vec![IndexSizingEntry {
+                index: QualifiedName::new("public", "orders_pkey"),
+                sizing: IndexSizing {
+                    size: 16384,
+                    relpages: 2,
+                    reltuples,
+                },
+            }],
+        }
+    }
+
+    fn snap_with_planner(p: PlannerStatsSnapshot) -> AnnotatedSnapshot {
+        AnnotatedSnapshot {
+            schema: empty_schema_snap(),
+            planner: Some(p),
+            activity_by_node: BTreeMap::new(),
+        }
+    }
+
+    fn snap_full(
+        planner: Option<PlannerStatsSnapshot>,
+        activity: Vec<ActivityStatsSnapshot>,
+    ) -> AnnotatedSnapshot {
+        let mut activity_by_node = BTreeMap::new();
+        for a in activity {
+            activity_by_node.insert(a.node.label.clone(), a);
+        }
+        AnnotatedSnapshot {
+            schema: empty_schema_snap(),
+            planner,
+            activity_by_node,
+        }
+    }
+
+    #[test]
+    fn reltuples_reads_from_planner() {
+        let snap = snap_with_planner(planner_for_orders(1234.0, 1_000_000));
+        let view = snap.view(None);
+        assert_eq!(
+            view.reltuples(&QualifiedName::new("public", "orders")),
+            Some(1234.0)
+        );
+    }
+
+    #[test]
+    fn reltuples_returns_none_when_planner_missing() {
+        let snap = snap_full(None, vec![]);
+        let view = snap.view(None);
+        assert!(
+            view.reltuples(&QualifiedName::new("public", "orders"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reltuples_returns_none_for_unknown_table() {
+        let snap = snap_with_planner(planner_for_orders(1234.0, 1_000_000));
+        let view = snap.view(None);
+        assert!(
+            view.reltuples(&QualifiedName::new("public", "ghost"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn table_size_relpages_index_sizing_read_from_planner() {
+        let snap = snap_with_planner(planner_for_orders(50.0, 99));
+        let view = snap.view(None);
+        let t = QualifiedName::new("public", "orders");
+        let ix = QualifiedName::new("public", "orders_pkey");
+        assert_eq!(view.table_size(&t), Some(99));
+        assert_eq!(view.relpages(&t), Some(7));
+        assert_eq!(view.index_sizing(&ix).map(|s| s.size), Some(16384));
+    }
+
+    #[test]
+    fn column_stats_reads_from_planner() {
+        let snap = snap_with_planner(planner_for_orders(1.0, 1));
+        let view = snap.view(None);
+        let stats = view
+            .column_stats(&QualifiedName::new("public", "orders"), "user_id")
+            .expect("user_id stats");
+        assert_eq!(stats.null_frac, Some(0.1));
+        assert!(
+            view.column_stats(&QualifiedName::new("public", "orders"), "ghost")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn idx_scan_sum_falls_through_merged_to_single_to_zero() {
+        let ix = QualifiedName::new("public", "orders_pkey");
+
+        // 1. multi-node activity → uses merged
+        let multi = snap_full(
+            None,
+            vec![
+                activity_for("primary", 10, 0, 0, None, None, None),
+                activity_for("replica1", 5, 0, 0, None, None, None),
+            ],
+        );
+        assert_eq!(multi.view(None).idx_scan_sum(&ix), 15);
+
+        // 2. single-node activity, merged is None → reads single
+        let single = snap_full(
+            None,
+            vec![activity_for("primary", 7, 0, 0, None, None, None)],
+        );
+        assert_eq!(single.view(None).idx_scan_sum(&ix), 7);
+
+        // 3. no activity at all → 0
+        let none = snap_full(None, vec![]);
+        assert_eq!(none.view(None).idx_scan_sum(&ix), 0);
+    }
+
+    #[test]
+    fn seq_scan_sum_falls_through_merged_to_single_to_zero() {
+        let t = QualifiedName::new("public", "orders");
+        let multi = snap_full(
+            None,
+            vec![
+                activity_for("primary", 0, 3, 0, None, None, None),
+                activity_for("replica1", 0, 4, 0, None, None, None),
+            ],
+        );
+        let single = snap_full(
+            None,
+            vec![activity_for("primary", 0, 9, 0, None, None, None)],
+        );
+        let none = snap_full(None, vec![]);
+        assert_eq!(multi.view(None).seq_scan_sum(&t), 7);
+        assert_eq!(single.view(None).seq_scan_sum(&t), 9);
+        assert_eq!(none.view(None).seq_scan_sum(&t), 0);
+    }
+
+    #[test]
+    fn n_dead_tup_sum_falls_through_merged_to_single_to_zero() {
+        let t = QualifiedName::new("public", "orders");
+        let multi = snap_full(
+            None,
+            vec![
+                activity_for("primary", 0, 0, 100, None, None, None),
+                activity_for("replica1", 0, 0, 50, None, None, None),
+            ],
+        );
+        let single = snap_full(
+            None,
+            vec![activity_for("primary", 0, 0, 42, None, None, None)],
+        );
+        let none = snap_full(None, vec![]);
+        assert_eq!(multi.view(None).n_dead_tup_sum(&t), 150);
+        assert_eq!(single.view(None).n_dead_tup_sum(&t), 42);
+        assert_eq!(none.view(None).n_dead_tup_sum(&t), 0);
+    }
+
+    #[test]
+    fn last_vacuum_max_falls_through_merged_to_single_to_none() {
+        let t = QualifiedName::new("public", "orders");
+        let early = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let late = "2026-03-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let multi = snap_full(
+            None,
+            vec![
+                activity_for("primary", 0, 0, 0, Some(early), None, None),
+                activity_for("replica1", 0, 0, 0, None, Some(late), None),
+            ],
+        );
+        let single = snap_full(
+            None,
+            vec![activity_for("primary", 0, 0, 0, Some(early), None, None)],
+        );
+        let none = snap_full(None, vec![]);
+        assert_eq!(multi.view(None).last_vacuum_max(&t), Some(late));
+        assert_eq!(single.view(None).last_vacuum_max(&t), Some(early));
+        assert!(none.view(None).last_vacuum_max(&t).is_none());
+    }
+
+    #[test]
+    fn idx_scan_per_node_works_for_single_and_multi() {
+        let ix = QualifiedName::new("public", "orders_pkey");
+        let single = snap_full(
+            None,
+            vec![activity_for("primary", 7, 0, 0, None, None, None)],
+        );
+        assert_eq!(
+            single.view(None).idx_scan_per_node(&ix),
+            vec![("primary".into(), 7)]
+        );
+
+        let multi = snap_full(
+            None,
+            vec![
+                activity_for("primary", 1, 0, 0, None, None, None),
+                activity_for("replica1", 2, 0, 0, None, None, None),
+            ],
+        );
+        assert_eq!(
+            multi.view(None).idx_scan_per_node(&ix),
+            vec![("primary".into(), 1), ("replica1".into(), 2)],
+        );
+
+        let none = snap_full(None, vec![]);
+        assert!(none.view(None).idx_scan_per_node(&ix).is_empty());
+    }
+
+    #[test]
+    fn single_node_and_multi_node_one_node_parity_for_cluster_sums() {
+        // The "merged is None when only one node" trap: single-node activity vs.
+        // a one-entry activity_by_node map must produce the same totals.
+        let ix = QualifiedName::new("public", "orders_pkey");
+        let t = QualifiedName::new("public", "orders");
+        // build via view default (single-node mode, merged = None)
+        let one = snap_full(
+            None,
+            vec![activity_for("primary", 11, 5, 3, None, None, None)],
+        );
+        let view = one.view(None);
+        assert_eq!(view.idx_scan_sum(&ix), 11);
+        assert_eq!(view.seq_scan_sum(&t), 5);
+        assert_eq!(view.n_dead_tup_sum(&t), 3);
+    }
+
+    #[test]
+    fn no_panic_on_fully_empty_annotated() {
+        let snap = AnnotatedSnapshot {
+            schema: empty_schema_snap(),
+            planner: None,
+            activity_by_node: BTreeMap::new(),
+        };
+        let view = snap.view(None);
+        let t = QualifiedName::new("public", "orders");
+        let ix = QualifiedName::new("public", "orders_pkey");
+        assert!(view.reltuples(&t).is_none());
+        assert!(view.table_size(&t).is_none());
+        assert!(view.relpages(&t).is_none());
+        assert!(view.column_stats(&t, "x").is_none());
+        assert!(view.index_sizing(&ix).is_none());
+        assert_eq!(view.seq_scan_sum(&t), 0);
+        assert_eq!(view.idx_scan_sum(&ix), 0);
+        assert!(view.idx_scan_per_node(&ix).is_empty());
+        assert_eq!(view.n_dead_tup_sum(&t), 0);
+        assert!(view.last_vacuum_max(&t).is_none());
+        assert!(view.last_analyze_max(&t).is_none());
+        assert_eq!(view.vacuum_count_sum(&t), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Layer A: AnnotatedSnapshot helpers — parity with legacy free functions
+    // -----------------------------------------------------------------------
+
+    fn schema_with_index_def(idx_name: &str, is_primary: bool, is_unique: bool) -> SchemaSnapshot {
+        SchemaSnapshot {
+            tables: vec![Table {
+                oid: 1,
+                schema: "public".into(),
+                name: "orders".into(),
+                columns: vec![],
+                constraints: vec![],
+                indexes: vec![Index {
+                    name: idx_name.into(),
+                    columns: vec!["id".into()],
+                    include_columns: vec![],
+                    index_type: "btree".into(),
+                    is_unique,
+                    is_primary,
+                    predicate: None,
+                    definition: format!("CREATE INDEX {idx_name} ON public.orders (id)"),
+                    is_valid: true,
+                    backs_constraint: false,
+                    stats: None,
+                }],
+                comment: None,
+                stats: None,
+                partition_info: None,
+                policies: vec![],
+                triggers: vec![],
+                reloptions: vec![],
+                rls_enabled: false,
+            }],
+            ..empty_schema_snap()
+        }
+    }
+
+    #[test]
+    fn unused_indexes_matches_legacy_for_equivalent_fixture() {
+        // Legacy fixture: NodeStats with two replicas, both reporting idx_scan=0.
+        let legacy_node_stats = vec![
+            NodeStats {
+                source: "primary".into(),
+                timestamp: Utc::now(),
+                is_standby: false,
+                table_stats: vec![],
+                index_stats: vec![NodeIndexStats {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    index_name: "idx_dead".into(),
+                    stats: IndexStats {
+                        idx_scan: 0,
+                        idx_tup_read: 0,
+                        idx_tup_fetch: 0,
+                        size: 8192,
+                        relpages: 1,
+                        reltuples: 0.0,
+                    },
+                }],
+                column_stats: vec![],
+            },
+            NodeStats {
+                source: "replica1".into(),
+                timestamp: Utc::now(),
+                is_standby: true,
+                table_stats: vec![],
+                index_stats: vec![NodeIndexStats {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    index_name: "idx_dead".into(),
+                    stats: IndexStats {
+                        idx_scan: 0,
+                        idx_tup_read: 0,
+                        idx_tup_fetch: 0,
+                        size: 16384,
+                        relpages: 2,
+                        reltuples: 0.0,
+                    },
+                }],
+                column_stats: vec![],
+            },
+        ];
+        let schema = schema_with_index_def("idx_dead", false, false);
+        let legacy = detect_unused_indexes(&legacy_node_stats, &schema.tables);
+
+        // New fixture: same logical content via planner+activity.
+        let new_planner = PlannerStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "accounts".into(),
+            timestamp: Utc::now(),
+            content_hash: "ph".into(),
+            schema_ref_hash: "schema-h".into(),
+            tables: vec![],
+            columns: vec![],
+            indexes: vec![IndexSizingEntry {
+                index: QualifiedName::new("public", "idx_dead"),
+                sizing: IndexSizing {
+                    size: 16384,
+                    relpages: 2,
+                    reltuples: 0.0,
+                },
+            }],
+        };
+        let new_snap = AnnotatedSnapshot {
+            schema,
+            planner: Some(new_planner),
+            activity_by_node: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "primary".into(),
+                    ActivityStatsSnapshot {
+                        pg_version: "PostgreSQL 17.0".into(),
+                        database: "accounts".into(),
+                        timestamp: Utc::now(),
+                        content_hash: "a1".into(),
+                        schema_ref_hash: "schema-h".into(),
+                        node: NodeIdentity {
+                            label: "primary".into(),
+                            host: "p".into(),
+                            is_standby: false,
+                            replication_lag_bytes: None,
+                            stats_reset: None,
+                        },
+                        tables: vec![],
+                        indexes: vec![IndexActivityEntry {
+                            index: QualifiedName::new("public", "idx_dead"),
+                            activity: IndexActivity {
+                                idx_scan: 0,
+                                idx_tup_read: 0,
+                                idx_tup_fetch: 0,
+                            },
+                        }],
+                    },
+                );
+                m.insert(
+                    "replica1".into(),
+                    ActivityStatsSnapshot {
+                        pg_version: "PostgreSQL 17.0".into(),
+                        database: "accounts".into(),
+                        timestamp: Utc::now(),
+                        content_hash: "a2".into(),
+                        schema_ref_hash: "schema-h".into(),
+                        node: NodeIdentity {
+                            label: "replica1".into(),
+                            host: "r1".into(),
+                            is_standby: true,
+                            replication_lag_bytes: None,
+                            stats_reset: None,
+                        },
+                        tables: vec![],
+                        indexes: vec![IndexActivityEntry {
+                            index: QualifiedName::new("public", "idx_dead"),
+                            activity: IndexActivity {
+                                idx_scan: 0,
+                                idx_tup_read: 0,
+                                idx_tup_fetch: 0,
+                            },
+                        }],
+                    },
+                );
+                m
+            },
+        };
+        let new_result = new_snap.unused_indexes(&NodeSelector::All);
+
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(new_result.len(), 1);
+        assert_eq!(new_result[0].schema, legacy[0].schema);
+        assert_eq!(new_result[0].table, legacy[0].table);
+        assert_eq!(new_result[0].index_name, legacy[0].index_name);
+        assert_eq!(new_result[0].total_idx_scan, legacy[0].total_idx_scan);
+        assert_eq!(new_result[0].total_size_bytes, legacy[0].total_size_bytes);
+        assert_eq!(new_result[0].is_unique, legacy[0].is_unique);
+        assert_eq!(new_result[0].definition, legacy[0].definition);
+    }
+
+    #[test]
+    fn unused_indexes_skips_primary_keys() {
+        let schema = schema_with_index_def("orders_pkey", true, true);
+        let snap = AnnotatedSnapshot {
+            schema,
+            planner: None,
+            activity_by_node: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "primary".into(),
+                    ActivityStatsSnapshot {
+                        pg_version: "PostgreSQL 17.0".into(),
+                        database: "accounts".into(),
+                        timestamp: Utc::now(),
+                        content_hash: "a".into(),
+                        schema_ref_hash: "s".into(),
+                        node: NodeIdentity {
+                            label: "primary".into(),
+                            host: "p".into(),
+                            is_standby: false,
+                            replication_lag_bytes: None,
+                            stats_reset: None,
+                        },
+                        tables: vec![],
+                        indexes: vec![IndexActivityEntry {
+                            index: QualifiedName::new("public", "orders_pkey"),
+                            activity: IndexActivity {
+                                idx_scan: 0,
+                                idx_tup_read: 0,
+                                idx_tup_fetch: 0,
+                            },
+                        }],
+                    },
+                );
+                m
+            },
+        };
+        assert!(snap.unused_indexes(&NodeSelector::All).is_empty());
+    }
+
+    #[test]
+    fn unused_indexes_empty_when_no_activity() {
+        let schema = schema_with_index_def("idx_dead", false, false);
+        let snap = AnnotatedSnapshot {
+            schema,
+            planner: None,
+            activity_by_node: BTreeMap::new(),
+        };
+        assert!(snap.unused_indexes(&NodeSelector::All).is_empty());
+    }
+
+    #[test]
+    fn seq_scan_imbalance_matches_legacy_for_equivalent_fixture() {
+        // 10x imbalance between primary and replica1.
+        let legacy_node_stats = vec![
+            NodeStats {
+                source: "primary".into(),
+                timestamp: Utc::now(),
+                is_standby: false,
+                table_stats: vec![NodeTableStats {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    stats: TableStats {
+                        reltuples: 0.0,
+                        relpages: 0,
+                        dead_tuples: 0,
+                        last_vacuum: None,
+                        last_autovacuum: None,
+                        last_analyze: None,
+                        last_autoanalyze: None,
+                        seq_scan: 1000,
+                        idx_scan: 0,
+                        table_size: 0,
+                    },
+                }],
+                index_stats: vec![],
+                column_stats: vec![],
+            },
+            NodeStats {
+                source: "replica1".into(),
+                timestamp: Utc::now(),
+                is_standby: true,
+                table_stats: vec![NodeTableStats {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    stats: TableStats {
+                        reltuples: 0.0,
+                        relpages: 0,
+                        dead_tuples: 0,
+                        last_vacuum: None,
+                        last_autovacuum: None,
+                        last_analyze: None,
+                        last_autoanalyze: None,
+                        seq_scan: 100,
+                        idx_scan: 0,
+                        table_size: 0,
+                    },
+                }],
+                index_stats: vec![],
+                column_stats: vec![],
+            },
+        ];
+        let legacy = detect_seq_scan_imbalance(&legacy_node_stats, "public", "orders");
+
+        let snap = snap_full(
+            None,
+            vec![
+                activity_for("primary", 0, 1000, 0, None, None, None),
+                activity_for("replica1", 0, 100, 0, None, None, None),
+            ],
+        );
+        let new_result = snap.seq_scan_imbalance(&QualifiedName::new("public", "orders"));
+
+        assert!(legacy.is_some());
+        assert!(new_result.is_some());
+        let legacy = legacy.unwrap();
+        let new_result = new_result.unwrap();
+        assert_eq!(legacy.hot_node, new_result.hot_node);
+        assert_eq!(legacy.multiplier, new_result.multiplier);
+    }
 }
 
 // use aggregated multi-node stats over table-level stats
@@ -1437,7 +2018,7 @@ pub struct NodeColumnStats {
 //
 // Snapshot split: schema / planner_stats / activity_stats
 //
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct QualifiedName {
     pub schema: String,
     pub name: String,
@@ -1674,6 +2255,202 @@ impl<'a> MergedActivity<'a> {
             })
             .sum()
     }
+
+    pub fn last_analyze_max(&self, t: &QualifiedName) -> Option<DateTime<Utc>> {
+        self.nodes
+            .iter()
+            .filter_map(|n| {
+                n.tables.iter().find(|e| &e.table == t).and_then(|e| {
+                    match (e.activity.last_analyze, e.activity.last_autoanalyze) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (None, None) => None,
+                    }
+                })
+            })
+            .max()
+    }
+
+    pub fn vacuum_count_sum(&self, t: &QualifiedName) -> i64 {
+        self.nodes
+            .iter()
+            .filter_map(|n| {
+                n.tables
+                    .iter()
+                    .find(|e| &e.table == t)
+                    .map(|e| e.activity.vacuum_count + e.activity.autovacuum_count)
+            })
+            .sum()
+    }
+}
+
+// Accessors that read from planner (sizing / column histograms) and from
+// activity (counters), with a uniform fall-through: merged across nodes →
+// single-node activity → empty. Consumers don't have to branch on
+// "do I have one node or many".
+impl<'a> AnnotatedSchema<'a> {
+    pub fn reltuples(&self, t: &QualifiedName) -> Option<f64> {
+        self.planner?
+            .tables
+            .iter()
+            .find(|e| &e.table == t)
+            .map(|e| e.sizing.reltuples)
+    }
+
+    pub fn table_size(&self, t: &QualifiedName) -> Option<i64> {
+        self.planner?
+            .tables
+            .iter()
+            .find(|e| &e.table == t)
+            .map(|e| e.sizing.table_size)
+    }
+
+    pub fn relpages(&self, t: &QualifiedName) -> Option<i64> {
+        self.planner?
+            .tables
+            .iter()
+            .find(|e| &e.table == t)
+            .map(|e| e.sizing.relpages)
+    }
+
+    pub fn column_stats(&self, t: &QualifiedName, col: &str) -> Option<&'a ColumnStats> {
+        self.planner?
+            .columns
+            .iter()
+            .find(|e| &e.table == t && e.column == col)
+            .map(|e| &e.stats)
+    }
+
+    pub fn index_sizing(&self, ix: &QualifiedName) -> Option<&'a IndexSizing> {
+        self.planner?
+            .indexes
+            .iter()
+            .find(|e| &e.index == ix)
+            .map(|e| &e.sizing)
+    }
+
+    pub fn idx_scan_sum(&self, ix: &QualifiedName) -> i64 {
+        if let Some(m) = &self.merged {
+            return m.idx_scan_sum(ix);
+        }
+        self.activity
+            .and_then(|a| a.indexes.iter().find(|e| &e.index == ix))
+            .map(|e| e.activity.idx_scan)
+            .unwrap_or(0)
+    }
+
+    pub fn idx_scan_per_node(&self, ix: &QualifiedName) -> Vec<(String, i64)> {
+        if let Some(m) = &self.merged {
+            return m.idx_scan_per_node(ix);
+        }
+        match self.activity {
+            Some(a) => {
+                let scan = a
+                    .indexes
+                    .iter()
+                    .find(|e| &e.index == ix)
+                    .map(|e| e.activity.idx_scan)
+                    .unwrap_or(0);
+                vec![(a.node.label.clone(), scan)]
+            }
+            None => Vec::new(),
+        }
+    }
+
+    // Per-node breakdown of seq_scan counters for a single table — used by
+    // tools that want to surface "this replica is doing the unindexed work,
+    // the others aren't" patterns. Ordering follows the BTreeMap key order
+    // when more than one node is present, so output is stable across runs.
+    pub fn seq_scan_per_node(&self, t: &QualifiedName) -> Vec<(String, i64)> {
+        if let Some(m) = &self.merged {
+            return m
+                .nodes
+                .iter()
+                .map(|n| {
+                    let scan = n
+                        .tables
+                        .iter()
+                        .find(|e| &e.table == t)
+                        .map(|e| e.activity.seq_scan)
+                        .unwrap_or(0);
+                    (n.node.label.clone(), scan)
+                })
+                .collect();
+        }
+        match self.activity {
+            Some(a) => {
+                let scan = a
+                    .tables
+                    .iter()
+                    .find(|e| &e.table == t)
+                    .map(|e| e.activity.seq_scan)
+                    .unwrap_or(0);
+                vec![(a.node.label.clone(), scan)]
+            }
+            None => Vec::new(),
+        }
+    }
+
+    pub fn seq_scan_sum(&self, t: &QualifiedName) -> i64 {
+        if let Some(m) = &self.merged {
+            return m.seq_scan_sum(t);
+        }
+        self.activity
+            .and_then(|a| a.tables.iter().find(|e| &e.table == t))
+            .map(|e| e.activity.seq_scan)
+            .unwrap_or(0)
+    }
+
+    pub fn n_dead_tup_sum(&self, t: &QualifiedName) -> i64 {
+        if let Some(m) = &self.merged {
+            return m.n_dead_tup_sum(t);
+        }
+        self.activity
+            .and_then(|a| a.tables.iter().find(|e| &e.table == t))
+            .map(|e| e.activity.n_dead_tup)
+            .unwrap_or(0)
+    }
+
+    pub fn last_vacuum_max(&self, t: &QualifiedName) -> Option<DateTime<Utc>> {
+        if let Some(m) = &self.merged {
+            return m.last_vacuum_max(t);
+        }
+        let e = self
+            .activity
+            .and_then(|a| a.tables.iter().find(|e| &e.table == t))?;
+        match (e.activity.last_vacuum, e.activity.last_autovacuum) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
+    pub fn last_analyze_max(&self, t: &QualifiedName) -> Option<DateTime<Utc>> {
+        if let Some(m) = &self.merged {
+            return m.last_analyze_max(t);
+        }
+        let e = self
+            .activity
+            .and_then(|a| a.tables.iter().find(|e| &e.table == t))?;
+        match (e.activity.last_analyze, e.activity.last_autoanalyze) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
+    pub fn vacuum_count_sum(&self, t: &QualifiedName) -> i64 {
+        if let Some(m) = &self.merged {
+            return m.vacuum_count_sum(t);
+        }
+        self.activity
+            .and_then(|a| a.tables.iter().find(|e| &e.table == t))
+            .map(|e| e.activity.vacuum_count + e.activity.autovacuum_count)
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1728,5 +2505,165 @@ impl AnnotatedSnapshot {
 
     pub fn node_labels(&self) -> impl Iterator<Item = &str> {
         self.activity_by_node.keys().map(|s| s.as_str())
+    }
+
+    // Indexes with zero scans across the requested nodes. Mirrors
+    // `detect_unused_indexes` (legacy NodeStats path), but reads from the
+    // activity_by_node map. Skips primary keys.
+    pub fn unused_indexes(&self, selector: &NodeSelector) -> Vec<UnusedIndexEntry> {
+        use std::collections::BTreeMap;
+
+        let nodes: Vec<&ActivityStatsSnapshot> = match selector {
+            NodeSelector::All => self.activity_by_node.values().collect(),
+            NodeSelector::Some(labels) => labels
+                .iter()
+                .filter_map(|l| self.activity_by_node.get(l))
+                .collect(),
+        };
+
+        // Build (qualified_index, sum, max_size) by walking each node's index activity,
+        // joined to the planner's index sizing for byte counts.
+        #[derive(Default)]
+        struct Agg {
+            total_idx_scan: i64,
+            max_size: i64,
+        }
+        let mut agg: BTreeMap<QualifiedName, Agg> = BTreeMap::new();
+        for n in &nodes {
+            for ie in &n.indexes {
+                let entry = agg.entry(ie.index.clone()).or_default();
+                entry.total_idx_scan += ie.activity.idx_scan;
+            }
+        }
+        if let Some(p) = &self.planner {
+            for ie in &p.indexes {
+                if let Some(entry) = agg.get_mut(&ie.index)
+                    && ie.sizing.size > entry.max_size
+                {
+                    entry.max_size = ie.sizing.size;
+                }
+            }
+        }
+
+        let idx_lookup: BTreeMap<(&str, &str), &Index> = self
+            .schema
+            .tables
+            .iter()
+            .flat_map(|t| {
+                t.indexes
+                    .iter()
+                    .map(move |idx| (t.schema.as_str(), t.name.as_str(), idx))
+            })
+            .map(|(s, _t, idx)| ((s, idx.name.as_str()), idx))
+            .collect();
+
+        let mut entries = Vec::new();
+        for (qn, a) in &agg {
+            if a.total_idx_scan != 0 {
+                continue;
+            }
+            let idx_info = idx_lookup.get(&(qn.schema.as_str(), qn.name.as_str()));
+            if idx_info.is_some_and(|idx| idx.is_primary) {
+                continue;
+            }
+
+            // table name comes from the schema's index → owning table mapping
+            let owning_table = self
+                .schema
+                .tables
+                .iter()
+                .find(|t| t.schema == qn.schema && t.indexes.iter().any(|idx| idx.name == qn.name))
+                .map(|t| t.name.clone())
+                .unwrap_or_default();
+
+            entries.push(UnusedIndexEntry {
+                schema: qn.schema.clone(),
+                table: owning_table,
+                index_name: qn.name.clone(),
+                total_idx_scan: 0,
+                total_size_bytes: a.max_size,
+                is_unique: idx_info.is_some_and(|idx| idx.is_unique),
+                definition: idx_info
+                    .map(|idx| idx.definition.clone())
+                    .unwrap_or_default(),
+            });
+        }
+        entries.sort_by_key(|b| std::cmp::Reverse(b.total_size_bytes));
+        entries
+    }
+
+    // Tables whose last_analyze (or last_autoanalyze) is older than `days`,
+    // or which have never been analyzed. One entry per (node, table).
+    pub fn stale_stats(&self, selector: &NodeSelector, days: i64) -> Vec<StaleStatsEntry> {
+        let nodes: Vec<&ActivityStatsSnapshot> = match selector {
+            NodeSelector::All => self.activity_by_node.values().collect(),
+            NodeSelector::Some(labels) => labels
+                .iter()
+                .filter_map(|l| self.activity_by_node.get(l))
+                .collect(),
+        };
+        let now = chrono::Utc::now();
+        let threshold = chrono::TimeDelta::days(days);
+        let mut entries = Vec::new();
+        for n in nodes {
+            for te in &n.tables {
+                let last = te.activity.last_analyze.max(te.activity.last_autoanalyze);
+                match last {
+                    Some(when) if now - when > threshold => {
+                        entries.push(StaleStatsEntry {
+                            node: n.node.label.clone(),
+                            schema: te.table.schema.clone(),
+                            table: te.table.name.clone(),
+                            last_analyzed_days_ago: Some((now - when).num_days()),
+                        });
+                    }
+                    None => {
+                        entries.push(StaleStatsEntry {
+                            node: n.node.label.clone(),
+                            schema: te.table.schema.clone(),
+                            table: te.table.name.clone(),
+                            last_analyzed_days_ago: None,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        entries
+    }
+
+    // 5x+ seq_scan imbalance between hottest and coldest non-zero node.
+    pub fn seq_scan_imbalance(&self, t: &QualifiedName) -> Option<NodeImbalanceInfo> {
+        let scans: Vec<(&str, i64)> = self
+            .activity_by_node
+            .values()
+            .filter_map(|n| {
+                n.tables
+                    .iter()
+                    .find(|e| &e.table == t)
+                    .map(|e| (n.node.label.as_str(), e.activity.seq_scan))
+            })
+            .collect();
+        if scans.len() < 2 {
+            return None;
+        }
+        let nonzero: Vec<(&str, i64)> = scans.into_iter().filter(|(_, v)| *v > 0).collect();
+        if nonzero.len() < 2 {
+            return None;
+        }
+        let min = nonzero.iter().map(|(_, v)| *v).min().unwrap_or(1);
+        let (hot_node, max) = nonzero
+            .iter()
+            .max_by_key(|(_, v)| *v)
+            .copied()
+            .unwrap_or(("", 1));
+        if min > 0 && max / min >= 5 {
+            Some(NodeImbalanceInfo {
+                hot_node: hot_node.to_string(),
+                multiplier: max / min,
+            })
+        } else {
+            None
+        }
     }
 }

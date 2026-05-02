@@ -1,20 +1,29 @@
 use super::parse::ParsedQuery;
 use super::validate::{ValidationWarning, WarningSeverity};
-use crate::schema::{SchemaSnapshot, effective_table_stats};
+use crate::schema::{AnnotatedSchema, QualifiedName, SchemaSnapshot};
 
 const LARGE_TABLE_THRESHOLD: f64 = 10_000.0;
 
+// Detect anti-patterns in a parsed SQL statement.
+//
+// Most rules are pure DDL — they look at parsed query structure plus the
+// schema to spot SELECT *, missing WHERE clauses, partition-key updates,
+// etc. The one stats-aware rule (`detect_unbounded_query`) needs
+// reltuples to know whether a missing WHERE on a small lookup table is
+// fine vs. a missing WHERE on a 100M-row event table is a footgun. So
+// the entry point takes the annotated view; sub-rules that only need
+// DDL borrow `annotated.schema` internally.
 pub fn detect_antipatterns(
     parsed: &ParsedQuery,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     warnings: &mut Vec<ValidationWarning>,
 ) {
     detect_select_star(parsed, warnings);
-    detect_unbounded_query(parsed, schema, warnings);
+    detect_unbounded_query(parsed, annotated, warnings);
     detect_cartesian_join(parsed, warnings);
     detect_dml_without_where(parsed, warnings);
-    detect_partition_key_antipatterns(parsed, schema, warnings);
-    detect_partition_key_update(parsed, schema, warnings);
+    detect_partition_key_antipatterns(parsed, annotated.schema, warnings);
+    detect_partition_key_update(parsed, annotated.schema, warnings);
 }
 
 fn detect_select_star(parsed: &ParsedQuery, warnings: &mut Vec<ValidationWarning>) {
@@ -30,7 +39,7 @@ fn detect_select_star(parsed: &ParsedQuery, warnings: &mut Vec<ValidationWarning
 
 fn detect_unbounded_query(
     parsed: &ParsedQuery,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     warnings: &mut Vec<ValidationWarning>,
 ) {
     if parsed.info.statement_type != "SELECT" {
@@ -42,12 +51,17 @@ fn detect_unbounded_query(
 
     for table_ref in &parsed.info.tables {
         let schema_name = table_ref.schema.as_deref().unwrap_or("public");
-        if let Some(table) = schema
+        // Only fire when reltuples > LARGE_TABLE_THRESHOLD. When there's
+        // no planner snapshot — fresh project, replica-only capture —
+        // we get None and silently skip, since we can't tell whether
+        // the table is small enough to safely scan or not.
+        if let Some(table) = annotated
+            .schema
             .tables
             .iter()
             .find(|t| t.name == table_ref.name && t.schema == schema_name)
         {
-            let reltuples = effective_table_stats(table, schema).map(|s| s.reltuples);
+            let reltuples = annotated.reltuples(&QualifiedName::new(schema_name, &table.name));
 
             if let Some(rows) = reltuples
                 && rows > LARGE_TABLE_THRESHOLD

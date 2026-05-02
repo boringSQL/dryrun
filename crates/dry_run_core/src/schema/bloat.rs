@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::types::{Index, Table};
+use super::types::{Index, IndexSizing, Table};
 
 const PAGE_SIZE: f64 = 8192.0;
 const BTREE_FILLFACTOR: f64 = 0.9;
@@ -15,11 +15,15 @@ pub struct BloatEstimate {
     pub avg_key_width: usize,
 }
 
-pub fn estimate_index_bloat(index: &Index, table: &Table) -> Option<BloatEstimate> {
-    let stats = index.stats.as_ref()?;
+pub fn estimate_index_bloat(
+    index: &Index,
+    sizing: Option<&IndexSizing>,
+    table: &Table,
+) -> Option<BloatEstimate> {
+    let s = sizing?;
     estimate_index_bloat_from_stats(
-        stats.reltuples,
-        stats.relpages,
+        s.reltuples,
+        s.relpages,
         &index.columns,
         table,
         &index.index_type,
@@ -114,7 +118,7 @@ fn lookup_type_width(type_name: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Column, IndexStats};
+    use crate::schema::Column;
 
     fn make_table_with_cols(cols: Vec<(&str, &str)>) -> Table {
         Table {
@@ -175,11 +179,9 @@ mod tests {
         assert_eq!(lookup_type_width("unknown_type"), DEFAULT_WIDTH);
     }
 
-    #[test]
-    fn bloat_from_index() {
-        let table = make_table_with_cols(vec![("id", "bigint")]);
-        let idx = Index {
-            name: "test_pkey".into(),
+    fn bare_index(name: &str) -> Index {
+        Index {
+            name: name.into(),
             columns: vec!["id".into()],
             include_columns: vec![],
             index_type: "btree".into(),
@@ -189,16 +191,27 @@ mod tests {
             backs_constraint: false,
             predicate: None,
             definition: String::new(),
-            stats: Some(IndexStats {
-                idx_scan: 1000,
-                idx_tup_read: 5000,
-                idx_tup_fetch: 4000,
-                size: 8192 * 500,
-                relpages: 500,
-                reltuples: 100_000.0,
-            }),
+            stats: None,
+        }
+    }
+
+    #[test]
+    fn bloat_estimated_when_index_sizing_present() {
+        let table = make_table_with_cols(vec![("id", "bigint")]);
+        let idx = bare_index("test_pkey");
+        let sizing = IndexSizing {
+            size: 8192 * 500,
+            relpages: 500,
+            reltuples: 100_000.0,
         };
-        let est = estimate_index_bloat(&idx, &table);
+        let est = estimate_index_bloat(&idx, Some(&sizing), &table);
         assert!(est.is_some());
+    }
+
+    #[test]
+    fn bloat_returns_none_without_sizing() {
+        let table = make_table_with_cols(vec![("id", "bigint")]);
+        let idx = bare_index("test_pkey");
+        assert!(estimate_index_bloat(&idx, None, &table).is_none());
     }
 }

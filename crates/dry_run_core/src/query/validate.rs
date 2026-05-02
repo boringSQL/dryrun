@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::antipatterns::detect_antipatterns;
 use super::parse::{ParsedQuery, ReferencedTable, parse_sql};
 use crate::error::Result;
-use crate::schema::SchemaSnapshot;
+use crate::schema::{AnnotatedSchema, SchemaSnapshot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationResult {
@@ -34,11 +34,17 @@ pub struct ResolvedStar {
     pub columns: Vec<String>,
 }
 
-pub fn validate_query(sql: &str, schema: &SchemaSnapshot) -> Result<ValidationResult> {
+// Top-level validation entry point — combines existence checks (DDL only)
+// with anti-pattern detection (mostly DDL, one stats-aware rule). Takes
+// the annotated view so anti-pattern rules can reach planner stats; the
+// existence-check sub-helpers borrow `annotated.schema` directly since
+// they need nothing from planner / activity.
+pub fn validate_query(sql: &str, annotated: &AnnotatedSchema<'_>) -> Result<ValidationResult> {
     let parsed = parse_sql(sql)?;
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let mut resolved_star = Vec::new();
+    let schema = annotated.schema;
 
     // check each referenced table exists
     for table_ref in &parsed.info.tables {
@@ -83,7 +89,7 @@ pub fn validate_query(sql: &str, schema: &SchemaSnapshot) -> Result<ValidationRe
         }
     }
 
-    detect_antipatterns(&parsed, schema, &mut warnings);
+    detect_antipatterns(&parsed, annotated, &mut warnings);
 
     let valid = errors.is_empty();
 

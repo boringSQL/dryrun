@@ -13,10 +13,7 @@ use tracing::info;
 use dry_run_core::audit::AuditConfig;
 use dry_run_core::history::{SnapshotKey, SnapshotRef, SnapshotStore};
 use dry_run_core::lint::LintConfig;
-use dry_run_core::schema::{
-    ConstraintKind, detect_seq_scan_imbalance, detect_stale_stats, detect_unused_indexes,
-    effective_table_stats,
-};
+use dry_run_core::schema::{ConstraintKind, NodeSelector, QualifiedName};
 use dry_run_core::{AnnotatedSnapshot, DryRun, HistoryStore, SchemaSnapshot};
 
 use crate::pgmustard::PgMustardClient;
@@ -224,7 +221,7 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<ListTablesParams>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = self.get_schema().await?;
+        let annotated = self.get_annotated().await?;
         let limit = params.limit.unwrap_or(50);
         let offset = params.offset.unwrap_or(0);
         let sort_by = params.sort.as_deref().unwrap_or("name");
@@ -236,19 +233,23 @@ impl DryRunServer {
             size: i64,
         }
 
-        let mut entries: Vec<TableEntry> = snapshot
+        // Default node selector: "primary" — single-node planner data
+        // is the right fit for a row-count summary. The "N nodes" suffix
+        // counts how many distinct activity captures we have, which
+        // signals "we have multi-node data for this cluster" but doesn't
+        // change the headline number.
+        let view = annotated.view(None);
+        let node_count = annotated.activity_by_node.len();
+
+        let mut entries: Vec<TableEntry> = annotated
+            .schema
             .tables
             .iter()
             .filter(|t| params.schema.as_ref().is_none_or(|s| &t.schema == s))
             .map(|t| {
-                let node_count = if snapshot.node_stats.is_empty() {
-                    0
-                } else {
-                    snapshot.node_stats.len()
-                };
-                let stats = effective_table_stats(t, &snapshot);
-                let rows = stats.as_ref().map(|s| s.reltuples).unwrap_or(0.0);
-                let size = stats.as_ref().map(|s| s.table_size).unwrap_or(0);
+                let qn = QualifiedName::new(&t.schema, &t.name);
+                let rows = view.reltuples(&qn).unwrap_or(0.0);
+                let size = view.table_size(&qn).unwrap_or(0);
                 let row_est = if rows > 0.0 {
                     if node_count > 0 {
                         format!(" (~{} rows, {} nodes)", rows as i64, node_count)
@@ -329,10 +330,15 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<DescribeTableParams>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = self.get_schema().await?;
+        // Pull the annotated bundle — every stats field this tool surfaces
+        // (reltuples, dead tuples, last vacuum, per-node breakdown, column
+        // profiles) reads from planner / activity, not from the legacy
+        // embedded fields.
+        let annotated = self.get_annotated().await?;
         let schema_name = params.schema.as_deref().unwrap_or("public");
 
-        let table = snapshot
+        let table = annotated
+            .schema
             .tables
             .iter()
             .find(|t| t.name == params.table && t.schema == schema_name)
@@ -344,33 +350,56 @@ impl DryRunServer {
             })?;
 
         let detail = params.detail.as_deref().unwrap_or("summary");
-        let table_rows = effective_table_stats(table, &snapshot)
-            .map(|s| s.reltuples)
-            .unwrap_or(0.0);
+        let qn = QualifiedName::new(schema_name, &params.table);
+        let view = annotated.view(None);
+        let table_rows = view.reltuples(&qn).unwrap_or(0.0);
 
-        // build column profiles
+        // Build column profiles — pull each column's stats out of the
+        // planner snapshot via `column_stats(qn, name)`. Profile is None
+        // when no stats are present, in which case the column is omitted
+        // from the profiles array (matches legacy behavior).
         let profiles: Vec<serde_json::Value> = table
             .columns
             .iter()
             .filter_map(|col| {
-                dry_run_core::schema::profile_column(col, table_rows).map(|p| {
-                    serde_json::json!({
-                        "column": col.name,
-                        "profile": p,
+                let stats = view.column_stats(&qn, &col.name);
+                dry_run_core::schema::profile_column(&col.name, &col.type_name, stats, table_rows)
+                    .map(|p| {
+                        serde_json::json!({
+                            "column": col.name,
+                            "profile": p,
+                        })
                     })
-                })
             })
             .collect();
+
+        // Synthesize a "stats" JSON object that mirrors the legacy
+        // TableStats shape, but built from planner sizing + (merged-or-single)
+        // activity. Returns an empty object when no stats are captured —
+        // intentionally distinct from `null` so consumers can tell the
+        // difference between "no snapshot yet" (object missing) vs.
+        // "snapshot exists, no rows for this table" (object empty).
+        let synth_stats = serde_json::json!({
+            "reltuples": view.reltuples(&qn),
+            "relpages": view.relpages(&qn),
+            "table_size": view.table_size(&qn),
+            "dead_tuples": view.n_dead_tup_sum(&qn),
+            "seq_scan": view.seq_scan_sum(&qn),
+            "last_vacuum": view.last_vacuum_max(&qn),
+            "last_analyze": view.last_analyze_max(&qn),
+            "vacuum_count": view.vacuum_count_sum(&qn),
+        });
 
         let mut json_val = match detail {
             "full" => {
                 let mut v = serde_json::to_value(table).map_err(|e| {
                     McpError::internal_error(format!("serialization error: {e}"), None)
                 })?;
-                if let Some(obj) = v.as_object_mut()
-                    && !profiles.is_empty()
-                {
-                    obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("stats".into(), synth_stats.clone());
+                    if !profiles.is_empty() {
+                        obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
+                    }
                 }
                 v
             }
@@ -378,7 +407,7 @@ impl DryRunServer {
                 let mut result = serde_json::json!({
                     "schema": table.schema,
                     "name": table.name,
-                    "stats": table.stats,
+                    "stats": synth_stats,
                 });
                 if let Some(obj) = result.as_object_mut()
                     && !profiles.is_empty()
@@ -432,7 +461,7 @@ impl DryRunServer {
                     "constraints": table.constraints,
                     "indexes": compact_idxs,
                     "comment": table.comment,
-                    "stats": table.stats,
+                    "stats": synth_stats,
                     "partition_info": table.partition_info,
                 });
                 if let Some(obj) = result.as_object_mut()
@@ -460,8 +489,9 @@ impl DryRunServer {
         let mut text = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
-        if let Some(breakdown) =
-            format_node_table_breakdown(&snapshot.node_stats, schema_name, &params.table)
+        // Per-node breakdown trailer — only meaningful when we have ≥ 2
+        // nodes' worth of activity. Single-node clusters skip the section.
+        if let Some(breakdown) = format_node_table_breakdown(&annotated, schema_name, &params.table)
         {
             text.push_str(&breakdown);
         }
@@ -737,8 +767,9 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<ValidateQueryParams>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = self.get_schema().await?;
-        let result = dry_run_core::query::validate_query(&params.sql, &snapshot)
+        let annotated = self.get_annotated().await?;
+        let view = annotated.view(None);
+        let result = dry_run_core::query::validate_query(&params.sql, &view)
             .map_err(|e| McpError::invalid_params(format!("SQL parse error: {e}"), None))?;
 
         let hint = if result.valid && !result.warnings.is_empty() {
@@ -768,14 +799,17 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<ExplainQueryParams>,
     ) -> Result<CallToolResult, McpError> {
-        let schema = self.get_schema().await.ok();
+        // Pull annotated so plan-warning rules have planner reltuples
+        // available as a fallback when the plan's own row estimate is zero.
+        let annotated = self.get_annotated().await.ok();
+        let view = annotated.as_ref().map(|a| a.view(None));
         let ctx = self.require_live_db()?;
 
         let result = dry_run_core::query::explain_query(
             ctx.pool(),
             &params.sql,
             params.analyze.unwrap_or(false),
-            schema.as_ref(),
+            view.as_ref(),
         )
         .await
         .map_err(|e| McpError::invalid_params(format!("EXPLAIN failed: {e}"), None))?;
@@ -805,17 +839,26 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<AdviseParams>,
     ) -> Result<CallToolResult, McpError> {
-        let schema = self.get_schema().await?;
+        // Pull the annotated bundle — advise's stats-aware refinements
+        // (selectivity, partial-index suggestions, per-replica seq_scan
+        // breakdown) all hang off planner/activity, not the raw schema.
+        let annotated = self.get_annotated().await?;
         let pg_version =
-            dry_run_core::PgVersion::parse_from_version_string(&schema.pg_version).ok();
+            dry_run_core::PgVersion::parse_from_version_string(&annotated.schema.pg_version).ok();
         let include_idx = params.include_index_suggestions.unwrap_or(true);
+
+        // Default node selector: "primary" for a single-node view —
+        // advise is a planner-stats-driven tool and primary is where
+        // those originate. Per-node breakdowns inside advise itself
+        // still iterate every node via `seq_scan_per_node`.
+        let view = annotated.view(None);
 
         let explain_result = if let Some(ctx) = &self.ctx {
             dry_run_core::query::explain_query(
                 ctx.pool(),
                 &params.sql,
                 params.analyze.unwrap_or(false),
-                Some(&schema),
+                Some(&view),
             )
             .await
             .ok()
@@ -826,7 +869,7 @@ impl DryRunServer {
         let advise_result = dry_run_core::query::advise_with_index_suggestions(
             &params.sql,
             explain_result.as_ref().map(|r| &r.plan),
-            &schema,
+            &view,
             pg_version.as_ref(),
             include_idx,
         )
@@ -875,9 +918,9 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<AnalyzePlanParams>,
     ) -> Result<CallToolResult, McpError> {
-        let schema = self.get_schema().await?;
+        let annotated = self.get_annotated().await?;
         let pg_version =
-            dry_run_core::PgVersion::parse_from_version_string(&schema.pg_version).ok();
+            dry_run_core::PgVersion::parse_from_version_string(&annotated.schema.pg_version).ok();
 
         // Parse the plan JSON — supports both wrapped [{"Plan": ...}] and bare {"Plan": ...}
         let plan_value = if let Some(arr) = params.plan_json.as_array() {
@@ -893,12 +936,13 @@ impl DryRunServer {
         let plan = dry_run_core::query::parse_plan_json(plan_value)
             .map_err(|e| McpError::invalid_params(format!("failed to parse plan: {e}"), None))?;
 
-        let warnings = dry_run_core::query::detect_plan_warnings(&plan, Some(&schema));
+        let view = annotated.view(None);
+        let warnings = dry_run_core::query::detect_plan_warnings(&plan, Some(&view));
 
         let advise_result = dry_run_core::query::advise_with_index_suggestions(
             &params.sql,
             Some(&plan),
-            &schema,
+            &view,
             pg_version.as_ref(),
             params.include_index_suggestions.unwrap_or(true),
         )
@@ -976,13 +1020,13 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<CheckMigrationParams>,
     ) -> Result<CallToolResult, McpError> {
-        let schema = self.get_schema().await?;
+        let annotated = self.get_annotated().await?;
         let pg_version =
-            dry_run_core::PgVersion::parse_from_version_string(&schema.pg_version).ok();
+            dry_run_core::PgVersion::parse_from_version_string(&annotated.schema.pg_version).ok();
+        let view = annotated.view(None);
 
-        let checks =
-            dry_run_core::query::check_migration(&params.ddl, &schema, pg_version.as_ref())
-                .map_err(|e| McpError::invalid_params(format!("DDL parse error: {e}"), None))?;
+        let checks = dry_run_core::query::check_migration(&params.ddl, &view, pg_version.as_ref())
+            .map_err(|e| McpError::invalid_params(format!("DDL parse error: {e}"), None))?;
 
         if checks.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
@@ -1019,24 +1063,23 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<LintSchemaParams>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = self.get_schema().await?;
-
-        let target = {
-            let mut filtered = snapshot.clone();
-            if let Some(schema_filter) = &params.schema {
-                filtered.tables.retain(|t| &t.schema == schema_filter);
-            }
-            if let Some(table_filter) = &params.table {
-                filtered.tables.retain(|t| &t.name == table_filter);
-            }
-            filtered
-        };
+        // Pull the full annotated bundle — we need it for the audit pass,
+        // which contains stats-aware rules. Lint itself is DDL-only and
+        // just borrows `target.schema` below.
+        let mut target = self.get_annotated().await?;
+        if let Some(schema_filter) = &params.schema {
+            target.schema.tables.retain(|t| &t.schema == schema_filter);
+        }
+        if let Some(table_filter) = &params.table {
+            target.schema.tables.retain(|t| &t.name == table_filter);
+        }
 
         let scope = params.scope.as_deref().unwrap_or("all");
         let mut result = serde_json::Map::new();
 
         if scope == "all" || scope == "conventions" {
-            let report = dry_run_core::lint::lint_schema(&target, &self.lint_config);
+            // Conventions/lint reads no stats — DDL only.
+            let report = dry_run_core::lint::lint_schema(&target.schema, &self.lint_config);
             let compact = dry_run_core::lint::compact_report(&report, 5);
             result.insert(
                 "conventions".into(),
@@ -1045,7 +1088,9 @@ impl DryRunServer {
         }
 
         let has_ddl_fixes = if scope == "all" || scope == "audit" {
-            let report = dry_run_core::audit::run_audit(&target, &self.audit_config);
+            // Audit needs planner sizing for the bloat / vacuum-defaults rules
+            // — pass the annotated view so those have a chance to fire.
+            let report = dry_run_core::audit::run_audit(&target.view(None), &self.audit_config);
             let has_fixes = report.findings.iter().any(|f| f.ddl_fix.is_some());
             result.insert(
                 "audit".into(),
@@ -1080,17 +1125,17 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<VacuumHealthParams>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = {
-            let mut filtered = self.get_schema().await?.clone();
-            if let Some(schema_filter) = &params.schema {
-                filtered.tables.retain(|t| &t.schema == schema_filter);
-            }
-            if let Some(table_filter) = &params.table {
-                filtered.tables.retain(|t| &t.name == table_filter);
-            }
-            filtered
-        };
-        let results = dry_run_core::schema::vacuum::analyze_vacuum_health(&snapshot);
+        let mut annotated = self.get_annotated().await?;
+        if let Some(schema_filter) = &params.schema {
+            annotated
+                .schema
+                .tables
+                .retain(|t| &t.schema == schema_filter);
+        }
+        if let Some(table_filter) = &params.table {
+            annotated.schema.tables.retain(|t| &t.name == table_filter);
+        }
+        let results = dry_run_core::schema::vacuum::analyze_vacuum_health(&annotated.view(None));
 
         if results.is_empty() {
             let text = self.wrap_text("No tables with significant row counts found.", None);
@@ -1112,24 +1157,26 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<DetectParams>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = {
-            let mut filtered = self.get_schema().await?.clone();
-            if let Some(schema_filter) = &params.schema {
-                filtered.tables.retain(|t| &t.schema == schema_filter);
-                filtered.node_stats.iter_mut().for_each(|ns| {
-                    ns.table_stats.retain(|ts| &ts.schema == schema_filter);
-                    ns.index_stats.retain(|is| &is.schema == schema_filter);
-                });
-            }
-            if let Some(table_filter) = &params.table {
-                filtered.tables.retain(|t| &t.name == table_filter);
-                filtered.node_stats.iter_mut().for_each(|ns| {
-                    ns.table_stats.retain(|ts| &ts.table == table_filter);
-                    ns.index_stats.retain(|is| &is.table == table_filter);
-                });
-            }
-            filtered
-        };
+        // Pull the cached annotated bundle and clone it — we filter
+        // tables in-place to honor the schema/table query params, and we
+        // don't want those mutations to leak back into the shared cache.
+        //
+        // Activity rows reference qualified-name keys, not table OIDs, so
+        // they're naturally narrowed by the lookups in
+        // `AnnotatedSnapshot::unused_indexes` / `seq_scan_imbalance` once
+        // we've thinned out `schema.tables`. No need to scrub the
+        // activity_by_node map by hand.
+        let mut annotated = self.get_annotated().await?;
+        if let Some(schema_filter) = &params.schema {
+            annotated
+                .schema
+                .tables
+                .retain(|t| &t.schema == schema_filter);
+        }
+        if let Some(table_filter) = &params.table {
+            annotated.schema.tables.retain(|t| &t.name == table_filter);
+        }
+
         let kind = params.kind.as_deref().unwrap_or("all");
 
         let mut result = serde_json::Map::new();
@@ -1143,7 +1190,10 @@ impl DryRunServer {
         let mut found_unused = false;
 
         if run_stale {
-            let stale = detect_stale_stats(&snapshot.node_stats, 7);
+            // 7-day staleness threshold — matches the legacy default.
+            // `stale_stats` walks every node in the selector and emits one
+            // entry per (node, table) that's stale or never analyzed.
+            let stale = annotated.stale_stats(&NodeSelector::All, 7);
             found_stale = !stale.is_empty();
             result.insert(
                 "stale_stats".into(),
@@ -1152,7 +1202,10 @@ impl DryRunServer {
         }
 
         if run_unused {
-            let unused = detect_unused_indexes(&snapshot.node_stats, &snapshot.tables);
+            // Cluster-wide question — sum scans across all known nodes.
+            // An index that's unused on the primary may still be hot on
+            // a read replica, so we deliberately don't restrict to one node.
+            let unused = annotated.unused_indexes(&NodeSelector::All);
             found_unused = !unused.is_empty();
             result.insert(
                 "unused_indexes".into(),
@@ -1162,13 +1215,11 @@ impl DryRunServer {
 
         if run_anomalies {
             let mut anomalies = Vec::new();
-            for table in &snapshot.tables {
-                let schema_name = &table.schema;
-                if let Some(imb) =
-                    detect_seq_scan_imbalance(&snapshot.node_stats, schema_name, &table.name)
-                {
+            for table in &annotated.schema.tables {
+                let qn = dry_run_core::schema::QualifiedName::new(&table.schema, &table.name);
+                if let Some(imb) = annotated.seq_scan_imbalance(&qn) {
                     anomalies.push(serde_json::json!({
-                        "table": format!("{}.{}", schema_name, table.name),
+                        "table": format!("{}.{}", table.schema, table.name),
                         "type": "seq_scan_imbalance",
                         "hot_node": imb.hot_node,
                         "multiplier": format!("{}x", imb.multiplier),
@@ -1180,7 +1231,10 @@ impl DryRunServer {
 
         if run_bloated {
             let threshold = params.threshold.unwrap_or(1.5);
-            let bloated = dry_run_core::schema::detect_bloated_indexes(&snapshot.tables, threshold);
+            // Bloat needs IndexSizing from the planner snapshot — pass the
+            // annotated view so the rule can pull it via `index_sizing()`.
+            let bloated =
+                dry_run_core::schema::detect_bloated_indexes(&annotated.view(None), threshold);
             result.insert(
                 "bloated_indexes".into(),
                 serde_json::to_value(&bloated).unwrap_or(serde_json::Value::Null),
@@ -1215,14 +1269,17 @@ impl DryRunServer {
         &self,
         Parameters(params): Parameters<CompareNodesParams>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = self.get_schema().await?;
+        let annotated = self.get_annotated().await?;
         let schema_name = params.schema.as_deref().unwrap_or("public");
         let qualified = format!("{schema_name}.{}", params.table);
+        let qn = QualifiedName::new(schema_name, &params.table);
 
-        if snapshot.node_stats.is_empty() {
+        if annotated.activity_by_node.is_empty() {
+            // No per-node activity captured — can't compare. Tell the user
+            // exactly which command will populate it.
             return Ok(CallToolResult::success(vec![Content::text(
-                "No per-node stats available. Import stats with:\n  \
-                 dryrun import schema.json --stats r1.json r2.json"
+                "No per-node activity stats available. Capture from each replica with:\n  \
+                 dryrun snapshot activity --from <replica-url> --label <name>"
                     .to_string(),
             )]));
         }
@@ -1230,19 +1287,18 @@ impl DryRunServer {
         let mut lines: Vec<String> = Vec::new();
         lines.push(format!(
             "Stats for {qualified} across {} node(s):",
-            snapshot.node_stats.len()
+            annotated.activity_by_node.len()
         ));
 
-        if let Some(breakdown) =
-            format_node_table_breakdown(&snapshot.node_stats, schema_name, &params.table)
+        if let Some(breakdown) = format_node_table_breakdown(&annotated, schema_name, &params.table)
         {
             lines.push(breakdown);
         }
 
-        // anomaly detection: seq_scan imbalance
-        if let Some(imb) =
-            detect_seq_scan_imbalance(&snapshot.node_stats, schema_name, &params.table)
-        {
+        // Anomaly detection — flag if one node is doing 5x+ the seq_scans
+        // of the quietest non-zero node. Often points at a routing
+        // misconfiguration or an unindexed query slipping past primary.
+        if let Some(imb) = annotated.seq_scan_imbalance(&qn) {
             lines.push(String::new());
             lines.push(format!(
                 "⚠ {} has {}x more seq_scans than the lowest node — \
@@ -1251,16 +1307,22 @@ impl DryRunServer {
             ));
         }
 
-        // per-index breakdown
+        // Per-index breakdown — pull each index belonging to this table
+        // out of the schema, then ask each node's activity what its
+        // idx_scan counter is for that index.
         let mut index_data: std::collections::BTreeMap<String, Vec<(String, i64)>> =
             std::collections::BTreeMap::new();
-        for ns in &snapshot.node_stats {
-            for is in &ns.index_stats {
-                if is.table == params.table && is.schema == schema_name {
-                    index_data
-                        .entry(is.index_name.clone())
-                        .or_default()
-                        .push((ns.source.clone(), is.stats.idx_scan));
+        if let Some(table) = annotated
+            .schema
+            .tables
+            .iter()
+            .find(|t| t.name == params.table && t.schema == schema_name)
+        {
+            for idx in &table.indexes {
+                let idx_qn = QualifiedName::new(schema_name, &idx.name);
+                let per_node = annotated.view(None).idx_scan_per_node(&idx_qn);
+                if !per_node.is_empty() {
+                    index_data.insert(idx.name.clone(), per_node);
                 }
             }
         }
@@ -1277,8 +1339,9 @@ impl DryRunServer {
             }
         }
 
-        // flag unused indexes for this table
-        let unused = detect_unused_indexes(&snapshot.node_stats, &snapshot.tables);
+        // Flag unused indexes for this table — `unused_indexes` already
+        // skips primary keys and aggregates across selected nodes.
+        let unused = annotated.unused_indexes(&NodeSelector::All);
         for entry in &unused {
             if entry.schema == schema_name && entry.table == params.table {
                 let size_mb = entry.total_size_bytes / (1024 * 1024);

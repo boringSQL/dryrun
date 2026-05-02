@@ -4,7 +4,7 @@ use super::plan::PlanNode;
 use super::suggest::{self, IndexSuggestion};
 use crate::error::Result;
 use crate::jit;
-use crate::schema::{self, Column, SchemaSnapshot};
+use crate::schema::{self, AnnotatedSchema, ColumnStats, QualifiedName};
 use crate::version::PgVersion;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,13 +24,20 @@ pub struct AdviseResult {
     pub index_suggestions: Vec<IndexSuggestion>,
 }
 
+// Top-level advise pass — walks the plan tree and emits per-node advice.
+//
+// Takes the annotated view rather than a raw `&SchemaSnapshot` because
+// the per-node refinements (selectivity hints, partial-index suggestions,
+// per-replica seq_scan breakdown) all need planner column stats and
+// activity counters. Without those, advise still works — it just
+// degrades to "DDL-only" recommendations.
 pub fn advise(
     plan: &PlanNode,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     pg_version: Option<&PgVersion>,
 ) -> Vec<Advice> {
     let mut advice = Vec::new();
-    walk_for_advice(plan, schema, pg_version, &mut advice);
+    walk_for_advice(plan, annotated, pg_version, &mut advice);
     advice
 }
 
@@ -39,17 +46,19 @@ pub fn advise(
 pub fn advise_with_index_suggestions(
     sql: &str,
     plan: Option<&PlanNode>,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     pg_version: Option<&PgVersion>,
     include_index_suggestions: bool,
 ) -> Result<AdviseResult> {
     let advice = match plan {
-        Some(p) => advise(p, schema, pg_version),
+        Some(p) => advise(p, annotated, pg_version),
         None => Vec::new(),
     };
 
     let index_suggestions = if include_index_suggestions {
-        suggest::suggest_index(sql, schema, plan, pg_version)?
+        // suggest_index reads `reltuples` for size cutoffs — pass the
+        // annotated view so it has access to planner sizing.
+        suggest::suggest_index(sql, annotated, plan, pg_version)?
     } else {
         Vec::new()
     };
@@ -62,23 +71,23 @@ pub fn advise_with_index_suggestions(
 
 fn walk_for_advice(
     node: &PlanNode,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     pg_version: Option<&PgVersion>,
     advice: &mut Vec<Advice>,
 ) {
-    advise_seq_scan(node, schema, pg_version, advice);
+    advise_seq_scan(node, annotated, pg_version, advice);
     advise_nested_loop_seq_scan(node, pg_version, advice);
-    advise_sort(node, schema, pg_version, advice);
+    advise_sort(node, pg_version, advice);
     advise_cte(node, advice);
 
     for child in &node.children {
-        walk_for_advice(child, schema, pg_version, advice);
+        walk_for_advice(child, annotated, pg_version, advice);
     }
 }
 
 fn advise_seq_scan(
     node: &PlanNode,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     pg_version: Option<&PgVersion>,
     advice: &mut Vec<Advice>,
 ) {
@@ -95,8 +104,10 @@ fn advise_seq_scan(
 
     let schema_name = node.schema.as_deref().unwrap_or("public");
     let qualified = format!("{schema_name}.{table_name}");
+    let qn = QualifiedName::new(schema_name, table_name);
 
-    let table = schema
+    let table = annotated
+        .schema
         .tables
         .iter()
         .find(|t| t.name == *table_name && t.schema == schema_name);
@@ -135,47 +146,45 @@ fn advise_seq_scan(
     let (ddl, recommendation) = if let Some(filter_col_name) = &filter_col {
         let col_obj = table.and_then(|t| t.columns.iter().find(|c| c.name == *filter_col_name));
         let col_type = col_obj.map(|c| c.type_name.as_str()).unwrap_or("unknown");
+        // Column stats live in the planner snapshot, keyed by qualified
+        // table name + column name. Returns None if there's no planner
+        // capture yet — in which case we fall back to non-stats advice.
+        let col_stats = annotated.column_stats(&qn, filter_col_name);
 
         let (idx_type, rec) = suggest_index_type(&qualified, col_type, filter_col_name);
         let mut recommendation = rec;
 
-        // stats-aware refinements
-        if let Some(col) = col_obj
-            && col.stats.is_some()
-        {
+        // Stats-aware refinements — only meaningful when we actually have
+        // column stats. The plan's row estimate is the floor; if planner
+        // sizing reports more rows than the plan rows estimate (which can
+        // happen on stale plan estimates), prefer the larger number.
+        if col_stats.is_some() {
             let mut table_rows = node.plan_rows;
-            if let Some(t) = table
-                && let Some(s) = &t.stats
-                && s.reltuples > table_rows
+            if let Some(rt) = annotated.reltuples(&qn)
+                && rt > table_rows
             {
-                table_rows = s.reltuples;
+                table_rows = rt;
             }
-            recommendation.push_str(&stats_aware_advice(col, filter_col_name, table_rows));
+            recommendation.push_str(&stats_aware_advice(col_stats, filter_col_name, table_rows));
         }
 
         let idx_name = format!("idx_{table_name}_{filter_col_name}");
 
-        // prefer partial index for high-null or skewed columns
-        let ddl = if let Some(col) = col_obj {
-            if col.stats.as_ref().and_then(|s| s.null_frac).unwrap_or(0.0) > 0.5 {
-                format!(
-                    "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name}) WHERE {filter_col_name} IS NOT NULL;"
-                )
-            } else if let Some(stats) = &col.stats {
-                if let Some((dominant, _freq)) = schema::has_skewed_distribution(stats, 0.5) {
-                    format!(
-                        "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name}) WHERE {filter_col_name} != '{dominant}';"
-                    )
-                } else {
-                    format!(
-                        "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name});"
-                    )
-                }
-            } else {
-                format!(
-                    "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name});"
-                )
-            }
+        // Prefer a partial index for high-null or skewed columns — a tiny
+        // selective index is much cheaper than a full one when most rows
+        // would never match the predicate. Falls through to a plain
+        // CREATE INDEX when stats aren't available.
+        let null_frac = col_stats.and_then(|s| s.null_frac).unwrap_or(0.0);
+        let ddl = if null_frac > 0.5 {
+            format!(
+                "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name}) WHERE {filter_col_name} IS NOT NULL;"
+            )
+        } else if let Some(stats) = col_stats
+            && let Some((dominant, _freq)) = schema::has_skewed_distribution(stats, 0.5)
+        {
+            format!(
+                "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name}) WHERE {filter_col_name} != '{dominant}';"
+            )
         } else {
             format!(
                 "CREATE INDEX CONCURRENTLY {idx_name} ON {schema_name}.{table_name} USING {idx_type}({filter_col_name});"
@@ -192,28 +201,20 @@ fn advise_seq_scan(
 
     let mut full_recommendation = recommendation;
 
-    // enrich with per-node context when available
-    let node_seq_scans: Vec<(&str, i64)> = schema
-        .node_stats
-        .iter()
-        .filter_map(|ns| {
-            ns.table_stats
-                .iter()
-                .find(|ts| ts.table == *table_name && ts.schema == schema_name)
-                .map(|ts| (ns.source.as_str(), ts.stats.seq_scan))
-        })
-        .collect();
-
-    if node_seq_scans.len() >= 2 {
-        let total: i64 = node_seq_scans.iter().map(|(_, v)| *v).sum();
-        let parts: Vec<String> = node_seq_scans
+    // Per-node breakdown — surfaces "this replica is doing the unindexed
+    // work, the others aren't" patterns. Empty when we only have one node
+    // (or none); skipping the note in that case avoids noise.
+    let per_node = annotated.seq_scan_per_node(&qn);
+    if per_node.len() >= 2 {
+        let total: i64 = per_node.iter().map(|(_, v)| *v).sum();
+        let parts: Vec<String> = per_node
             .iter()
             .map(|(src, v)| format!("{src}: {v}"))
             .collect();
         full_recommendation.push_str(&format!(
             "\n\nNote: across {} nodes, seq_scan totals {} ({}). \
              Check if specific replicas are serving unindexed query patterns.",
-            node_seq_scans.len(),
+            per_node.len(),
             total,
             parts.join(", ")
         ));
@@ -276,12 +277,7 @@ fn advise_nested_loop_seq_scan(
     });
 }
 
-fn advise_sort(
-    node: &PlanNode,
-    _schema: &SchemaSnapshot,
-    pg_version: Option<&PgVersion>,
-    advice: &mut Vec<Advice>,
-) {
+fn advise_sort(node: &PlanNode, pg_version: Option<&PgVersion>, advice: &mut Vec<Advice>) {
     if node.node_type != "Sort" || node.plan_rows < 10_000.0 {
         return;
     }
@@ -323,15 +319,21 @@ fn advise_sort(
     });
 }
 
-fn stats_aware_advice(col: &Column, filter_col: &str, table_rows: f64) -> String {
-    let stats = match &col.stats {
+// Build a recommendation suffix grounded in column stats — selectivity,
+// dominant-value skew, null fraction, physical correlation. Returns an
+// empty string when no stats are available, which lets the caller stitch
+// it on unconditionally without a `match`.
+fn stats_aware_advice(stats: Option<&ColumnStats>, filter_col: &str, table_rows: f64) -> String {
+    let stats = match stats {
         Some(s) => s,
         None => return String::new(),
     };
     let mut parts = Vec::new();
 
-    // selectivity assessment
-    let sel = schema::column_selectivity(col, table_rows);
+    // Selectivity — the fraction of rows a value-equality predicate is
+    // expected to match. Low cardinality (≤ 5 distinct values) → high
+    // selectivity → poor index usefulness; we call that out explicitly.
+    let sel = schema::column_selectivity(Some(stats), table_rows);
     if let Some(nd) = stats.n_distinct {
         if nd > 0.0 && nd <= 5.0 {
             parts.push(format!(
@@ -469,10 +471,16 @@ fn find_table_in_subtree(node: &PlanNode) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use chrono::Utc;
 
     use super::*;
     use crate::schema::*;
+    use crate::schema::{
+        ActivityStatsSnapshot, AnnotatedSnapshot, IndexActivityEntry, NodeIdentity,
+        PlannerStatsSnapshot, TableActivity, TableActivityEntry, TableSizing, TableSizingEntry,
+    };
 
     fn empty_schema() -> SchemaSnapshot {
         SchemaSnapshot {
@@ -575,11 +583,22 @@ mod tests {
         }
     }
 
+    // Wrap a bare schema in an empty annotated bundle — no planner, no
+    // activity. Mirrors what the MCP server hands tool bodies before
+    // any `dryrun snapshot take` has run.
+    fn ddl_only(schema: SchemaSnapshot) -> AnnotatedSnapshot {
+        AnnotatedSnapshot {
+            schema,
+            planner: None,
+            activity_by_node: BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn advise_seq_scan_suggests_btree() {
-        let schema = empty_schema();
+        let snap = ddl_only(empty_schema());
         let plan = make_seq_scan("orders", 100_000.0, Some("(customer_id = 42)"));
-        let advice = advise(&plan, &schema, None);
+        let advice = advise(&plan, &snap.view(None), None);
         assert!(!advice.is_empty());
         assert!(advice[0].ddl.as_ref().unwrap().contains("btree"));
         assert!(advice[0].ddl.as_ref().unwrap().contains("customer_id"));
@@ -588,88 +607,105 @@ mod tests {
 
     #[test]
     fn advise_seq_scan_jsonb_suggests_gin() {
-        let schema = empty_schema();
+        let snap = ddl_only(empty_schema());
         let plan = make_seq_scan("orders", 100_000.0, Some("(data @> '{}'::jsonb)"));
-        let advice = advise(&plan, &schema, None);
+        let advice = advise(&plan, &snap.view(None), None);
         assert!(!advice.is_empty());
         assert!(advice[0].ddl.as_ref().unwrap().contains("gin"));
     }
 
     #[test]
     fn advise_small_table_no_advice() {
-        let schema = empty_schema();
+        let snap = ddl_only(empty_schema());
         let plan = make_seq_scan("orders", 50.0, Some("(id = 1)"));
-        let advice = advise(&plan, &schema, None);
+        let advice = advise(&plan, &snap.view(None), None);
         assert!(advice.is_empty());
     }
 
     #[test]
     fn advise_includes_version_note() {
-        let schema = empty_schema();
+        let snap = ddl_only(empty_schema());
         let plan = make_seq_scan("orders", 100_000.0, Some("(customer_id = 42)"));
         let pg14 = PgVersion {
             major: 14,
             minor: 0,
             patch: 0,
         };
-        let advice = advise(&plan, &schema, Some(&pg14));
+        let advice = advise(&plan, &snap.view(None), Some(&pg14));
         assert!(!advice.is_empty());
         assert!(advice[0].version_note.is_some());
     }
 
+    // Helper: build an ActivityStatsSnapshot for one node with a single
+    // table activity row carrying the supplied seq_scan counter.
+    fn activity_for(label: &str, seq_scan: i64) -> ActivityStatsSnapshot {
+        ActivityStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "test".into(),
+            timestamp: Utc::now(),
+            content_hash: format!("h-{label}"),
+            schema_ref_hash: "sh".into(),
+            node: NodeIdentity {
+                label: label.into(),
+                host: label.into(),
+                is_standby: label != "master",
+                replication_lag_bytes: None,
+                stats_reset: None,
+            },
+            tables: vec![TableActivityEntry {
+                table: QualifiedName::new("public", "orders"),
+                activity: TableActivity {
+                    seq_scan,
+                    idx_scan: 0,
+                    n_live_tup: 0,
+                    n_dead_tup: 0,
+                    last_vacuum: None,
+                    last_autovacuum: None,
+                    last_analyze: None,
+                    last_autoanalyze: None,
+                    vacuum_count: 0,
+                    autovacuum_count: 0,
+                    analyze_count: 0,
+                    autoanalyze_count: 0,
+                },
+            }],
+            indexes: Vec::<IndexActivityEntry>::new(),
+        }
+    }
+
     #[test]
     fn advise_seq_scan_includes_node_context() {
-        let mut schema = empty_schema();
-        schema.node_stats = vec![
-            NodeStats {
-                source: "master".into(),
+        // Two-node cluster — primary handles indexed traffic, replica
+        // is doing the seq scans. The recommendation should call that
+        // out with the per-node breakdown.
+        let mut activity_by_node = BTreeMap::new();
+        activity_by_node.insert("master".into(), activity_for("master", 100));
+        activity_by_node.insert("replica-1".into(), activity_for("replica-1", 42000));
+        let snap = AnnotatedSnapshot {
+            schema: empty_schema(),
+            planner: Some(PlannerStatsSnapshot {
+                pg_version: "PostgreSQL 17.0".into(),
+                database: "test".into(),
                 timestamp: Utc::now(),
-                is_standby: false,
-                table_stats: vec![NodeTableStats {
-                    schema: "public".into(),
-                    table: "orders".into(),
-                    stats: TableStats {
+                content_hash: "ph".into(),
+                schema_ref_hash: "sh".into(),
+                tables: vec![TableSizingEntry {
+                    table: QualifiedName::new("public", "orders"),
+                    sizing: TableSizing {
                         reltuples: 100_000.0,
                         relpages: 1250,
-                        dead_tuples: 0,
-                        last_vacuum: None,
-                        last_autovacuum: None,
-                        last_analyze: None,
-                        last_autoanalyze: None,
-                        seq_scan: 100,
-                        idx_scan: 5000,
                         table_size: 10_000_000,
+                        total_size: None,
+                        index_size: None,
                     },
                 }],
-                index_stats: vec![],
-                column_stats: vec![],
-            },
-            NodeStats {
-                source: "replica-1".into(),
-                timestamp: Utc::now(),
-                is_standby: true,
-                table_stats: vec![NodeTableStats {
-                    schema: "public".into(),
-                    table: "orders".into(),
-                    stats: TableStats {
-                        reltuples: 100_000.0,
-                        relpages: 1250,
-                        dead_tuples: 0,
-                        last_vacuum: None,
-                        last_autovacuum: None,
-                        last_analyze: None,
-                        last_autoanalyze: None,
-                        seq_scan: 42000,
-                        idx_scan: 1000,
-                        table_size: 10_000_000,
-                    },
-                }],
-                index_stats: vec![],
-                column_stats: vec![],
-            },
-        ];
+                columns: vec![],
+                indexes: vec![],
+            }),
+            activity_by_node,
+        };
         let plan = make_seq_scan("orders", 100_000.0, Some("(customer_id = 42)"));
-        let advice = advise(&plan, &schema, None);
+        let advice = advise(&plan, &snap.view(None), None);
         assert!(!advice.is_empty());
         assert!(advice[0].recommendation.contains("across 2 nodes"));
         assert!(advice[0].recommendation.contains("master: 100"));
