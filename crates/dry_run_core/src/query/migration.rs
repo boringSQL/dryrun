@@ -551,7 +551,6 @@ mod tests {
                 comment: None,
                 // Stats now live in the PlannerStatsSnapshot built by
                 // `empty_annotated`; the legacy embedded field stays None.
-                stats: None,
                 partition_info: None,
                 policies: vec![],
                 triggers: vec![],
@@ -565,7 +564,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 

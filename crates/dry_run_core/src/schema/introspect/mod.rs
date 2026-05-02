@@ -106,7 +106,6 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         functions,
         extensions,
         gucs,
-        node_stats: vec![],
     };
 
     info!(
@@ -122,24 +121,6 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
     );
 
     Ok(snapshot)
-}
-
-pub async fn fetch_stats_only(pool: &PgPool, source: &str) -> Result<NodeStats> {
-    let (raw_table_stats, raw_index_stats, raw_column_stats, is_standby) = tokio::try_join!(
-        stats::fetch_named_table_stats(pool),
-        stats::fetch_named_index_stats(pool),
-        stats::fetch_named_column_stats(pool),
-        fetch_is_standby(pool),
-    )?;
-
-    Ok(NodeStats {
-        source: source.to_string(),
-        timestamp: Utc::now(),
-        is_standby,
-        table_stats: raw_table_stats,
-        index_stats: raw_index_stats,
-        column_stats: raw_column_stats,
-    })
 }
 
 pub async fn fetch_is_standby(pool: &PgPool) -> Result<bool> {
@@ -170,20 +151,11 @@ pub async fn introspect_planner_stats(
         .fetch_one(pool)
         .await?;
 
-    let (table_sizing, index_sizing, raw_column_stats) = tokio::try_join!(
+    let (table_sizing, index_sizing, columns) = tokio::try_join!(
         stats::fetch_named_table_sizing(pool),
         stats::fetch_named_index_sizing(pool),
         stats::fetch_named_column_stats(pool),
     )?;
-
-    let columns = raw_column_stats
-        .into_iter()
-        .map(|c| ColumnStatsEntry {
-            table: QualifiedName::new(c.schema, c.table),
-            column: c.column,
-            stats: c.stats,
-        })
-        .collect();
 
     let mut snapshot = PlannerStatsSnapshot {
         pg_version,
@@ -323,7 +295,6 @@ fn assemble_tables(
                 generated: rc.generated,
                 comment: None,
                 statistics_target: rc.statistics_target,
-                stats: None,
             });
     }
 
@@ -383,7 +354,6 @@ fn assemble_tables(
             definition: ri.definition,
             is_valid: ri.is_valid,
             backs_constraint: ri.backs_constraint,
-            stats: None,
         });
     }
 
@@ -454,7 +424,6 @@ fn assemble_tables(
             constraints: constraints_by_oid.remove(&rt.oid).unwrap_or_default(),
             indexes: indexes_by_oid.remove(&rt.oid).unwrap_or_default(),
             comment: table_comment_map.get(&rt.oid).cloned(),
-            stats: None,
             partition_info: partition_info_by_oid.get(&rt.oid).cloned(),
             policies: policies_by_oid.remove(&rt.oid).unwrap_or_default(),
             triggers: triggers_by_oid.remove(&rt.oid).unwrap_or_default(),

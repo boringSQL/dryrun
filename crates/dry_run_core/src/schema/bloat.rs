@@ -138,13 +138,11 @@ mod tests {
                     generated: None,
                     comment: None,
                     statistics_target: None,
-                    stats: None,
                 })
                 .collect(),
             constraints: vec![],
             indexes: vec![],
             comment: None,
-            stats: None,
             partition_info: None,
             policies: vec![],
             triggers: vec![],
@@ -191,7 +189,6 @@ mod tests {
             backs_constraint: false,
             predicate: None,
             definition: String::new(),
-            stats: None,
         }
     }
 

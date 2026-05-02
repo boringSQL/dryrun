@@ -565,7 +565,6 @@ mod trait_tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 

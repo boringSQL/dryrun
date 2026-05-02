@@ -7,7 +7,6 @@ use clap::{Parser, Subcommand};
 use dry_run_core::history::{
     DatabaseId, PutOutcome, SnapshotKey, SnapshotRef, SnapshotStore, TimeRange,
 };
-use dry_run_core::schema::{NodeColumnStats, NodeIndexStats, NodeStats, NodeTableStats};
 use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
 use rmcp::ServiceExt;
 
@@ -36,8 +35,6 @@ enum Command {
     },
     Import {
         file: PathBuf,
-        #[arg(long, num_args = 1..)]
-        stats: Vec<PathBuf>,
     },
     Probe {
         #[arg(long, env = "DATABASE_URL")]
@@ -59,8 +56,6 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
         #[arg(long)]
-        stats_only: bool,
-        #[arg(long)]
         name: Option<String>,
     },
     Snapshot {
@@ -70,10 +65,6 @@ enum Command {
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
-    },
-    Stats {
-        #[command(subcommand)]
-        action: StatsAction,
     },
     Drift {
         #[arg(long, env = "DATABASE_URL")]
@@ -94,18 +85,6 @@ enum Command {
         transport: String,
         #[arg(long, default_value = "3000")]
         port: u16,
-    },
-}
-
-#[derive(Subcommand)]
-enum StatsAction {
-    Apply {
-        #[arg(long, env = "DATABASE_URL")]
-        db: Option<String>,
-        #[arg(long, short)]
-        schema_file: Option<PathBuf>,
-        #[arg(long, short)]
-        node: Option<String>,
     },
 }
 
@@ -194,7 +173,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             ref source,
             pretty,
             ref output,
-            stats_only,
             ref name,
         } => {
             cmd_dump_schema(
@@ -202,16 +180,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 source.as_deref(),
                 pretty,
                 output.clone(),
-                stats_only,
                 name.clone(),
             )
             .await
         }
         Command::Init { ref db } => cmd_init(db.as_deref()).await,
-        Command::Import {
-            ref file,
-            ref stats,
-        } => cmd_import(&cli, file, stats).await,
+        Command::Import { ref file } => cmd_import(&cli, file).await,
         Command::Lint {
             ref schema_name,
             pretty,
@@ -219,7 +193,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => cmd_lint(&cli, schema_name.as_deref(), pretty, json).await,
         Command::Snapshot { ref action } => cmd_snapshot(&cli, action).await,
         Command::Profile { ref action } => cmd_profile(&cli, action),
-        Command::Stats { ref action } => cmd_stats(&cli, action).await,
         Command::Drift {
             ref db,
             ref against,
@@ -277,7 +250,6 @@ async fn cmd_dump_schema(
     source: Option<&str>,
     pretty: bool,
     output: Option<PathBuf>,
-    stats_only: bool,
     name: Option<String>,
 ) -> anyhow::Result<()> {
     let resolved = active_resolved_profile(cli, source, None)?;
@@ -288,80 +260,8 @@ async fn cmd_dump_schema(
     let name = name.or_else(|| resolved.database_id.as_ref().map(|d| d.0.clone()));
     let ctx = DryRun::connect(db_url).await?;
 
-    if stats_only {
-        let source =
-            name.ok_or_else(|| anyhow::anyhow!("--name is required when using --stats-only"))?;
-        let node_stats = ctx.introspect_stats_only(&source).await?;
-
-        let json = if pretty {
-            serde_json::to_string_pretty(&node_stats)?
-        } else {
-            serde_json::to_string(&node_stats)?
-        };
-
-        if let Some(path) = &output {
-            std::fs::write(path, &json)?;
-            eprintln!(
-                "Stats written to {} ({} tables, {} indexes)",
-                path.display(),
-                node_stats.table_stats.len(),
-                node_stats.index_stats.len()
-            );
-        } else {
-            println!("{json}");
-        }
-        return Ok(());
-    }
-
     let mut snapshot = ctx.introspect_schema().await?;
     snapshot.source = name;
-
-    if let Some(ref source) = snapshot.source {
-        let mut table_stats = Vec::new();
-        let mut index_stats = Vec::new();
-        let mut column_stats = Vec::new();
-
-        for table in &snapshot.tables {
-            if let Some(ref ts) = table.stats {
-                table_stats.push(NodeTableStats {
-                    schema: table.schema.clone(),
-                    table: table.name.clone(),
-                    stats: ts.clone(),
-                });
-            }
-            for idx in &table.indexes {
-                if let Some(ref is) = idx.stats {
-                    index_stats.push(NodeIndexStats {
-                        schema: table.schema.clone(),
-                        table: table.name.clone(),
-                        index_name: idx.name.clone(),
-                        stats: is.clone(),
-                    });
-                }
-            }
-            for col in &table.columns {
-                if let Some(ref cs) = col.stats {
-                    column_stats.push(NodeColumnStats {
-                        schema: table.schema.clone(),
-                        table: table.name.clone(),
-                        column: col.name.clone(),
-                        stats: cs.clone(),
-                    });
-                }
-            }
-        }
-
-        let is_standby = ctx.is_standby().await?;
-
-        snapshot.node_stats = vec![NodeStats {
-            source: source.clone(),
-            timestamp: snapshot.timestamp,
-            is_standby,
-            table_stats,
-            index_stats,
-            column_stats,
-        }];
-    }
 
     let json = if pretty {
         serde_json::to_string_pretty(&snapshot)?
@@ -820,37 +720,14 @@ fn cmd_profile(cli: &Cli, action: &ProfileAction) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_import(
-    cli: &Cli,
-    file: &std::path::Path,
-    stats_files: &[PathBuf],
-) -> anyhow::Result<()> {
+async fn cmd_import(cli: &Cli, file: &std::path::Path) -> anyhow::Result<()> {
     let json = std::fs::read_to_string(file)?;
-    let mut snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)
+    let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("invalid schema JSON in '{}': {e}", file.display()))?;
-
-    if !stats_files.is_empty() {
-        for stats_path in stats_files {
-            let stats_json = std::fs::read_to_string(stats_path)?;
-            let node_stats: dry_run_core::NodeStats =
-                serde_json::from_str(&stats_json).map_err(|e| {
-                    anyhow::anyhow!("invalid stats JSON in '{}': {e}", stats_path.display())
-                })?;
-            eprintln!(
-                "  merging stats from '{}' ({} tables, {} indexes)",
-                node_stats.source,
-                node_stats.table_stats.len(),
-                node_stats.index_stats.len()
-            );
-            snapshot.node_stats.push(node_stats);
-        }
-    }
 
     let data_dir = dry_run_core::history::default_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
 
-    // route to the resolved profile's schema_file when one is configured;
-    // fall back to .dryrun/schema.json
     let out_path = active_resolved_profile(cli, None, None)
         .ok()
         .and_then(|r| r.schema_file)
@@ -862,70 +739,11 @@ async fn cmd_import(
     std::fs::write(&out_path, &out_json)?;
 
     eprintln!(
-        "Imported {} tables to {}{}",
+        "Imported {} tables to {}",
         snapshot.tables.len(),
         out_path.display(),
-        if snapshot.node_stats.is_empty() {
-            String::new()
-        } else {
-            format!(" (with {} node stats)", snapshot.node_stats.len())
-        }
     );
     Ok(())
-}
-
-async fn cmd_stats(cli: &Cli, action: &StatsAction) -> anyhow::Result<()> {
-    match action {
-        StatsAction::Apply {
-            db,
-            schema_file,
-            node,
-        } => {
-            let resolved = active_resolved_profile(cli, db.as_deref(), schema_file.as_deref())?;
-            let db_url = resolved
-                .db_url
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("--db or a profile with db_url is required"))?;
-
-            let snapshot = match resolved.schema_file.as_deref() {
-                Some(path) => load_schema_file(path)?,
-                None => resolve_schema(schema_file.as_deref(), None, None)?,
-            };
-
-            let ctx = DryRun::connect(db_url).await?;
-
-            let result =
-                dry_run_core::schema::apply_stats(ctx.pool(), &snapshot, node.as_deref()).await?;
-
-            // pg_regresql warning
-            if !result.regresql_loaded {
-                eprintln!();
-                eprintln!("  pg_regresql extension is not loaded.");
-                eprintln!("  Without it, PostgreSQL ignores pg_class.reltuples/relpages and uses");
-                eprintln!("  physical file sizes instead. Your injected row counts will have no");
-                eprintln!("  effect on EXPLAIN cost estimates.");
-                eprintln!();
-                eprintln!("  Install: sudo pgxn install pg_regresql");
-                eprintln!("  Then:    CREATE EXTENSION pg_regresql;");
-                eprintln!("  See:     https://github.com/boringSQL/regresql");
-                eprintln!();
-            }
-
-            eprintln!(
-                "Applied: {} tables, {} indexes, {} columns",
-                result.tables_updated, result.indexes_updated, result.columns_injected
-            );
-
-            if !result.skipped.is_empty() {
-                eprintln!("Skipped ({}):", result.skipped.len());
-                for s in &result.skipped {
-                    eprintln!("  {s}");
-                }
-            }
-
-            Ok(())
-        }
-    }
 }
 
 async fn cmd_drift(
@@ -1264,7 +1082,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 

@@ -18,7 +18,7 @@ pub use error::{Error, Result};
 pub use history::HistoryStore;
 pub use lint::LintConfig;
 pub use schema::{
-    ActivityStatsSnapshot, AnnotatedSchema, AnnotatedSnapshot, ApplyResult, MergedActivity,
-    NodeIdentity, NodeSelector, NodeStats, PlannerStatsSnapshot, SchemaSnapshot,
+    ActivityStatsSnapshot, AnnotatedSchema, AnnotatedSnapshot, MergedActivity, NodeIdentity,
+    NodeSelector, PlannerStatsSnapshot, SchemaSnapshot,
 };
 pub use version::PgVersion;

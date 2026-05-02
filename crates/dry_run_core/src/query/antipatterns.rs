@@ -271,7 +271,6 @@ mod tests {
                 constraints: vec![],
                 indexes: vec![],
                 comment: None,
-                stats: None,
                 partition_info: Some(PartitionInfo {
                     strategy: PartitionStrategy::Range,
                     key: "created_at".into(),
@@ -300,7 +299,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 
