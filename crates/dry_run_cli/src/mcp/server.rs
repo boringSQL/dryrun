@@ -24,6 +24,28 @@ use crate::pgmustard::PgMustardClient;
 use super::helpers::{format_node_table_breakdown, format_number, to_mcp_err};
 use super::params::*;
 
+async fn persist_refresh(
+    store: &HistoryStore,
+    key: &SnapshotKey,
+    schema: &SchemaSnapshot,
+    planner: Option<&dry_run_core::PlannerStatsSnapshot>,
+    activity_by_node: &std::collections::BTreeMap<String, dry_run_core::ActivityStatsSnapshot>,
+) {
+    if let Err(e) = store.put(key, schema).await {
+        tracing::warn!(error = %e, "failed to persist schema");
+    }
+    if let Some(p) = planner
+        && let Err(e) = store.put_planner_stats(key, p).await
+    {
+        tracing::warn!(error = %e, "failed to persist planner stats");
+    }
+    if let Some(a) = activity_by_node.get("primary")
+        && let Err(e) = store.put_activity_stats(key, a).await
+    {
+        tracing::warn!(error = %e, "failed to persist activity stats");
+    }
+}
+
 fn wrap_schema_only(schema: SchemaSnapshot) -> AnnotatedSnapshot {
     AnnotatedSnapshot {
         schema,
@@ -1323,19 +1345,7 @@ impl DryRunServer {
         }
 
         if let (Some(store), Some(key)) = (self.history.as_ref(), self.snapshot_key.as_ref()) {
-            if let Err(e) = store.put(key, &schema).await {
-                tracing::warn!(error = %e, "failed to persist schema");
-            }
-            if let Some(p) = planner.as_ref()
-                && let Err(e) = store.put_planner_stats(key, p).await
-            {
-                tracing::warn!(error = %e, "failed to persist planner stats");
-            }
-            if let Some(a) = activity_by_node.get("primay")
-                && let Err(e) = store.put_activity_stats(key, a).await
-            {
-                tracing::warn!(error = %e, "failed to persist activity stats");
-            }
+            persist_refresh(store, key, &schema, planner.as_ref(), &activity_by_node).await;
         }
 
         let body = format!(
@@ -1657,6 +1667,144 @@ mod tests {
         assert_eq!(plan.actual_rows, Some(487320.0));
         assert_eq!(plan.shared_hit_blocks, Some(8000));
         assert_eq!(plan.rows_removed_by_filter, Some(487278.0));
+    }
+
+    #[tokio::test]
+    async fn persist_refresh_writes_activity_for_primary() {
+        use dry_run_core::history::{DatabaseId, ProjectId};
+        use dry_run_core::schema::{
+            ActivityStatsSnapshot, IndexActivity, IndexActivityEntry, NodeIdentity, QualifiedName,
+            TableActivity, TableActivityEntry,
+        };
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = HistoryStore::open(&dir.path().join("history.db")).unwrap();
+        let key = SnapshotKey {
+            project_id: ProjectId("test".into()),
+            database_id: DatabaseId("test-db".into()),
+        };
+
+        let schema = test_snapshot();
+        let schema_hash = schema.content_hash.clone();
+
+        let activity = ActivityStatsSnapshot {
+            pg_version: schema.pg_version.clone(),
+            database: schema.database.clone(),
+            timestamp: chrono::Utc::now(),
+            content_hash: "act-h1".into(),
+            schema_ref_hash: schema_hash.clone(),
+            node: NodeIdentity {
+                label: "primary".into(),
+                host: "localhost".into(),
+                is_standby: false,
+                replication_lag_bytes: None,
+                stats_reset: None,
+            },
+            tables: vec![TableActivityEntry {
+                table: QualifiedName::new("public", "orders"),
+                activity: TableActivity {
+                    seq_scan: 1,
+                    idx_scan: 0,
+                    n_live_tup: 0,
+                    n_dead_tup: 0,
+                    last_vacuum: None,
+                    last_autovacuum: None,
+                    last_analyze: None,
+                    last_autoanalyze: None,
+                    vacuum_count: 0,
+                    autovacuum_count: 0,
+                    analyze_count: 0,
+                    autoanalyze_count: 0,
+                },
+            }],
+            indexes: vec![IndexActivityEntry {
+                index: QualifiedName::new("public", "orders_pkey"),
+                activity: IndexActivity {
+                    idx_scan: 0,
+                    idx_tup_read: 0,
+                    idx_tup_fetch: 0,
+                },
+            }],
+        };
+
+        let mut activity_by_node = std::collections::BTreeMap::new();
+        activity_by_node.insert("primary".to_string(), activity);
+
+        super::persist_refresh(&store, &key, &schema, None, &activity_by_node).await;
+
+        let bundle = store
+            .get_annotated(&key, SnapshotRef::Latest)
+            .await
+            .unwrap();
+        assert_eq!(bundle.schema.content_hash, schema_hash);
+        assert!(
+            bundle.activity_by_node.contains_key("primary"),
+            "persist_refresh should have written activity_stats for 'primary'"
+        );
+    }
+
+    // Integration test: surfaces refresh_schema's persist branch.
+    // Set DRYRUN_TEST_DATABASE_URL to a primary PG to enable; otherwise skipped.
+    #[tokio::test]
+    async fn refresh_schema_persists_all_three_kinds() {
+        let url = match std::env::var("DRYRUN_TEST_DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("skipping: set DRYRUN_TEST_DATABASE_URL to enable");
+                return;
+            }
+        };
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let history_path = dir.path().join("history.db");
+        let store = HistoryStore::open(&history_path).unwrap();
+        let key = SnapshotKey {
+            project_id: dry_run_core::history::ProjectId("test".into()),
+            database_id: dry_run_core::history::DatabaseId("test-db".into()),
+        };
+
+        let ctx = DryRun::connect(&url).await.expect("connect to test PG");
+        // Bootstrap server in offline mode, then attach live ctx via from_snapshot_with_db.
+        let bootstrap_schema = ctx.introspect_schema().await.expect("bootstrap introspect");
+        let server = DryRunServer::from_snapshot_with_db(
+            bootstrap_schema,
+            Some((url.as_str(), ctx)),
+            LintConfig::default(),
+            None,
+            "test",
+            vec![],
+        )
+        .with_history(
+            HistoryStore::open(&history_path).unwrap(),
+            Some(key.clone()),
+        );
+
+        server
+            .refresh_schema()
+            .await
+            .expect("refresh_schema should succeed");
+
+        // Cache should hold all three kinds.
+        let bundle = server.get_annotated().await.unwrap();
+        assert!(
+            bundle.activity_by_node.contains_key("primary"),
+            "in-memory cache must contain activity under 'primary'"
+        );
+
+        // History store should have persisted all three kinds.
+        let persisted = store
+            .get_annotated(&key, SnapshotRef::Latest)
+            .await
+            .expect("get_annotated from history");
+        assert!(
+            persisted.planner.is_some(),
+            "planner_stats row missing from history db"
+        );
+        assert!(
+            persisted.activity_by_node.contains_key("primary"),
+            "activity_stats row for 'primary' missing from history db \
+             (refresh_schema captured it in cache but never persisted)"
+        );
     }
 }
 
