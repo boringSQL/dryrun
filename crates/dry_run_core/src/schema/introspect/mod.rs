@@ -30,7 +30,8 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         .fetch_one(pool)
         .await?;
 
-    // Group 1: table-centric data.
+    // Group 1: table-centric data. Stats now live in PlannerStatsSnapshot /
+    // ActivityStatsSnapshot; introspect_schema is DDL-only.
     let (
         raw_tables,
         raw_columns,
@@ -38,13 +39,10 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         table_comments,
         column_comments,
         raw_indexes,
-        raw_table_stats,
-        raw_column_stats,
         raw_partitions,
         raw_partition_children,
         raw_policies,
         raw_triggers,
-        raw_index_stats,
     ) = tokio::try_join!(
         tables::fetch_tables(pool),
         tables::fetch_columns(pool),
@@ -52,17 +50,14 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         comments::fetch_table_comments(pool),
         comments::fetch_column_comments(pool),
         indexes::fetch_indexes(pool),
-        tables::fetch_table_stats(pool),
-        tables::fetch_column_stats(pool),
         partitions::fetch_partition_info(pool),
         partitions::fetch_partition_children(pool),
         policies::fetch_policies(pool),
         policies::fetch_triggers(pool),
-        indexes::fetch_index_stats(pool),
     )?;
 
     // Group 2: top-level objects.
-    let (enums, domains, composites, views, functions, extensions, gucs, is_standby) = tokio::try_join!(
+    let (enums, domains, composites, views, functions, extensions, gucs, _is_standby) = tokio::try_join!(
         catalog::fetch_enums(pool),
         catalog::fetch_domains(pool),
         catalog::fetch_composites(pool),
@@ -73,21 +68,6 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         fetch_is_standby(pool),
     )?;
 
-    let with_vacuum = raw_table_stats
-        .iter()
-        .filter(|s| s.last_autovacuum.is_some())
-        .count();
-    if with_vacuum == 0 && !raw_table_stats.is_empty() {
-        if is_standby {
-            info!("all vacuum timestamps are null;expected on standby");
-        } else {
-            tracing::warn!(
-                "all vacuum/analyze timestamps are null on primary! \
-                 check that the role has pg_read_all_stats privilege"
-            );
-        }
-    }
-
     let tables = assemble_tables(
         raw_tables,
         raw_columns,
@@ -95,13 +75,10 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         table_comments,
         column_comments,
         raw_indexes,
-        raw_table_stats,
-        raw_column_stats,
         raw_partitions,
         raw_partition_children,
         raw_policies,
         raw_triggers,
-        raw_index_stats,
     );
 
     let content_hash = compute_content_hash(&HashInput {
@@ -325,13 +302,10 @@ fn assemble_tables(
     table_comments: Vec<RawTableComment>,
     column_comments: Vec<RawColumnComment>,
     raw_indexes: Vec<RawIndex>,
-    raw_table_stats: Vec<RawTableStats>,
-    raw_column_stats: Vec<RawColumnStats>,
     raw_partitions: Vec<RawPartitionInfo>,
     raw_partition_children: Vec<RawPartitionChild>,
     raw_policies: Vec<RawPolicy>,
     raw_triggers: Vec<RawTrigger>,
-    raw_index_stats: Vec<RawIndexStats>,
 ) -> Vec<Table> {
     // --- Columns ---
     let mut columns_by_oid: HashMap<u32, Vec<Column>> = HashMap::new();
@@ -395,50 +369,9 @@ fn assemble_tables(
         }
     }
 
-    // --- Column stats ---
-    let mut col_stats_map: HashMap<(u32, String), ColumnStats> = HashMap::new();
-    for cs in raw_column_stats {
-        col_stats_map.insert(
-            (cs.table_oid, cs.column_name),
-            ColumnStats {
-                null_frac: cs.null_frac,
-                n_distinct: cs.n_distinct,
-                most_common_vals: cs.most_common_vals,
-                most_common_freqs: cs.most_common_freqs,
-                histogram_bounds: cs.histogram_bounds,
-                correlation: cs.correlation,
-            },
-        );
-    }
-
-    for (oid, cols) in &mut columns_by_oid {
-        for col in cols.iter_mut() {
-            if let Some(stats) = col_stats_map.remove(&(*oid, col.name.clone())) {
-                col.stats = Some(stats);
-            }
-        }
-    }
-
-    // --- Index stats ---
-    let mut idx_stats_map: HashMap<(u32, String), IndexStats> = HashMap::new();
-    for ris in raw_index_stats {
-        idx_stats_map.insert(
-            (ris.table_oid, ris.index_name),
-            IndexStats {
-                idx_scan: ris.idx_scan,
-                idx_tup_read: ris.idx_tup_read,
-                idx_tup_fetch: ris.idx_tup_fetch,
-                size: ris.size,
-                relpages: ris.relpages,
-                reltuples: ris.reltuples,
-            },
-        );
-    }
-
     // --- Indexes ---
     let mut indexes_by_oid: HashMap<u32, Vec<Index>> = HashMap::new();
     for ri in raw_indexes {
-        let stats = idx_stats_map.remove(&(ri.table_oid, ri.name.clone()));
         indexes_by_oid.entry(ri.table_oid).or_default().push(Index {
             name: ri.name,
             columns: ri.columns,
@@ -450,31 +383,9 @@ fn assemble_tables(
             definition: ri.definition,
             is_valid: ri.is_valid,
             backs_constraint: ri.backs_constraint,
-            stats,
+            stats: None,
         });
     }
-
-    // --- Table stats ---
-    let stats_by_oid: HashMap<u32, TableStats> = raw_table_stats
-        .into_iter()
-        .map(|s| {
-            (
-                s.table_oid,
-                TableStats {
-                    reltuples: s.reltuples,
-                    relpages: s.relpages,
-                    dead_tuples: s.dead_tuples,
-                    last_vacuum: s.last_vacuum,
-                    last_autovacuum: s.last_autovacuum,
-                    last_analyze: s.last_analyze,
-                    last_autoanalyze: s.last_autoanalyze,
-                    seq_scan: s.seq_scan,
-                    idx_scan: s.idx_scan,
-                    table_size: s.table_size,
-                },
-            )
-        })
-        .collect();
 
     // --- Partition info ---
     let mut children_by_parent: HashMap<u32, Vec<PartitionChild>> = HashMap::new();
@@ -543,7 +454,7 @@ fn assemble_tables(
             constraints: constraints_by_oid.remove(&rt.oid).unwrap_or_default(),
             indexes: indexes_by_oid.remove(&rt.oid).unwrap_or_default(),
             comment: table_comment_map.get(&rt.oid).cloned(),
-            stats: stats_by_oid.get(&rt.oid).cloned(),
+            stats: None,
             partition_info: partition_info_by_oid.get(&rt.oid).cloned(),
             policies: policies_by_oid.remove(&rt.oid).unwrap_or_default(),
             triggers: triggers_by_oid.remove(&rt.oid).unwrap_or_default(),
