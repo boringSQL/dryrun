@@ -187,7 +187,6 @@ pub enum NodeSelector {
 pub struct AnnotatedSchema<'a> {
     pub schema: &'a SchemaSnapshot,
     pub planner: Option<&'a PlannerStatsSnapshot>,
-    pub activity: Option<&'a ActivityStatsSnapshot>,
     pub merged: Option<MergedActivity<'a>>,
 }
 
@@ -237,6 +236,21 @@ impl<'a> MergedActivity<'a> {
                     .map(|e| e.activity.seq_scan)
             })
             .sum()
+    }
+
+    pub fn seq_scan_per_node(&self, t: &QualifiedName) -> Vec<(String, i64)> {
+        self.nodes
+            .iter()
+            .map(|n| {
+                let scan = n
+                    .tables
+                    .iter()
+                    .find(|e| &e.table == t)
+                    .map(|e| e.activity.seq_scan)
+                    .unwrap_or(0);
+                (n.node.label.clone(), scan)
+            })
+            .collect()
     }
 
     // max across nodes of max(last_vacuum, last_autovacuum) — "did anything vacuum"
@@ -297,10 +311,11 @@ impl<'a> MergedActivity<'a> {
     }
 }
 
-// Accessors that read from planner (sizing / column histograms) and from
-// activity (counters), with a uniform fall-through: merged across nodes →
-// single-node activity → empty. Consumers don't have to branch on
-// "do I have one node or many".
+// Planner reads serve sizing / column histograms; activity reads delegate
+// to MergedActivity, which transparently aggregates across whatever nodes
+// the snapshot has captured (one or many). When no activity is present
+// the accessors return 0 / None / empty, so consumers never have to
+// branch on "is there activity data".
 impl<'a> AnnotatedSchema<'a> {
     pub fn reltuples(&self, t: &QualifiedName) -> Option<f64> {
         self.planner?
@@ -343,125 +358,39 @@ impl<'a> AnnotatedSchema<'a> {
     }
 
     pub fn idx_scan_sum(&self, ix: &QualifiedName) -> i64 {
-        if let Some(m) = &self.merged {
-            return m.idx_scan_sum(ix);
-        }
-        self.activity
-            .and_then(|a| a.indexes.iter().find(|e| &e.index == ix))
-            .map(|e| e.activity.idx_scan)
-            .unwrap_or(0)
+        self.merged.as_ref().map_or(0, |m| m.idx_scan_sum(ix))
     }
 
     pub fn idx_scan_per_node(&self, ix: &QualifiedName) -> Vec<(String, i64)> {
-        if let Some(m) = &self.merged {
-            return m.idx_scan_per_node(ix);
-        }
-        match self.activity {
-            Some(a) => {
-                let scan = a
-                    .indexes
-                    .iter()
-                    .find(|e| &e.index == ix)
-                    .map(|e| e.activity.idx_scan)
-                    .unwrap_or(0);
-                vec![(a.node.label.clone(), scan)]
-            }
-            None => Vec::new(),
-        }
+        self.merged
+            .as_ref()
+            .map_or_else(Vec::new, |m| m.idx_scan_per_node(ix))
     }
 
-    // Per-node breakdown of seq_scan counters for a single table — used by
-    // tools that want to surface "this replica is doing the unindexed work,
-    // the others aren't" patterns. Ordering follows the BTreeMap key order
-    // when more than one node is present, so output is stable across runs.
     pub fn seq_scan_per_node(&self, t: &QualifiedName) -> Vec<(String, i64)> {
-        if let Some(m) = &self.merged {
-            return m
-                .nodes
-                .iter()
-                .map(|n| {
-                    let scan = n
-                        .tables
-                        .iter()
-                        .find(|e| &e.table == t)
-                        .map(|e| e.activity.seq_scan)
-                        .unwrap_or(0);
-                    (n.node.label.clone(), scan)
-                })
-                .collect();
-        }
-        match self.activity {
-            Some(a) => {
-                let scan = a
-                    .tables
-                    .iter()
-                    .find(|e| &e.table == t)
-                    .map(|e| e.activity.seq_scan)
-                    .unwrap_or(0);
-                vec![(a.node.label.clone(), scan)]
-            }
-            None => Vec::new(),
-        }
+        self.merged
+            .as_ref()
+            .map_or_else(Vec::new, |m| m.seq_scan_per_node(t))
     }
 
     pub fn seq_scan_sum(&self, t: &QualifiedName) -> i64 {
-        if let Some(m) = &self.merged {
-            return m.seq_scan_sum(t);
-        }
-        self.activity
-            .and_then(|a| a.tables.iter().find(|e| &e.table == t))
-            .map(|e| e.activity.seq_scan)
-            .unwrap_or(0)
+        self.merged.as_ref().map_or(0, |m| m.seq_scan_sum(t))
     }
 
     pub fn n_dead_tup_sum(&self, t: &QualifiedName) -> i64 {
-        if let Some(m) = &self.merged {
-            return m.n_dead_tup_sum(t);
-        }
-        self.activity
-            .and_then(|a| a.tables.iter().find(|e| &e.table == t))
-            .map(|e| e.activity.n_dead_tup)
-            .unwrap_or(0)
+        self.merged.as_ref().map_or(0, |m| m.n_dead_tup_sum(t))
     }
 
     pub fn last_vacuum_max(&self, t: &QualifiedName) -> Option<DateTime<Utc>> {
-        if let Some(m) = &self.merged {
-            return m.last_vacuum_max(t);
-        }
-        let e = self
-            .activity
-            .and_then(|a| a.tables.iter().find(|e| &e.table == t))?;
-        match (e.activity.last_vacuum, e.activity.last_autovacuum) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
+        self.merged.as_ref().and_then(|m| m.last_vacuum_max(t))
     }
 
     pub fn last_analyze_max(&self, t: &QualifiedName) -> Option<DateTime<Utc>> {
-        if let Some(m) = &self.merged {
-            return m.last_analyze_max(t);
-        }
-        let e = self
-            .activity
-            .and_then(|a| a.tables.iter().find(|e| &e.table == t))?;
-        match (e.activity.last_analyze, e.activity.last_autoanalyze) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
+        self.merged.as_ref().and_then(|m| m.last_analyze_max(t))
     }
 
     pub fn vacuum_count_sum(&self, t: &QualifiedName) -> i64 {
-        if let Some(m) = &self.merged {
-            return m.vacuum_count_sum(t);
-        }
-        self.activity
-            .and_then(|a| a.tables.iter().find(|e| &e.table == t))
-            .map(|e| e.activity.vacuum_count + e.activity.autovacuum_count)
-            .unwrap_or(0)
+        self.merged.as_ref().map_or(0, |m| m.vacuum_count_sum(t))
     }
 }
 
@@ -473,19 +402,11 @@ pub struct AnnotatedSnapshot {
 }
 
 impl AnnotatedSnapshot {
-    pub fn view(&self, node_label: Option<&str>) -> AnnotatedSchema<'_> {
-        let label = node_label.unwrap_or("primary");
-        let activity = self.activity_by_node.get(label);
-        let merged = if self.activity_by_node.len() > 1 {
-            self.merged(&NodeSelector::All)
-        } else {
-            None
-        };
+    pub fn view(&self) -> AnnotatedSchema<'_> {
         AnnotatedSchema {
             schema: &self.schema,
             planner: self.planner.as_ref(),
-            activity,
-            merged,
+            merged: self.merged(&NodeSelector::All),
         }
     }
 

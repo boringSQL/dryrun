@@ -579,7 +579,7 @@ mod tests {
     fn add_column_no_default_safe() {
         let checks = check_migration(
             "ALTER TABLE orders ADD COLUMN notes text",
-            &empty_annotated().view(None),
+            &empty_annotated().view(),
             Some(&pg17()),
         )
         .unwrap();
@@ -592,7 +592,7 @@ mod tests {
     fn add_column_with_default() {
         let checks = check_migration(
             "ALTER TABLE orders ADD COLUMN status text DEFAULT 'pending'",
-            &empty_annotated().view(None),
+            &empty_annotated().view(),
             Some(&pg17()),
         )
         .unwrap();
@@ -605,7 +605,7 @@ mod tests {
     fn create_index_without_concurrently() {
         let checks = check_migration(
             "CREATE INDEX idx_orders_status ON orders(status)",
-            &empty_annotated().view(None),
+            &empty_annotated().view(),
             Some(&pg17()),
         )
         .unwrap();
@@ -618,7 +618,7 @@ mod tests {
     fn create_index_concurrently_safe() {
         let checks = check_migration(
             "CREATE INDEX CONCURRENTLY idx_orders_status ON orders(status)",
-            &empty_annotated().view(None),
+            &empty_annotated().view(),
             Some(&pg17()),
         )
         .unwrap();
@@ -635,7 +635,7 @@ mod tests {
         };
         let checks = check_migration(
             "ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
-            &empty_annotated().view(None),
+            &empty_annotated().view(),
             Some(&pg12),
         )
         .unwrap();
@@ -649,7 +649,7 @@ mod tests {
     fn alter_column_type_dangerous() {
         let checks = check_migration(
             "ALTER TABLE orders ALTER COLUMN id TYPE bigint",
-            &empty_annotated().view(None),
+            &empty_annotated().view(),
             Some(&pg17()),
         )
         .unwrap();
@@ -661,7 +661,7 @@ mod tests {
     fn drop_column_safe() {
         let checks = check_migration(
             "ALTER TABLE orders DROP COLUMN legacy",
-            &empty_annotated().view(None),
+            &empty_annotated().view(),
             Some(&pg17()),
         )
         .unwrap();
@@ -673,7 +673,7 @@ mod tests {
     fn includes_table_size() {
         let checks = check_migration(
             "ALTER TABLE orders ADD COLUMN x text",
-            &empty_annotated().view(None),
+            &empty_annotated().view(),
             Some(&pg17()),
         )
         .unwrap();

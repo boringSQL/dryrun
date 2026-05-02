@@ -420,7 +420,6 @@ mod tests {
         AnnotatedSchema {
             schema,
             planner: None,
-            activity: None,
             merged: None,
         }
     }

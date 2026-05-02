@@ -44,7 +44,7 @@ pub fn format_node_table_breakdown(
     }
 
     let qn = QualifiedName::new(schema, table);
-    let view = annotated.view(None);
+    let view = annotated.view();
 
     // Pull sizing once — it's the same regardless of which node we're
     // displaying. `unwrap_or` zeros so the table still renders cleanly
