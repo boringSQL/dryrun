@@ -1,8 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::snapshot::{AnnotatedSchema, QualifiedName};
-
 pub(super) fn null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -280,49 +278,4 @@ pub struct GucSetting {
     pub name: String,
     pub setting: String,
     pub unit: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BloatedIndexEntry {
-    pub schema: String,
-    pub table: String,
-    pub index_name: String,
-    pub bloat_ratio: f64,
-    pub actual_pages: i64,
-    pub expected_pages: i64,
-    pub definition: String,
-}
-
-pub fn detect_bloated_indexes(
-    annotated: &AnnotatedSchema<'_>,
-    threshold: f64,
-) -> Vec<BloatedIndexEntry> {
-    let mut entries = Vec::new();
-
-    for table in &annotated.schema.tables {
-        for idx in &table.indexes {
-            let qn = QualifiedName::new(&table.schema, &idx.name);
-            let sizing = annotated.index_sizing(&qn);
-            if let Some(est) = super::bloat::estimate_index_bloat(idx, sizing, table)
-                && est.bloat_ratio > threshold
-            {
-                entries.push(BloatedIndexEntry {
-                    schema: table.schema.clone(),
-                    table: table.name.clone(),
-                    index_name: idx.name.clone(),
-                    bloat_ratio: est.bloat_ratio,
-                    actual_pages: est.actual_pages,
-                    expected_pages: est.expected_pages,
-                    definition: idx.definition.clone(),
-                });
-            }
-        }
-    }
-
-    entries.sort_by(|a, b| {
-        b.bloat_ratio
-            .partial_cmp(&a.bloat_ratio)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    entries
 }
