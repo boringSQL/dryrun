@@ -872,4 +872,177 @@ mod trait_tests {
             ("p", "billing")
         );
     }
+
+    use crate::schema::{
+        ActivityStatsSnapshot, IndexActivity, IndexActivityEntry, NodeIdentity,
+        PlannerStatsSnapshot, QualifiedName, TableActivity, TableActivityEntry,
+    };
+
+    fn make_planner(schema_ref: &str, db: &str, hash: &str) -> PlannerStatsSnapshot {
+        PlannerStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: db.into(),
+            timestamp: Utc::now(),
+            content_hash: hash.into(),
+            schema_ref_hash: schema_ref.into(),
+            tables: vec![],
+            columns: vec![],
+            indexes: vec![],
+        }
+    }
+
+    fn make_activity(schema_ref: &str, db: &str, label: &str, hash: &str) -> ActivityStatsSnapshot {
+        ActivityStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: db.into(),
+            timestamp: Utc::now(),
+            content_hash: hash.into(),
+            schema_ref_hash: schema_ref.into(),
+            node: NodeIdentity {
+                label: label.into(),
+                host: format!("host-{label}"),
+                is_standby: label != "primary",
+                replication_lag_bytes: None,
+                stats_reset: None,
+            },
+            tables: vec![TableActivityEntry {
+                table: QualifiedName::new("public", "orders"),
+                activity: TableActivity {
+                    seq_scan: 1,
+                    idx_scan: 2,
+                    n_live_tup: 0,
+                    n_dead_tup: 0,
+                    last_vacuum: None,
+                    last_autovacuum: None,
+                    last_analyze: None,
+                    last_autoanalyze: None,
+                    vacuum_count: 0,
+                    autovacuum_count: 0,
+                    analyze_count: 0,
+                    autoanalyze_count: 0,
+                },
+            }],
+            indexes: vec![IndexActivityEntry {
+                index: QualifiedName::new("public", "orders_pkey"),
+                activity: IndexActivity {
+                    idx_scan: 0,
+                    idx_tup_read: 0,
+                    idx_tup_fetch: 0,
+                },
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_get_filters_to_kind_schema() {
+        // Regression: planner_stats rows must not bleed into SnapshotStore::get(Latest).
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+
+        let schema = make_snap("schema-h1", "auth");
+        store.put(&k, &schema).await.unwrap();
+
+        // Insert a newer planner_stats row referring to the schema.
+        let planner = make_planner("schema-h1", "auth", "planner-h1");
+        store.put_planner_stats(&k, &planner).await.unwrap();
+
+        let got = store.get(&k, SnapshotRef::Latest).await.unwrap();
+        assert_eq!(got.content_hash, "schema-h1");
+    }
+
+    #[tokio::test]
+    async fn get_annotated_joins_schema_planner_and_single_node_activity() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+
+        let schema = make_snap("schema-h1", "auth");
+        store.put(&k, &schema).await.unwrap();
+        let planner = make_planner("schema-h1", "auth", "planner-h1");
+        store.put_planner_stats(&k, &planner).await.unwrap();
+        let primary = make_activity("schema-h1", "auth", "primary", "act-primary-1");
+        store.put_activity_stats(&k, &primary).await.unwrap();
+
+        let bundle = store.get_annotated(&k, SnapshotRef::Latest).await.unwrap();
+        assert_eq!(bundle.schema.content_hash, "schema-h1");
+        assert!(bundle.planner.is_some());
+        assert_eq!(bundle.activity_by_node.len(), 1);
+        assert!(bundle.activity_by_node.contains_key("primary"));
+    }
+
+    #[tokio::test]
+    async fn get_annotated_returns_multiple_activity_nodes() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+        store
+            .put(&k, &make_snap("schema-h1", "auth"))
+            .await
+            .unwrap();
+        for label in ["primary", "replica1", "replica2"] {
+            let a = make_activity("schema-h1", "auth", label, &format!("act-{label}"));
+            store.put_activity_stats(&k, &a).await.unwrap();
+        }
+
+        let bundle = store.get_annotated(&k, SnapshotRef::Latest).await.unwrap();
+        assert_eq!(bundle.activity_by_node.len(), 3);
+        let labels: Vec<&str> = bundle.node_labels().collect();
+        assert_eq!(labels, vec!["primary", "replica1", "replica2"]);
+    }
+
+    #[tokio::test]
+    async fn get_annotated_excludes_planner_with_stale_schema_ref() {
+        // Planner attached to schema A. New schema B replaces A as latest.
+        // get_annotated(Latest) must return planner=None — strict-match on schema_ref_hash.
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+
+        store.put(&k, &make_snap("schema-A", "auth")).await.unwrap();
+        let planner = make_planner("schema-A", "auth", "planner-A");
+        store.put_planner_stats(&k, &planner).await.unwrap();
+
+        // small sleep to ensure later timestamp ordering
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        store.put(&k, &make_snap("schema-B", "auth")).await.unwrap();
+
+        let bundle = store.get_annotated(&k, SnapshotRef::Latest).await.unwrap();
+        assert_eq!(bundle.schema.content_hash, "schema-B");
+        assert!(
+            bundle.planner.is_none(),
+            "planner attached to old schema must not bleed onto new schema"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_annotated_with_no_stats_returns_empty_bundle() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+        store
+            .put(&k, &make_snap("schema-h1", "auth"))
+            .await
+            .unwrap();
+
+        let bundle = store.get_annotated(&k, SnapshotRef::Latest).await.unwrap();
+        assert!(bundle.planner.is_none());
+        assert!(bundle.activity_by_node.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_annotated_picks_latest_per_node_label() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+        store
+            .put(&k, &make_snap("schema-h1", "auth"))
+            .await
+            .unwrap();
+
+        // Two activity rows for the same label; only the latest should appear.
+        let first = make_activity("schema-h1", "auth", "primary", "act-1");
+        store.put_activity_stats(&k, &first).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let second = make_activity("schema-h1", "auth", "primary", "act-2");
+        store.put_activity_stats(&k, &second).await.unwrap();
+
+        let bundle = store.get_annotated(&k, SnapshotRef::Latest).await.unwrap();
+        let primary = bundle.activity_by_node.get("primary").unwrap();
+        assert_eq!(primary.content_hash, "act-2");
+    }
 }

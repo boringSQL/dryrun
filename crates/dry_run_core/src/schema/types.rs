@@ -1142,6 +1142,251 @@ mod tests {
             NodeSelector::All => panic!("wrong variant"),
         }
     }
+
+    fn activity_for(
+        label: &str,
+        idx_scan: i64,
+        seq_scan: i64,
+        n_dead_tup: i64,
+        last_vacuum: Option<DateTime<Utc>>,
+        last_autovacuum: Option<DateTime<Utc>>,
+        stats_reset: Option<DateTime<Utc>>,
+    ) -> ActivityStatsSnapshot {
+        ActivityStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "accounts".into(),
+            timestamp: Utc::now(),
+            content_hash: format!("hash-{label}"),
+            schema_ref_hash: "schema-h".into(),
+            node: NodeIdentity {
+                label: label.into(),
+                host: format!("10.0.0.{label}"),
+                is_standby: label != "primary",
+                replication_lag_bytes: None,
+                stats_reset,
+            },
+            tables: vec![TableActivityEntry {
+                table: QualifiedName::new("public", "orders"),
+                activity: TableActivity {
+                    seq_scan,
+                    idx_scan,
+                    n_live_tup: 0,
+                    n_dead_tup,
+                    last_vacuum,
+                    last_autovacuum,
+                    last_analyze: None,
+                    last_autoanalyze: None,
+                    vacuum_count: 0,
+                    autovacuum_count: 0,
+                    analyze_count: 0,
+                    autoanalyze_count: 0,
+                },
+            }],
+            indexes: vec![IndexActivityEntry {
+                index: QualifiedName::new("public", "orders_pkey"),
+                activity: IndexActivity {
+                    idx_scan,
+                    idx_tup_read: 0,
+                    idx_tup_fetch: 0,
+                },
+            }],
+        }
+    }
+
+    fn empty_schema_snap() -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "accounts".into(),
+            timestamp: Utc::now(),
+            content_hash: "schema-h".into(),
+            source: None,
+            tables: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
+            node_stats: vec![],
+        }
+    }
+
+    fn snap_with_nodes(nodes: Vec<ActivityStatsSnapshot>) -> AnnotatedSnapshot {
+        let mut activity_by_node = BTreeMap::new();
+        for n in nodes {
+            activity_by_node.insert(n.node.label.clone(), n);
+        }
+        AnnotatedSnapshot {
+            schema: empty_schema_snap(),
+            planner: None,
+            activity_by_node,
+        }
+    }
+
+    #[test]
+    fn merged_activity_idx_scan_sum_across_nodes() {
+        let snap = snap_with_nodes(vec![
+            activity_for("primary", 10, 0, 0, None, None, None),
+            activity_for("replica1", 20, 0, 0, None, None, None),
+            activity_for("replica2", 5, 0, 0, None, None, None),
+        ]);
+        let merged = snap.merged(&NodeSelector::All).expect("3 nodes");
+        let ix = QualifiedName::new("public", "orders_pkey");
+        assert_eq!(merged.idx_scan_sum(&ix), 35);
+    }
+
+    #[test]
+    fn merged_activity_idx_scan_per_node_returns_breakdown() {
+        let snap = snap_with_nodes(vec![
+            activity_for("primary", 10, 0, 0, None, None, None),
+            activity_for("replica1", 20, 0, 0, None, None, None),
+        ]);
+        let merged = snap.merged(&NodeSelector::All).unwrap();
+        let ix = QualifiedName::new("public", "orders_pkey");
+        let per_node = merged.idx_scan_per_node(&ix);
+        // BTreeMap ordering: primary < replica1
+        assert_eq!(
+            per_node,
+            vec![("primary".into(), 10), ("replica1".into(), 20)]
+        );
+    }
+
+    #[test]
+    fn merged_activity_seq_scan_sum_across_nodes() {
+        let snap = snap_with_nodes(vec![
+            activity_for("primary", 0, 3, 0, None, None, None),
+            activity_for("replica1", 0, 7, 0, None, None, None),
+        ]);
+        let merged = snap.merged(&NodeSelector::All).unwrap();
+        let t = QualifiedName::new("public", "orders");
+        assert_eq!(merged.seq_scan_sum(&t), 10);
+    }
+
+    #[test]
+    fn merged_activity_n_dead_tup_sums_across_nodes() {
+        let snap = snap_with_nodes(vec![
+            activity_for("primary", 0, 0, 100, None, None, None),
+            activity_for("replica1", 0, 0, 50, None, None, None),
+        ]);
+        let merged = snap.merged(&NodeSelector::All).unwrap();
+        let t = QualifiedName::new("public", "orders");
+        assert_eq!(merged.n_dead_tup_sum(&t), 150);
+    }
+
+    #[test]
+    fn merged_activity_last_vacuum_max_picks_max_across_nodes_and_kinds() {
+        let early = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mid = "2026-02-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let late = "2026-03-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let snap = snap_with_nodes(vec![
+            // primary: manual at early, autovacuum at mid → node max = mid
+            activity_for("primary", 0, 0, 0, Some(early), Some(mid), None),
+            // replica1: autovacuum at late → node max = late
+            activity_for("replica1", 0, 0, 0, None, Some(late), None),
+        ]);
+        let merged = snap.merged(&NodeSelector::All).unwrap();
+        let t = QualifiedName::new("public", "orders");
+        assert_eq!(merged.last_vacuum_max(&t), Some(late));
+    }
+
+    #[test]
+    fn merged_activity_last_vacuum_max_returns_none_when_never_vacuumed() {
+        let snap = snap_with_nodes(vec![
+            activity_for("primary", 0, 0, 0, None, None, None),
+            activity_for("replica1", 0, 0, 0, None, None, None),
+        ]);
+        let merged = snap.merged(&NodeSelector::All).unwrap();
+        let t = QualifiedName::new("public", "orders");
+        assert_eq!(merged.last_vacuum_max(&t), None);
+    }
+
+    #[test]
+    fn annotated_snapshot_view_defaults_to_primary() {
+        let snap = snap_with_nodes(vec![
+            activity_for("primary", 1, 0, 0, None, None, None),
+            activity_for("replica1", 2, 0, 0, None, None, None),
+        ]);
+        let view = snap.view(None);
+        let activity = view.activity.expect("primary should resolve by default");
+        assert_eq!(activity.node.label, "primary");
+    }
+
+    #[test]
+    fn annotated_snapshot_view_unknown_label_yields_no_activity() {
+        let snap = snap_with_nodes(vec![activity_for("primary", 1, 0, 0, None, None, None)]);
+        let view = snap.view(Some("ghost"));
+        assert!(view.activity.is_none());
+    }
+
+    #[test]
+    fn annotated_snapshot_view_single_node_has_no_merged() {
+        let snap = snap_with_nodes(vec![activity_for("primary", 1, 0, 0, None, None, None)]);
+        let view = snap.view(None);
+        assert!(view.merged.is_none());
+    }
+
+    #[test]
+    fn annotated_snapshot_view_multi_node_populates_merged() {
+        let snap = snap_with_nodes(vec![
+            activity_for("primary", 1, 0, 0, None, None, None),
+            activity_for("replica1", 2, 0, 0, None, None, None),
+        ]);
+        let view = snap.view(None);
+        let merged = view.merged.expect("multi-node should produce merged view");
+        assert_eq!(merged.nodes.len(), 2);
+    }
+
+    #[test]
+    fn annotated_snapshot_merged_partial_when_any_node_lacks_reset() {
+        let reset = "2026-04-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let snap = snap_with_nodes(vec![
+            activity_for("primary", 0, 0, 0, None, None, Some(reset)),
+            activity_for("replica1", 0, 0, 0, None, None, None),
+        ]);
+        let merged = snap.merged(&NodeSelector::All).unwrap();
+        assert!(
+            merged.partial,
+            "partial should be true when a node lacks stats_reset"
+        );
+    }
+
+    #[test]
+    fn annotated_snapshot_merged_window_start_is_min_reset() {
+        let early = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let later = "2026-02-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let snap = snap_with_nodes(vec![
+            activity_for("primary", 0, 0, 0, None, None, Some(later)),
+            activity_for("replica1", 0, 0, 0, None, None, Some(early)),
+        ]);
+        let merged = snap.merged(&NodeSelector::All).unwrap();
+        assert_eq!(merged.window_start, early);
+        assert!(!merged.partial);
+    }
+
+    #[test]
+    fn annotated_snapshot_merged_node_selector_some_filters() {
+        let snap = snap_with_nodes(vec![
+            activity_for("primary", 1, 0, 0, None, None, None),
+            activity_for("replica1", 2, 0, 0, None, None, None),
+            activity_for("replica2", 4, 0, 0, None, None, None),
+        ]);
+        let merged = snap
+            .merged(&NodeSelector::Some(vec![
+                "replica1".into(),
+                "replica2".into(),
+            ]))
+            .unwrap();
+        let ix = QualifiedName::new("public", "orders_pkey");
+        assert_eq!(merged.idx_scan_sum(&ix), 6);
+        assert_eq!(merged.nodes.len(), 2);
+    }
+
+    #[test]
+    fn annotated_snapshot_merged_returns_none_for_empty_selector() {
+        let snap = snap_with_nodes(vec![]);
+        assert!(snap.merged(&NodeSelector::All).is_none());
+    }
 }
 
 // use aggregated multi-node stats over table-level stats
