@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::types::{Column, ColumnStats};
+use super::types::ColumnStats;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ColumnProfile {
@@ -18,9 +18,21 @@ pub struct ColumnProfile {
     pub note: Option<String>,
 }
 
-/// Build a human-readable profile for a single column.
-pub fn profile_column(col: &Column, table_rows: f64) -> Option<ColumnProfile> {
-    let s = col.stats.as_ref()?;
+// Build a human-readable profile for a single column.
+//
+// Decoupled from `&Column` after the snapshot split — column stats now
+// live in `PlannerStatsSnapshot.columns`, not on the DDL node — so we take
+// the type name and the stats reference separately. Callers (typically MCP
+// tool bodies) thread the stats via `annotated.column_stats(qn, col_name)`,
+// which returns `None` when no planner snapshot exists yet; in that case
+// the profiler simply returns `None` and the consumer skips that column.
+pub fn profile_column(
+    col_name: &str,
+    type_name: &str,
+    stats: Option<&ColumnStats>,
+    table_rows: f64,
+) -> Option<ColumnProfile> {
+    let s = stats?;
 
     Some(ColumnProfile {
         cardinality: profile_cardinality(s, table_rows),
@@ -29,13 +41,18 @@ pub fn profile_column(col: &Column, table_rows: f64) -> Option<ColumnProfile> {
         physical_order: profile_correlation(s),
         value_range: profile_range(s),
         top_values: parse_top_values(s, 5),
-        note: profile_note(col, s, table_rows),
+        note: profile_note(col_name, type_name, s, table_rows),
     })
 }
 
-/// Estimated selectivity (0..1) for equality predicate on this column.
-pub fn column_selectivity(col: &Column, table_rows: f64) -> f64 {
-    let s = match col.stats.as_ref() {
+// Estimated selectivity (0..1) for an equality predicate on this column.
+//
+// Same shape change as `profile_column` — takes `Option<&ColumnStats>`
+// directly rather than reaching into a `&Column`. Returns the neutral
+// 0.5 default when stats are missing, preserving the legacy behavior:
+// callers don't have to special-case the no-data path.
+pub fn column_selectivity(stats: Option<&ColumnStats>, table_rows: f64) -> f64 {
+    let s = match stats {
         Some(s) => s,
         None => return 0.5,
     };
@@ -206,13 +223,18 @@ fn parse_top_values(s: &ColumnStats, limit: usize) -> Vec<String> {
         .collect()
 }
 
-fn profile_note(col: &Column, s: &ColumnStats, table_rows: f64) -> Option<String> {
+fn profile_note(
+    _col_name: &str,
+    type_name: &str,
+    s: &ColumnStats,
+    table_rows: f64,
+) -> Option<String> {
     // low-cardinality text column -> suggest enum
     if let Some(nd) = s.n_distinct
         && nd > 0.0
         && nd <= 10.0
     {
-        let t = col.type_name.to_lowercase();
+        let t = type_name.to_lowercase();
         if t.contains("text") || t.contains("varchar") || t.contains("character varying") {
             return Some("Consider using an enum type".to_string());
         }
@@ -320,20 +342,11 @@ mod tests {
         }
     }
 
-    fn make_col(type_name: &str, stats: Option<ColumnStats>) -> Column {
-        Column {
-            name: "test_col".to_string(),
-            ordinal: 1,
-            type_name: type_name.to_string(),
-            nullable: true,
-            default: None,
-            identity: None,
-            generated: None,
-            comment: None,
-            statistics_target: None,
-            stats,
-        }
-    }
+    // The legacy `make_col` helper went away with the signature change —
+    // `Column` import is gone too. Test inputs now build `ColumnStats`
+    // directly and hand them to `profile_column` / `column_selectivity`,
+    // which mirrors how production code threads them via
+    // `AnnotatedSchema::column_stats`.
 
     #[test]
     fn test_parse_pg_array_simple() {
@@ -388,23 +401,25 @@ mod tests {
 
     #[test]
     fn test_column_selectivity_negative_distinct() {
-        let col = make_col("integer", Some(make_stats(Some(-0.5))));
-        let sel = column_selectivity(&col, 10000.0);
+        let s = make_stats(Some(-0.5));
+        let sel = column_selectivity(Some(&s), 10000.0);
         // -0.5 -> 5000 distinct -> selectivity 0.0002
         assert!((sel - 0.0002).abs() < 0.0001);
     }
 
     #[test]
     fn test_column_selectivity_positive_distinct() {
-        let col = make_col("integer", Some(make_stats(Some(100.0))));
-        let sel = column_selectivity(&col, 10000.0);
+        let s = make_stats(Some(100.0));
+        let sel = column_selectivity(Some(&s), 10000.0);
         assert!((sel - 0.01).abs() < 0.0001);
     }
 
     #[test]
     fn test_column_selectivity_no_stats() {
-        let col = make_col("integer", None);
-        assert_eq!(column_selectivity(&col, 1000.0), 0.5);
+        // Degradation path — when the planner snapshot hasn't been
+        // captured yet, callers pass `None` and we fall back to the
+        // neutral 0.5 default rather than refusing to estimate.
+        assert_eq!(column_selectivity(None, 1000.0), 0.5);
     }
 
     #[test]
@@ -470,8 +485,7 @@ mod tests {
     fn test_profile_note_enum_suggestion() {
         let mut s = make_stats(Some(3.0));
         s.null_frac = Some(0.0);
-        let col = make_col("text", Some(s));
-        let note = profile_note(&col, col.stats.as_ref().unwrap(), 1000.0);
+        let note = profile_note("status", "text", &s, 1000.0);
         assert_eq!(note, Some("Consider using an enum type".to_string()));
     }
 
@@ -479,19 +493,31 @@ mod tests {
     fn test_profile_note_high_nulls() {
         let mut s = make_stats(Some(100.0));
         s.null_frac = Some(0.9);
-        let col = make_col("integer", Some(s));
-        let note = profile_note(&col, col.stats.as_ref().unwrap(), 1000.0);
+        let note = profile_note("optional_field", "integer", &s, 1000.0);
         assert!(note.unwrap().contains("partial index"));
     }
 
     #[test]
     fn test_profile_column_returns_none_without_stats() {
-        let col = make_col("integer", None);
-        assert!(profile_column(&col, 1000.0).is_none());
+        // No planner snapshot for this column → no profile produced.
+        // Mirrors the production path where MCP tools call
+        // `annotated.column_stats(qn, col_name)` and pass through whatever
+        // it returns.
+        assert!(profile_column("test_col", "integer", None, 1000.0).is_none());
     }
 
     #[test]
     fn test_profile_column_returns_some_with_stats() {
+        let s = make_stats(Some(50.0));
+        let p = profile_column("test_col", "integer", Some(&s), 1000.0)
+            .expect("profile should build when stats present");
+        assert!(p.cardinality.contains("low"));
+    }
+
+    #[test]
+    fn test_profile_column_full_when_rich_stats() {
+        // Rich-stats case — every field populated, exercises every
+        // sub-formatter inside `profile_column`.
         let s = ColumnStats {
             null_frac: Some(0.1),
             n_distinct: Some(-0.8),
@@ -500,8 +526,7 @@ mod tests {
             histogram_bounds: Some("{1,100}".to_string()),
             correlation: Some(0.99),
         };
-        let col = make_col("integer", Some(s));
-        let p = profile_column(&col, 10000.0).unwrap();
+        let p = profile_column("col", "integer", Some(&s), 10000.0).unwrap();
         assert!(p.cardinality.contains("high"));
         assert_eq!(p.nulls, "10.0% (~1000 rows)");
         assert!(p.physical_order.is_some());

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::jit;
-use crate::schema::SchemaSnapshot;
+use crate::schema::{AnnotatedSchema, QualifiedName, SchemaSnapshot};
 use crate::version::PgVersion;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,9 +28,15 @@ pub enum SafetyRating {
     Dangerous,
 }
 
+// Inspect a DDL string and emit safety / lock-impact checks for each
+// statement. Takes the annotated view because two of the inner analyses
+// reach for stats: `lookup_table_stats` synthesizes the "(2 GB, ~50M
+// rows)" flavor text from planner sizing, and the SET NOT NULL path
+// reads column null_frac to predict whether the constraint scan will
+// actually find offending rows.
 pub fn check_migration(
     ddl: &str,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     pg_version: Option<&PgVersion>,
 ) -> Result<Vec<MigrationCheck>> {
     let result =
@@ -44,24 +50,24 @@ pub fn check_migration(
                 for cmd_node in &stmt.cmds {
                     if let Some(pg_query::protobuf::node::Node::AlterTableCmd(cmd)) = &cmd_node.node
                         && let Some(check) =
-                            analyze_alter_table_cmd(cmd, &result, schema, pg_version)
+                            analyze_alter_table_cmd(cmd, &result, annotated, pg_version)
                     {
                         checks.push(check);
                     }
                 }
             }
             NodeRef::IndexStmt(idx) => {
-                checks.push(analyze_create_index(idx, schema, pg_version));
+                checks.push(analyze_create_index(idx, annotated, pg_version));
             }
             NodeRef::RenameStmt(ren) => {
-                checks.push(analyze_rename(ren, schema));
+                checks.push(analyze_rename(ren, annotated.schema));
             }
             _ => {}
         }
     }
 
     if checks.is_empty()
-        && let Some(check) = fallback_keyword_check(ddl, schema, pg_version)
+        && let Some(check) = fallback_keyword_check(ddl, annotated.schema, pg_version)
     {
         checks.push(check);
     }
@@ -72,7 +78,7 @@ pub fn check_migration(
 fn analyze_alter_table_cmd(
     cmd: &pg_query::protobuf::AlterTableCmd,
     parse_result: &pg_query::ParseResult,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     pg_version: Option<&PgVersion>,
 ) -> Option<MigrationCheck> {
     let subtype = pg_query::protobuf::AlterTableType::try_from(cmd.subtype).ok()?;
@@ -83,7 +89,7 @@ fn analyze_alter_table_cmd(
         .map(|(name, _)| name.clone())
         .unwrap_or_default();
 
-    let (table_size, row_estimate) = lookup_table_stats(schema, &table_name);
+    let (table_size, row_estimate) = lookup_table_stats(annotated, &table_name);
 
     match subtype {
         pg_query::protobuf::AlterTableType::AtAddColumn => {
@@ -174,20 +180,33 @@ fn analyze_alter_table_cmd(
 
             let mut rec = e.to_string();
 
-            // check column stats for null_frac context
-            if !cmd.name.is_empty()
-                && let Some(col) = find_column(schema, &table_name, &cmd.name)
-                    && let Some(nf) = col.stats.as_ref().and_then(|s| s.null_frac) {
-                        if nf == 0.0 {
-                            rec.push_str("\n\nDATA CHECK: Column currently has 0% NULLs. The scan will pass, but ACCESS EXCLUSIVE lock is still held.");
-                        } else if let Some(rows) = row_estimate {
-                            let null_rows = (nf * rows) as i64;
-                            rec.push_str(&format!(
-                                "\n\nDATA CHECK: Column has ~{:.0}% NULLs (~{} rows) that must be backfilled before this constraint can be applied.",
-                                nf * 100.0, null_rows
-                            ));
-                        }
-                    }
+            // Check column stats for null_frac context — pulls the
+            // ColumnStats out of the planner snapshot so we can warn
+            // the user about how many rows would currently fail the new
+            // NOT NULL constraint. Skipped when there's no planner
+            // snapshot — better to omit the data check than to bluff
+            // a "0% NULLs" estimate we can't actually verify.
+            let col_stats = if !cmd.name.is_empty() {
+                let (schema_part, name_part) = if let Some((s, n)) = table_name.rsplit_once('.') {
+                    (s, n)
+                } else {
+                    ("public", table_name.as_str())
+                };
+                annotated.column_stats(&QualifiedName::new(schema_part, name_part), &cmd.name)
+            } else {
+                None
+            };
+            if let Some(nf) = col_stats.and_then(|s| s.null_frac) {
+                if nf == 0.0 {
+                    rec.push_str("\n\nDATA CHECK: Column currently has 0% NULLs. The scan will pass, but ACCESS EXCLUSIVE lock is still held.");
+                } else if let Some(rows) = row_estimate {
+                    let null_rows = (nf * rows) as i64;
+                    rec.push_str(&format!(
+                        "\n\nDATA CHECK: Column has ~{:.0}% NULLs (~{} rows) that must be backfilled before this constraint can be applied.",
+                        nf * 100.0, null_rows
+                    ));
+                }
+            }
 
             Some(MigrationCheck {
                 operation: "SET NOT NULL".into(),
@@ -222,9 +241,14 @@ fn analyze_alter_table_cmd(
             })
         }
 
-        pg_query::protobuf::AlterTableType::AtAddConstraint => {
-            analyze_add_constraint(cmd, &table_name, table_size, row_estimate, schema, pg_version)
-        }
+        pg_query::protobuf::AlterTableType::AtAddConstraint => analyze_add_constraint(
+            cmd,
+            &table_name,
+            table_size,
+            row_estimate,
+            annotated.schema,
+            pg_version,
+        ),
 
         pg_query::protobuf::AlterTableType::AtValidateConstraint => Some(MigrationCheck {
             operation: "VALIDATE CONSTRAINT".into(),
@@ -316,7 +340,7 @@ fn analyze_add_constraint(
 
 fn analyze_create_index(
     idx: &pg_query::protobuf::IndexStmt,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     _pg_version: Option<&PgVersion>,
 ) -> MigrationCheck {
     let table_name = idx
@@ -331,7 +355,7 @@ fn analyze_create_index(
         })
         .unwrap_or_default();
 
-    let (table_size, row_estimate) = lookup_table_stats(schema, &table_name);
+    let (table_size, row_estimate) = lookup_table_stats(annotated, &table_name);
 
     let (safety, recommendation, lock_type) = if idx.concurrent {
         (
@@ -426,40 +450,25 @@ fn fallback_keyword_check(
     None
 }
 
-fn find_column<'a>(
-    schema: &'a SchemaSnapshot,
+// Pull (formatted_size, row_estimate) for a table out of the planner
+// snapshot. Both fields end up in MigrationCheck so the LLM consumer can
+// say things like "ALTER COLUMN TYPE on a 12 GB table will hold ACCESS
+// EXCLUSIVE for ~minutes". Returns (None, None) when there's no planner
+// snapshot — caller's flavor text just omits the size context in that
+// case rather than guessing.
+fn lookup_table_stats(
+    annotated: &AnnotatedSchema<'_>,
     table_name: &str,
-    col_name: &str,
-) -> Option<&'a crate::schema::Column> {
+) -> (Option<String>, Option<f64>) {
     let (schema_part, name_part) = if let Some((s, n)) = table_name.rsplit_once('.') {
         (s, n)
     } else {
         ("public", table_name)
     };
-    schema
-        .tables
-        .iter()
-        .find(|t| t.name == name_part && t.schema == schema_part)
-        .and_then(|t| t.columns.iter().find(|c| c.name == col_name))
-}
-
-fn lookup_table_stats(schema: &SchemaSnapshot, table_name: &str) -> (Option<String>, Option<f64>) {
-    let (schema_part, name_part) = if let Some((s, n)) = table_name.rsplit_once('.') {
-        (s, n)
-    } else {
-        ("public", table_name)
-    };
-
-    schema
-        .tables
-        .iter()
-        .find(|t| t.name == name_part && t.schema == schema_part)
-        .and_then(|t| t.stats.as_ref())
-        .map(|s| {
-            let size = format_bytes(s.table_size);
-            (Some(size), Some(s.reltuples))
-        })
-        .unwrap_or((None, None))
+    let qn = QualifiedName::new(schema_part, name_part);
+    let size = annotated.table_size(&qn).map(format_bytes);
+    let rows = annotated.reltuples(&qn);
+    (size, rows)
 }
 
 fn format_bytes(bytes: i64) -> String {
@@ -485,10 +494,45 @@ fn version_behavior_add_column(pg_version: Option<&PgVersion>) -> Option<String>
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use chrono::Utc;
 
     use super::*;
     use crate::schema::*;
+    use crate::schema::{AnnotatedSnapshot, PlannerStatsSnapshot, TableSizing, TableSizingEntry};
+
+    // Build a stats-bearing AnnotatedSnapshot for the migration tests.
+    // Most check_migration outputs reference table size / row count in
+    // their flavor text — we hand-roll a 2 GB / 5M-row planner row so
+    // the tests can exercise that path without spelunking.
+    fn empty_annotated() -> AnnotatedSnapshot {
+        let schema = empty_schema();
+        let planner = PlannerStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "test".into(),
+            timestamp: Utc::now(),
+            content_hash: "ph".into(),
+            schema_ref_hash: schema.content_hash.clone(),
+            tables: vec![TableSizingEntry {
+                table: QualifiedName::new("public", "orders"),
+                sizing: TableSizing {
+                    reltuples: 5_000_000.0,
+                    relpages: 262144,
+                    table_size: 2_147_483_648,
+                    total_size: None,
+                    index_size: None,
+                },
+            }],
+            columns: vec![],
+            indexes: vec![],
+        };
+        AnnotatedSnapshot {
+            schema,
+            planner: Some(planner),
+            activity_by_node: BTreeMap::new(),
+        }
+    }
 
     fn empty_schema() -> SchemaSnapshot {
         SchemaSnapshot {
@@ -505,18 +549,9 @@ mod tests {
                 constraints: vec![],
                 indexes: vec![],
                 comment: None,
-                stats: Some(TableStats {
-                    reltuples: 5_000_000.0,
-                    relpages: 262144,
-                    dead_tuples: 0,
-                    last_vacuum: None,
-                    last_autovacuum: None,
-                    last_analyze: None,
-                    last_autoanalyze: None,
-                    seq_scan: 0,
-                    idx_scan: 0,
-                    table_size: 2_147_483_648,
-                }),
+                // Stats now live in the PlannerStatsSnapshot built by
+                // `empty_annotated`; the legacy embedded field stays None.
+                stats: None,
                 partition_info: None,
                 policies: vec![],
                 triggers: vec![],
@@ -546,7 +581,7 @@ mod tests {
     fn add_column_no_default_safe() {
         let checks = check_migration(
             "ALTER TABLE orders ADD COLUMN notes text",
-            &empty_schema(),
+            &empty_annotated().view(None),
             Some(&pg17()),
         )
         .unwrap();
@@ -559,7 +594,7 @@ mod tests {
     fn add_column_with_default() {
         let checks = check_migration(
             "ALTER TABLE orders ADD COLUMN status text DEFAULT 'pending'",
-            &empty_schema(),
+            &empty_annotated().view(None),
             Some(&pg17()),
         )
         .unwrap();
@@ -572,7 +607,7 @@ mod tests {
     fn create_index_without_concurrently() {
         let checks = check_migration(
             "CREATE INDEX idx_orders_status ON orders(status)",
-            &empty_schema(),
+            &empty_annotated().view(None),
             Some(&pg17()),
         )
         .unwrap();
@@ -585,7 +620,7 @@ mod tests {
     fn create_index_concurrently_safe() {
         let checks = check_migration(
             "CREATE INDEX CONCURRENTLY idx_orders_status ON orders(status)",
-            &empty_schema(),
+            &empty_annotated().view(None),
             Some(&pg17()),
         )
         .unwrap();
@@ -602,7 +637,7 @@ mod tests {
         };
         let checks = check_migration(
             "ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
-            &empty_schema(),
+            &empty_annotated().view(None),
             Some(&pg12),
         )
         .unwrap();
@@ -616,7 +651,7 @@ mod tests {
     fn alter_column_type_dangerous() {
         let checks = check_migration(
             "ALTER TABLE orders ALTER COLUMN id TYPE bigint",
-            &empty_schema(),
+            &empty_annotated().view(None),
             Some(&pg17()),
         )
         .unwrap();
@@ -628,7 +663,7 @@ mod tests {
     fn drop_column_safe() {
         let checks = check_migration(
             "ALTER TABLE orders DROP COLUMN legacy",
-            &empty_schema(),
+            &empty_annotated().view(None),
             Some(&pg17()),
         )
         .unwrap();
@@ -640,7 +675,7 @@ mod tests {
     fn includes_table_size() {
         let checks = check_migration(
             "ALTER TABLE orders ADD COLUMN x text",
-            &empty_schema(),
+            &empty_annotated().view(None),
             Some(&pg17()),
         )
         .unwrap();

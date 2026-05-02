@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::types::{GucSetting, SchemaSnapshot, effective_table_stats};
+use super::types::{AnnotatedSchema, GucSetting, QualifiedName};
 
 #[derive(Debug, Clone)]
 pub struct AutovacuumDefaults {
@@ -78,15 +78,17 @@ fn parse_reloptions(reloptions: &[String]) -> std::collections::HashMap<String, 
         .collect()
 }
 
-pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
-    let defaults = parse_autovacuum_defaults(&snap.gucs);
+pub fn analyze_vacuum_health(annotated: &AnnotatedSchema<'_>) -> Vec<VacuumHealth> {
+    let defaults = parse_autovacuum_defaults(&annotated.schema.gucs);
     let mut results = Vec::new();
 
-    for table in &snap.tables {
-        let stats = match effective_table_stats(table, snap) {
-            Some(s) if s.reltuples >= 10_000.0 => s,
+    for table in &annotated.schema.tables {
+        let qn = QualifiedName::new(&table.schema, &table.name);
+        let reltuples = match annotated.reltuples(&qn) {
+            Some(r) if r >= 10_000.0 => r,
             _ => continue,
         };
+        let dead_tuples = annotated.n_dead_tup_sum(&qn);
 
         let opts = parse_reloptions(&table.reloptions);
         let has_overrides = opts.keys().any(|k| k.starts_with("autovacuum_"));
@@ -121,10 +123,10 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
             av_enabled = v == "on" || v == "true";
         }
 
-        let trigger_at = threshold as f64 + scale_factor * stats.reltuples;
-        let analyze_trigger = analyze_threshold as f64 + analyze_scale_factor * stats.reltuples;
+        let trigger_at = threshold as f64 + scale_factor * reltuples;
+        let analyze_trigger = analyze_threshold as f64 + analyze_scale_factor * reltuples;
         let progress = if trigger_at > 0.0 {
-            stats.dead_tuples as f64 / trigger_at
+            dead_tuples as f64 / trigger_at
         } else {
             0.0
         };
@@ -138,8 +140,8 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
             );
         }
 
-        if stats.reltuples >= 1_000_000.0 && !has_overrides {
-            let mut suggested_vac_sf = 100_000.0 / stats.reltuples;
+        if reltuples >= 1_000_000.0 && !has_overrides {
+            let mut suggested_vac_sf = 100_000.0 / reltuples;
             suggested_vac_sf = (suggested_vac_sf * 1000.0).round() / 1000.0;
             if suggested_vac_sf < 0.001 {
                 suggested_vac_sf = 0.001;
@@ -147,7 +149,7 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
             let suggested_az_sf = (suggested_vac_sf / 2.0 * 1000.0).round() / 1000.0;
 
             // threshold: ~1% of rows, clamped to 500..5000
-            let suggested_vac_thresh = ((stats.reltuples * 0.01) as i64).clamp(500, 5000);
+            let suggested_vac_thresh = ((reltuples * 0.01) as i64).clamp(500, 5000);
             let suggested_az_thresh = (suggested_vac_thresh / 2).max(250);
 
             recommendations.push(format!(
@@ -156,16 +158,16 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
                  autovacuum_vacuum_threshold={suggested_vac_thresh}, \
                  autovacuum_analyze_scale_factor={suggested_az_sf}, \
                  autovacuum_analyze_threshold={suggested_az_thresh}",
-                stats.reltuples as i64 / 1000
+                reltuples as i64 / 1000
             ));
         }
 
-        if stats.reltuples > 0.0 && stats.dead_tuples as f64 / stats.reltuples > 0.10 {
+        if reltuples > 0.0 && dead_tuples as f64 / reltuples > 0.10 {
             recommendations.push(format!(
                 "high dead tuple ratio: {} dead / {}k live ({:.1}%)",
-                stats.dead_tuples,
-                stats.reltuples as i64 / 1000,
-                stats.dead_tuples as f64 / stats.reltuples * 100.0
+                dead_tuples,
+                reltuples as i64 / 1000,
+                dead_tuples as f64 / reltuples * 100.0
             ));
         }
 
@@ -179,8 +181,8 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
         results.push(VacuumHealth {
             schema: table.schema.clone(),
             table: table.name.clone(),
-            reltuples: stats.reltuples,
-            dead_tuples: stats.dead_tuples,
+            reltuples,
+            dead_tuples,
             vacuum_trigger_at: trigger_at,
             vacuum_progress: progress,
             has_overrides,
@@ -204,10 +206,16 @@ pub fn analyze_vacuum_health(snap: &SchemaSnapshot) -> Vec<VacuumHealth> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::schema::types::{
+        ActivityStatsSnapshot, AnnotatedSnapshot, IndexActivityEntry, NodeIdentity,
+        PlannerStatsSnapshot, TableActivity, TableActivityEntry, TableSizing, TableSizingEntry,
+    };
     use crate::schema::*;
 
-    fn make_table_with_stats(name: &str, reltuples: f64, dead: i64) -> Table {
+    fn ddl_table(name: &str) -> Table {
         Table {
             oid: 0,
             schema: "public".into(),
@@ -216,18 +224,7 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
             comment: None,
-            stats: Some(TableStats {
-                reltuples,
-                relpages: 1000,
-                dead_tuples: dead,
-                last_vacuum: None,
-                last_autovacuum: None,
-                last_analyze: None,
-                last_autoanalyze: None,
-                seq_scan: 0,
-                idx_scan: 0,
-                table_size: 0,
-            }),
+            stats: None,
             partition_info: None,
             policies: vec![],
             triggers: vec![],
@@ -255,17 +252,97 @@ mod tests {
         }
     }
 
+    fn annotated(
+        tables: Vec<Table>,
+        sizing: Vec<(&str, f64, i64)>,
+        dead_by_table: Vec<(&str, i64)>,
+    ) -> AnnotatedSnapshot {
+        let schema = make_snap(tables);
+        let planner = PlannerStatsSnapshot {
+            pg_version: "16.0".into(),
+            database: "test".into(),
+            timestamp: chrono::Utc::now(),
+            content_hash: "ph".into(),
+            schema_ref_hash: "sh".into(),
+            tables: sizing
+                .into_iter()
+                .map(|(name, reltuples, table_size)| TableSizingEntry {
+                    table: QualifiedName::new("public", name),
+                    sizing: TableSizing {
+                        reltuples,
+                        relpages: 1000,
+                        table_size,
+                        total_size: None,
+                        index_size: None,
+                    },
+                })
+                .collect(),
+            columns: vec![],
+            indexes: vec![],
+        };
+        let activity = ActivityStatsSnapshot {
+            pg_version: "16.0".into(),
+            database: "test".into(),
+            timestamp: chrono::Utc::now(),
+            content_hash: "ah".into(),
+            schema_ref_hash: "sh".into(),
+            node: NodeIdentity {
+                label: "primary".into(),
+                host: "p".into(),
+                is_standby: false,
+                replication_lag_bytes: None,
+                stats_reset: None,
+            },
+            tables: dead_by_table
+                .into_iter()
+                .map(|(name, dead)| TableActivityEntry {
+                    table: QualifiedName::new("public", name),
+                    activity: TableActivity {
+                        seq_scan: 0,
+                        idx_scan: 0,
+                        n_live_tup: 0,
+                        n_dead_tup: dead,
+                        last_vacuum: None,
+                        last_autovacuum: None,
+                        last_analyze: None,
+                        last_autoanalyze: None,
+                        vacuum_count: 0,
+                        autovacuum_count: 0,
+                        analyze_count: 0,
+                        autoanalyze_count: 0,
+                    },
+                })
+                .collect(),
+            indexes: Vec::<IndexActivityEntry>::new(),
+        };
+        let mut activity_by_node = BTreeMap::new();
+        activity_by_node.insert("primary".into(), activity);
+        AnnotatedSnapshot {
+            schema,
+            planner: Some(planner),
+            activity_by_node,
+        }
+    }
+
     #[test]
     fn skips_small_tables() {
-        let snap = make_snap(vec![make_table_with_stats("tiny", 100.0, 10)]);
-        let results = analyze_vacuum_health(&snap);
+        let snap = annotated(
+            vec![ddl_table("tiny")],
+            vec![("tiny", 100.0, 0)],
+            vec![("tiny", 10)],
+        );
+        let results = analyze_vacuum_health(&snap.view(None));
         assert!(results.is_empty());
     }
 
     #[test]
     fn reports_large_table_with_defaults() {
-        let snap = make_snap(vec![make_table_with_stats("big", 5_000_000.0, 100)]);
-        let results = analyze_vacuum_health(&snap);
+        let snap = annotated(
+            vec![ddl_table("big")],
+            vec![("big", 5_000_000.0, 0)],
+            vec![("big", 100)],
+        );
+        let results = analyze_vacuum_health(&snap.view(None));
         assert_eq!(results.len(), 1);
         assert!(
             results[0]
@@ -277,8 +354,12 @@ mod tests {
 
     #[test]
     fn reports_high_dead_ratio() {
-        let snap = make_snap(vec![make_table_with_stats("dirty", 100_000.0, 20_000)]);
-        let results = analyze_vacuum_health(&snap);
+        let snap = annotated(
+            vec![ddl_table("dirty")],
+            vec![("dirty", 100_000.0, 0)],
+            vec![("dirty", 20_000)],
+        );
+        let results = analyze_vacuum_health(&snap.view(None));
         assert_eq!(results.len(), 1);
         assert!(
             results[0]
@@ -290,10 +371,10 @@ mod tests {
 
     #[test]
     fn disabled_autovacuum_warns() {
-        let mut table = make_table_with_stats("bad", 100_000.0, 100);
+        let mut table = ddl_table("bad");
         table.reloptions = vec!["autovacuum_enabled=false".into()];
-        let snap = make_snap(vec![table]);
-        let results = analyze_vacuum_health(&snap);
+        let snap = annotated(vec![table], vec![("bad", 100_000.0, 0)], vec![("bad", 100)]);
+        let results = analyze_vacuum_health(&snap.view(None));
         assert_eq!(results.len(), 1);
         assert!(
             results[0]
@@ -302,6 +383,101 @@ mod tests {
                 .any(|r| r.contains("disabled"))
         );
         assert!(!results[0].autovacuum_enabled);
+    }
+
+    #[test]
+    fn skipped_when_planner_absent() {
+        // Degradation case: schema has the table but planner is None → reltuples
+        // returns None → skipped. Pins the new "no data → no findings" path.
+        let snap = AnnotatedSnapshot {
+            schema: make_snap(vec![ddl_table("big")]),
+            planner: None,
+            activity_by_node: BTreeMap::new(),
+        };
+        assert!(analyze_vacuum_health(&snap.view(None)).is_empty());
+    }
+
+    #[test]
+    fn dead_tuples_summed_across_replicas() {
+        // 3-node cluster, dead_tuples reported per node. Cluster sum drives the
+        // ratio check.
+        let schema = make_snap(vec![ddl_table("hot")]);
+        let planner = PlannerStatsSnapshot {
+            pg_version: "16.0".into(),
+            database: "test".into(),
+            timestamp: chrono::Utc::now(),
+            content_hash: "ph".into(),
+            schema_ref_hash: "sh".into(),
+            tables: vec![TableSizingEntry {
+                table: QualifiedName::new("public", "hot"),
+                sizing: TableSizing {
+                    reltuples: 100_000.0,
+                    relpages: 1000,
+                    table_size: 0,
+                    total_size: None,
+                    index_size: None,
+                },
+            }],
+            columns: vec![],
+            indexes: vec![],
+        };
+        let mut activity_by_node = BTreeMap::new();
+        for (label, dead) in [
+            ("primary", 8_000_i64),
+            ("replica1", 7_000),
+            ("replica2", 6_000),
+        ] {
+            activity_by_node.insert(
+                label.into(),
+                ActivityStatsSnapshot {
+                    pg_version: "16.0".into(),
+                    database: "test".into(),
+                    timestamp: chrono::Utc::now(),
+                    content_hash: format!("h-{label}"),
+                    schema_ref_hash: "sh".into(),
+                    node: NodeIdentity {
+                        label: label.into(),
+                        host: label.into(),
+                        is_standby: label != "primary",
+                        replication_lag_bytes: None,
+                        stats_reset: None,
+                    },
+                    tables: vec![TableActivityEntry {
+                        table: QualifiedName::new("public", "hot"),
+                        activity: TableActivity {
+                            seq_scan: 0,
+                            idx_scan: 0,
+                            n_live_tup: 0,
+                            n_dead_tup: dead,
+                            last_vacuum: None,
+                            last_autovacuum: None,
+                            last_analyze: None,
+                            last_autoanalyze: None,
+                            vacuum_count: 0,
+                            autovacuum_count: 0,
+                            analyze_count: 0,
+                            autoanalyze_count: 0,
+                        },
+                    }],
+                    indexes: vec![],
+                },
+            );
+        }
+        let snap = AnnotatedSnapshot {
+            schema,
+            planner: Some(planner),
+            activity_by_node,
+        };
+        let results = analyze_vacuum_health(&snap.view(None));
+        assert_eq!(results.len(), 1);
+        // 8k+7k+6k = 21k dead vs 100k live → 21% > 10% threshold
+        assert_eq!(results[0].dead_tuples, 21_000);
+        assert!(
+            results[0]
+                .recommendations
+                .iter()
+                .any(|r| r.contains("high dead tuple"))
+        );
     }
 
     #[test]

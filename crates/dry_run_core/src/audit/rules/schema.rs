@@ -336,18 +336,32 @@ pub fn check_no_comment(schema: &SchemaSnapshot, config: &AuditConfig) -> Vec<Au
     findings
 }
 
+// Flag tables north of ~1M rows that still use cluster-wide autovacuum
+// defaults — those defaults rarely scale once the row count gets serious,
+// and a finger-in-the-air recommendation is better than silence.
+//
+// Reads `reltuples` via the planner snapshot (the only place it lives
+// post-snapshot-split). When the planner is missing — fresh project,
+// orphan replica capture — we just produce no findings; the rule
+// degrades gracefully rather than guessing.
 #[must_use]
-pub fn check_vacuum_large_table_defaults(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
-    use crate::schema::effective_table_stats;
+pub fn check_vacuum_large_table_defaults(
+    annotated: &crate::schema::AnnotatedSchema<'_>,
+) -> Vec<AuditFinding> {
+    use crate::schema::QualifiedName;
 
     let mut findings = Vec::new();
 
-    for table in &schema.tables {
-        let stats = match effective_table_stats(table, schema) {
-            Some(s) if s.reltuples >= 1_000_000.0 => s,
+    for table in &annotated.schema.tables {
+        let qn = QualifiedName::new(&table.schema, &table.name);
+        // Threshold: only worth nagging once a table is genuinely large.
+        let reltuples = match annotated.reltuples(&qn) {
+            Some(r) if r >= 1_000_000.0 => r,
             _ => continue,
         };
 
+        // If the operator already set per-table autovacuum_* reloptions
+        // they've thought about it — don't second-guess.
         let has_overrides = table
             .reloptions
             .iter()
@@ -356,13 +370,18 @@ pub fn check_vacuum_large_table_defaults(schema: &SchemaSnapshot) -> Vec<AuditFi
         if !has_overrides {
             let qualified = format!("{}.{}", table.schema, table.name);
 
-            let mut vac_sf = 100_000.0 / stats.reltuples;
+            // Suggest scale factors that target ~100k dead tuples regardless
+            // of table size — keeps vacuum bursts small on large tables.
+            let mut vac_sf = 100_000.0 / reltuples;
             vac_sf = (vac_sf * 1000.0).round() / 1000.0;
             if vac_sf < 0.001 {
                 vac_sf = 0.001;
             }
             let az_sf = (vac_sf / 2.0 * 1000.0).round() / 1000.0;
-            let vac_thresh = ((stats.reltuples * 0.01) as i64).clamp(500, 5000);
+            // Threshold floor at 500 rows — below that it's noise; ceiling at
+            // 5000 so even huge tables vacuum at least a few times per day
+            // under steady write load.
+            let vac_thresh = ((reltuples * 0.01) as i64).clamp(500, 5000);
             let az_thresh = (vac_thresh / 2).max(250);
 
             findings.push(AuditFinding {
@@ -373,7 +392,7 @@ pub fn check_vacuum_large_table_defaults(schema: &SchemaSnapshot) -> Vec<AuditFi
                 message: format!(
                     "'{}' has {}M rows but uses default autovacuum settings",
                     qualified,
-                    stats.reltuples as i64 / 1_000_000
+                    reltuples as i64 / 1_000_000
                 ),
                 recommendation: "consider tuning autovacuum for large tables — \
                      lower scale factors alone aren't enough without explicit thresholds"

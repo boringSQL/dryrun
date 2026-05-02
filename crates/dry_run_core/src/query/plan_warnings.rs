@@ -1,32 +1,50 @@
 use super::explain::PlanWarning;
 use super::plan::PlanNode;
 use crate::jit;
-use crate::schema::SchemaSnapshot;
+use crate::schema::{AnnotatedSchema, QualifiedName, SchemaSnapshot};
 
 const SEQ_SCAN_ROW_THRESHOLD: f64 = 5_000.0;
 
-pub fn detect_plan_warnings(plan: &PlanNode, schema: Option<&SchemaSnapshot>) -> Vec<PlanWarning> {
+// Plan warnings — walks an EXPLAIN tree and surfaces patterns worth
+// flagging (large seq scans, nested-loop antipatterns, missing partition
+// pruning, materialized CTEs).
+//
+// Schema reference is `Option<&AnnotatedSchema>` because warnings work
+// just fine without one — the plan itself usually has all the info we
+// need. The schema unlocks two refinements:
+//   - `detect_seq_scan_large_table` falls back to planner reltuples when
+//     the plan's own `plan_rows` is zero (some EXPLAIN paths emit that).
+//   - partition / CTE warnings need the DDL to know which tables are
+//     partitioned. They read `annotated.schema` directly.
+pub fn detect_plan_warnings(
+    plan: &PlanNode,
+    annotated: Option<&AnnotatedSchema<'_>>,
+) -> Vec<PlanWarning> {
     let mut warnings = Vec::new();
-    walk_plan(plan, schema, &mut warnings);
+    walk_plan(plan, annotated, &mut warnings);
     warnings
 }
 
-fn walk_plan(node: &PlanNode, schema: Option<&SchemaSnapshot>, warnings: &mut Vec<PlanWarning>) {
-    detect_seq_scan_large_table(node, schema, warnings);
+fn walk_plan(
+    node: &PlanNode,
+    annotated: Option<&AnnotatedSchema<'_>>,
+    warnings: &mut Vec<PlanWarning>,
+) {
+    detect_seq_scan_large_table(node, annotated, warnings);
     detect_nested_loop_seq_scan(node, warnings);
     detect_sort_without_index(node, warnings);
     detect_high_rows_removed(node, warnings);
-    detect_partition_pruning_issues(node, schema, warnings);
-    detect_cte_materialized(node, schema, warnings);
+    detect_partition_pruning_issues(node, annotated.map(|a| a.schema), warnings);
+    detect_cte_materialized(node, annotated.map(|a| a.schema), warnings);
 
     for child in &node.children {
-        walk_plan(child, schema, warnings);
+        walk_plan(child, annotated, warnings);
     }
 }
 
 fn detect_seq_scan_large_table(
     node: &PlanNode,
-    schema: Option<&SchemaSnapshot>,
+    annotated: Option<&AnnotatedSchema<'_>>,
     warnings: &mut Vec<PlanWarning>,
 ) {
     if node.node_type != "Seq Scan" {
@@ -38,16 +56,16 @@ fn detect_seq_scan_large_table(
         None => return,
     };
 
+    // Prefer the plan's own row estimate; fall back to planner reltuples
+    // when it's zero (some EXPLAIN modes don't emit it). When neither is
+    // available we treat the row count as zero, which suppresses the
+    // warning — better silent than wrong.
     let row_count = if node.plan_rows > 0.0 {
         node.plan_rows
-    } else if let Some(schema) = schema {
+    } else if let Some(annotated) = annotated {
         let schema_name = node.schema.as_deref().unwrap_or("public");
-        schema
-            .tables
-            .iter()
-            .find(|t| t.name == *table_name && t.schema == schema_name)
-            .and_then(|t| t.stats.as_ref())
-            .map(|s| s.reltuples)
+        annotated
+            .reltuples(&QualifiedName::new(schema_name, table_name))
             .unwrap_or(0.0)
     } else {
         0.0
@@ -398,9 +416,21 @@ mod tests {
         }
     }
 
+    // Wrap a bare schema in an empty annotated bundle — partition / CTE
+    // tests don't need stats, just DDL.
+    fn ddl_view(schema: &SchemaSnapshot) -> AnnotatedSchema<'_> {
+        AnnotatedSchema {
+            schema,
+            planner: None,
+            activity: None,
+            merged: None,
+        }
+    }
+
     #[test]
     fn no_pruning_warns() {
         let schema = partitioned_schema();
+        let view = ddl_view(&schema);
         // Append scanning all 4 partitions, no SubplansRemoved
         let plan = PlanNode {
             node_type: "Append".into(),
@@ -412,7 +442,7 @@ mod tests {
             ],
             ..make_seq_scan("", 0.0)
         };
-        let warnings = detect_plan_warnings(&plan, Some(&schema));
+        let warnings = detect_plan_warnings(&plan, Some(&view));
         assert!(
             warnings
                 .iter()
@@ -423,6 +453,7 @@ mod tests {
     #[test]
     fn good_pruning_no_warning() {
         let schema = partitioned_schema();
+        let view = ddl_view(&schema);
         // Only 1 partition scanned, 3 pruned
         let plan = PlanNode {
             node_type: "Append".into(),
@@ -430,7 +461,7 @@ mod tests {
             children: vec![make_seq_scan("orders_q1", 1000.0)],
             ..make_seq_scan("", 0.0)
         };
-        let warnings = detect_plan_warnings(&plan, Some(&schema));
+        let warnings = detect_plan_warnings(&plan, Some(&view));
         assert!(
             !warnings
                 .iter()
@@ -441,6 +472,7 @@ mod tests {
     #[test]
     fn partial_pruning_info() {
         let schema = partitioned_schema();
+        let view = ddl_view(&schema);
         // 3 partitions still scanned but 1 pruned — scanning > half
         let plan = PlanNode {
             node_type: "Append".into(),
@@ -452,7 +484,7 @@ mod tests {
             ],
             ..make_seq_scan("", 0.0)
         };
-        let warnings = detect_plan_warnings(&plan, Some(&schema));
+        let warnings = detect_plan_warnings(&plan, Some(&view));
         assert!(
             warnings
                 .iter()
