@@ -17,12 +17,20 @@ use dry_run_core::schema::{
     ConstraintKind, detect_seq_scan_imbalance, detect_stale_stats, detect_unused_indexes,
     effective_table_stats,
 };
-use dry_run_core::{DryRun, HistoryStore, SchemaSnapshot};
+use dry_run_core::{AnnotatedSnapshot, DryRun, HistoryStore, SchemaSnapshot};
 
 use crate::pgmustard::PgMustardClient;
 
 use super::helpers::{format_node_table_breakdown, format_number, to_mcp_err};
 use super::params::*;
+
+fn wrap_schema_only(schema: SchemaSnapshot) -> AnnotatedSnapshot {
+    AnnotatedSnapshot {
+        schema,
+        planner: None,
+        activity_by_node: std::collections::BTreeMap::new(),
+    }
+}
 
 #[derive(Clone)]
 pub struct DryRunServer {
@@ -30,7 +38,7 @@ pub struct DryRunServer {
     app_version: String,
     pg_version_display: String,
     database_name: String,
-    schema: Arc<RwLock<Option<SchemaSnapshot>>>,
+    schema: Arc<RwLock<Option<AnnotatedSnapshot>>>,
     history: Option<Arc<HistoryStore>>,
     snapshot_key: Option<SnapshotKey>,
     lint_config: LintConfig,
@@ -69,7 +77,7 @@ impl DryRunServer {
             app_version: app_version.to_string(),
             pg_version_display,
             database_name,
-            schema: Arc::new(RwLock::new(Some(snapshot))),
+            schema: Arc::new(RwLock::new(Some(wrap_schema_only(snapshot)))),
             history: None,
             snapshot_key: None,
             lint_config,
@@ -119,6 +127,10 @@ impl DryRunServer {
     }
 
     async fn get_schema(&self) -> Result<SchemaSnapshot, McpError> {
+        Ok(self.get_annotated().await?.schema)
+    }
+
+    async fn get_annotated(&self) -> Result<AnnotatedSnapshot, McpError> {
         let guard = self.schema.read().await;
         guard.clone().ok_or_else(|| {
             McpError::internal_error(
@@ -1286,20 +1298,67 @@ impl DryRunServer {
     #[tool(description = "Force re-introspection of the database schema (requires live DB)")]
     async fn refresh_schema(&self) -> Result<CallToolResult, McpError> {
         let ctx = self.require_live_db()?;
-        let snapshot = ctx
+        let schema = ctx
             .introspect_schema()
             .await
             .map_err(|e| McpError::internal_error(format!("introspection failed: {e}"), None))?;
+        let schema_hash = schema.content_hash.clone();
+
+        let planner = match ctx.introspect_planner_stats(&schema_hash).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(error = %e, "planner stats introspection failed; continuing without");
+                None
+            }
+        };
+
+        let mut activity_by_node = std::collections::BTreeMap::new();
+        match ctx.introspect_activity_stats(&schema_hash, "primary").await {
+            Ok(a) => {
+                activity_by_node.insert("primary".to_string(), a);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "activity stats introspection failed; continuing without");
+            }
+        }
+
+        if let (Some(store), Some(key)) = (self.history.as_ref(), self.snapshot_key.as_ref()) {
+            if let Err(e) = store.put(key, &schema).await {
+                tracing::warn!(error = %e, "failed to persist schema");
+            }
+            if let Some(p) = planner.as_ref()
+                && let Err(e) = store.put_planner_stats(key, p).await
+            {
+                tracing::warn!(error = %e, "failed to persist planner stats");
+            }
+            if let Some(a) = activity_by_node.get("primay")
+                && let Err(e) = store.put_activity_stats(key, a).await
+            {
+                tracing::warn!(error = %e, "failed to persist activity stats");
+            }
+        }
 
         let body = format!(
-            "Schema refreshed: {} tables, {} views, {} functions (hash: {})",
-            snapshot.tables.len(),
-            snapshot.views.len(),
-            snapshot.functions.len(),
-            &snapshot.content_hash[..16],
+            "Schema refreshed: {} tables, {} views, {} functions (hash: {})\n\
+             Planner stats: {}\n\
+             Activity stats: {} node(s)",
+            schema.tables.len(),
+            schema.views.len(),
+            schema.functions.len(),
+            &schema_hash[..16],
+            if planner.is_some() {
+                "captured"
+            } else {
+                "unavailable"
+            },
+            activity_by_node.len(),
         );
 
-        *self.schema.write().await = Some(snapshot);
+        *self.schema.write().await = Some(AnnotatedSnapshot {
+            schema,
+            planner,
+            activity_by_node,
+        });
 
         let text = self.wrap_text(&body, None);
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -1334,7 +1393,7 @@ impl DryRunServer {
                 snapshot.functions.len(),
             );
 
-            *self.schema.write().await = Some(snapshot);
+            *self.schema.write().await = Some(wrap_schema_only(snapshot));
 
             let text = self.wrap_text(&body, None);
             return Ok(CallToolResult::success(vec![Content::text(text)]));
