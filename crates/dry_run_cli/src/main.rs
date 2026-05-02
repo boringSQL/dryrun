@@ -984,54 +984,86 @@ async fn cmd_mcp_serve(
     let candidates =
         schema_candidate_paths(schema_path, project_config.as_ref(), cli.profile.as_deref());
 
-    // try to load schema — if missing, start in uninitialized mode;
-    // if file exists but is broken, propagate the error
-    let schema_path_result =
-        resolve_schema_path(schema_path, project_config.as_ref(), cli.profile.as_deref());
+    let resolved_profile = project_config.as_ref().and_then(|c| {
+        c.resolve_profile(None, schema_path, cli.profile.as_deref(), &cwd)
+            .ok()
+    });
 
-    let server = match schema_path_result {
-        Ok(schema_file) => {
-            let json = std::fs::read_to_string(&schema_file)?;
-            let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)?;
+    let json_snapshot: Option<dry_run_core::SchemaSnapshot> =
+        resolve_schema_path(schema_path, project_config.as_ref(), cli.profile.as_deref())
+            .ok()
+            .and_then(|p| load_schema_file(&p).ok());
+
+    // SnapshotKey for profile/database (if present)
+    let snapshot_key = resolved_profile.as_ref().and_then(|r| {
+        let db_name = r
+            .database_id
+            .as_ref()
+            .map(|d| d.0.clone())
+            .or_else(|| json_snapshot.as_ref().map(|s| s.database.clone()))?;
+        Some(complete_key(r, &db_name))
+    });
+
+    // try history.db file, if not found fall back to JSON file
+    let history_store = HistoryStore::open_default().ok();
+
+    let annotated_from_history = match (history_store.as_ref(), snapshot_key.as_ref()) {
+        (Some(store), Some(key)) => store.get_annotated(key, SnapshotRef::Latest).await.ok(),
+        _ => None,
+    };
+
+    let annotated = match annotated_from_history {
+        Some(a) => {
             eprintln!(
-                "dryrun: loaded schema from {} ({} tables)",
-                schema_file.display(),
-                snapshot.tables.len()
+                "dryrun: loaded annotated snapshot from history.db ({} tables, planner: {}, activity nodes: {})",
+                a.schema.tables.len(),
+                if a.planner.is_some() { "yes" } else { "no" },
+                a.activity_by_node.len(),
             );
+            Some(a)
+        }
+        None => json_snapshot.map(|s| {
+            eprintln!(
+                "dryrun: loaded {} tables from schema.json (planner/activity unavailable; run `dryrun snapshot take` to capture stats)",
+                s.tables.len(),
+            );
+            mcp::wrap_schema_only(s)
+        }),
+    };
 
-            // optional --db enables live tools (explain_query, refresh_schema)
-            let effective_db = db.map(|s| s.to_string()).or_else(|| {
-                if let Some(ref config) = project_config
-                    && let Ok(resolved) =
-                        config.resolve_profile(None, None, cli.profile.as_deref(), &cwd)
-                {
-                    return resolved.db_url;
-                }
-                None
-            });
+    // --db enables live tools (explain_query, refresh_schema)
+    let effective_db = db
+        .map(|s| s.to_string())
+        .or_else(|| resolved_profile.as_ref().and_then(|r| r.db_url.clone()));
 
-            let db_connection = if let Some(ref db_url) = effective_db {
-                let ctx = DryRun::connect(db_url).await?;
-                eprintln!("dryrun: connected to local db (live tools enabled)");
-                Some((db_url.as_str(), ctx))
-            } else {
-                eprintln!("dryrun: offline mode (explain_query, refresh_schema disabled)");
-                None
-            };
+    let db_connection = if let Some(ref db_url) = effective_db {
+        let ctx = DryRun::connect(db_url).await?;
+        eprintln!("dryrun: connected to live db (live tools enabled)");
+        Some((db_url.as_str(), ctx))
+    } else {
+        eprintln!("dryrun: offline mode (explain_query, refresh_schema disabled)");
+        None
+    };
 
-            mcp::DryRunServer::from_snapshot_with_db(
-                snapshot,
+    let server = match annotated {
+        Some(a) => {
+            let mut s = mcp::DryRunServer::from_annotated_with_db(
+                a,
                 db_connection,
                 lint_config,
                 pgmustard_api_key,
                 get_version(),
                 candidates,
-            )
+            );
+            if let Some(store) = history_store {
+                s = s.with_history(store, snapshot_key);
+            }
+            s
         }
-        Err(_) => {
+        None => {
             eprintln!(
                 "dryrun: no schema found — starting in uninitialized mode\n\
-                 dryrun: use the reload_schema tool after running dump-schema"
+                 dryrun: use the reload_schema tool after running dump-schema or snapshot take"
             );
             mcp::DryRunServer::uninitialized(lint_config, get_version(), candidates)
         }
