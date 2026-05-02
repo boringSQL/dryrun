@@ -391,6 +391,32 @@ impl DryRunServer {
             "vacuum_count": view.vacuum_count_sum(&qn),
         });
 
+        // Enrich partition_info with per-child sizing and nactivity.
+        let synth_partition_info = table.partition_info.as_ref().map(|pi| {
+            let children: Vec<serde_json::Value> = pi
+                .children
+                .iter()
+                .map(|c| {
+                    let cqn = QualifiedName::new(&c.schema, &c.name);
+                    serde_json::json!({
+                        "schema": c.schema,
+                        "name": c.name,
+                        "bound": c.bound,
+                        "reltuples": view.reltuples(&cqn),
+                        "table_size": view.table_size(&cqn),
+                        "dead_tuples": view.n_dead_tup_sum(&cqn),
+                        "seq_scan": view.seq_scan_sum(&cqn),
+                        "last_vacuum": view.last_vacuum_max(&cqn),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "strategy": pi.strategy,
+                "key": pi.key,
+                "children": children,
+            })
+        });
+
         let mut json_val = match detail {
             "full" => {
                 let mut v = serde_json::to_value(table).map_err(|e| {
@@ -398,6 +424,9 @@ impl DryRunServer {
                 })?;
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("stats".into(), synth_stats.clone());
+                    if let Some(pi) = synth_partition_info.clone() {
+                        obj.insert("partition_info".into(), pi);
+                    }
 
                     // inject snapshot-derived stats
                     let idx_full: Vec<serde_json::Value> = table
@@ -438,10 +467,13 @@ impl DryRunServer {
                     "name": table.name,
                     "stats": synth_stats,
                 });
-                if let Some(obj) = result.as_object_mut()
-                    && !profiles.is_empty()
-                {
-                    obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
+                if let Some(obj) = result.as_object_mut() {
+                    if let Some(pi) = synth_partition_info.clone() {
+                        obj.insert("partition_info".into(), pi);
+                    }
+                    if !profiles.is_empty() {
+                        obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
+                    }
                 }
                 result
             }
@@ -497,7 +529,7 @@ impl DryRunServer {
                     "indexes": compact_idxs,
                     "comment": table.comment,
                     "stats": synth_stats,
-                    "partition_info": table.partition_info,
+                    "partition_info": synth_partition_info.clone(),
                 });
                 if let Some(obj) = result.as_object_mut()
                     && !profiles.is_empty()
