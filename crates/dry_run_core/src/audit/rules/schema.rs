@@ -430,7 +430,6 @@ mod tests {
             generated: None,
             comment: None,
             statistics_target: None,
-            stats: None,
         }
     }
 
@@ -445,7 +444,6 @@ mod tests {
             generated: None,
             comment: Some(comment.into()),
             statistics_target: None,
-            stats: None,
         }
     }
 
@@ -484,7 +482,6 @@ mod tests {
             constraints,
             indexes: vec![],
             comment: None,
-            stats: None,
             partition_info: None,
             policies: vec![],
             triggers: vec![],
@@ -508,7 +505,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 

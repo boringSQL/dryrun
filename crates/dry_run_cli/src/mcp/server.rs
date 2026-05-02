@@ -1660,23 +1660,10 @@ mod tests {
                     generated: None,
                     comment: None,
                     statistics_target: None,
-                    stats: None,
                 }],
                 constraints: vec![],
                 indexes: vec![],
                 comment: None,
-                stats: Some(TableStats {
-                    reltuples: 50000.0,
-                    relpages: 625,
-                    dead_tuples: 0,
-                    last_vacuum: None,
-                    last_autovacuum: None,
-                    last_analyze: None,
-                    last_autoanalyze: None,
-                    seq_scan: 0,
-                    idx_scan: 0,
-                    table_size: 5000000,
-                }),
                 partition_info: None,
                 policies: vec![],
                 triggers: vec![],
@@ -1690,7 +1677,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 

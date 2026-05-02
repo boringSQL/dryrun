@@ -311,7 +311,6 @@ mod tests {
                         generated: None,
                         comment: None,
                         statistics_target: None,
-                        stats: None,
                     },
                     Column {
                         name: "email".into(),
@@ -323,7 +322,6 @@ mod tests {
                         generated: None,
                         comment: None,
                         statistics_target: None,
-                        stats: None,
                     },
                     Column {
                         name: "data".into(),
@@ -335,14 +333,12 @@ mod tests {
                         generated: None,
                         comment: None,
                         statistics_target: None,
-                        stats: None,
                     },
                 ],
                 constraints: vec![],
                 indexes: vec![],
                 comment: None,
                 // Stats now live in PlannerStatsSnapshot — see test_annotated.
-                stats: None,
                 partition_info: None,
                 policies: vec![],
                 triggers: vec![],
@@ -356,7 +352,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 

@@ -224,7 +224,6 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
             comment: None,
-            stats: None,
             partition_info: None,
             policies: vec![],
             triggers: vec![],
@@ -248,7 +247,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 

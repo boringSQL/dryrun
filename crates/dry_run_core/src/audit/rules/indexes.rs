@@ -279,7 +279,6 @@ mod tests {
             generated: None,
             comment: None,
             statistics_target: None,
-            stats: None,
         }
     }
 
@@ -295,7 +294,6 @@ mod tests {
             definition: format!("CREATE INDEX {name} ON ..."),
             is_valid: true,
             backs_constraint: false,
-            stats: None,
         }
     }
 
@@ -308,7 +306,6 @@ mod tests {
             constraints: vec![],
             indexes,
             comment: None,
-            stats: None,
             partition_info: None,
             policies: vec![],
             triggers: vec![],
@@ -332,7 +329,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 

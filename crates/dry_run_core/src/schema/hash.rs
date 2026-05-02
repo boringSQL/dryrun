@@ -91,7 +91,6 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::types::{ColumnStats, IndexStats, TableStats};
 
     fn empty_table(schema: &str, name: &str) -> Table {
         Table {
@@ -108,7 +107,6 @@ mod tests {
                 generated: None,
                 comment: None,
                 statistics_target: None,
-                stats: None,
             }],
             constraints: vec![],
             indexes: vec![Index {
@@ -122,53 +120,14 @@ mod tests {
                 definition: format!("CREATE UNIQUE INDEX {name}_pkey ON {schema}.{name} (id)"),
                 is_valid: true,
                 backs_constraint: true,
-                stats: None,
             }],
             comment: None,
-            stats: None,
             partition_info: None,
             policies: vec![],
             triggers: vec![],
             reloptions: vec![],
             rls_enabled: false,
         }
-    }
-
-    fn populated_stats(t: &Table, reltuples: f64, idx_scan: i64) -> Table {
-        let mut t = t.clone();
-        t.stats = Some(TableStats {
-            reltuples,
-            relpages: (reltuples / 100.0) as i64,
-            dead_tuples: 17,
-            last_vacuum: None,
-            last_autovacuum: None,
-            last_analyze: None,
-            last_autoanalyze: None,
-            seq_scan: 9,
-            idx_scan,
-            table_size: 4096,
-        });
-        for col in &mut t.columns {
-            col.stats = Some(ColumnStats {
-                null_frac: Some(0.1),
-                n_distinct: Some(reltuples),
-                most_common_vals: None,
-                most_common_freqs: None,
-                histogram_bounds: None,
-                correlation: Some(0.5),
-            });
-        }
-        for idx in &mut t.indexes {
-            idx.stats = Some(IndexStats {
-                idx_scan,
-                idx_tup_read: idx_scan * 2,
-                idx_tup_fetch: idx_scan,
-                size: 8192,
-                relpages: 1,
-                reltuples,
-            });
-        }
-        t
     }
 
     fn input_for<'a>(tables: &'a [Table]) -> HashInput<'a> {
@@ -182,23 +141,6 @@ mod tests {
             functions: &[],
             extensions: &[],
         }
-    }
-
-    // Drift hash must not change when only stats churn — same DDL, different
-    // reltuples / idx_scan / dead_tuples / column histograms must produce the
-    // same content_hash. Regression for the original snapshot-split bug.
-    #[test]
-    fn content_hash_stable_across_stats_churn() {
-        let bare = empty_table("public", "orders");
-        let cold = populated_stats(&bare, 100.0, 0);
-        let hot = populated_stats(&bare, 1_000_000.0, 42_000);
-
-        let h_bare = compute_content_hash(&input_for(&[bare]));
-        let h_cold = compute_content_hash(&input_for(&[cold]));
-        let h_hot = compute_content_hash(&input_for(&[hot]));
-
-        assert_eq!(h_bare, h_cold, "stats absence vs. presence must not differ");
-        assert_eq!(h_cold, h_hot, "stats values must not affect hash");
     }
 
     #[test]
@@ -225,7 +167,6 @@ mod tests {
             generated: None,
             comment: None,
             statistics_target: None,
-            stats: None,
         });
         assert_ne!(
             compute_content_hash(&input_for(&[a])),
@@ -270,7 +211,6 @@ mod tests {
             definition: "CREATE INDEX orders_id_idx ON public.orders (id)".into(),
             is_valid: true,
             backs_constraint: false,
-            stats: None,
         });
         assert_ne!(
             compute_content_hash(&input_for(&[a])),
@@ -314,42 +254,6 @@ mod tests {
         assert_ne!(
             compute_content_hash(&no_enums),
             compute_content_hash(&with_enum),
-        );
-    }
-
-    #[test]
-    fn content_hash_unchanged_when_index_stats_only_differ() {
-        let bare = empty_table("public", "orders");
-        let mut hot = bare.clone();
-        hot.indexes[0].stats = Some(IndexStats {
-            idx_scan: 500_000,
-            idx_tup_read: 1_000_000,
-            idx_tup_fetch: 750_000,
-            size: 1_048_576,
-            relpages: 128,
-            reltuples: 1_000_000.0,
-        });
-        assert_eq!(
-            compute_content_hash(&input_for(&[bare])),
-            compute_content_hash(&input_for(&[hot])),
-        );
-    }
-
-    #[test]
-    fn content_hash_unchanged_when_column_stats_only_differ() {
-        let bare = empty_table("public", "orders");
-        let mut analyzed = bare.clone();
-        analyzed.columns[0].stats = Some(ColumnStats {
-            null_frac: Some(0.42),
-            n_distinct: Some(10_000.0),
-            most_common_vals: Some("{1,2,3}".into()),
-            most_common_freqs: Some("{0.1,0.05,0.02}".into()),
-            histogram_bounds: Some("{0,500,1000}".into()),
-            correlation: Some(-0.9),
-        });
-        assert_eq!(
-            compute_content_hash(&input_for(&[bare])),
-            compute_content_hash(&input_for(&[analyzed])),
         );
     }
 }
