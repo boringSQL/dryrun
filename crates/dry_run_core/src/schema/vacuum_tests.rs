@@ -117,7 +117,7 @@ fn skips_small_tables() {
         vec![("tiny", 100.0, 0)],
         vec![("tiny", 10)],
     );
-    let results = analyze_vacuum_health(&snap.view(None));
+    let results = analyze_vacuum_health(&snap.view());
     assert!(results.is_empty());
 }
 
@@ -128,7 +128,7 @@ fn reports_large_table_with_defaults() {
         vec![("big", 5_000_000.0, 0)],
         vec![("big", 100)],
     );
-    let results = analyze_vacuum_health(&snap.view(None));
+    let results = analyze_vacuum_health(&snap.view());
     assert_eq!(results.len(), 1);
     assert!(
         results[0]
@@ -145,7 +145,7 @@ fn reports_high_dead_ratio() {
         vec![("dirty", 100_000.0, 0)],
         vec![("dirty", 20_000)],
     );
-    let results = analyze_vacuum_health(&snap.view(None));
+    let results = analyze_vacuum_health(&snap.view());
     assert_eq!(results.len(), 1);
     assert!(
         results[0]
@@ -160,7 +160,7 @@ fn disabled_autovacuum_warns() {
     let mut table = ddl_table("bad");
     table.reloptions = vec!["autovacuum_enabled=false".into()];
     let snap = annotated(vec![table], vec![("bad", 100_000.0, 0)], vec![("bad", 100)]);
-    let results = analyze_vacuum_health(&snap.view(None));
+    let results = analyze_vacuum_health(&snap.view());
     assert_eq!(results.len(), 1);
     assert!(
         results[0]
@@ -180,7 +180,7 @@ fn skipped_when_planner_absent() {
         planner: None,
         activity_by_node: BTreeMap::new(),
     };
-    assert!(analyze_vacuum_health(&snap.view(None)).is_empty());
+    assert!(analyze_vacuum_health(&snap.view()).is_empty());
 }
 
 #[test]
@@ -254,7 +254,7 @@ fn dead_tuples_summed_across_replicas() {
         planner: Some(planner),
         activity_by_node,
     };
-    let results = analyze_vacuum_health(&snap.view(None));
+    let results = analyze_vacuum_health(&snap.view());
     assert_eq!(results.len(), 1);
     // 8k+7k+6k = 21k dead vs 100k live → 21% > 10% threshold
     assert_eq!(results[0].dead_tuples, 21_000);

@@ -120,7 +120,7 @@ fn ddl_only(schema: SchemaSnapshot) -> AnnotatedSnapshot {
 fn advise_seq_scan_suggests_btree() {
     let snap = ddl_only(empty_schema());
     let plan = make_seq_scan("orders", 100_000.0, Some("(customer_id = 42)"));
-    let advice = advise(&plan, &snap.view(None), None);
+    let advice = advise(&plan, &snap.view(), None);
     assert!(!advice.is_empty());
     assert!(advice[0].ddl.as_ref().unwrap().contains("btree"));
     assert!(advice[0].ddl.as_ref().unwrap().contains("customer_id"));
@@ -131,7 +131,7 @@ fn advise_seq_scan_suggests_btree() {
 fn advise_seq_scan_jsonb_suggests_gin() {
     let snap = ddl_only(empty_schema());
     let plan = make_seq_scan("orders", 100_000.0, Some("(data @> '{}'::jsonb)"));
-    let advice = advise(&plan, &snap.view(None), None);
+    let advice = advise(&plan, &snap.view(), None);
     assert!(!advice.is_empty());
     assert!(advice[0].ddl.as_ref().unwrap().contains("gin"));
 }
@@ -140,7 +140,7 @@ fn advise_seq_scan_jsonb_suggests_gin() {
 fn advise_small_table_no_advice() {
     let snap = ddl_only(empty_schema());
     let plan = make_seq_scan("orders", 50.0, Some("(id = 1)"));
-    let advice = advise(&plan, &snap.view(None), None);
+    let advice = advise(&plan, &snap.view(), None);
     assert!(advice.is_empty());
 }
 
@@ -153,7 +153,7 @@ fn advise_includes_version_note() {
         minor: 0,
         patch: 0,
     };
-    let advice = advise(&plan, &snap.view(None), Some(&pg14));
+    let advice = advise(&plan, &snap.view(), Some(&pg14));
     assert!(!advice.is_empty());
     assert!(advice[0].version_note.is_some());
 }
@@ -227,7 +227,7 @@ fn advise_seq_scan_includes_node_context() {
         activity_by_node,
     };
     let plan = make_seq_scan("orders", 100_000.0, Some("(customer_id = 42)"));
-    let advice = advise(&plan, &snap.view(None), None);
+    let advice = advise(&plan, &snap.view(), None);
     assert!(!advice.is_empty());
     assert!(advice[0].recommendation.contains("across 2 nodes"));
     assert!(advice[0].recommendation.contains("master: 100"));

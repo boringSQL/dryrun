@@ -323,28 +323,21 @@ fn merged_activity_last_vacuum_max_returns_none_when_never_vacuumed() {
 }
 
 #[test]
-fn annotated_snapshot_view_defaults_to_primary() {
-    let snap = snap_with_nodes(vec![
-        activity_for("primary", 1, 0, 0, None, None, None),
-        activity_for("replica1", 2, 0, 0, None, None, None),
-    ]);
-    let view = snap.view(None);
-    let activity = view.activity.expect("primary should resolve by default");
-    assert_eq!(activity.node.label, "primary");
-}
-
-#[test]
-fn annotated_snapshot_view_unknown_label_yields_no_activity() {
-    let snap = snap_with_nodes(vec![activity_for("primary", 1, 0, 0, None, None, None)]);
-    let view = snap.view(Some("ghost"));
-    assert!(view.activity.is_none());
-}
-
-#[test]
-fn annotated_snapshot_view_single_node_has_no_merged() {
-    let snap = snap_with_nodes(vec![activity_for("primary", 1, 0, 0, None, None, None)]);
-    let view = snap.view(None);
+fn annotated_snapshot_view_with_no_activity_has_no_merged() {
+    let snap = snap_with_nodes(vec![]);
+    let view = snap.view();
     assert!(view.merged.is_none());
+}
+
+#[test]
+fn annotated_snapshot_view_single_node_populates_merged() {
+    let snap = snap_with_nodes(vec![activity_for("primary", 1, 0, 0, None, None, None)]);
+    let view = snap.view();
+    let merged = view
+        .merged
+        .expect("single node still produces a merged view");
+    assert_eq!(merged.nodes.len(), 1);
+    assert_eq!(merged.nodes[0].node.label, "primary");
 }
 
 #[test]
@@ -353,7 +346,7 @@ fn annotated_snapshot_view_multi_node_populates_merged() {
         activity_for("primary", 1, 0, 0, None, None, None),
         activity_for("replica1", 2, 0, 0, None, None, None),
     ]);
-    let view = snap.view(None);
+    let view = snap.view();
     let merged = view.merged.expect("multi-node should produce merged view");
     assert_eq!(merged.nodes.len(), 2);
 }
@@ -479,7 +472,7 @@ fn snap_full(
 #[test]
 fn reltuples_reads_from_planner() {
     let snap = snap_with_planner(planner_for_orders(1234.0, 1_000_000));
-    let view = snap.view(None);
+    let view = snap.view();
     assert_eq!(
         view.reltuples(&QualifiedName::new("public", "orders")),
         Some(1234.0)
@@ -489,7 +482,7 @@ fn reltuples_reads_from_planner() {
 #[test]
 fn reltuples_returns_none_when_planner_missing() {
     let snap = snap_full(None, vec![]);
-    let view = snap.view(None);
+    let view = snap.view();
     assert!(
         view.reltuples(&QualifiedName::new("public", "orders"))
             .is_none()
@@ -499,7 +492,7 @@ fn reltuples_returns_none_when_planner_missing() {
 #[test]
 fn reltuples_returns_none_for_unknown_table() {
     let snap = snap_with_planner(planner_for_orders(1234.0, 1_000_000));
-    let view = snap.view(None);
+    let view = snap.view();
     assert!(
         view.reltuples(&QualifiedName::new("public", "ghost"))
             .is_none()
@@ -509,7 +502,7 @@ fn reltuples_returns_none_for_unknown_table() {
 #[test]
 fn table_size_relpages_index_sizing_read_from_planner() {
     let snap = snap_with_planner(planner_for_orders(50.0, 99));
-    let view = snap.view(None);
+    let view = snap.view();
     let t = QualifiedName::new("public", "orders");
     let ix = QualifiedName::new("public", "orders_pkey");
     assert_eq!(view.table_size(&t), Some(99));
@@ -520,7 +513,7 @@ fn table_size_relpages_index_sizing_read_from_planner() {
 #[test]
 fn column_stats_reads_from_planner() {
     let snap = snap_with_planner(planner_for_orders(1.0, 1));
-    let view = snap.view(None);
+    let view = snap.view();
     let stats = view
         .column_stats(&QualifiedName::new("public", "orders"), "user_id")
         .expect("user_id stats");
@@ -543,18 +536,18 @@ fn idx_scan_sum_falls_through_merged_to_single_to_zero() {
             activity_for("replica1", 5, 0, 0, None, None, None),
         ],
     );
-    assert_eq!(multi.view(None).idx_scan_sum(&ix), 15);
+    assert_eq!(multi.view().idx_scan_sum(&ix), 15);
 
     // 2. single-node activity, merged is None → reads single
     let single = snap_full(
         None,
         vec![activity_for("primary", 7, 0, 0, None, None, None)],
     );
-    assert_eq!(single.view(None).idx_scan_sum(&ix), 7);
+    assert_eq!(single.view().idx_scan_sum(&ix), 7);
 
     // 3. no activity at all → 0
     let none = snap_full(None, vec![]);
-    assert_eq!(none.view(None).idx_scan_sum(&ix), 0);
+    assert_eq!(none.view().idx_scan_sum(&ix), 0);
 }
 
 #[test]
@@ -572,9 +565,9 @@ fn seq_scan_sum_falls_through_merged_to_single_to_zero() {
         vec![activity_for("primary", 0, 9, 0, None, None, None)],
     );
     let none = snap_full(None, vec![]);
-    assert_eq!(multi.view(None).seq_scan_sum(&t), 7);
-    assert_eq!(single.view(None).seq_scan_sum(&t), 9);
-    assert_eq!(none.view(None).seq_scan_sum(&t), 0);
+    assert_eq!(multi.view().seq_scan_sum(&t), 7);
+    assert_eq!(single.view().seq_scan_sum(&t), 9);
+    assert_eq!(none.view().seq_scan_sum(&t), 0);
 }
 
 #[test]
@@ -592,9 +585,9 @@ fn n_dead_tup_sum_falls_through_merged_to_single_to_zero() {
         vec![activity_for("primary", 0, 0, 42, None, None, None)],
     );
     let none = snap_full(None, vec![]);
-    assert_eq!(multi.view(None).n_dead_tup_sum(&t), 150);
-    assert_eq!(single.view(None).n_dead_tup_sum(&t), 42);
-    assert_eq!(none.view(None).n_dead_tup_sum(&t), 0);
+    assert_eq!(multi.view().n_dead_tup_sum(&t), 150);
+    assert_eq!(single.view().n_dead_tup_sum(&t), 42);
+    assert_eq!(none.view().n_dead_tup_sum(&t), 0);
 }
 
 #[test]
@@ -614,9 +607,9 @@ fn last_vacuum_max_falls_through_merged_to_single_to_none() {
         vec![activity_for("primary", 0, 0, 0, Some(early), None, None)],
     );
     let none = snap_full(None, vec![]);
-    assert_eq!(multi.view(None).last_vacuum_max(&t), Some(late));
-    assert_eq!(single.view(None).last_vacuum_max(&t), Some(early));
-    assert!(none.view(None).last_vacuum_max(&t).is_none());
+    assert_eq!(multi.view().last_vacuum_max(&t), Some(late));
+    assert_eq!(single.view().last_vacuum_max(&t), Some(early));
+    assert!(none.view().last_vacuum_max(&t).is_none());
 }
 
 #[test]
@@ -627,7 +620,7 @@ fn idx_scan_per_node_works_for_single_and_multi() {
         vec![activity_for("primary", 7, 0, 0, None, None, None)],
     );
     assert_eq!(
-        single.view(None).idx_scan_per_node(&ix),
+        single.view().idx_scan_per_node(&ix),
         vec![("primary".into(), 7)]
     );
 
@@ -639,12 +632,12 @@ fn idx_scan_per_node_works_for_single_and_multi() {
         ],
     );
     assert_eq!(
-        multi.view(None).idx_scan_per_node(&ix),
+        multi.view().idx_scan_per_node(&ix),
         vec![("primary".into(), 1), ("replica1".into(), 2)],
     );
 
     let none = snap_full(None, vec![]);
-    assert!(none.view(None).idx_scan_per_node(&ix).is_empty());
+    assert!(none.view().idx_scan_per_node(&ix).is_empty());
 }
 
 #[test]
@@ -658,7 +651,7 @@ fn single_node_and_multi_node_one_node_parity_for_cluster_sums() {
         None,
         vec![activity_for("primary", 11, 5, 3, None, None, None)],
     );
-    let view = one.view(None);
+    let view = one.view();
     assert_eq!(view.idx_scan_sum(&ix), 11);
     assert_eq!(view.seq_scan_sum(&t), 5);
     assert_eq!(view.n_dead_tup_sum(&t), 3);
@@ -671,7 +664,7 @@ fn no_panic_on_fully_empty_annotated() {
         planner: None,
         activity_by_node: BTreeMap::new(),
     };
-    let view = snap.view(None);
+    let view = snap.view();
     let t = QualifiedName::new("public", "orders");
     let ix = QualifiedName::new("public", "orders_pkey");
     assert!(view.reltuples(&t).is_none());
