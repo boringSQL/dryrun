@@ -24,6 +24,7 @@ pub struct BloatedIndexEntry {
     pub bloat_ratio: f64,
     pub actual_pages: i64,
     pub expected_pages: i64,
+    pub size_bytes: i64,
     pub definition: String,
 }
 
@@ -47,6 +48,7 @@ pub fn detect_bloated_indexes(
                     bloat_ratio: est.bloat_ratio,
                     actual_pages: est.actual_pages,
                     expected_pages: est.expected_pages,
+                    size_bytes: sizing.map(|s| s.size).unwrap_or(0),
                     definition: idx.definition.clone(),
                 });
             }
