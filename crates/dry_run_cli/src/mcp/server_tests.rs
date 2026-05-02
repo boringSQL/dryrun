@@ -94,8 +94,8 @@ fn plan_json_missing_plan_key_object() {
 #[tokio::test]
 async fn list_tables_includes_pg_version() {
     let snapshot = test_snapshot();
-    let server = DryRunServer::from_snapshot_with_db(
-        snapshot,
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(snapshot),
         None,
         LintConfig::default(),
         None,
@@ -122,8 +122,8 @@ async fn list_tables_includes_pg_version() {
 #[tokio::test]
 async fn describe_table_includes_pg_version() {
     let snapshot = test_snapshot();
-    let server = DryRunServer::from_snapshot_with_db(
-        snapshot,
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(snapshot),
         None,
         LintConfig::default(),
         None,
@@ -323,8 +323,8 @@ async fn refresh_schema_persists_all_three_kinds() {
     let ctx = DryRun::connect(&url).await.expect("connect to test PG");
     // Bootstrap server in offline mode, then attach live ctx via from_snapshot_with_db.
     let bootstrap_schema = ctx.introspect_schema().await.expect("bootstrap introspect");
-    let server = DryRunServer::from_snapshot_with_db(
-        bootstrap_schema,
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(bootstrap_schema),
         Some((url.as_str(), ctx)),
         LintConfig::default(),
         None,
