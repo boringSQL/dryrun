@@ -1,10 +1,6 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::schema::types::{
-    ActivityStatsSnapshot, AnnotatedSnapshot, IndexActivityEntry, NodeIdentity,
-    PlannerStatsSnapshot, TableActivity, TableActivityEntry, TableSizing, TableSizingEntry,
-};
 use crate::schema::*;
 
 fn ddl_table(name: &str) -> Table {

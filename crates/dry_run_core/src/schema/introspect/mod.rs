@@ -18,6 +18,7 @@ use tracing::info;
 use sha2::{Digest, Sha256};
 
 use super::hash::{HashInput, compute_content_hash};
+use super::snapshot::*;
 use super::types::*;
 use crate::error::{Error, Result};
 

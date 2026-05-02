@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use super::types::{AnnotatedSchema, GucSetting, QualifiedName};
+use super::snapshot::{AnnotatedSchema, QualifiedName};
+use super::types::GucSetting;
 
 #[derive(Debug, Clone)]
 pub struct AutovacuumDefaults {
