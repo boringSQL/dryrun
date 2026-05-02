@@ -238,7 +238,7 @@ impl DryRunServer {
         // counts how many distinct activity captures we have, which
         // signals "we have multi-node data for this cluster" but doesn't
         // change the headline number.
-        let view = annotated.view(None);
+        let view = annotated.view();
         let node_count = annotated.activity_by_node.len();
 
         let mut entries: Vec<TableEntry> = annotated
@@ -351,7 +351,7 @@ impl DryRunServer {
 
         let detail = params.detail.as_deref().unwrap_or("summary");
         let qn = QualifiedName::new(schema_name, &params.table);
-        let view = annotated.view(None);
+        let view = annotated.view();
         let table_rows = view.reltuples(&qn).unwrap_or(0.0);
 
         // Build column profiles — pull each column's stats out of the
@@ -768,7 +768,7 @@ impl DryRunServer {
         Parameters(params): Parameters<ValidateQueryParams>,
     ) -> Result<CallToolResult, McpError> {
         let annotated = self.get_annotated().await?;
-        let view = annotated.view(None);
+        let view = annotated.view();
         let result = dry_run_core::query::validate_query(&params.sql, &view)
             .map_err(|e| McpError::invalid_params(format!("SQL parse error: {e}"), None))?;
 
@@ -802,7 +802,7 @@ impl DryRunServer {
         // Pull annotated so plan-warning rules have planner reltuples
         // available as a fallback when the plan's own row estimate is zero.
         let annotated = self.get_annotated().await.ok();
-        let view = annotated.as_ref().map(|a| a.view(None));
+        let view = annotated.as_ref().map(|a| a.view());
         let ctx = self.require_live_db()?;
 
         let result = dry_run_core::query::explain_query(
@@ -851,7 +851,7 @@ impl DryRunServer {
         // advise is a planner-stats-driven tool and primary is where
         // those originate. Per-node breakdowns inside advise itself
         // still iterate every node via `seq_scan_per_node`.
-        let view = annotated.view(None);
+        let view = annotated.view();
 
         let explain_result = if let Some(ctx) = &self.ctx {
             dry_run_core::query::explain_query(
@@ -936,7 +936,7 @@ impl DryRunServer {
         let plan = dry_run_core::query::parse_plan_json(plan_value)
             .map_err(|e| McpError::invalid_params(format!("failed to parse plan: {e}"), None))?;
 
-        let view = annotated.view(None);
+        let view = annotated.view();
         let warnings = dry_run_core::query::detect_plan_warnings(&plan, Some(&view));
 
         let advise_result = dry_run_core::query::advise_with_index_suggestions(
@@ -1023,7 +1023,7 @@ impl DryRunServer {
         let annotated = self.get_annotated().await?;
         let pg_version =
             dry_run_core::PgVersion::parse_from_version_string(&annotated.schema.pg_version).ok();
-        let view = annotated.view(None);
+        let view = annotated.view();
 
         let checks = dry_run_core::query::check_migration(&params.ddl, &view, pg_version.as_ref())
             .map_err(|e| McpError::invalid_params(format!("DDL parse error: {e}"), None))?;
@@ -1090,7 +1090,7 @@ impl DryRunServer {
         let has_ddl_fixes = if scope == "all" || scope == "audit" {
             // Audit needs planner sizing for the bloat / vacuum-defaults rules
             // — pass the annotated view so those have a chance to fire.
-            let report = dry_run_core::audit::run_audit(&target.view(None), &self.audit_config);
+            let report = dry_run_core::audit::run_audit(&target.view(), &self.audit_config);
             let has_fixes = report.findings.iter().any(|f| f.ddl_fix.is_some());
             result.insert(
                 "audit".into(),
@@ -1135,7 +1135,7 @@ impl DryRunServer {
         if let Some(table_filter) = &params.table {
             annotated.schema.tables.retain(|t| &t.name == table_filter);
         }
-        let results = dry_run_core::schema::vacuum::analyze_vacuum_health(&annotated.view(None));
+        let results = dry_run_core::schema::vacuum::analyze_vacuum_health(&annotated.view());
 
         if results.is_empty() {
             let text = self.wrap_text("No tables with significant row counts found.", None);
@@ -1234,7 +1234,7 @@ impl DryRunServer {
             // Bloat needs IndexSizing from the planner snapshot — pass the
             // annotated view so the rule can pull it via `index_sizing()`.
             let bloated =
-                dry_run_core::schema::detect_bloated_indexes(&annotated.view(None), threshold);
+                dry_run_core::schema::detect_bloated_indexes(&annotated.view(), threshold);
             result.insert(
                 "bloated_indexes".into(),
                 serde_json::to_value(&bloated).unwrap_or(serde_json::Value::Null),
@@ -1320,7 +1320,7 @@ impl DryRunServer {
         {
             for idx in &table.indexes {
                 let idx_qn = QualifiedName::new(schema_name, &idx.name);
-                let per_node = annotated.view(None).idx_scan_per_node(&idx_qn);
+                let per_node = annotated.view().idx_scan_per_node(&idx_qn);
                 if !per_node.is_empty() {
                     index_data.insert(idx.name.clone(), per_node);
                 }

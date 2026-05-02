@@ -360,7 +360,7 @@ mod tests {
         let snap = test_annotated(500_000.0);
         let suggestions = suggest_index(
             "SELECT * FROM users WHERE email = 'test@example.com'",
-            &snap.view(None),
+            &snap.view(),
             None,
             None,
         )
@@ -377,7 +377,7 @@ mod tests {
         let snap = test_annotated(500_000.0);
         let suggestions = suggest_index(
             "SELECT * FROM users u WHERE u.data = '{}'",
-            &snap.view(None),
+            &snap.view(),
             None,
             None,
         )
@@ -395,7 +395,7 @@ mod tests {
         let snap = test_annotated(50.0);
         let suggestions = suggest_index(
             "SELECT * FROM users WHERE email = 'x'",
-            &snap.view(None),
+            &snap.view(),
             None,
             None,
         )
@@ -415,7 +415,7 @@ mod tests {
         };
         let suggestions = suggest_index(
             "SELECT * FROM users WHERE email = 'x'",
-            &snap.view(None),
+            &snap.view(),
             None,
             None,
         )
@@ -456,7 +456,7 @@ mod tests {
         };
         let suggestions = suggest_index(
             "SELECT * FROM users WHERE email = 'test@example.com'",
-            &snap.view(None),
+            &snap.view(),
             Some(&plan),
             None,
         )

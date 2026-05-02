@@ -135,7 +135,7 @@ mod tests {
     fn empty_schema_produces_no_findings() {
         let config = AuditConfig::default();
         let snap = ddl_only(empty_schema());
-        let findings = run_all_audit_rules(&snap.view(None), &config);
+        let findings = run_all_audit_rules(&snap.view(), &config);
         assert!(findings.is_empty());
     }
 
@@ -171,14 +171,14 @@ mod tests {
         let snap = ddl_only(schema);
 
         let config = AuditConfig::default();
-        let findings = run_all_audit_rules(&snap.view(None), &config);
+        let findings = run_all_audit_rules(&snap.view(), &config);
         assert!(findings.iter().any(|f| f.rule == "naming/reserved"));
 
         let config = AuditConfig {
             disabled_rules: vec!["naming/reserved".into()],
             ..AuditConfig::default()
         };
-        let findings = run_all_audit_rules(&snap.view(None), &config);
+        let findings = run_all_audit_rules(&snap.view(), &config);
         assert!(!findings.iter().any(|f| f.rule == "naming/reserved"));
     }
 }
