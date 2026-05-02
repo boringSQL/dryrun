@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 use crate::history::snapshot_store::{
     PutOutcome, SnapshotKey, SnapshotRef, SnapshotStore, TimeRange,
 };
-use crate::schema::SchemaSnapshot;
+use crate::schema::{ActivityStatsSnapshot, PlannerStatsSnapshot, SchemaSnapshot};
 
 pub struct HistoryStore {
     conn: Arc<Mutex<Connection>>,
@@ -91,6 +91,134 @@ impl HistoryStore {
     pub fn open_default() -> Result<Self> {
         let path = default_history_path()?;
         Self::open(&path)
+    }
+
+    pub async fn latest_schema_hash(&self, key: &SnapshotKey) -> Result<Option<String>> {
+        let pid = key.project_id.0.clone();
+        let did = key.database_id.0.clone();
+        run_blocking(&self.conn, move |conn| {
+            let row: rusqlite::Result<String> = conn.query_row(
+                "SELECT content_hash FROM snapshots
+                  WHERE project_id = ?1 AND database_id = ?2 AND kind = 'schema'
+                  ORDER BY timestamp DESC LIMIT 1",
+                params![pid, did],
+                |r| r.get(0),
+            );
+            match row {
+                Ok(h) => Ok(Some(h)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await
+    }
+
+    pub async fn put_planner_stats(
+        &self,
+        key: &SnapshotKey,
+        snap: &PlannerStatsSnapshot,
+    ) -> Result<PutOutcome> {
+        let key = key.clone();
+        let snap = snap.clone();
+        run_blocking(&self.conn, move |conn| {
+            let pid = &key.project_id.0;
+            let did = &key.database_id.0;
+
+            let latest: Option<String> = conn
+                .query_row(
+                    "SELECT content_hash FROM snapshots
+                      WHERE project_id = ?1 AND database_id = ?2 AND kind = 'planner_stats'
+                      ORDER BY timestamp DESC LIMIT 1",
+                    params![pid, did],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            if latest.as_deref() == Some(snap.content_hash.as_str()) {
+                debug!(hash = %snap.content_hash, "planner stats unchanged, skipping put");
+                return Ok(PutOutcome::Deduped);
+            }
+
+            let json = serde_json::to_string(&snap)
+                .map_err(|e| Error::History(format!("cannot serialize planner stats: {e}")))?;
+
+            conn.execute(
+                "INSERT INTO snapshots (kind, timestamp, content_hash, schema_ref_hash,
+                                        database_name, snapshot_json, project_id, database_id)
+                 VALUES ('planner_stats', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    snap.timestamp.to_rfc3339(),
+                    snap.content_hash,
+                    snap.schema_ref_hash,
+                    snap.database,
+                    json,
+                    pid,
+                    did,
+                ],
+            )?;
+
+            info!(hash = %snap.content_hash, schema_ref = %snap.schema_ref_hash,
+                project = %pid, database = %did, "planner stats put");
+            Ok(PutOutcome::Inserted)
+        })
+        .await
+    }
+
+    pub async fn put_activity_stats(
+        &self,
+        key: &SnapshotKey,
+        snap: &ActivityStatsSnapshot,
+    ) -> Result<PutOutcome> {
+        let key = key.clone();
+        let snap = snap.clone();
+        run_blocking(&self.conn, move |conn| {
+            let pid = &key.project_id.0;
+            let did = &key.database_id.0;
+            let label = &snap.node.label;
+
+            let latest: Option<String> = conn
+                .query_row(
+                    "SELECT content_hash FROM snapshots
+                      WHERE project_id = ?1 AND database_id = ?2
+                        AND kind = 'activity_stats' AND node_label = ?3
+                      ORDER BY timestamp DESC LIMIT 1",
+                    params![pid, did, label],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            if latest.as_deref() == Some(snap.content_hash.as_str()) {
+                debug!(hash = %snap.content_hash, label = %label,
+                    "activity stats unchanged, skipping put");
+                return Ok(PutOutcome::Deduped);
+            }
+
+            let json = serde_json::to_string(&snap)
+                .map_err(|e| Error::History(format!("cannot serialize activity stats: {e}")))?;
+
+            conn.execute(
+                "INSERT INTO snapshots (kind, timestamp, content_hash, schema_ref_hash,
+                                        node_label, database_name, snapshot_json,
+                                        project_id, database_id)
+                 VALUES ('activity_stats', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    snap.timestamp.to_rfc3339(),
+                    snap.content_hash,
+                    snap.schema_ref_hash,
+                    label,
+                    snap.database,
+                    json,
+                    pid,
+                    did,
+                ],
+            )?;
+
+            info!(hash = %snap.content_hash, schema_ref = %snap.schema_ref_hash,
+                label = %label, project = %pid, database = %did,
+                "activity stats put");
+            Ok(PutOutcome::Inserted)
+        })
+        .await
     }
 
     pub fn list_keys(&self) -> Result<Vec<SnapshotKey>> {
