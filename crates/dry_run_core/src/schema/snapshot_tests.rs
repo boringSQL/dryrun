@@ -1,3 +1,4 @@
+use super::super::types::*;
 use super::*;
 
 #[test]

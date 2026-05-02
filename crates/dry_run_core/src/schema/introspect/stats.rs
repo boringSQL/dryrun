@@ -1,6 +1,7 @@
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
+use super::super::snapshot::*;
 use super::super::types::*;
 use crate::error::Result;
 

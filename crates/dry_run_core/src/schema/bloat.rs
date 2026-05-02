@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use super::types::{Index, IndexSizing, Table};
+use super::snapshot::IndexSizing;
+use super::types::{Index, Table};
 
 const PAGE_SIZE: f64 = 8192.0;
 const BTREE_FILLFACTOR: f64 = 0.9;
