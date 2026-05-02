@@ -43,7 +43,7 @@ async fn persist_refresh(
     }
 }
 
-fn wrap_schema_only(schema: SchemaSnapshot) -> AnnotatedSnapshot {
+pub fn wrap_schema_only(schema: SchemaSnapshot) -> AnnotatedSnapshot {
     AnnotatedSnapshot {
         schema,
         planner: None,
@@ -68,8 +68,8 @@ pub struct DryRunServer {
 }
 
 impl DryRunServer {
-    pub fn from_snapshot_with_db(
-        snapshot: SchemaSnapshot,
+    pub fn from_annotated_with_db(
+        annotated: AnnotatedSnapshot,
         db: Option<(&str, DryRun)>,
         lint_config: LintConfig,
         pgmustard_api_key: Option<String>,
@@ -79,16 +79,18 @@ impl DryRunServer {
         let ctx = db.map(|(_url, ctx)| Arc::new(ctx));
 
         let pg_version_display =
-            dry_run_core::PgVersion::parse_from_version_string(&snapshot.pg_version)
+            dry_run_core::PgVersion::parse_from_version_string(&annotated.schema.pg_version)
                 .map(|v| format!("{}.{}.{}", v.major, v.minor, v.patch))
                 .unwrap_or_default();
-        let database_name = snapshot.database.clone();
+        let database_name = annotated.schema.database.clone();
 
         info!(
-            tables = snapshot.tables.len(),
-            database = %snapshot.database,
+            tables = annotated.schema.tables.len(),
+            database = %annotated.schema.database,
+            planner = annotated.planner.is_some(),
+            activity_nodes = annotated.activity_by_node.len(),
             live_db = ctx.is_some(),
-            "loaded schema from file"
+            "loaded annotated snapshot"
         );
 
         Self {
@@ -96,7 +98,7 @@ impl DryRunServer {
             app_version: app_version.to_string(),
             pg_version_display,
             database_name,
-            schema: Arc::new(RwLock::new(Some(wrap_schema_only(snapshot)))),
+            schema: Arc::new(RwLock::new(Some(annotated))),
             history: None,
             snapshot_key: None,
             lint_config,
@@ -138,7 +140,6 @@ impl DryRunServer {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_history(mut self, store: HistoryStore, key: Option<SnapshotKey>) -> Self {
         self.history = Some(Arc::new(store));
         self.snapshot_key = key;
@@ -397,6 +398,34 @@ impl DryRunServer {
                 })?;
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("stats".into(), synth_stats.clone());
+
+                    // inject snapshot-derived stats
+                    let idx_full: Vec<serde_json::Value> = table
+                        .indexes
+                        .iter()
+                        .map(|i| {
+                            let idx_qn = QualifiedName::new(&table.schema, &i.name);
+                            let sizing = view.index_sizing(&idx_qn);
+                            serde_json::json!({
+                                "name": i.name,
+                                "columns": i.columns,
+                                "include_columns": i.include_columns,
+                                "index_type": i.index_type,
+                                "is_unique": i.is_unique,
+                                "is_primary": i.is_primary,
+                                "predicate": i.predicate,
+                                "definition": i.definition,
+                                "is_valid": i.is_valid,
+                                "backs_constraint": i.backs_constraint,
+                                "idx_scan": view.idx_scan_sum(&idx_qn),
+                                "idx_scan_per_node": view.idx_scan_per_node(&idx_qn),
+                                "size_bytes": sizing.map(|s| s.size),
+                                "relpages": sizing.map(|s| s.relpages),
+                                "reltuples": sizing.map(|s| s.reltuples),
+                            })
+                        })
+                        .collect();
+                    obj.insert("indexes".into(), serde_json::Value::Array(idx_full));
                     if !profiles.is_empty() {
                         obj.insert("column_profiles".into(), serde_json::Value::Array(profiles));
                     }
@@ -442,6 +471,8 @@ impl DryRunServer {
                     .indexes
                     .iter()
                     .map(|i| {
+                        let idx_qn = QualifiedName::new(&table.schema, &i.name);
+                        let sizing = view.index_sizing(&idx_qn);
                         serde_json::json!({
                             "name": i.name,
                             "columns": i.columns,
@@ -451,6 +482,10 @@ impl DryRunServer {
                             "predicate": i.predicate,
                             "definition": i.definition,
                             "is_valid": i.is_valid,
+                            "idx_scan": view.idx_scan_sum(&idx_qn),
+                            "size_bytes": sizing.map(|s| s.size),
+                            "relpages": sizing.map(|s| s.relpages),
+                            "reltuples": sizing.map(|s| s.reltuples),
                         })
                     })
                     .collect();
