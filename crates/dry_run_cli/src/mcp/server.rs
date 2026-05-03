@@ -67,6 +67,30 @@ fn build_inline(
     }
 }
 
+async fn rebuild_after_refresh(
+    schema: SchemaSnapshot,
+    planner: Option<dry_run_core::PlannerStatsSnapshot>,
+    primary_activity: Option<dry_run_core::ActivityStatsSnapshot>,
+    history: Option<(&HistoryStore, &SnapshotKey)>,
+) -> AnnotatedSnapshot {
+    let mut annotated = build_inline(schema, planner, primary_activity);
+    if let Some((store, key)) = history {
+        persist_refresh(
+            store,
+            key,
+            &annotated.schema,
+            annotated.planner.as_ref(),
+            &annotated.activity_by_node,
+        )
+        .await;
+        match store.get_annotated(key, SnapshotRef::Latest).await {
+            Ok(a) => annotated = a,
+            Err(e) => tracing::warn!(error = %e, "history reload after refresh failed"),
+        }
+    }
+    annotated
+}
+
 #[derive(Clone)]
 pub struct DryRunServer {
     ctx: Option<Arc<DryRun>>,
@@ -1482,22 +1506,12 @@ impl DryRunServer {
             .inspect_err(|e| tracing::warn!(error = %e, "primary activity unavailable"))
             .ok();
 
-        let mut annotated = build_inline(schema, planner, primary);
-
-        if let (Some(store), Some(key)) = (self.history.as_ref(), self.snapshot_key.as_ref()) {
-            persist_refresh(
-                store,
-                key,
-                &annotated.schema,
-                annotated.planner.as_ref(),
-                &annotated.activity_by_node,
-            )
-            .await;
-            match store.get_annotated(key, SnapshotRef::Latest).await {
-                Ok(a) => annotated = a,
-                Err(e) => tracing::warn!(error = %e, "history reload after refresh failed"),
-            }
-        }
+        let history = self
+            .history
+            .as_ref()
+            .zip(self.snapshot_key.as_ref())
+            .map(|(s, k)| (s.as_ref(), k));
+        let annotated = rebuild_after_refresh(schema, planner, primary, history).await;
 
         let body = format!(
             "Schema refreshed: {} tables, {} views, {} functions (hash: {})\n\
