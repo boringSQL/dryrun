@@ -51,6 +51,22 @@ pub fn wrap_schema_only(schema: SchemaSnapshot) -> AnnotatedSnapshot {
     }
 }
 
+fn build_inline(
+    schema: SchemaSnapshot,
+    planner: Option<dry_run_core::PlannerStatsSnapshot>,
+    primary_activity: Option<dry_run_core::ActivityStatsSnapshot>,
+) -> AnnotatedSnapshot {
+    let mut activity_by_node = std::collections::BTreeMap::new();
+    if let Some(a) = primary_activity {
+        activity_by_node.insert("primary".to_string(), a);
+    }
+    AnnotatedSnapshot {
+        schema,
+        planner,
+        activity_by_node,
+    }
+}
+
 #[derive(Clone)]
 pub struct DryRunServer {
     ctx: Option<Arc<DryRun>>,
@@ -1454,52 +1470,58 @@ impl DryRunServer {
             .introspect_schema()
             .await
             .map_err(|e| McpError::internal_error(format!("introspection failed: {e}"), None))?;
-        let schema_hash = schema.content_hash.clone();
+        let hash = schema.content_hash.clone();
+        let planner = ctx
+            .introspect_planner_stats(&hash)
+            .await
+            .inspect_err(|e| tracing::warn!(error = %e, "planner stats unavailable"))
+            .ok();
+        let primary = ctx
+            .introspect_activity_stats(&hash, "primary")
+            .await
+            .inspect_err(|e| tracing::warn!(error = %e, "primary activity unavailable"))
+            .ok();
 
-        let planner = match ctx.introspect_planner_stats(&schema_hash).await {
-            Ok(p) => Some(p),
-            Err(e) => {
-                tracing::warn!(error = %e, "planner stats introspection failed; continuing without");
-                None
-            }
-        };
-
-        let mut activity_by_node = std::collections::BTreeMap::new();
-        match ctx.introspect_activity_stats(&schema_hash, "primary").await {
-            Ok(a) => {
-                activity_by_node.insert("primary".to_string(), a);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "activity stats introspection failed; continuing without");
-            }
-        }
+        let mut annotated = build_inline(schema, planner, primary);
 
         if let (Some(store), Some(key)) = (self.history.as_ref(), self.snapshot_key.as_ref()) {
-            persist_refresh(store, key, &schema, planner.as_ref(), &activity_by_node).await;
+            persist_refresh(
+                store,
+                key,
+                &annotated.schema,
+                annotated.planner.as_ref(),
+                &annotated.activity_by_node,
+            )
+            .await;
+            match store.get_annotated(key, SnapshotRef::Latest).await {
+                Ok(a) => annotated = a,
+                Err(e) => tracing::warn!(error = %e, "history reload after refresh failed"),
+            }
         }
 
         let body = format!(
             "Schema refreshed: {} tables, {} views, {} functions (hash: {})\n\
              Planner stats: {}\n\
-             Activity stats: {} node(s)",
-            schema.tables.len(),
-            schema.views.len(),
-            schema.functions.len(),
-            &schema_hash[..16],
-            if planner.is_some() {
+             Activity stats: {} node(s) [{}]",
+            annotated.schema.tables.len(),
+            annotated.schema.views.len(),
+            annotated.schema.functions.len(),
+            &annotated.schema.content_hash[..16],
+            if annotated.planner.is_some() {
                 "captured"
             } else {
                 "unavailable"
             },
-            activity_by_node.len(),
+            annotated.activity_by_node.len(),
+            annotated
+                .activity_by_node
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
         );
 
-        *self.schema.write().await = Some(AnnotatedSnapshot {
-            schema,
-            planner,
-            activity_by_node,
-        });
-
+        *self.schema.write().await = Some(annotated);
         let text = self.wrap_text(&body, None);
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
