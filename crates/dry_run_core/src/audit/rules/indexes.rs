@@ -231,13 +231,15 @@ pub fn check_wide_column_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
 const DEFAULT_BLOAT_THRESHOLD: f64 = 1.5;
 
 #[must_use]
-pub fn check_bloated_indexes(schema: &SchemaSnapshot) -> Vec<AuditFinding> {
+pub fn check_bloated_indexes(annotated: &crate::schema::AnnotatedSchema<'_>) -> Vec<AuditFinding> {
     let mut findings = Vec::new();
 
-    for table in &schema.tables {
+    for table in &annotated.schema.tables {
         let qualified = format!("{}.{}", table.schema, table.name);
         for idx in &table.indexes {
-            if let Some(est) = crate::schema::bloat::estimate_index_bloat(idx, table)
+            let qn = crate::schema::QualifiedName::new(&table.schema, &idx.name);
+            let sizing = annotated.index_sizing(&qn);
+            if let Some(est) = crate::schema::bloat::estimate_index_bloat(idx, sizing, table)
                 && est.bloat_ratio > DEFAULT_BLOAT_THRESHOLD
             {
                 findings.push(AuditFinding {
@@ -277,7 +279,6 @@ mod tests {
             generated: None,
             comment: None,
             statistics_target: None,
-            stats: None,
         }
     }
 
@@ -293,7 +294,6 @@ mod tests {
             definition: format!("CREATE INDEX {name} ON ..."),
             is_valid: true,
             backs_constraint: false,
-            stats: None,
         }
     }
 
@@ -306,7 +306,6 @@ mod tests {
             constraints: vec![],
             indexes,
             comment: None,
-            stats: None,
             partition_info: None,
             policies: vec![],
             triggers: vec![],
@@ -330,7 +329,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 

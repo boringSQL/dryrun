@@ -221,7 +221,6 @@ mod tests {
             generated: None,
             comment: None,
             statistics_target: None,
-            stats: None,
         }
     }
 
@@ -250,7 +249,6 @@ mod tests {
             definition: format!("CREATE INDEX {name} ON ..."),
             is_valid: true,
             backs_constraint: false,
-            stats: None,
         }
     }
 
@@ -268,7 +266,6 @@ mod tests {
             constraints,
             indexes,
             comment: None,
-            stats: None,
             partition_info: None,
             policies: vec![],
             triggers: vec![],
@@ -292,7 +289,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 
@@ -448,7 +444,6 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
             comment: None,
-            stats: None,
             partition_info: Some(PartitionInfo {
                 strategy: PartitionStrategy::Range,
                 key: "created_at".into(),
@@ -518,7 +513,6 @@ mod tests {
             generated: None,
             comment: None,
             statistics_target: None,
-            stats: None,
         }
     }
 
@@ -573,7 +567,6 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
             comment: None,
-            stats: None,
             partition_info: Some(PartitionInfo {
                 strategy: PartitionStrategy::Hash,
                 key: "id".into(),
@@ -766,7 +759,6 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
             comment: None,
-            stats: None,
             partition_info: Some(PartitionInfo {
                 strategy: PartitionStrategy::Range,
                 key: "created_at".into(),

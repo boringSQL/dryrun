@@ -6,7 +6,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
-use crate::schema::{NodeStats, SchemaSnapshot};
+use crate::schema::SchemaSnapshot;
 use crate::version::PgVersion;
 
 pub struct DryRun {
@@ -81,8 +81,19 @@ impl DryRun {
         crate::schema::introspect_schema(&self.pool).await
     }
 
-    pub async fn introspect_stats_only(&self, source: &str) -> Result<NodeStats> {
-        crate::schema::fetch_stats_only(&self.pool, source).await
+    pub async fn introspect_planner_stats(
+        &self,
+        schema_ref_hash: &str,
+    ) -> Result<crate::schema::PlannerStatsSnapshot> {
+        crate::schema::introspect_planner_stats(&self.pool, schema_ref_hash).await
+    }
+
+    pub async fn introspect_activity_stats(
+        &self,
+        schema_ref_hash: &str,
+        label: &str,
+    ) -> Result<crate::schema::ActivityStatsSnapshot> {
+        crate::schema::introspect_activity_stats(&self.pool, schema_ref_hash, label).await
     }
 
     pub async fn is_standby(&self) -> Result<bool> {

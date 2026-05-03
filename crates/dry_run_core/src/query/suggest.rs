@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::parse::parse_sql;
 use super::plan::PlanNode;
 use crate::error::Result;
-use crate::schema::{SchemaSnapshot, Table, effective_table_stats};
+use crate::schema::{AnnotatedSchema, QualifiedName, Table};
 use crate::version::PgVersion;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,7 +20,7 @@ pub struct IndexSuggestion {
 
 pub(crate) fn suggest_index(
     sql: &str,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     plan: Option<&PlanNode>,
     _pg_version: Option<&PgVersion>,
 ) -> Result<Vec<IndexSuggestion>> {
@@ -28,20 +28,21 @@ pub(crate) fn suggest_index(
     let mut suggestions = Vec::new();
 
     if let Some(plan) = plan {
-        suggest_from_plan(plan, schema, &mut suggestions);
+        suggest_from_plan(plan, annotated, &mut suggestions);
     }
 
-    suggest_from_query_structure(&parsed, schema, &mut suggestions);
+    suggest_from_query_structure(&parsed, annotated, &mut suggestions);
     dedup_suggestions(&mut suggestions);
 
     Ok(suggestions)
 }
 
-// plan-based suggestions
-
+// Plan-based suggestions — walks an EXPLAIN plan tree looking for
+// patterns that an index could fix. Reads only DDL plus reltuples (for
+// the "is this table large enough to bother" cutoff).
 fn suggest_from_plan(
     node: &PlanNode,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     suggestions: &mut Vec<IndexSuggestion>,
 ) {
     if node.node_type == "Seq Scan"
@@ -49,7 +50,8 @@ fn suggest_from_plan(
         && let Some(table_name) = &node.relation_name
     {
         let schema_name = node.schema.as_deref().unwrap_or("public");
-        let table = schema
+        let table = annotated
+            .schema
             .tables
             .iter()
             .find(|t| t.name == *table_name && t.schema == schema_name);
@@ -111,15 +113,19 @@ fn suggest_from_plan(
     }
 
     for child in &node.children {
-        suggest_from_plan(child, schema, suggestions);
+        suggest_from_plan(child, annotated, suggestions);
     }
 }
 
-// query structure-based suggestions
-
+// Query-structure-based suggestions — uses the parsed SQL to spot
+// WHERE-clause filter columns on large tables that lack a leading index.
+//
+// "Large" is gated on planner reltuples; tables under the threshold or
+// without any planner snapshot at all are silently skipped — there's no
+// useful suggestion to make in those cases.
 fn suggest_from_query_structure(
     parsed: &super::parse::ParsedQuery,
-    schema: &SchemaSnapshot,
+    annotated: &AnnotatedSchema<'_>,
     suggestions: &mut Vec<IndexSuggestion>,
 ) {
     for (alias, col_name) in &parsed.info.filter_columns {
@@ -137,22 +143,24 @@ fn suggest_from_query_structure(
 
         if let Some(table_ref) = table_ref {
             let schema_name = table_ref.schema.as_deref().unwrap_or("public");
-            let table = schema
+            let table = annotated
+                .schema
                 .tables
                 .iter()
                 .find(|t| t.name == table_ref.name && t.schema == schema_name);
 
             if let Some(table) = table {
-                let effective_stats = effective_table_stats(table, schema);
-                let is_large = effective_stats
-                    .as_ref()
-                    .is_some_and(|s| s.reltuples >= 1000.0);
+                let qn = QualifiedName::new(&table.schema, &table.name);
+                // Reltuples is the only stat this rule needs — comes
+                // from the planner snapshot (always None on a fresh
+                // project, in which case we skip).
+                let reltuples = annotated.reltuples(&qn).unwrap_or(0.0);
+                let is_large = reltuples >= 1000.0;
 
                 if is_large && !has_leading_index(Some(table), col_name) {
                     let idx_type = choose_index_type(Some(table), col_name);
                     let qualified = format!("{}.{}", table.schema, table.name);
                     let idx_name = format!("idx_{}_{col_name}", table.name);
-                    let reltuples = effective_stats.as_ref().map(|s| s.reltuples).unwrap_or(0.0);
 
                     suggestions.push(IndexSuggestion {
                         table: qualified.clone(),
@@ -245,8 +253,41 @@ fn dedup_suggestions(suggestions: &mut Vec<IndexSuggestion>) {
 mod tests {
     use chrono::Utc;
 
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::schema::*;
+    use crate::schema::{AnnotatedSnapshot, PlannerStatsSnapshot, TableSizing, TableSizingEntry};
+
+    // Build a stats-bearing AnnotatedSnapshot — wraps the legacy
+    // `test_schema()` fixture and bolts on a planner snapshot with the
+    // reltuples each test relies on. `with_size` lets the small-table
+    // case override the row count without hand-rolling another schema.
+    fn test_annotated(reltuples: f64) -> AnnotatedSnapshot {
+        AnnotatedSnapshot {
+            schema: test_schema(),
+            planner: Some(PlannerStatsSnapshot {
+                pg_version: "PostgreSQL 17.0".into(),
+                database: "test".into(),
+                timestamp: Utc::now(),
+                content_hash: "ph".into(),
+                schema_ref_hash: "sh".into(),
+                tables: vec![TableSizingEntry {
+                    table: QualifiedName::new("public", "users"),
+                    sizing: TableSizing {
+                        reltuples,
+                        relpages: 6250,
+                        table_size: 50_000_000,
+                        total_size: None,
+                        index_size: None,
+                    },
+                }],
+                columns: vec![],
+                indexes: vec![],
+            }),
+            activity_by_node: BTreeMap::new(),
+        }
+    }
 
     fn test_schema() -> SchemaSnapshot {
         SchemaSnapshot {
@@ -270,7 +311,6 @@ mod tests {
                         generated: None,
                         comment: None,
                         statistics_target: None,
-                        stats: None,
                     },
                     Column {
                         name: "email".into(),
@@ -282,7 +322,6 @@ mod tests {
                         generated: None,
                         comment: None,
                         statistics_target: None,
-                        stats: None,
                     },
                     Column {
                         name: "data".into(),
@@ -294,24 +333,12 @@ mod tests {
                         generated: None,
                         comment: None,
                         statistics_target: None,
-                        stats: None,
                     },
                 ],
                 constraints: vec![],
                 indexes: vec![],
                 comment: None,
-                stats: Some(TableStats {
-                    reltuples: 500_000.0,
-                    relpages: 6250,
-                    dead_tuples: 0,
-                    last_vacuum: None,
-                    last_autovacuum: None,
-                    last_analyze: None,
-                    last_autoanalyze: None,
-                    seq_scan: 0,
-                    idx_scan: 0,
-                    table_size: 50_000_000,
-                }),
+                // Stats now live in PlannerStatsSnapshot — see test_annotated.
                 partition_info: None,
                 policies: vec![],
                 triggers: vec![],
@@ -325,16 +352,15 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 
     #[test]
     fn suggest_from_where_clause() {
-        let schema = test_schema();
+        let snap = test_annotated(500_000.0);
         let suggestions = suggest_index(
             "SELECT * FROM users WHERE email = 'test@example.com'",
-            &schema,
+            &snap.view(),
             None,
             None,
         )
@@ -348,10 +374,10 @@ mod tests {
 
     #[test]
     fn suggest_gin_for_jsonb() {
-        let schema = test_schema();
+        let snap = test_annotated(500_000.0);
         let suggestions = suggest_index(
             "SELECT * FROM users u WHERE u.data = '{}'",
-            &schema,
+            &snap.view(),
             None,
             None,
         )
@@ -365,16 +391,41 @@ mod tests {
 
     #[test]
     fn no_suggestion_for_small_table() {
-        let mut schema = test_schema();
-        schema.tables[0].stats.as_mut().unwrap().reltuples = 50.0;
-        let suggestions =
-            suggest_index("SELECT * FROM users WHERE email = 'x'", &schema, None, None).unwrap();
+        // Tiny reltuples (< 1000) → suggest_from_query_structure short-circuits.
+        let snap = test_annotated(50.0);
+        let suggestions = suggest_index(
+            "SELECT * FROM users WHERE email = 'x'",
+            &snap.view(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn no_suggestion_when_planner_absent() {
+        // Degradation case: no planner → reltuples returns None → 0.0 →
+        // is_large is false → no suggestion. Pins the new "no data → no
+        // suggestions" path.
+        let snap = AnnotatedSnapshot {
+            schema: test_schema(),
+            planner: None,
+            activity_by_node: BTreeMap::new(),
+        };
+        let suggestions = suggest_index(
+            "SELECT * FROM users WHERE email = 'x'",
+            &snap.view(),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(suggestions.is_empty());
     }
 
     #[test]
     fn no_duplicate_suggestions() {
-        let schema = test_schema();
+        let snap = test_annotated(500_000.0);
         let plan = PlanNode {
             node_type: "Seq Scan".into(),
             relation_name: Some("users".into()),
@@ -405,7 +456,7 @@ mod tests {
         };
         let suggestions = suggest_index(
             "SELECT * FROM users WHERE email = 'test@example.com'",
-            &schema,
+            &snap.view(),
             Some(&plan),
             None,
         )

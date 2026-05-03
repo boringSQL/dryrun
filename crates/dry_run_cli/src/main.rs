@@ -7,7 +7,6 @@ use clap::{Parser, Subcommand};
 use dry_run_core::history::{
     DatabaseId, PutOutcome, SnapshotKey, SnapshotRef, SnapshotStore, TimeRange,
 };
-use dry_run_core::schema::{NodeColumnStats, NodeIndexStats, NodeStats, NodeTableStats};
 use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
 use rmcp::ServiceExt;
 
@@ -36,8 +35,6 @@ enum Command {
     },
     Import {
         file: PathBuf,
-        #[arg(long, num_args = 1..)]
-        stats: Vec<PathBuf>,
     },
     Probe {
         #[arg(long, env = "DATABASE_URL")]
@@ -59,8 +56,6 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
         #[arg(long)]
-        stats_only: bool,
-        #[arg(long)]
         name: Option<String>,
     },
     Snapshot {
@@ -70,10 +65,6 @@ enum Command {
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
-    },
-    Stats {
-        #[command(subcommand)]
-        action: StatsAction,
     },
     Drift {
         #[arg(long, env = "DATABASE_URL")]
@@ -98,22 +89,28 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum StatsAction {
-    Apply {
-        #[arg(long, env = "DATABASE_URL")]
-        db: Option<String>,
-        #[arg(long, short)]
-        schema_file: Option<PathBuf>,
-        #[arg(long, short)]
-        node: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
 enum SnapshotAction {
     Take {
         #[arg(long, env = "DATABASE_URL")]
         db: Option<String>,
+        #[arg(long)]
+        history_db: Option<PathBuf>,
+    },
+    /// Capture activity counters from a replica.
+    ///
+    /// Connects to `--from <url>` (a replica) and writes a single
+    /// activity_stats row tagged with `--label`. Use `dryrun snapshot take`
+    /// against the primary instead to capture schema and planner stats.
+    Activity {
+        /// Replica connection URL (must report pg_is_in_recovery() = true)
+        #[arg(long)]
+        from: String,
+        /// Label identifying this node in the history db (e.g. `replica1`)
+        #[arg(long)]
+        label: String,
+        /// Allow capture even if no schema snapshot exists for the project yet.
+        #[arg(long)]
+        allow_orphan: bool,
         #[arg(long)]
         history_db: Option<PathBuf>,
     },
@@ -176,7 +173,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             ref source,
             pretty,
             ref output,
-            stats_only,
             ref name,
         } => {
             cmd_dump_schema(
@@ -184,16 +180,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 source.as_deref(),
                 pretty,
                 output.clone(),
-                stats_only,
                 name.clone(),
             )
             .await
         }
         Command::Init { ref db } => cmd_init(db.as_deref()).await,
-        Command::Import {
-            ref file,
-            ref stats,
-        } => cmd_import(&cli, file, stats).await,
+        Command::Import { ref file } => cmd_import(&cli, file).await,
         Command::Lint {
             ref schema_name,
             pretty,
@@ -201,7 +193,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => cmd_lint(&cli, schema_name.as_deref(), pretty, json).await,
         Command::Snapshot { ref action } => cmd_snapshot(&cli, action).await,
         Command::Profile { ref action } => cmd_profile(&cli, action),
-        Command::Stats { ref action } => cmd_stats(&cli, action).await,
         Command::Drift {
             ref db,
             ref against,
@@ -259,7 +250,6 @@ async fn cmd_dump_schema(
     source: Option<&str>,
     pretty: bool,
     output: Option<PathBuf>,
-    stats_only: bool,
     name: Option<String>,
 ) -> anyhow::Result<()> {
     let resolved = active_resolved_profile(cli, source, None)?;
@@ -270,80 +260,8 @@ async fn cmd_dump_schema(
     let name = name.or_else(|| resolved.database_id.as_ref().map(|d| d.0.clone()));
     let ctx = DryRun::connect(db_url).await?;
 
-    if stats_only {
-        let source =
-            name.ok_or_else(|| anyhow::anyhow!("--name is required when using --stats-only"))?;
-        let node_stats = ctx.introspect_stats_only(&source).await?;
-
-        let json = if pretty {
-            serde_json::to_string_pretty(&node_stats)?
-        } else {
-            serde_json::to_string(&node_stats)?
-        };
-
-        if let Some(path) = &output {
-            std::fs::write(path, &json)?;
-            eprintln!(
-                "Stats written to {} ({} tables, {} indexes)",
-                path.display(),
-                node_stats.table_stats.len(),
-                node_stats.index_stats.len()
-            );
-        } else {
-            println!("{json}");
-        }
-        return Ok(());
-    }
-
     let mut snapshot = ctx.introspect_schema().await?;
     snapshot.source = name;
-
-    if let Some(ref source) = snapshot.source {
-        let mut table_stats = Vec::new();
-        let mut index_stats = Vec::new();
-        let mut column_stats = Vec::new();
-
-        for table in &snapshot.tables {
-            if let Some(ref ts) = table.stats {
-                table_stats.push(NodeTableStats {
-                    schema: table.schema.clone(),
-                    table: table.name.clone(),
-                    stats: ts.clone(),
-                });
-            }
-            for idx in &table.indexes {
-                if let Some(ref is) = idx.stats {
-                    index_stats.push(NodeIndexStats {
-                        schema: table.schema.clone(),
-                        table: table.name.clone(),
-                        index_name: idx.name.clone(),
-                        stats: is.clone(),
-                    });
-                }
-            }
-            for col in &table.columns {
-                if let Some(ref cs) = col.stats {
-                    column_stats.push(NodeColumnStats {
-                        schema: table.schema.clone(),
-                        table: table.name.clone(),
-                        column: col.name.clone(),
-                        stats: cs.clone(),
-                    });
-                }
-            }
-        }
-
-        let is_standby = ctx.is_standby().await?;
-
-        snapshot.node_stats = vec![NodeStats {
-            source: source.clone(),
-            timestamp: snapshot.timestamp,
-            is_standby,
-            table_stats,
-            index_stats,
-            column_stats,
-        }];
-    }
 
     let json = if pretty {
         serde_json::to_string_pretty(&snapshot)?
@@ -516,6 +434,15 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
         SnapshotAction::Take { db, history_db } => {
             let db_url = require_db_url(db.as_deref())?;
             let ctx = DryRun::connect(db_url).await?;
+
+            if ctx.is_standby().await? {
+                anyhow::bail!(
+                    "`dryrun snapshot take` must run against the primary; \
+                     use `dryrun snapshot activity --from <url> --label <name>` \
+                     to capture activity from a replica"
+                );
+            }
+
             let store = open_history_store(history_db.as_deref())?;
             let snapshot = ctx.introspect_schema().await?;
 
@@ -526,7 +453,8 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
             let resolved = config.resolve_profile(Some(db_url), None, profile, &cwd)?;
             let key = complete_key(&resolved, &snapshot.database);
 
-            match store.put(&key, &snapshot).await? {
+            let schema_outcome = store.put(&key, &snapshot).await?;
+            match schema_outcome {
                 PutOutcome::Inserted => {
                     println!("Snapshot saved: {}", snapshot.content_hash);
                     println!(
@@ -535,19 +463,116 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
                         snapshot.views.len(),
                         snapshot.functions.len()
                     );
-                    println!(
-                        "  project={} database={}",
-                        key.project_id.0, key.database_id.0
-                    );
                 }
                 PutOutcome::Deduped => {
                     println!("Schema unchanged (hash: {})", snapshot.content_hash);
+                }
+            }
+
+            let planner = ctx.introspect_planner_stats(&snapshot.content_hash).await?;
+            let planner_outcome = store.put_planner_stats(&key, &planner).await?;
+            match planner_outcome {
+                PutOutcome::Inserted => {
                     println!(
-                        "  project={} database={}",
-                        key.project_id.0, key.database_id.0
+                        "Planner stats saved: {} ({} tables, {} columns, {} indexes)",
+                        planner.content_hash,
+                        planner.tables.len(),
+                        planner.columns.len(),
+                        planner.indexes.len(),
+                    );
+                }
+                PutOutcome::Deduped => {
+                    println!("Planner stats unchanged (hash: {})", planner.content_hash);
+                }
+            }
+
+            let activity = ctx
+                .introspect_activity_stats(&snapshot.content_hash, "primary")
+                .await?;
+            let activity_outcome = store.put_activity_stats(&key, &activity).await?;
+            match activity_outcome {
+                PutOutcome::Inserted => {
+                    println!(
+                        "Activity stats saved: {} (label=primary, {} tables, {} indexes)",
+                        activity.content_hash,
+                        activity.tables.len(),
+                        activity.indexes.len(),
+                    );
+                }
+                PutOutcome::Deduped => {
+                    println!("Activity stats unchanged (hash: {})", activity.content_hash);
+                }
+            }
+
+            println!(
+                "  project={} database={}",
+                key.project_id.0, key.database_id.0
+            );
+            Ok(())
+        }
+        SnapshotAction::Activity {
+            from,
+            label,
+            allow_orphan,
+            history_db,
+        } => {
+            let ctx = DryRun::connect(from).await?;
+            if !ctx.is_standby().await? {
+                anyhow::bail!(
+                    "`dryrun snapshot activity` must run against a standby \
+                     (--from must report pg_is_in_recovery() = true); \
+                     use `dryrun snapshot take` against the primary instead"
+                );
+            }
+
+            let store = open_history_store(history_db.as_deref())?;
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let config = ProjectConfig::discover(&cwd)
+                .map(|(_, c)| Ok(c))
+                .unwrap_or_else(|| ProjectConfig::parse(""))?;
+            let resolved = config.resolve_profile(Some(from), None, profile, &cwd)?;
+            let database = ctx.current_database().await?;
+            let key = complete_key(&resolved, &database);
+
+            let schema_ref = match store.latest_schema_hash(&key).await? {
+                Some(h) => h,
+                None if *allow_orphan => String::new(),
+                None => anyhow::bail!(
+                    "no schema snapshot found for project={} database={}; \
+                     run `dryrun snapshot take` against the primary first, \
+                     or pass --allow-orphan to capture activity anyway",
+                    key.project_id.0,
+                    key.database_id.0,
+                ),
+            };
+
+            let activity = ctx.introspect_activity_stats(&schema_ref, label).await?;
+            match store.put_activity_stats(&key, &activity).await? {
+                PutOutcome::Inserted => {
+                    println!(
+                        "Activity stats saved: {} (label={}, {} tables, {} indexes)",
+                        activity.content_hash,
+                        label,
+                        activity.tables.len(),
+                        activity.indexes.len(),
+                    );
+                }
+                PutOutcome::Deduped => {
+                    println!(
+                        "Activity stats unchanged (hash: {}, label={})",
+                        activity.content_hash, label
                     );
                 }
             }
+            if schema_ref.is_empty() {
+                println!("  (orphan capture: no matching schema snapshot)");
+            } else {
+                println!("  schema_ref={schema_ref}");
+            }
+            println!(
+                "  project={} database={}",
+                key.project_id.0, key.database_id.0
+            );
             Ok(())
         }
         SnapshotAction::List { db, history_db } => {
@@ -695,37 +720,14 @@ fn cmd_profile(cli: &Cli, action: &ProfileAction) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_import(
-    cli: &Cli,
-    file: &std::path::Path,
-    stats_files: &[PathBuf],
-) -> anyhow::Result<()> {
+async fn cmd_import(cli: &Cli, file: &std::path::Path) -> anyhow::Result<()> {
     let json = std::fs::read_to_string(file)?;
-    let mut snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)
+    let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("invalid schema JSON in '{}': {e}", file.display()))?;
-
-    if !stats_files.is_empty() {
-        for stats_path in stats_files {
-            let stats_json = std::fs::read_to_string(stats_path)?;
-            let node_stats: dry_run_core::NodeStats =
-                serde_json::from_str(&stats_json).map_err(|e| {
-                    anyhow::anyhow!("invalid stats JSON in '{}': {e}", stats_path.display())
-                })?;
-            eprintln!(
-                "  merging stats from '{}' ({} tables, {} indexes)",
-                node_stats.source,
-                node_stats.table_stats.len(),
-                node_stats.index_stats.len()
-            );
-            snapshot.node_stats.push(node_stats);
-        }
-    }
 
     let data_dir = dry_run_core::history::default_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
 
-    // route to the resolved profile's schema_file when one is configured;
-    // fall back to .dryrun/schema.json
     let out_path = active_resolved_profile(cli, None, None)
         .ok()
         .and_then(|r| r.schema_file)
@@ -737,70 +739,11 @@ async fn cmd_import(
     std::fs::write(&out_path, &out_json)?;
 
     eprintln!(
-        "Imported {} tables to {}{}",
+        "Imported {} tables to {}",
         snapshot.tables.len(),
         out_path.display(),
-        if snapshot.node_stats.is_empty() {
-            String::new()
-        } else {
-            format!(" (with {} node stats)", snapshot.node_stats.len())
-        }
     );
     Ok(())
-}
-
-async fn cmd_stats(cli: &Cli, action: &StatsAction) -> anyhow::Result<()> {
-    match action {
-        StatsAction::Apply {
-            db,
-            schema_file,
-            node,
-        } => {
-            let resolved = active_resolved_profile(cli, db.as_deref(), schema_file.as_deref())?;
-            let db_url = resolved
-                .db_url
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("--db or a profile with db_url is required"))?;
-
-            let snapshot = match resolved.schema_file.as_deref() {
-                Some(path) => load_schema_file(path)?,
-                None => resolve_schema(schema_file.as_deref(), None, None)?,
-            };
-
-            let ctx = DryRun::connect(db_url).await?;
-
-            let result =
-                dry_run_core::schema::apply_stats(ctx.pool(), &snapshot, node.as_deref()).await?;
-
-            // pg_regresql warning
-            if !result.regresql_loaded {
-                eprintln!();
-                eprintln!("  pg_regresql extension is not loaded.");
-                eprintln!("  Without it, PostgreSQL ignores pg_class.reltuples/relpages and uses");
-                eprintln!("  physical file sizes instead. Your injected row counts will have no");
-                eprintln!("  effect on EXPLAIN cost estimates.");
-                eprintln!();
-                eprintln!("  Install: sudo pgxn install pg_regresql");
-                eprintln!("  Then:    CREATE EXTENSION pg_regresql;");
-                eprintln!("  See:     https://github.com/boringSQL/regresql");
-                eprintln!();
-            }
-
-            eprintln!(
-                "Applied: {} tables, {} indexes, {} columns",
-                result.tables_updated, result.indexes_updated, result.columns_injected
-            );
-
-            if !result.skipped.is_empty() {
-                eprintln!("Skipped ({}):", result.skipped.len());
-                for s in &result.skipped {
-                    eprintln!("  {s}");
-                }
-            }
-
-            Ok(())
-        }
-    }
 }
 
 async fn cmd_drift(
@@ -1041,54 +984,86 @@ async fn cmd_mcp_serve(
     let candidates =
         schema_candidate_paths(schema_path, project_config.as_ref(), cli.profile.as_deref());
 
-    // try to load schema — if missing, start in uninitialized mode;
-    // if file exists but is broken, propagate the error
-    let schema_path_result =
-        resolve_schema_path(schema_path, project_config.as_ref(), cli.profile.as_deref());
+    let resolved_profile = project_config.as_ref().and_then(|c| {
+        c.resolve_profile(None, schema_path, cli.profile.as_deref(), &cwd)
+            .ok()
+    });
 
-    let server = match schema_path_result {
-        Ok(schema_file) => {
-            let json = std::fs::read_to_string(&schema_file)?;
-            let snapshot: dry_run_core::SchemaSnapshot = serde_json::from_str(&json)?;
+    let json_snapshot: Option<dry_run_core::SchemaSnapshot> =
+        resolve_schema_path(schema_path, project_config.as_ref(), cli.profile.as_deref())
+            .ok()
+            .and_then(|p| load_schema_file(&p).ok());
+
+    // SnapshotKey for profile/database (if present)
+    let snapshot_key = resolved_profile.as_ref().and_then(|r| {
+        let db_name = r
+            .database_id
+            .as_ref()
+            .map(|d| d.0.clone())
+            .or_else(|| json_snapshot.as_ref().map(|s| s.database.clone()))?;
+        Some(complete_key(r, &db_name))
+    });
+
+    // try history.db file, if not found fall back to JSON file
+    let history_store = HistoryStore::open_default().ok();
+
+    let annotated_from_history = match (history_store.as_ref(), snapshot_key.as_ref()) {
+        (Some(store), Some(key)) => store.get_annotated(key, SnapshotRef::Latest).await.ok(),
+        _ => None,
+    };
+
+    let annotated = match annotated_from_history {
+        Some(a) => {
             eprintln!(
-                "dryrun: loaded schema from {} ({} tables)",
-                schema_file.display(),
-                snapshot.tables.len()
+                "dryrun: loaded annotated snapshot from history.db ({} tables, planner: {}, activity nodes: {})",
+                a.schema.tables.len(),
+                if a.planner.is_some() { "yes" } else { "no" },
+                a.activity_by_node.len(),
             );
+            Some(a)
+        }
+        None => json_snapshot.map(|s| {
+            eprintln!(
+                "dryrun: loaded {} tables from schema.json (planner/activity unavailable; run `dryrun snapshot take` to capture stats)",
+                s.tables.len(),
+            );
+            mcp::wrap_schema_only(s)
+        }),
+    };
 
-            // optional --db enables live tools (explain_query, refresh_schema)
-            let effective_db = db.map(|s| s.to_string()).or_else(|| {
-                if let Some(ref config) = project_config
-                    && let Ok(resolved) =
-                        config.resolve_profile(None, None, cli.profile.as_deref(), &cwd)
-                {
-                    return resolved.db_url;
-                }
-                None
-            });
+    // --db enables live tools (explain_query, refresh_schema)
+    let effective_db = db
+        .map(|s| s.to_string())
+        .or_else(|| resolved_profile.as_ref().and_then(|r| r.db_url.clone()));
 
-            let db_connection = if let Some(ref db_url) = effective_db {
-                let ctx = DryRun::connect(db_url).await?;
-                eprintln!("dryrun: connected to local db (live tools enabled)");
-                Some((db_url.as_str(), ctx))
-            } else {
-                eprintln!("dryrun: offline mode (explain_query, refresh_schema disabled)");
-                None
-            };
+    let db_connection = if let Some(ref db_url) = effective_db {
+        let ctx = DryRun::connect(db_url).await?;
+        eprintln!("dryrun: connected to live db (live tools enabled)");
+        Some((db_url.as_str(), ctx))
+    } else {
+        eprintln!("dryrun: offline mode (explain_query, refresh_schema disabled)");
+        None
+    };
 
-            mcp::DryRunServer::from_snapshot_with_db(
-                snapshot,
+    let server = match annotated {
+        Some(a) => {
+            let mut s = mcp::DryRunServer::from_annotated_with_db(
+                a,
                 db_connection,
                 lint_config,
                 pgmustard_api_key,
                 get_version(),
                 candidates,
-            )
+            );
+            if let Some(store) = history_store {
+                s = s.with_history(store, snapshot_key);
+            }
+            s
         }
-        Err(_) => {
+        None => {
             eprintln!(
                 "dryrun: no schema found — starting in uninitialized mode\n\
-                 dryrun: use the reload_schema tool after running dump-schema"
+                 dryrun: use the reload_schema tool after running dump-schema or snapshot take"
             );
             mcp::DryRunServer::uninitialized(lint_config, get_version(), candidates)
         }
@@ -1139,7 +1114,6 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
         }
     }
 
