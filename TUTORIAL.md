@@ -103,7 +103,7 @@ Privileges:
 dryrun init --db "$DATABASE_URL"
 ```
 
-Creates `.dryrun/schema.json` and `.dryrun/history.db`.
+Creates `dryrun.toml`, the `.dryrun/` directory, and `.dryrun/schema.json`. Snapshot history lives in `~/.dryrun/history.db` (shared across projects, keyed by `(project_id, database_id)`).
 
 ### 3. Snapshots and diffing
 
@@ -149,54 +149,63 @@ All tools available including EXPLAIN ANALYZE (runs in rolled-back transactions,
 
 ## Part C: Multi-node workflow
 
-For setups with one master and N replicas serving different query patterns. Stats (seq_scan, idx_scan, reltuples) differ per node. dryrun can aggregate them.
+For setups with one primary and N replicas serving different query patterns. Activity counters (`seq_scan`, `idx_scan`, `n_dead_tup`) differ per node and only live where the queries actually run, on the replicas. dryrun captures schema + planner stats from the primary and activity stats from each replica, then aggregates them.
 
-### 1. Full dump from master
+In v0.6.0 a snapshot is split into three rows in `~/.dryrun/history.db`: `schema`, `planner_stats`, `activity_stats`. `snapshot take` writes the first two from the primary; `snapshot activity` writes one `activity_stats` row per replica, tagged with `--label`.
 
-```sh
-dryrun dump-schema --source "$MASTER_DB" --name "master" -o master.json
-```
-
-### 2. Stats-only dumps from replicas
-
-No structural schema, just pg_stat_user_tables and pg_stat_user_indexes data:
+### 1. Schema + planner stats from the primary
 
 ```sh
-dryrun dump-schema --source "$REPLICA1_DB" --stats-only --name "replica-1" -o r1-stats.json
-dryrun dump-schema --source "$REPLICA2_DB" --stats-only --name "replica-2" -o r2-stats.json
-dryrun dump-schema --source "$REPLICA3_DB" --stats-only --name "replica-3" -o r3-stats.json
+dryrun --profile primary snapshot take
 ```
 
-These are lightweight, good for nightly cron. Example cron entry:
+Refuses to run on a standby. Writes `schema` (DDL) + `planner_stats` (`reltuples`, `relpages`, `pg_statistic`) to history.
+
+### 2. Activity stats from each replica
+
+```sh
+dryrun --profile replica1 snapshot activity --from "$REPLICA1_URL" --label replica1
+dryrun --profile replica2 snapshot activity --from "$REPLICA2_URL" --label replica2
+dryrun --profile replica3 snapshot activity --from "$REPLICA3_URL" --label replica3
+```
+
+`--label` is required and identifies the node in `compare_nodes` and `detect`. `snapshot activity` refuses to run on the primary. Activity rows attach to the most recent `schema` row by `schema_ref_hash`; pass `--allow-orphan` to capture before a schema exists.
+
+### 3. Define profiles for repeatable runs
+
+```toml
+# dryrun.toml
+[project]
+id = "myapp"
+
+[profiles.primary]
+db_url = "${PRIMARY_DATABASE_URL}"
+
+[profiles.replica1]
+db_url = "${REPLICA1_DATABASE_URL}"
+
+[profiles.replica2]
+db_url = "${REPLICA2_DATABASE_URL}"
+```
+
+### 4. Cron
+
+Schema changes rarely; activity counters shift daily. Capture each on its own schedule:
 
 ```sh
 # /etc/cron.d/dryrun-stats
-0 2 * * * app dryrun dump-schema --source "$REPLICA1_DB" --stats-only --name "replica-1" -o /data/dryrun/r1-stats.json
+0  2 * * * app dryrun --profile primary  snapshot take
+15 2 * * * app dryrun --profile replica1 snapshot activity --from "$REPLICA1_URL" --label replica1
+15 2 * * * app dryrun --profile replica2 snapshot activity --from "$REPLICA2_URL" --label replica2
 ```
 
-### 3. Import with merged stats
+### 5. Verify
 
 ```sh
-dryrun import master.json --stats r1-stats.json r2-stats.json r3-stats.json
+dryrun snapshot list
 ```
 
-The resulting `.dryrun/schema.json` contains the full schema from master plus per-node stats from each replica. Consumers (suggest, validate, lint) automatically use aggregated values:
-
-- **reltuples**: max across nodes
-- **seq_scan / idx_scan**: sum across nodes (reveals which replicas are doing seq scans)
-- **table_size**: max across nodes
-
-### 4. Verify
-
-```sh
-cat .dryrun/schema.json | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(f'{len(d.get(\"node_stats\", []))} node stats attached')
-for ns in d.get('node_stats', []):
-    print(f'  {ns[\"source\"]}: {len(ns[\"table_stats\"])} tables, {len(ns[\"index_stats\"])} indexes')
-"
-```
+Each row prints its `kind` (`schema` / `planner_stats` / `activity_stats`), `node_label` for activity rows, and the `schema_ref_hash` linking activity to schema. The MCP `compare_nodes` tool then exposes per-node `idx_scan` for any table.
 
 ---
 
@@ -285,6 +294,6 @@ GRANT pg_monitor TO your_readonly_user;
 
 **"invalid schema JSON"** - The file must be a valid SchemaSnapshot. If you renamed fields or edited by hand, re-dump from the database.
 
-**Multi-node stats not showing** - Verify `node_stats` array is present in `.dryrun/schema.json`. Each stats file must be a valid NodeStats JSON (from `--stats-only`).
+**Multi-node stats not showing** - Run `dryrun snapshot list` and confirm you see both `schema` rows (from `snapshot take` on the primary) and `activity_stats` rows (from `snapshot activity --label ...` on each replica) sharing the same `schema_ref_hash`. Activity captured before any schema exists needs `--allow-orphan` and won't reattach automatically.
 
 
