@@ -71,14 +71,19 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         fetch_is_standby(pool),
     )?;
 
-    let with_vacuum = raw_table_stats
-        .iter()
-        .filter(|s| s.last_autovacuum.is_some())
-        .count();
-    if with_vacuum == 0 && !raw_table_stats.is_empty() {
-        if is_standby {
-            info!("all vacuum timestamps are null;expected on standby");
-        } else {
+    if is_standby {
+        tracing::warn!(
+            database = %database,
+            "captured from a PostgreSQL standby (pg_is_in_recovery=true); \
+             last_vacuum/last_autovacuum/last_analyze/last_autoanalyze and dead_tuples \
+             will be unreliable. capture from the primary for accurate vacuum stats"
+        );
+    } else {
+        let with_vacuum = raw_table_stats
+            .iter()
+            .filter(|s| s.last_autovacuum.is_some())
+            .count();
+        if with_vacuum == 0 && !raw_table_stats.is_empty() {
             tracing::warn!(
                 "all vacuum/analyze timestamps are null on primary! \
                  check that the role has pg_read_all_stats privilege"
@@ -152,6 +157,15 @@ pub async fn fetch_stats_only(pool: &PgPool, source: &str) -> Result<NodeStats> 
         stats::fetch_named_column_stats(pool),
         fetch_is_standby(pool),
     )?;
+
+    if is_standby {
+        tracing::warn!(
+            source = %source,
+            "captured stats from a PostgreSQL standby (pg_is_in_recovery=true); \
+             last_vacuum/last_autovacuum/last_analyze/last_autoanalyze and dead_tuples \
+             will be unreliable. capture from the primary for accurate vacuum stats"
+        );
+    }
 
     Ok(NodeStats {
         source: source.to_string(),
