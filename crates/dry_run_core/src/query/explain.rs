@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use super::plan::{PlanNode, parse_plan_json};
 use super::plan_warnings::detect_plan_warnings;
 use crate::error::{Error, Result};
-use crate::schema::SchemaSnapshot;
+use crate::schema::AnnotatedSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExplainResult {
@@ -37,7 +37,7 @@ pub async fn explain_query(
     pool: &PgPool,
     sql: &str,
     analyze: bool,
-    schema: Option<&SchemaSnapshot>,
+    annotated: Option<&AnnotatedSchema<'_>>,
 ) -> Result<ExplainResult> {
     let explain_sql = if analyze {
         format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql}")
@@ -96,7 +96,7 @@ pub async fn explain_query(
         None
     };
 
-    let warnings = detect_plan_warnings(&plan, schema);
+    let warnings = detect_plan_warnings(&plan, annotated);
 
     Ok(ExplainResult {
         plan,

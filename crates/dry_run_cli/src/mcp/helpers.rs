@@ -1,4 +1,4 @@
-use dry_run_core::schema::NodeStats;
+use dry_run_core::schema::{AnnotatedSnapshot, QualifiedName};
 use rmcp::ErrorData as McpError;
 
 pub fn to_mcp_err(e: dry_run_core::Error) -> McpError {
@@ -23,51 +23,78 @@ pub fn format_number(n: i64) -> String {
     result.chars().rev().collect()
 }
 
+// Render a per-node activity table for one (schema, table) pair, attached
+// as a trailer to MCP tool output.
+//
+// Sizing columns (`reltuples`, `relpages`, `table_size`) come from the
+// planner snapshot — those are byte-identical across replicas (they're
+// replicated via WAL), so it would be misleading to render one column per
+// node. Counter columns (`seq_scan`, `idx_scan`) come from each node's
+// activity row and naturally vary node-to-node.
+//
+// Returns None when there's no activity at all (single-node, no captures
+// yet); the caller skips the section in that case.
 pub fn format_node_table_breakdown(
-    node_stats: &[NodeStats],
+    annotated: &AnnotatedSnapshot,
     schema: &str,
     table: &str,
 ) -> Option<String> {
-    if node_stats.is_empty() {
+    if annotated.activity_by_node.is_empty() {
         return None;
     }
 
-    let newest = node_stats.iter().map(|ns| ns.timestamp).max();
+    let qn = QualifiedName::new(schema, table);
+    let view = annotated.view();
+
+    // Pull sizing once — it's the same regardless of which node we're
+    // displaying. `unwrap_or` zeros so the table still renders cleanly
+    // when the planner snapshot is missing.
+    let reltuples = view.reltuples(&qn).unwrap_or(0.0);
+    let relpages = view.relpages(&qn).unwrap_or(0);
+    let table_size = view.table_size(&qn).unwrap_or(0);
+
+    // Stale = "this node's activity capture is more than 7 days older
+    // than the freshest one in the bundle." Surfaces forgotten replicas.
+    let newest = annotated
+        .activity_by_node
+        .values()
+        .map(|a| a.timestamp)
+        .max();
     let stale_threshold = newest.map(|t| t - chrono::TimeDelta::days(7));
 
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
         "\nPer-node breakdown ({} node(s)):\n",
-        node_stats.len()
+        annotated.activity_by_node.len()
     ));
     lines.push(format!(
         "{:<16} {:>12} {:>10} {:>10} {:>10} {:>12}  {}",
         "", "reltuples", "relpages", "seq_scan", "idx_scan", "table_size", "collected"
     ));
 
-    for ns in node_stats {
-        let ts = ns
-            .table_stats
-            .iter()
-            .find(|t| t.table == table && t.schema == schema);
-
-        if let Some(ts) = ts {
-            let size_mb = ts.stats.table_size / (1024 * 1024);
-            let collected = ns.timestamp.format("%Y-%m-%d %H:%M");
-            let stale = stale_threshold.is_some_and(|threshold| ns.timestamp < threshold);
+    for (label, activity) in &annotated.activity_by_node {
+        let ta = activity.tables.iter().find(|e| e.table == qn);
+        if let Some(ta) = ta {
+            let size_mb = table_size / (1024 * 1024);
+            let collected = activity.timestamp.format("%Y-%m-%d %H:%M");
+            let stale = stale_threshold.is_some_and(|threshold| activity.timestamp < threshold);
+            // idx_scan_sum on a single index would be ambiguous here —
+            // the table-level row aggregates across all indexes already
+            // (TableActivity.idx_scan), so we read it directly off the
+            // entry.
             lines.push(format!(
                 "{:<16} {:>12} {:>10} {:>10} {:>10} {:>9} MB  {}{}",
-                ns.source,
-                format_number(ts.stats.reltuples as i64),
-                format_number(ts.stats.relpages),
-                format_number(ts.stats.seq_scan),
-                format_number(ts.stats.idx_scan),
+                label,
+                format_number(reltuples as i64),
+                format_number(relpages),
+                format_number(ta.activity.seq_scan),
+                format_number(ta.activity.idx_scan),
                 format_number(size_mb),
                 collected,
                 if stale { " (stale)" } else { "" },
             ));
         } else {
-            lines.push(format!("{:<16} (no data for this table)", ns.source));
+            lines.push(format!("{:<16} (no data for this table)", label));
         }
     }
 

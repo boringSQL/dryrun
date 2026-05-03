@@ -3,13 +3,31 @@ mod indexes;
 mod schema;
 
 use super::types::{AuditConfig, AuditFinding};
-use crate::schema::SchemaSnapshot;
+use crate::schema::AnnotatedSchema;
 
-// Runs all audit rules and returns findings, skipping disabled ones
+// Top-level audit entry point — runs every rule against the annotated
+// snapshot, skipping anything the caller disabled via `config.disabled_rules`.
+//
+// Rules split into two groups based on what they need:
+//   - DDL-only rules (naming, FK shape, duplicate indexes, …) read just
+//     `annotated.schema`. They worked fine before the snapshot split and
+//     they keep working — we hand them the schema reference directly.
+//   - Stats-aware rules (`indexes/bloated`, `vacuum/large_table_defaults`)
+//     need planner sizing or activity counters. They take the full
+//     `&AnnotatedSchema` and use accessors like `index_sizing()` /
+//     `reltuples()` so they're robust to "no stats captured yet" — they
+//     simply produce no findings in that degenerate case rather than
+//     panicking or lying.
 #[must_use]
-pub fn run_all_audit_rules(snapshot: &SchemaSnapshot, config: &AuditConfig) -> Vec<AuditFinding> {
+pub fn run_all_audit_rules(
+    annotated: &AnnotatedSchema<'_>,
+    config: &AuditConfig,
+) -> Vec<AuditFinding> {
     let mut findings = Vec::new();
     let disabled = &config.disabled_rules;
+    // Most rules just want DDL — pull the schema reference out once so
+    // the per-rule sites stay readable.
+    let snapshot = annotated.schema;
 
     macro_rules! run_rule {
         ($id:expr, $check:expr) => {
@@ -19,7 +37,7 @@ pub fn run_all_audit_rules(snapshot: &SchemaSnapshot, config: &AuditConfig) -> V
         };
     }
 
-    // index rules
+    // ---- index rules ----
     run_rule!(
         "indexes/duplicate",
         indexes::check_duplicate_indexes(snapshot)
@@ -36,9 +54,11 @@ pub fn run_all_audit_rules(snapshot: &SchemaSnapshot, config: &AuditConfig) -> V
         "indexes/wide_columns",
         indexes::check_wide_column_indexes(snapshot)
     );
-    run_rule!("indexes/bloated", indexes::check_bloated_indexes(snapshot));
+    // bloated indexes need IndexSizing from the planner snapshot — gets
+    // the annotated view, not the raw schema.
+    run_rule!("indexes/bloated", indexes::check_bloated_indexes(annotated));
 
-    // FK rules
+    // ---- FK rules ----
     run_rule!(
         "fk/type_mismatch",
         fk_graph::check_fk_type_mismatch(snapshot)
@@ -46,27 +66,28 @@ pub fn run_all_audit_rules(snapshot: &SchemaSnapshot, config: &AuditConfig) -> V
     run_rule!("fk/circular", fk_graph::check_circular_fks(snapshot));
     run_rule!("fk/orphan", fk_graph::check_orphan_tables(snapshot));
 
-    // PK rules
+    // ---- PK rules ----
     run_rule!(
         "pk/non_sequential",
         schema::check_pk_non_sequential(snapshot)
     );
 
-    // naming rules
+    // ---- naming rules ----
     run_rule!("naming/bool_prefix", schema::check_bool_prefix(snapshot));
     run_rule!("naming/reserved", schema::check_reserved_words(snapshot));
     run_rule!("naming/id_mismatch", schema::check_id_mismatch(snapshot));
 
-    // documentation rules
+    // ---- documentation rules ----
     run_rule!(
         "docs/no_comment",
         schema::check_no_comment(snapshot, config)
     );
 
-    // storage rules
+    // ---- storage rules ----
+    // vacuum check needs reltuples from the planner — passes annotated.
     run_rule!(
         "vacuum/large_table_defaults",
-        schema::check_vacuum_large_table_defaults(snapshot)
+        schema::check_vacuum_large_table_defaults(annotated)
     );
 
     findings
@@ -74,6 +95,8 @@ pub fn run_all_audit_rules(snapshot: &SchemaSnapshot, config: &AuditConfig) -> V
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     use crate::schema::*;
@@ -94,14 +117,25 @@ mod tests {
             functions: vec![],
             extensions: vec![],
             gucs: vec![],
-            node_stats: vec![],
+        }
+    }
+
+    // Build a stats-less annotated wrapper around a schema — mirrors
+    // what the audit harness sees when no planner / activity rows exist
+    // (e.g. fresh project, before the first `dryrun snapshot take`).
+    fn ddl_only(schema: SchemaSnapshot) -> AnnotatedSnapshot {
+        AnnotatedSnapshot {
+            schema,
+            planner: None,
+            activity_by_node: BTreeMap::new(),
         }
     }
 
     #[test]
     fn empty_schema_produces_no_findings() {
         let config = AuditConfig::default();
-        let findings = run_all_audit_rules(&empty_schema(), &config);
+        let snap = ddl_only(empty_schema());
+        let findings = run_all_audit_rules(&snap.view(), &config);
         assert!(findings.is_empty());
     }
 
@@ -122,12 +156,10 @@ mod tests {
                     generated: None,
                     comment: None,
                     statistics_target: None,
-                    stats: None,
                 }],
                 constraints: vec![],
                 indexes: vec![],
                 comment: None,
-                stats: None,
                 partition_info: None,
                 policies: vec![],
                 triggers: vec![],
@@ -136,16 +168,17 @@ mod tests {
             }],
             ..empty_schema()
         };
+        let snap = ddl_only(schema);
 
         let config = AuditConfig::default();
-        let findings = run_all_audit_rules(&schema, &config);
+        let findings = run_all_audit_rules(&snap.view(), &config);
         assert!(findings.iter().any(|f| f.rule == "naming/reserved"));
 
         let config = AuditConfig {
             disabled_rules: vec!["naming/reserved".into()],
             ..AuditConfig::default()
         };
-        let findings = run_all_audit_rules(&schema, &config);
+        let findings = run_all_audit_rules(&snap.view(), &config);
         assert!(!findings.iter().any(|f| f.rule == "naming/reserved"));
     }
 }

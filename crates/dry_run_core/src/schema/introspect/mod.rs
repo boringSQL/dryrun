@@ -15,9 +15,12 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use tracing::info;
 
+use sha2::{Digest, Sha256};
+
 use super::hash::{HashInput, compute_content_hash};
+use super::snapshot::*;
 use super::types::*;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
     let pg_version: String = sqlx::query_scalar("SELECT version()")
@@ -28,7 +31,8 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         .fetch_one(pool)
         .await?;
 
-    // Group 1: table-centric data.
+    // Group 1: table-centric data. Stats now live in PlannerStatsSnapshot /
+    // ActivityStatsSnapshot; introspect_schema is DDL-only.
     let (
         raw_tables,
         raw_columns,
@@ -36,13 +40,10 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         table_comments,
         column_comments,
         raw_indexes,
-        raw_table_stats,
-        raw_column_stats,
         raw_partitions,
         raw_partition_children,
         raw_policies,
         raw_triggers,
-        raw_index_stats,
     ) = tokio::try_join!(
         tables::fetch_tables(pool),
         tables::fetch_columns(pool),
@@ -50,17 +51,14 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         comments::fetch_table_comments(pool),
         comments::fetch_column_comments(pool),
         indexes::fetch_indexes(pool),
-        tables::fetch_table_stats(pool),
-        tables::fetch_column_stats(pool),
         partitions::fetch_partition_info(pool),
         partitions::fetch_partition_children(pool),
         policies::fetch_policies(pool),
         policies::fetch_triggers(pool),
-        indexes::fetch_index_stats(pool),
     )?;
 
     // Group 2: top-level objects.
-    let (enums, domains, composites, views, functions, extensions, gucs, is_standby) = tokio::try_join!(
+    let (enums, domains, composites, views, functions, extensions, gucs, _is_standby) = tokio::try_join!(
         catalog::fetch_enums(pool),
         catalog::fetch_domains(pool),
         catalog::fetch_composites(pool),
@@ -71,21 +69,6 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         fetch_is_standby(pool),
     )?;
 
-    let with_vacuum = raw_table_stats
-        .iter()
-        .filter(|s| s.last_autovacuum.is_some())
-        .count();
-    if with_vacuum == 0 && !raw_table_stats.is_empty() {
-        if is_standby {
-            info!("all vacuum timestamps are null;expected on standby");
-        } else {
-            tracing::warn!(
-                "all vacuum/analyze timestamps are null on primary! \
-                 check that the role has pg_read_all_stats privilege"
-            );
-        }
-    }
-
     let tables = assemble_tables(
         raw_tables,
         raw_columns,
@@ -93,13 +76,10 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         table_comments,
         column_comments,
         raw_indexes,
-        raw_table_stats,
-        raw_column_stats,
         raw_partitions,
         raw_partition_children,
         raw_policies,
         raw_triggers,
-        raw_index_stats,
     );
 
     let content_hash = compute_content_hash(&HashInput {
@@ -127,7 +107,6 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
         functions,
         extensions,
         gucs,
-        node_stats: vec![],
     };
 
     info!(
@@ -145,29 +124,141 @@ pub async fn introspect_schema(pool: &PgPool) -> Result<SchemaSnapshot> {
     Ok(snapshot)
 }
 
-pub async fn fetch_stats_only(pool: &PgPool, source: &str) -> Result<NodeStats> {
-    let (raw_table_stats, raw_index_stats, raw_column_stats, is_standby) = tokio::try_join!(
-        stats::fetch_named_table_stats(pool),
-        stats::fetch_named_index_stats(pool),
-        stats::fetch_named_column_stats(pool),
-        fetch_is_standby(pool),
-    )?;
-
-    Ok(NodeStats {
-        source: source.to_string(),
-        timestamp: Utc::now(),
-        is_standby,
-        table_stats: raw_table_stats,
-        index_stats: raw_index_stats,
-        column_stats: raw_column_stats,
-    })
-}
-
 pub async fn fetch_is_standby(pool: &PgPool) -> Result<bool> {
     let row: PgRow = sqlx::query("SELECT pg_catalog.pg_is_in_recovery() AS is_standby")
         .fetch_one(pool)
         .await?;
     Ok(row.get("is_standby"))
+}
+
+// Snapshot split: planner-only and per-node activity captures
+
+pub async fn introspect_planner_stats(
+    pool: &PgPool,
+    schema_ref_hash: &str,
+) -> Result<PlannerStatsSnapshot> {
+    if fetch_is_standby(pool).await? {
+        return Err(Error::Introspection(
+            "planner stats must be captured from the primary; \
+             use `dryrun snapshot activity --from <replica>` for per-node activity"
+                .into(),
+        ));
+    }
+
+    let pg_version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(pool)
+        .await?;
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await?;
+
+    let (table_sizing, index_sizing, columns) = tokio::try_join!(
+        stats::fetch_named_table_sizing(pool),
+        stats::fetch_named_index_sizing(pool),
+        stats::fetch_named_column_stats(pool),
+    )?;
+
+    let mut snapshot = PlannerStatsSnapshot {
+        pg_version,
+        database,
+        timestamp: Utc::now(),
+        content_hash: String::new(),
+        schema_ref_hash: schema_ref_hash.to_string(),
+        tables: table_sizing,
+        columns,
+        indexes: index_sizing,
+    };
+    snapshot.content_hash = hash_payload(&snapshot)?;
+
+    info!(
+        tables = snapshot.tables.len(),
+        columns = snapshot.columns.len(),
+        indexes = snapshot.indexes.len(),
+        hash = %snapshot.content_hash,
+        schema_ref = %snapshot.schema_ref_hash,
+        "planner stats introspection complete"
+    );
+
+    Ok(snapshot)
+}
+
+pub async fn introspect_activity_stats(
+    pool: &PgPool,
+    schema_ref_hash: &str,
+    label: &str,
+) -> Result<ActivityStatsSnapshot> {
+    let pg_version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(pool)
+        .await?;
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await?;
+
+    let (node, table_activity, index_activity) = tokio::try_join!(
+        resolve_node_identity(pool, label),
+        stats::fetch_named_table_activity(pool),
+        stats::fetch_named_index_activity(pool),
+    )?;
+
+    let mut snapshot = ActivityStatsSnapshot {
+        pg_version,
+        database,
+        timestamp: Utc::now(),
+        content_hash: String::new(),
+        schema_ref_hash: schema_ref_hash.to_string(),
+        node,
+        tables: table_activity,
+        indexes: index_activity,
+    };
+    snapshot.content_hash = hash_payload(&snapshot)?;
+
+    info!(
+        label = %snapshot.node.label,
+        is_standby = snapshot.node.is_standby,
+        tables = snapshot.tables.len(),
+        indexes = snapshot.indexes.len(),
+        hash = %snapshot.content_hash,
+        schema_ref = %snapshot.schema_ref_hash,
+        "activity stats introspection complete"
+    );
+
+    Ok(snapshot)
+}
+
+async fn resolve_node_identity(pool: &PgPool, label: &str) -> Result<NodeIdentity> {
+    let row: PgRow = sqlx::query(
+        r#"
+        SELECT pg_catalog.pg_is_in_recovery()                           AS is_standby,
+               COALESCE(host(pg_catalog.inet_server_addr())::text, '')  AS host,
+               (SELECT stats_reset
+                  FROM pg_catalog.pg_stat_database
+                 WHERE datname = current_database())                    AS stats_reset,
+               CASE
+                 WHEN pg_catalog.pg_is_in_recovery()
+                   THEN pg_catalog.pg_wal_lsn_diff(
+                          pg_catalog.pg_last_wal_receive_lsn(),
+                          pg_catalog.pg_last_wal_replay_lsn())::int8
+                 ELSE NULL
+               END                                                      AS lag_bytes
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(NodeIdentity {
+        label: label.to_string(),
+        host: row.get::<String, _>("host"),
+        is_standby: row.get("is_standby"),
+        replication_lag_bytes: row.get::<Option<i64>, _>("lag_bytes"),
+        stats_reset: row.get("stats_reset"),
+    })
+}
+
+fn hash_payload<T: serde::Serialize>(value: &T) -> Result<String> {
+    let json = serde_json::to_vec(value)
+        .map_err(|e| Error::Introspection(format!("cannot serialize for hashing: {e}")))?;
+    let digest = Sha256::digest(&json);
+    Ok(format!("{digest:x}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -184,13 +275,10 @@ fn assemble_tables(
     table_comments: Vec<RawTableComment>,
     column_comments: Vec<RawColumnComment>,
     raw_indexes: Vec<RawIndex>,
-    raw_table_stats: Vec<RawTableStats>,
-    raw_column_stats: Vec<RawColumnStats>,
     raw_partitions: Vec<RawPartitionInfo>,
     raw_partition_children: Vec<RawPartitionChild>,
     raw_policies: Vec<RawPolicy>,
     raw_triggers: Vec<RawTrigger>,
-    raw_index_stats: Vec<RawIndexStats>,
 ) -> Vec<Table> {
     // --- Columns ---
     let mut columns_by_oid: HashMap<u32, Vec<Column>> = HashMap::new();
@@ -208,7 +296,6 @@ fn assemble_tables(
                 generated: rc.generated,
                 comment: None,
                 statistics_target: rc.statistics_target,
-                stats: None,
             });
     }
 
@@ -254,50 +341,9 @@ fn assemble_tables(
         }
     }
 
-    // --- Column stats ---
-    let mut col_stats_map: HashMap<(u32, String), ColumnStats> = HashMap::new();
-    for cs in raw_column_stats {
-        col_stats_map.insert(
-            (cs.table_oid, cs.column_name),
-            ColumnStats {
-                null_frac: cs.null_frac,
-                n_distinct: cs.n_distinct,
-                most_common_vals: cs.most_common_vals,
-                most_common_freqs: cs.most_common_freqs,
-                histogram_bounds: cs.histogram_bounds,
-                correlation: cs.correlation,
-            },
-        );
-    }
-
-    for (oid, cols) in &mut columns_by_oid {
-        for col in cols.iter_mut() {
-            if let Some(stats) = col_stats_map.remove(&(*oid, col.name.clone())) {
-                col.stats = Some(stats);
-            }
-        }
-    }
-
-    // --- Index stats ---
-    let mut idx_stats_map: HashMap<(u32, String), IndexStats> = HashMap::new();
-    for ris in raw_index_stats {
-        idx_stats_map.insert(
-            (ris.table_oid, ris.index_name),
-            IndexStats {
-                idx_scan: ris.idx_scan,
-                idx_tup_read: ris.idx_tup_read,
-                idx_tup_fetch: ris.idx_tup_fetch,
-                size: ris.size,
-                relpages: ris.relpages,
-                reltuples: ris.reltuples,
-            },
-        );
-    }
-
     // --- Indexes ---
     let mut indexes_by_oid: HashMap<u32, Vec<Index>> = HashMap::new();
     for ri in raw_indexes {
-        let stats = idx_stats_map.remove(&(ri.table_oid, ri.name.clone()));
         indexes_by_oid.entry(ri.table_oid).or_default().push(Index {
             name: ri.name,
             columns: ri.columns,
@@ -309,31 +355,8 @@ fn assemble_tables(
             definition: ri.definition,
             is_valid: ri.is_valid,
             backs_constraint: ri.backs_constraint,
-            stats,
         });
     }
-
-    // --- Table stats ---
-    let stats_by_oid: HashMap<u32, TableStats> = raw_table_stats
-        .into_iter()
-        .map(|s| {
-            (
-                s.table_oid,
-                TableStats {
-                    reltuples: s.reltuples,
-                    relpages: s.relpages,
-                    dead_tuples: s.dead_tuples,
-                    last_vacuum: s.last_vacuum,
-                    last_autovacuum: s.last_autovacuum,
-                    last_analyze: s.last_analyze,
-                    last_autoanalyze: s.last_autoanalyze,
-                    seq_scan: s.seq_scan,
-                    idx_scan: s.idx_scan,
-                    table_size: s.table_size,
-                },
-            )
-        })
-        .collect();
 
     // --- Partition info ---
     let mut children_by_parent: HashMap<u32, Vec<PartitionChild>> = HashMap::new();
@@ -402,7 +425,6 @@ fn assemble_tables(
             constraints: constraints_by_oid.remove(&rt.oid).unwrap_or_default(),
             indexes: indexes_by_oid.remove(&rt.oid).unwrap_or_default(),
             comment: table_comment_map.get(&rt.oid).cloned(),
-            stats: stats_by_oid.get(&rt.oid).cloned(),
             partition_info: partition_info_by_oid.get(&rt.oid).cloned(),
             policies: policies_by_oid.remove(&rt.oid).unwrap_or_default(),
             triggers: triggers_by_oid.remove(&rt.oid).unwrap_or_default(),
@@ -410,4 +432,46 @@ fn assemble_tables(
             rls_enabled: rt.rls_enabled,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    fn fixed_planner() -> PlannerStatsSnapshot {
+        PlannerStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "accounts".into(),
+            timestamp: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            content_hash: String::new(),
+            schema_ref_hash: "schema-h1".into(),
+            tables: vec![],
+            columns: vec![],
+            indexes: vec![],
+        }
+    }
+
+    #[test]
+    fn hash_payload_is_deterministic_for_identical_inputs() {
+        let a = fixed_planner();
+        let b = fixed_planner();
+        assert_eq!(hash_payload(&a).unwrap(), hash_payload(&b).unwrap());
+    }
+
+    #[test]
+    fn hash_payload_changes_when_payload_changes() {
+        let a = fixed_planner();
+        let mut b = fixed_planner();
+        b.schema_ref_hash = "schema-h2".into();
+        assert_ne!(hash_payload(&a).unwrap(), hash_payload(&b).unwrap());
+    }
+
+    #[test]
+    fn hash_payload_emits_hex_sha256() {
+        let h = hash_payload(&fixed_planner()).unwrap();
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }
