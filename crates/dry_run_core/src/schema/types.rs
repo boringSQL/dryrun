@@ -455,33 +455,65 @@ pub fn detect_table_flags(summary: &TableSummary, node_stats: &[NodeStats]) -> V
 }
 
 // Detect tables with stale or missing analyze stats across nodes.
-pub fn detect_stale_stats(node_stats: &[NodeStats], stale_days: i64) -> Vec<StaleStatsEntry> {
+// When `node_stats` is empty, fall back to Table.stat from the snapshot
+pub fn detect_stale_stats(
+    node_stats: &[NodeStats],
+    tables: &[Table],
+    stale_days: i64,
+) -> Vec<StaleStatsEntry> {
     let now = chrono::Utc::now();
     let threshold = chrono::TimeDelta::days(stale_days);
     let mut entries = Vec::new();
 
-    for ns in node_stats {
-        for ts in &ns.table_stats {
-            let last_analyzed = ts.stats.last_analyze.max(ts.stats.last_autoanalyze);
-
+    let push_entry =
+        |entries: &mut Vec<StaleStatsEntry>,
+         node: &str,
+         schema: &str,
+         table: &str,
+         last_analyze: Option<chrono::DateTime<chrono::Utc>>,
+         last_autoanalyze: Option<chrono::DateTime<chrono::Utc>>| {
+            let last_analyzed = last_analyze.max(last_autoanalyze);
             match last_analyzed {
-                Some(when) if now - when > threshold => {
-                    entries.push(StaleStatsEntry {
-                        node: ns.source.clone(),
-                        schema: ts.schema.clone(),
-                        table: ts.table.clone(),
-                        last_analyzed_days_ago: Some((now - when).num_days()),
-                    });
-                }
-                None => {
-                    entries.push(StaleStatsEntry {
-                        node: ns.source.clone(),
-                        schema: ts.schema.clone(),
-                        table: ts.table.clone(),
-                        last_analyzed_days_ago: None,
-                    });
-                }
+                Some(when) if now - when > threshold => entries.push(StaleStatsEntry {
+                    node: node.to_string(),
+                    schema: schema.to_string(),
+                    table: table.to_string(),
+                    last_analyzed_days_ago: Some((now - when).num_days()),
+                }),
+                None => entries.push(StaleStatsEntry {
+                    node: node.to_string(),
+                    schema: schema.to_string(),
+                    table: table.to_string(),
+                    last_analyzed_days_ago: None,
+                }),
                 _ => {}
+            }
+        };
+
+    if node_stats.is_empty() {
+        for t in tables {
+            if let Some(ref s) = t.stats {
+                push_entry(
+                    &mut entries,
+                    "inline",
+                    &t.schema,
+                    &t.name,
+                    s.last_analyze,
+                    s.last_autoanalyze,
+                );
+            }
+        }
+    } else {
+        for ns in node_stats {
+            for ts in &ns.table_stats {
+                push_entry(
+                    &mut entries,
+                    &ns.source,
+                    &ts.schema,
+                    &ts.table,
+                    ts.stats.last_analyze,
+                    ts.stats.last_autoanalyze,
+                );
             }
         }
     }

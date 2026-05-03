@@ -1109,7 +1109,7 @@ impl DryRunServer {
         let mut found_unused = false;
 
         if run_stale {
-            let stale = detect_stale_stats(&snapshot.node_stats, 7);
+            let stale = detect_stale_stats(&snapshot.node_stats, &snapshot.tables, 7);
             found_stale = !stale.is_empty();
             result.insert(
                 "stale_stats".into(),
@@ -1127,21 +1127,31 @@ impl DryRunServer {
         }
 
         if run_anomalies {
-            let mut anomalies = Vec::new();
-            for table in &snapshot.tables {
-                let schema_name = &table.schema;
-                if let Some(imb) =
-                    detect_seq_scan_imbalance(&snapshot.node_stats, schema_name, &table.name)
-                {
-                    anomalies.push(serde_json::json!({
-                        "table": format!("{}.{}", schema_name, table.name),
-                        "type": "seq_scan_imbalance",
-                        "hot_node": imb.hot_node,
-                        "multiplier": format!("{}x", imb.multiplier),
-                    }));
+            if snapshot.node_stats.is_empty() {
+                result.insert(
+                    "anomalies".into(),
+                    serde_json::json!({
+                        "note": "seq_scan imbalance requires per-node stats (node_stats); not available from a single-source snapshot",
+                        "entries": [],
+                    }),
+                );
+            } else {
+                let mut anomalies = Vec::new();
+                for table in &snapshot.tables {
+                    let schema_name = &table.schema;
+                    if let Some(imb) =
+                        detect_seq_scan_imbalance(&snapshot.node_stats, schema_name, &table.name)
+                    {
+                        anomalies.push(serde_json::json!({
+                            "table": format!("{}.{}", schema_name, table.name),
+                            "type": "seq_scan_imbalance",
+                            "hot_node": imb.hot_node,
+                            "multiplier": format!("{}x", imb.multiplier),
+                        }));
+                    }
                 }
+                result.insert("anomalies".into(), serde_json::Value::Array(anomalies));
             }
-            result.insert("anomalies".into(), serde_json::Value::Array(anomalies));
         }
 
         if run_bloated {
