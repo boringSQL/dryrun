@@ -8,7 +8,7 @@ The PostgreSQL MCP server that doesn't need connection to the production.
 
 ## The problem
 
-LLM/AI coding assistants are very good in writing code/SQL queries. But they are blind. THey don't know your schema, your indexes or your constraints. They might generate a migration that takes an `ACCESS EXCLUSIVE` lock on your busiest table and send your app down.
+LLM/AI coding assistants are very good in writing code/SQL queries. But they are blind. They don't know your schema, your indexes or your constraints. They might generate a migration that takes an `ACCESS EXCLUSIVE` lock on your busiest table and send your app down.
 
 Some PostgreSQL MCP server ask you for the database connection. And to perform the administrative tasks you might need SUPERUSER permission. But that's like asking for problem.
 
@@ -133,6 +133,20 @@ dryrun lint
 
 All commands work offline from the schema file. Each project has its own `dryrun.toml` and `.dryrun/`, there is no global state. Add `.dryrun/` to your `.gitignore`.
 
+Snapshots live in `~/.dryrun/history.db`, keyed by `(project_id, database_id)`. The MCP server reads from the history db first and falls back to `.dryrun/schema.json` for first-run or shared snapshots. After `dryrun snapshot take` it will switch to DB.
+
+### Multi-node: capture activity from replicas
+
+`snapshot take` runs against the primary and writes schema + planner stats. Activity counters (`idx_scan`, `n_dead_tup`, last vacuum) live on each replica, so capture them separately:
+
+```sh
+dryrun --profile primary  snapshot take
+dryrun --profile replica1 snapshot activity --from "$REPLICA1_URL" --label replica1
+dryrun --profile replica2 snapshot activity --from "$REPLICA2_URL" --label replica2
+```
+
+The MCP `compare_nodes` tool then exposes per-node `idx_scan` so you can spot routing imbalances. See [docs/multi-node-stats.md](docs/multi-node-stats.md).
+
 ### Multiple databases per project
 
 `dryrun snapshot take` keys snapshots by `(project_id, database_id)`. The defaults work — `project_id` is your folder name, `database_id` is the actual database name from `current_database()`:
@@ -167,9 +181,9 @@ dryrun --profile billing snapshot diff --latest
 
 See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for all profile options.
 
-Every DB-related command (`init`, `import`, `probe`, `dump-schema`, `lint`, `drift`, `stats apply`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` and `schema_file` when the corresponding CLI flag is not provider.
+Every DB-related command (`init`, `import`, `probe`, `dump-schema`, `lint`, `drift`, `stats apply`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` and `schema_file` when the corresponding CLI flag is not provided.
 
-> **Note:** the MCP server is currently single-database. Using the default profile. Or the option is to run one `dryrun mcp-serve` process per database. Native multi-database support inside one MCP process is tracked in [#4](https://github.com/boringSQL/dryrun/issues/7).
+> **Note:** the MCP server is currently single-database. Using the default profile. Or the option is to run one `dryrun mcp-serve` process per database. Native multi-database support inside one MCP process is tracked in [#7](https://github.com/boringSQL/dryrun/issues/7).
 
 ## MCP server
 
@@ -199,6 +213,12 @@ See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Clau
 - **[boringSQL](https://boringsql.com)**, the blog and project home
 - **[RegreSQL](https://github.com/boringsql/regresql)**, SQL regression testing and **`dryrun`**'s companion tool
 
+
+## Upgrading from 0.5.x
+
+- `dump-schema --stats-only` is removed. Use `dryrun snapshot take` (primary) and `dryrun snapshot activity` (replicas).
+- Snapshot JSON no longer embeds `Table.stats`, `Column.stats`, `Index.stats`, or `node_stats`. Stats are read per-kind from the history db via `HistoryStore::get_annotated`.
+- `check_drift` is now schema-only. It no longer flaps when `reltuples` or `idx_scan` change.
 
 ## License
 

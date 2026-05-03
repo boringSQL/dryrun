@@ -6,76 +6,72 @@ dryrun merges statistics from every node in your cluster into one snapshot, then
 
 ## Collecting stats
 
-The idea is straightforward. One full dump from the primary, lightweight stats-only dumps from replicas.
+A snapshot in v0.6.0 is split into three rows in `~/.dryrun/history.db`:
+
+- **`schema`**: DDL (tables, columns, constraints, indexes, partitions, functions, enums, extensions, GUCs).
+- **`planner_stats`**: what the planner uses (`reltuples`, `relpages`, `pg_statistic`).
+- **`activity_stats`**: runtime counters (`seq_scan`, `idx_scan`, `n_dead_tup`, `last_vacuum`).
+
+`snapshot take` writes `schema` + `planner_stats` from the primary. `snapshot activity` writes one `activity_stats` row per replica, tagged with a `--label`. Activity rows attach to the most recent matching schema by `schema_ref_hash`.
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐ 
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │  Primary    │     │  Replica 1  │     │  Replica 2  │
-│ (full dump) │     │ (stats only)│     │ (stats only)│
+│ snapshot    │     │ snapshot    │     │ snapshot    │
+│ take        │     │ activity    │     │ activity    │
 └─────┬───────┘     └──────┬──────┘     └──────┬──────┘
       │                    │                    │
+      │ schema +           │ activity_stats     │ activity_stats
+      │ planner_stats      │ (label=replica1)   │ (label=replica2)
       ▼                    ▼                    ▼
-   master.json        r1-stats.json        r2-stats.json
-     │                    │                    │
-     └────────────┬───────┘────────────────────┘
-                  ▼
-        dryrun import master.json \
-          --stats r1-stats.json r2-stats.json
-                  │
-                  ▼
-           .dryrun/schema.json
-          (schema + all node stats)
+            ~/.dryrun/history.db
+       (joined by schema_ref_hash)
 ```
 
-The full dump captures table definitions, columns, constraints, indexes, partitions, functions, enums, extensions, and GUCs. Stats-only dumps capture `pg_stat_user_tables`, `pg_stat_user_indexes`, and `pg_statistic`. They're small, fast, and safe for cron.
-
-### Full dump from primary
+### Schema + planner stats from the primary
 
 ```sh
-dryrun dump-schema --source "postgres://readonly@primary:5432/mydb" \
-  --name "primary" --pretty -o master.json
+dryrun --profile primary snapshot take
 ```
 
-`--name` tags this node in the output and controls whether the primary appears in per-node comparisons (`compare_nodes`, `detect`). Without it, statistics are embedded in the schema but the primary won't appear in the `node_stats` array.
+Refuses to run on a standby (`pg_is_in_recovery() = false` required). Writes one `schema` row and one `planner_stats` row.
 
-### Stats-only dumps from replicas
+### Activity stats from replicas
 
 ```sh
-dryrun dump-schema --source "postgres://readonly@replica-1:5432/mydb" \
-  --stats-only --name "replica-1" -o r1-stats.json
+dryrun --profile replica1 snapshot activity \
+  --from "postgres://readonly@replica-1:5432/mydb" --label replica1
 
-dryrun dump-schema --source "postgres://readonly@replica-2:5432/mydb" \
-  --stats-only --name "replica-2" -o r2-stats.json
+dryrun --profile replica2 snapshot activity \
+  --from "postgres://readonly@replica-2:5432/mydb" --label replica2
 
-dryrun dump-schema --source "postgres://readonly@replica-3:5432/mydb" \
-  --stats-only --name "replica-3" -o r3-stats.json
+dryrun --profile replica3 snapshot activity \
+  --from "postgres://readonly@replica-3:5432/mydb" --label replica3
 ```
 
-`--stats-only` skips structural schema and captures only runtime statistics. Files are typically 1–5 MB and take seconds to produce. `--name` is required with `--stats-only`.
+`--label` is required and identifies the node in `compare_nodes` and `detect`. `snapshot activity` refuses to run on the primary. Each row captures `pg_stat_user_tables`, `pg_stat_user_indexes`, and `stats_reset` for the node, then joins to the latest schema by `schema_ref_hash`. Use `--allow-orphan` when activity arrives before any schema snapshot exists; orphan rows are stored but not reattached when a matching schema lands later.
 
-### Import and merge
-
-```sh
-dryrun import master.json --stats r1-stats.json r2-stats.json r3-stats.json
-```
-
-The result lands in `.dryrun/schema.json`: full schema from the primary plus a `node_stats` array with per-node statistics. Every dryrun tool picks up multi-node data automatically.
+Activity dumps are small (single-digit MB) and safe for cron. See [Automating collection](#automating-collection).
 
 ## Aggregation rules
 
-When multiple nodes report stats for the same table, dryrun combines them:
+When activity rows from multiple nodes attach to the same schema, the `MergedActivity` view combines them per table:
 
-| Statistic | Rule | Why |
+| Field | Rule | Why |
 |---|---|---|
-| `reltuples`, `relpages` | max across nodes | All replicas replay the same WAL, so values should be close. Max is the safest estimate for planning |
-| `seq_scan`, `idx_scan` | sum across nodes | Reveals total query load hitting the cluster |
-| `dead_tuples` | max across nodes | Worst case is what matters for vacuum decisions |
-| `table_size` | max across nodes | Same reasoning as reltuples |
-| `last_vacuum`, `last_analyze` | primary only | Autovacuum doesn't run on standby replicas, so their timestamps are always null |
+| `idx_scan_sum` | sum across nodes | Total indexed reads hitting the cluster |
+| `idx_scan_per_node` | per-node breakdown | Powers `compare_nodes` and routing-imbalance detection |
+| `seq_scan_sum` | sum across nodes | Reveals which replicas are doing seq scans |
+| `n_dead_tup_sum` | sum across nodes | Worst-case dead-tuple pressure for vacuum decisions |
+| `last_vacuum_max` | max timestamp | Autovacuum runs on the primary only; replicas always report null |
+| `vacuum_count_sum` | sum across nodes | Total vacuum runs observed |
+| `partial` | true if any node is missing a `stats_reset` | Flags counters that aren't comparable |
+
+`reltuples` / `relpages` come from the primary's `planner_stats` row, not from activity rows.
 
 ## Analysis tools
 
-All multi-node analysis tools are MCP tools. They work offline from imported `node_stats`.
+All multi-node analysis tools are MCP tools. They read from `~/.dryrun/history.db` via `HistoryStore::get_annotated`, which joins the latest schema with each node's most recent activity row by `schema_ref_hash`.
 
 ### compare_nodes
 
@@ -156,50 +152,26 @@ A connection pooler is supposed to round-robin across three replicas, but `compa
 
 ## Automating collection
 
-Stats-only dumps are lightweight and safe for cron:
+Activity captures are lightweight and safe for cron. Take the primary snapshot first so activity rows have a `schema_ref_hash` to attach to:
 
 ```sh
 # /etc/cron.d/dryrun-stats
-0 2 * * * app dryrun dump-schema --source "$REPLICA1_DB" --stats-only --name "replica-1" -o /data/dryrun/r1-stats.json
-0 2 * * * app dryrun dump-schema --source "$REPLICA2_DB" --stats-only --name "replica-2" -o /data/dryrun/r2-stats.json
-0 2 * * * app dryrun dump-schema --source "$REPLICA3_DB" --stats-only --name "replica-3" -o /data/dryrun/r3-stats.json
-
-# merge after all replicas finish
-30 2 * * * app dryrun import /data/dryrun/master.json --stats /data/dryrun/r*.json
+0  2 * * * app dryrun --profile primary  snapshot take
+15 2 * * * app dryrun --profile replica1 snapshot activity --from "$REPLICA1_DB" --label replica1
+15 2 * * * app dryrun --profile replica2 snapshot activity --from "$REPLICA2_DB" --label replica2
+15 2 * * * app dryrun --profile replica3 snapshot activity --from "$REPLICA3_DB" --label replica3
 ```
 
-Run the full dump less frequently, weekly or after migrations. Stats-only dumps can run nightly since they capture the runtime counters that shift daily.
+`snapshot take` is idempotent on a quiet schema; repeated runs produce the same `schema_ref_hash`, so re-attaching activity rows is automatic. Run it nightly alongside activity captures, or only after migrations if you want fewer rows in history.
 
-## Stats file format
+## Snapshot storage
 
-A stats-only dump produces a `NodeStats` JSON object:
+Snapshots live in `~/.dryrun/history.db`, keyed by `(project_id, database_id, kind, schema_ref_hash, node_label)`. Activity rows from `snapshot activity` carry their `--label` in `node_label`; rows from `snapshot take` use an empty label. `is_standby` is auto-detected from `pg_is_in_recovery()` and enforced by the CLI: `take` requires false, `activity` requires true.
 
-```json
-{
-  "source": "replica-1",
-  "timestamp": "2026-04-01T02:00:17Z",
-  "is_standby": true,
-  "table_stats": [
-    {
-      "schema": "public",
-      "table": "orders",
-      "stats": {
-        "reltuples": 1234567.0,
-        "relpages": 5123,
-        "dead_tuples": 398,
-        "last_vacuum": null,
-        "last_autovacuum": null,
-        "last_analyze": "2026-03-31T14:00:03Z",
-        "last_autoanalyze": "2026-04-01T01:12:45Z",
-        "seq_scan": 987654,
-        "idx_scan": 44998,
-        "table_size": 10485760
-      }
-    }
-  ],
-  "index_stats": [ ... ],
-  "column_stats": [ ... ]
-}
+To export a snapshot for sharing or archiving:
+
+```sh
+dryrun snapshot export
 ```
 
-`is_standby` is auto-detected from `pg_is_in_recovery()`. It controls which nodes contribute vacuum and analyze timestamps during aggregation. Only nodes where `is_standby = false` are considered.
+Writes `{project_id}/{database_id}/{timestamp}-{hash}.json.zst`. The zstd-compressed JSON contains the schema row plus all attached planner and activity rows.
