@@ -300,66 +300,123 @@ async fn persist_refresh_writes_activity_for_primary() {
     );
 }
 
-// Integration test: surfaces refresh_schema's persist branch.
-// Set DRYRUN_TEST_DATABASE_URL to a primary PG to enable; otherwise skipped.
-#[tokio::test]
-async fn refresh_schema_persists_all_three_kinds() {
-    let url = match std::env::var("DRYRUN_TEST_DATABASE_URL") {
-        Ok(u) => u,
-        Err(_) => {
-            eprintln!("skipping: set DRYRUN_TEST_DATABASE_URL to enable");
-            return;
-        }
+fn make_activity_row(
+    schema_ref: &str,
+    label: &str,
+    hash: &str,
+) -> dry_run_core::ActivityStatsSnapshot {
+    use dry_run_core::schema::{
+        ActivityStatsSnapshot, IndexActivity, IndexActivityEntry, NodeIdentity, QualifiedName,
+        TableActivity, TableActivityEntry,
     };
+    ActivityStatsSnapshot {
+        pg_version: "PostgreSQL 18.3.0".into(),
+        database: "testdb".into(),
+        timestamp: chrono::Utc::now(),
+        content_hash: hash.into(),
+        schema_ref_hash: schema_ref.into(),
+        node: NodeIdentity {
+            label: label.into(),
+            host: format!("host-{label}"),
+            is_standby: label != "primary",
+            replication_lag_bytes: None,
+            stats_reset: None,
+        },
+        tables: vec![TableActivityEntry {
+            table: QualifiedName::new("public", "orders"),
+            activity: TableActivity {
+                seq_scan: 1,
+                idx_scan: 0,
+                n_live_tup: 0,
+                n_dead_tup: 0,
+                last_vacuum: None,
+                last_autovacuum: None,
+                last_analyze: None,
+                last_autoanalyze: None,
+                vacuum_count: 0,
+                autovacuum_count: 0,
+                analyze_count: 0,
+                autoanalyze_count: 0,
+            },
+        }],
+        indexes: vec![IndexActivityEntry {
+            index: QualifiedName::new("public", "orders_pkey"),
+            activity: IndexActivity {
+                idx_scan: 0,
+                idx_tup_read: 0,
+                idx_tup_fetch: 0,
+            },
+        }],
+    }
+}
 
+#[test]
+fn build_inline_inserts_primary_when_present() {
+    let bundle = super::build_inline(
+        test_snapshot(),
+        None,
+        Some(make_activity_row("abc123", "primary", "act-1")),
+    );
+    assert_eq!(bundle.activity_by_node.len(), 1);
+    assert!(bundle.activity_by_node.contains_key("primary"));
+}
+
+#[test]
+fn build_inline_yields_empty_map_without_activity() {
+    let bundle = super::build_inline(test_snapshot(), None, None);
+    assert!(bundle.activity_by_node.is_empty());
+    assert!(bundle.planner.is_none());
+}
+
+// Regression for 2f85792: refresh must not drop replica activity rows
+// already in history.db. Before the fix, the cache was rebuilt with
+// primary-only. This exercises the cache-rebuild logic directly via
+// `rebuild_after_refresh`, no live DB needed.
+#[tokio::test]
+async fn rebuild_after_refresh_preserves_replica_activity() {
     let dir = tempfile::TempDir::new().unwrap();
-    let history_path = dir.path().join("history.db");
-    let store = HistoryStore::open(&history_path).unwrap();
+    let store = HistoryStore::open(&dir.path().join("history.db")).unwrap();
     let key = SnapshotKey {
         project_id: dry_run_core::history::ProjectId("test".into()),
         database_id: dry_run_core::history::DatabaseId("test-db".into()),
     };
 
-    let ctx = DryRun::connect(&url).await.expect("connect to test PG");
-    // Bootstrap server in offline mode, then attach live ctx via from_snapshot_with_db.
-    let bootstrap_schema = ctx.introspect_schema().await.expect("bootstrap introspect");
-    let server = DryRunServer::from_annotated_with_db(
-        crate::mcp::wrap_schema_only(bootstrap_schema),
-        Some((url.as_str(), ctx)),
-        LintConfig::default(),
-        None,
-        "test",
-        vec![],
-    )
-    .with_history(
-        HistoryStore::open(&history_path).unwrap(),
-        Some(key.clone()),
-    );
+    let schema = test_snapshot();
+    let schema_hash = schema.content_hash.clone();
 
-    server
-        .refresh_schema()
+    SnapshotStore::put(&store, &key, &schema)
         .await
-        .expect("refresh_schema should succeed");
+        .expect("seed schema");
+    let replica = make_activity_row(&schema_hash, "replica1", "replica-h1");
+    store
+        .put_activity_stats(&key, &replica)
+        .await
+        .expect("seed replica activity");
 
-    // Cache should hold all three kinds.
-    let bundle = server.get_annotated().await.unwrap();
+    let live_primary = make_activity_row(&schema_hash, "primary", "primary-h1");
+    let bundle =
+        super::rebuild_after_refresh(schema, None, Some(live_primary), Some((&store, &key))).await;
+
     assert!(
         bundle.activity_by_node.contains_key("primary"),
-        "in-memory cache must contain activity under 'primary'"
+        "freshly-introspected primary activity must end up in the cache"
     );
+    assert!(
+        bundle.activity_by_node.contains_key("replica1"),
+        "pre-seeded replica1 activity must survive rebuild \
+         (regression: rebuild used to drop everything except primary)"
+    );
+}
 
-    // History store should have persisted all three kinds.
-    let persisted = store
-        .get_annotated(&key, SnapshotRef::Latest)
-        .await
-        .expect("get_annotated from history");
-    assert!(
-        persisted.planner.is_some(),
-        "planner_stats row missing from history db"
-    );
-    assert!(
-        persisted.activity_by_node.contains_key("primary"),
-        "activity_stats row for 'primary' missing from history db \
-         (refresh_schema captured it in cache but never persisted)"
-    );
+#[tokio::test]
+async fn rebuild_after_refresh_without_history_uses_inline_only() {
+    let bundle = super::rebuild_after_refresh(
+        test_snapshot(),
+        None,
+        Some(make_activity_row("abc123", "primary", "primary-h1")),
+        None,
+    )
+    .await;
+    assert_eq!(bundle.activity_by_node.len(), 1);
+    assert!(bundle.activity_by_node.contains_key("primary"));
 }
