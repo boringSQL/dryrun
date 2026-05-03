@@ -81,7 +81,7 @@ No database needed. Works entirely from the JSON file.
 **Homebrew:**
 
 ```sh
-brew install boringsql/tap/dryrun
+brew install boringsql/boringsql/dryrun
 ```
 
 **From source:**
