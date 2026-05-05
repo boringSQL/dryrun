@@ -278,19 +278,33 @@ async fn cmd_dump_schema(
     Ok(())
 }
 
+fn prompt_yes_no(question: &str, detail: &str) -> bool {
+    eprint!("{question}\n  {detail}\n  [y/N]: ");
+    let mut input = String::new();
+    let _ = std::io::stdin().read_line(&mut input);
+    let answer = input.trim().to_ascii_lowercase();
+    matches!(answer.as_str(), "y" | "yes")
+}
+
 async fn cmd_init(db: Option<&str>) -> anyhow::Result<()> {
     let config_path = PathBuf::from("dryrun.toml");
     let cwd = std::env::current_dir().unwrap_or_default();
 
     // scaffold config file
     if !config_path.exists() {
+        let telemetry = prompt_yes_no(
+            "Enable anonymous usage telemetry? (aggregated tool names, execution count, and rough sizes; no schema data)",
+            "Helps improve dryrun. See: boringsql.com/dryrun/privacy",
+        );
         let project_id = cwd
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("default");
         let profile_name = project_id;
         let content = format!(
-            r#"[project]
+            r#"telemetry_enabled = {telemetry}
+
+[project]
 id = "{project_id}"
 
 [default]

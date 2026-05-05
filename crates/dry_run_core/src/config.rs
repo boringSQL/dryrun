@@ -38,6 +38,9 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub services: Option<ServicesConfig>,
+
+    #[serde(default)]
+    pub telemetry_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -495,6 +498,18 @@ schema_file = ".dryrun/staging.json"
     fn discover_returns_none_for_nonexistent() {
         let result = ProjectConfig::discover(Path::new("/nonexistent/path/that/doesnt/exist"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_telemetry_enabled() {
+        let config = ProjectConfig::parse("telemetry_enabled = true\n").unwrap();
+        assert_eq!(config.telemetry_enabled, Some(true));
+
+        let config = ProjectConfig::parse("telemetry_enabled = false\n").unwrap();
+        assert_eq!(config.telemetry_enabled, Some(false));
+
+        let config = ProjectConfig::parse("").unwrap();
+        assert_eq!(config.telemetry_enabled, None);
     }
 
     #[test]
