@@ -532,6 +532,7 @@ version = "0.6.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "indexmap",
  "pg_introspect",
  "pg_query",
  "regex",

@@ -317,3 +317,7 @@ fn convert_extension(e: PgExtension) -> Extension {
         schema: e.schema,
     }
 }
+
+#[cfg(test)]
+#[path = "from_pg_introspect_tests.rs"]
+mod tests;
