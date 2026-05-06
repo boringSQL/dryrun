@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
+pg_introspect = { workspace = true }
 pg_query = { workspace = true }
 regex = { workspace = true }
 rusqlite = { workspace = true }
