@@ -532,6 +532,7 @@ version = "0.6.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "pg_introspect",
  "pg_query",
  "regex",
  "rusqlite",
@@ -1526,6 +1527,17 @@ checksum = "3672b37090dbd86368a4145bc067582552b29c27377cad4e0a306c97f9bd7772"
 dependencies = [
  "fixedbitset",
  "indexmap",
+]
+
+[[package]]
+name = "pg_introspect"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "serde",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
