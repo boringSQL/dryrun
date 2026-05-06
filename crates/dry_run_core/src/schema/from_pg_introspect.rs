@@ -1,4 +1,4 @@
-crates/dry_run_core/src/schema/from_pg_introspect.rsuse pg_introspect::{
+use pg_introspect::{
     Catalog as PgCatalog, CheckConstraint as PgCheck, Column as PgColumn,
     CompositeType as PgComposite, DomainType as PgDomain, EnumType as PgEnum,
     ExclusionConstraint as PgExclusion, Extension as PgExtension, ForeignKey as PgFk,
