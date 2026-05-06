@@ -420,3 +420,96 @@ async fn rebuild_after_refresh_without_history_uses_inline_only() {
     assert_eq!(bundle.activity_by_node.len(), 1);
     assert!(bundle.activity_by_node.contains_key("primary"));
 }
+
+// Regression: reload_schema must prefer history.db over schema.json so
+// planner/activity stats survive a reload. Before this fix, reload_schema
+// only read schema.json and wrapped it stats-less via wrap_schema_only,
+// clobbering history-derived stats already in the in-memory cache.
+#[tokio::test]
+async fn reload_schema_prefers_history_over_json() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = HistoryStore::open(&dir.path().join("history.db")).unwrap();
+    let key = SnapshotKey {
+        project_id: dry_run_core::history::ProjectId("test".into()),
+        database_id: dry_run_core::history::DatabaseId("test-db".into()),
+    };
+
+    let schema = test_snapshot();
+    let schema_hash = schema.content_hash.clone();
+    SnapshotStore::put(&store, &key, &schema)
+        .await
+        .expect("seed schema");
+    store
+        .put_activity_stats(
+            &key,
+            &make_activity_row(&schema_hash, "primary", "primary-h1"),
+        )
+        .await
+        .expect("seed primary activity");
+
+    let json_path = dir.path().join("schema.json");
+    std::fs::write(&json_path, serde_json::to_string(&schema).unwrap()).unwrap();
+
+    // Server starts with a stats-less snapshot in cache (mimicking a server
+    // that booted before history.db was populated). schema_candidates points
+    // at the JSON fallback. with_history wires up the primary source.
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(test_snapshot()),
+        None,
+        LintConfig::default(),
+        None,
+        "test",
+        vec![json_path],
+    )
+    .with_history(store, Some(key));
+
+    let result = server.reload_schema().await.expect("reload_schema");
+    let text = format!("{:?}", result.content.first().unwrap());
+    assert!(
+        text.contains("history.db"),
+        "reload_schema should report loading from history.db, got: {text}"
+    );
+
+    let annotated = server.schema.read().await.clone().unwrap();
+    assert!(
+        annotated.activity_by_node.contains_key("primary"),
+        "reload_schema should preserve primary activity from history.db"
+    );
+}
+
+// Regression: when history.db has no entry for the configured key,
+// reload_schema must still load from schema.json (DDL-only fallback).
+#[tokio::test]
+async fn reload_schema_falls_back_to_schema_json_when_history_empty() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = HistoryStore::open(&dir.path().join("history.db")).unwrap();
+    let key = SnapshotKey {
+        project_id: dry_run_core::history::ProjectId("test".into()),
+        database_id: dry_run_core::history::DatabaseId("test-db".into()),
+    };
+
+    let schema = test_snapshot();
+    let json_path = dir.path().join("schema.json");
+    std::fs::write(&json_path, serde_json::to_string(&schema).unwrap()).unwrap();
+
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(test_snapshot()),
+        None,
+        LintConfig::default(),
+        None,
+        "test",
+        vec![json_path.clone()],
+    )
+    .with_history(store, Some(key));
+
+    let result = server.reload_schema().await.expect("reload_schema");
+    let text = format!("{:?}", result.content.first().unwrap());
+    assert!(
+        text.contains(&format!("{}", json_path.display())),
+        "reload_schema should report loading from the schema.json path, got: {text}"
+    );
+
+    let annotated = server.schema.read().await.clone().unwrap();
+    assert!(annotated.planner.is_none());
+    assert!(annotated.activity_by_node.is_empty());
+}
