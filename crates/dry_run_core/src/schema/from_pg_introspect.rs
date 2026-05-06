@@ -1,4 +1,4 @@
-use pg_introspect::{
+crates/dry_run_core/src/schema/from_pg_introspect.rsuse pg_introspect::{
     Catalog as PgCatalog, CheckConstraint as PgCheck, Column as PgColumn,
     CompositeType as PgComposite, DomainType as PgDomain, EnumType as PgEnum,
     ExclusionConstraint as PgExclusion, Extension as PgExtension, ForeignKey as PgFk,
@@ -68,6 +68,8 @@ fn convert_table(t: PgTable) -> Table {
     for x in t.exclusion_constraints {
         constraints.push(convert_exclusion(x));
     }
+    // match the old ORDER BY conname so content_hash stays stable
+    constraints.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut cols: Vec<Column> = Vec::with_capacity(t.columns.len());
     for (_, c) in t.columns {
