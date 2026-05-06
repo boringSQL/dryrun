@@ -86,6 +86,14 @@ brew install boringsql/boringsql/dryrun
 
 **From source:**
 
+Requires Rust. If you don't have it, install via [rustup](https://rustup.rs/):
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Then:
+
 ```sh
 git clone https://github.com/boringsql/dryrun.git
 cd dryrun
