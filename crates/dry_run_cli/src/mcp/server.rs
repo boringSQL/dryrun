@@ -1554,7 +1554,11 @@ impl DryRunServer {
                 annotated.schema.tables.len(),
                 annotated.schema.views.len(),
                 annotated.schema.functions.len(),
-                if annotated.planner.is_some() { "yes" } else { "no" },
+                if annotated.planner.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                },
                 annotated.activity_by_node.len(),
             );
             *self.schema.write().await = Some(annotated);
