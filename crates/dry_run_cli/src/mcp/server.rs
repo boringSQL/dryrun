@@ -1541,9 +1541,27 @@ impl DryRunServer {
     }
 
     #[tool(
-        description = "Reload the on-disk schema without restarting. Run after `dryrun dump-schema`."
+        description = "Reload schema from history.db (with stats) or schema.json (DDL only) without restarting."
     )]
     async fn reload_schema(&self) -> Result<CallToolResult, McpError> {
+        // history.db first; the schema.json fallback drops planner/activity stats
+        if let (Some(store), Some(key)) = (self.history.as_ref(), self.snapshot_key.as_ref())
+            && let Ok(annotated) = store.get_annotated(key, SnapshotRef::Latest).await
+        {
+            let body = format!(
+                "Schema loaded from history.db: {} tables, {} views, {} functions \
+                 (planner: {}, activity nodes: {})",
+                annotated.schema.tables.len(),
+                annotated.schema.views.len(),
+                annotated.schema.functions.len(),
+                if annotated.planner.is_some() { "yes" } else { "no" },
+                annotated.activity_by_node.len(),
+            );
+            *self.schema.write().await = Some(annotated);
+            let text = self.wrap_text(&body, None);
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
+        }
+
         for candidate in &self.schema_candidates {
             if !candidate.exists() {
                 continue;
@@ -1562,7 +1580,9 @@ impl DryRunServer {
             })?;
 
             let body = format!(
-                "Schema loaded from {}: {} tables, {} views, {} functions",
+                "Schema loaded from {} (planner/activity unavailable; \
+                 run `dryrun snapshot take` or `dryrun init` to capture stats): \
+                 {} tables, {} views, {} functions",
                 candidate.display(),
                 snapshot.tables.len(),
                 snapshot.views.len(),
@@ -1582,8 +1602,10 @@ impl DryRunServer {
             .collect();
         Err(McpError::internal_error(
             format!(
-                "no schema file found at any expected location:\n{}\n\n\
-                 Run `dryrun dump-schema --db <DATABASE_URL>` first.",
+                "no schema source available: history.db has no entry for the \
+                 configured snapshot key, and no schema file was found at:\n{}\n\n\
+                 Run `dryrun init --db <DATABASE_URL>` (with stats) or \
+                 `dryrun dump-schema --db <DATABASE_URL>` (DDL only).",
                 paths.join("\n")
             ),
             None,
