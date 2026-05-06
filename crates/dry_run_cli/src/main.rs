@@ -324,6 +324,12 @@ schema_file = ".dryrun/schema.json"
     // if --db is provided, introspect and save schema
     if let Some(db_url) = db {
         let ctx = DryRun::connect(db_url).await?;
+        if ctx.is_standby().await? {
+            anyhow::bail!(
+                "`dryrun init --db` must run against the primary; \
+                 planner and activity stats are not available on standbys"
+            );
+        }
         let snapshot = ctx.introspect_schema().await?;
 
         let schema_path = data_dir.join("schema.json");
@@ -338,11 +344,30 @@ schema_file = ".dryrun/schema.json"
         let key = complete_key(&resolved, &snapshot.database);
         store.put(&key, &snapshot).await?;
 
+        let planner = ctx.introspect_planner_stats(&snapshot.content_hash).await?;
+        store.put_planner_stats(&key, &planner).await?;
+
+        let activity = ctx
+            .introspect_activity_stats(&snapshot.content_hash, "primary")
+            .await?;
+        store.put_activity_stats(&key, &activity).await?;
+
         eprintln!(
             "Captured schema: {} tables, {} views, {} functions",
             snapshot.tables.len(),
             snapshot.views.len(),
             snapshot.functions.len()
+        );
+        eprintln!(
+            "  Planner stats: {} tables, {} columns, {} indexes",
+            planner.tables.len(),
+            planner.columns.len(),
+            planner.indexes.len()
+        );
+        eprintln!(
+            "  Activity stats: {} tables, {} indexes (label=primary)",
+            activity.tables.len(),
+            activity.indexes.len()
         );
         eprintln!("  Schema: {}", schema_path.display());
         eprintln!(
