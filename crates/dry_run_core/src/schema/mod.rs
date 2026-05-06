@@ -1,4 +1,5 @@
 pub mod bloat;
+mod from_pg_introspect;
 mod hash;
 mod introspect;
 pub mod profile;
