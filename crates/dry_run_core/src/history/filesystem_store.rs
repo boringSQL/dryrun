@@ -295,3 +295,182 @@ where
         .await
         .map_err(|e| Error::History(format!("blocking task failed: {e}")))?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{
+        IndexActivity, IndexActivityEntry, NodeIdentity, QualifiedName, TableActivity,
+        TableActivityEntry,
+    };
+    use tempfile::TempDir;
+
+    fn make_schema(hash: &str) -> SchemaSnapshot {
+        SchemaSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "auth".into(),
+            timestamp: Utc::now(),
+            content_hash: hash.into(),
+            source: None,
+            tables: vec![],
+            enums: vec![],
+            domains: vec![],
+            composites: vec![],
+            views: vec![],
+            functions: vec![],
+            extensions: vec![],
+            gucs: vec![],
+        }
+    }
+
+    fn make_planner(schema_ref: &str, hash: &str) -> crate::schema::PlannerStatsSnapshot {
+        crate::schema::PlannerStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "auth".into(),
+            timestamp: Utc::now(),
+            content_hash: hash.into(),
+            schema_ref_hash: schema_ref.into(),
+            tables: vec![],
+            columns: vec![],
+            indexes: vec![],
+        }
+    }
+
+    fn make_activity(
+        schema_ref: &str,
+        label: &str,
+        hash: &str,
+    ) -> crate::schema::ActivityStatsSnapshot {
+        crate::schema::ActivityStatsSnapshot {
+            pg_version: "PostgreSQL 17.0".into(),
+            database: "auth".into(),
+            timestamp: Utc::now(),
+            content_hash: hash.into(),
+            schema_ref_hash: schema_ref.into(),
+            node: NodeIdentity {
+                label: label.into(),
+                host: format!("host-{label}"),
+                is_standby: label != "primary",
+                replication_lag_bytes: None,
+                stats_reset: None,
+            },
+            tables: vec![TableActivityEntry {
+                table: QualifiedName::new("public", "orders"),
+                activity: TableActivity {
+                    seq_scan: 1,
+                    idx_scan: 2,
+                    n_live_tup: 0,
+                    n_dead_tup: 0,
+                    last_vacuum: None,
+                    last_autovacuum: None,
+                    last_analyze: None,
+                    last_autoanalyze: None,
+                    vacuum_count: 0,
+                    autovacuum_count: 0,
+                    analyze_count: 0,
+                    autoanalyze_count: 0,
+                },
+            }],
+            indexes: vec![IndexActivityEntry {
+                index: QualifiedName::new("public", "orders_pkey"),
+                activity: IndexActivity {
+                    idx_scan: 0,
+                    idx_tup_read: 0,
+                    idx_tup_fetch: 0,
+                },
+            }],
+        }
+    }
+
+    fn key() -> SnapshotKey {
+        SnapshotKey {
+            project_id: ProjectId("p".into()),
+            database_id: DatabaseId("auth".into()),
+        }
+    }
+
+    fn temp_store() -> (TempDir, FilesystemStore) {
+        let dir = TempDir::new().unwrap();
+        let store = FilesystemStore::new(dir.path().to_path_buf());
+        (dir, store)
+    }
+
+    #[tokio::test]
+    async fn put_schema_round_trips_via_trait() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        store.put_schema(&k, &make_schema("h1")).await.unwrap();
+
+        let got = store.get_schema(&k, SnapshotRef::Latest).await.unwrap();
+        assert_eq!(got.content_hash, "h1");
+    }
+
+    #[tokio::test]
+    async fn put_schema_dedupes_on_same_content_hash() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        let s = make_schema("h1");
+        assert_eq!(
+            store.put_schema(&k, &s).await.unwrap(),
+            PutOutcome::Inserted
+        );
+        assert_eq!(store.put_schema(&k, &s).await.unwrap(), PutOutcome::Deduped);
+    }
+
+    #[tokio::test]
+    async fn put_planner_returns_unsupported_error() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        let err = store
+            .put_planner_stats(&k, &make_planner("schema-h1", "p1"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("only schema snapshots supported"));
+    }
+
+    #[tokio::test]
+    async fn put_activity_returns_unsupported_error() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        let err = store
+            .put_activity_stats(&k, &make_activity("schema-h1", "primary", "a1"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("only schema snapshots supported"));
+    }
+
+    #[tokio::test]
+    async fn get_planner_returns_unsupported_error() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        let err = store
+            .get(&k, &SnapshotKind::Planner, SnapshotRef::Latest)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("only schema snapshots supported"));
+    }
+
+    #[tokio::test]
+    async fn list_returns_empty_for_non_schema_kinds() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        store.put_schema(&k, &make_schema("h1")).await.unwrap();
+
+        let planner = store
+            .list(&k, &SnapshotKind::Planner, TimeRange::default())
+            .await
+            .unwrap();
+        assert!(planner.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_kinds_returns_schema_only_when_files_present() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        assert!(store.list_kinds(&k).await.unwrap().is_empty());
+
+        store.put_schema(&k, &make_schema("h1")).await.unwrap();
+        let kinds = store.list_kinds(&k).await.unwrap();
+        assert_eq!(kinds, vec![SnapshotKind::Schema]);
+    }
+}
