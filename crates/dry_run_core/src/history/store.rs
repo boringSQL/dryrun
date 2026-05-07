@@ -127,18 +127,23 @@ impl HistoryStore {
             let pid = &key.project_id.0;
             let did = &key.database_id.0;
 
-            let latest: Option<String> = conn
+            // dedup on (schema_ref, content): same content_hash under a
+            // different schema_ref is a new row, not a duplicate.
+            let exists: Option<i64> = conn
                 .query_row(
-                    "SELECT content_hash FROM snapshots
-                      WHERE project_id = ?1 AND database_id = ?2 AND kind = 'planner_stats'
-                      ORDER BY timestamp DESC LIMIT 1",
-                    params![pid, did],
+                    "SELECT id FROM snapshots
+                      WHERE project_id = ?1 AND database_id = ?2
+                        AND kind = 'planner_stats'
+                        AND schema_ref_hash = ?3 AND content_hash = ?4
+                      LIMIT 1",
+                    params![pid, did, snap.schema_ref_hash, snap.content_hash],
                     |row| row.get(0),
                 )
                 .ok();
 
-            if latest.as_deref() == Some(snap.content_hash.as_str()) {
-                debug!(hash = %snap.content_hash, "planner stats unchanged, skipping put");
+            if exists.is_some() {
+                debug!(hash = %snap.content_hash, schema_ref = %snap.schema_ref_hash,
+                    "planner stats unchanged, skipping put");
                 return Ok(PutOutcome::Deduped);
             }
 
@@ -179,20 +184,23 @@ impl HistoryStore {
             let did = &key.database_id.0;
             let label = &snap.node.label;
 
-            let latest: Option<String> = conn
+            // dedup on (schema_ref, node, content); same content_hash for the
+            // same node under a different schema_ref is a new row.
+            let exists: Option<i64> = conn
                 .query_row(
-                    "SELECT content_hash FROM snapshots
+                    "SELECT id FROM snapshots
                       WHERE project_id = ?1 AND database_id = ?2
                         AND kind = 'activity_stats' AND node_label = ?3
-                      ORDER BY timestamp DESC LIMIT 1",
-                    params![pid, did, label],
+                        AND schema_ref_hash = ?4 AND content_hash = ?5
+                      LIMIT 1",
+                    params![pid, did, label, snap.schema_ref_hash, snap.content_hash],
                     |row| row.get(0),
                 )
                 .ok();
 
-            if latest.as_deref() == Some(snap.content_hash.as_str()) {
-                debug!(hash = %snap.content_hash, label = %label,
-                    "activity stats unchanged, skipping put");
+            if exists.is_some() {
+                debug!(hash = %snap.content_hash, schema_ref = %snap.schema_ref_hash,
+                    label = %label, "activity stats unchanged, skipping put");
                 return Ok(PutOutcome::Deduped);
             }
 
