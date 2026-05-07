@@ -573,7 +573,6 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
     fn make_planner(schema_ref: &str, hash: &str) -> PlannerStatsSnapshot {
         PlannerStatsSnapshot {
             pg_version: "PostgreSQL 17.0".into(),
@@ -587,7 +586,6 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
     fn make_activity(schema_ref: &str, label: &str, hash: &str) -> ActivityStatsSnapshot {
         ActivityStatsSnapshot {
             pg_version: "PostgreSQL 17.0".into(),
@@ -663,5 +661,238 @@ mod tests {
             PutOutcome::Inserted
         );
         assert_eq!(store.put_schema(&k, &s).await.unwrap(), PutOutcome::Deduped);
+    }
+
+    #[tokio::test]
+    async fn bundle_round_trips_all_three_kinds() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        store.put_schema(&k, &make_schema("sh")).await.unwrap();
+        store
+            .put_planner_stats(&k, &make_planner("sh", "ph"))
+            .await
+            .unwrap();
+        store
+            .put_activity_stats(&k, &make_activity("sh", "primary", "ah"))
+            .await
+            .unwrap();
+
+        let s = store.get_schema(&k, SnapshotRef::Latest).await.unwrap();
+        assert_eq!(s.content_hash, "sh");
+
+        let p = store
+            .get(&k, &SnapshotKind::Planner, SnapshotRef::Latest)
+            .await
+            .unwrap()
+            .into_planner()
+            .unwrap();
+        assert_eq!(p.content_hash, "ph");
+
+        let a = store
+            .get(
+                &k,
+                &SnapshotKind::Activity {
+                    node_label: "primary".into(),
+                },
+                SnapshotRef::Latest,
+            )
+            .await
+            .unwrap()
+            .into_activity()
+            .unwrap();
+        assert_eq!(a.content_hash, "ah");
+        assert_eq!(a.node.label, "primary");
+    }
+
+    #[tokio::test]
+    async fn put_planner_without_schema_errors() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        let err = store
+            .put_planner_stats(&k, &make_planner("missing", "ph"))
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("orphan"), "expected orphan error, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn put_planner_dedupes_on_same_content_hash() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        store.put_schema(&k, &make_schema("sh")).await.unwrap();
+        let p = make_planner("sh", "ph");
+        assert_eq!(
+            store.put_planner_stats(&k, &p).await.unwrap(),
+            PutOutcome::Inserted
+        );
+        assert_eq!(
+            store.put_planner_stats(&k, &p).await.unwrap(),
+            PutOutcome::Deduped
+        );
+    }
+
+    #[tokio::test]
+    async fn put_activity_upserts_per_node_label() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        store.put_schema(&k, &make_schema("sh")).await.unwrap();
+        store
+            .put_activity_stats(&k, &make_activity("sh", "primary", "a1"))
+            .await
+            .unwrap();
+        store
+            .put_activity_stats(&k, &make_activity("sh", "standby", "b1"))
+            .await
+            .unwrap();
+        // overwrite primary
+        store
+            .put_activity_stats(&k, &make_activity("sh", "primary", "a2"))
+            .await
+            .unwrap();
+
+        let primary = store
+            .get(
+                &k,
+                &SnapshotKind::Activity {
+                    node_label: "primary".into(),
+                },
+                SnapshotRef::Latest,
+            )
+            .await
+            .unwrap()
+            .into_activity()
+            .unwrap();
+        assert_eq!(primary.content_hash, "a2");
+
+        let standby = store
+            .get(
+                &k,
+                &SnapshotKind::Activity {
+                    node_label: "standby".into(),
+                },
+                SnapshotRef::Latest,
+            )
+            .await
+            .unwrap()
+            .into_activity()
+            .unwrap();
+        assert_eq!(standby.content_hash, "b1");
+    }
+
+    #[tokio::test]
+    async fn list_planner_returns_only_bundles_with_planner() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        // bundle #1: schema + planner
+        store.put_schema(&k, &make_schema("sh1")).await.unwrap();
+        store
+            .put_planner_stats(&k, &make_planner("sh1", "ph1"))
+            .await
+            .unwrap();
+        // bundle #2: schema only
+        store.put_schema(&k, &make_schema("sh2")).await.unwrap();
+
+        let schemas = store
+            .list(&k, &SnapshotKind::Schema, TimeRange::default())
+            .await
+            .unwrap();
+        assert_eq!(schemas.len(), 2);
+
+        let planners = store
+            .list(&k, &SnapshotKind::Planner, TimeRange::default())
+            .await
+            .unwrap();
+        assert_eq!(planners.len(), 1);
+        assert_eq!(planners[0].content_hash, "ph1");
+        assert_eq!(planners[0].schema_ref_hash.as_deref(), Some("sh1"));
+    }
+
+    #[tokio::test]
+    async fn list_kinds_reports_distinct_node_labels() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        store.put_schema(&k, &make_schema("sh")).await.unwrap();
+        store
+            .put_planner_stats(&k, &make_planner("sh", "ph"))
+            .await
+            .unwrap();
+        store
+            .put_activity_stats(&k, &make_activity("sh", "primary", "a1"))
+            .await
+            .unwrap();
+        store
+            .put_activity_stats(&k, &make_activity("sh", "standby", "b1"))
+            .await
+            .unwrap();
+
+        let kinds = store.list_kinds(&k).await.unwrap();
+        assert!(kinds.contains(&SnapshotKind::Schema));
+        assert!(kinds.contains(&SnapshotKind::Planner));
+        assert!(kinds.contains(&SnapshotKind::Activity {
+            node_label: "primary".into()
+        }));
+        assert!(kinds.contains(&SnapshotKind::Activity {
+            node_label: "standby".into()
+        }));
+        assert_eq!(kinds.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn delete_before_planner_clears_field_keeps_schema() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        store.put_schema(&k, &make_schema("sh")).await.unwrap();
+        store
+            .put_planner_stats(&k, &make_planner("sh", "ph"))
+            .await
+            .unwrap();
+
+        let cutoff = Utc::now() + chrono::Duration::seconds(60);
+        let removed = store
+            .delete_before(&k, &SnapshotKind::Planner, cutoff)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        // schema still there
+        let s = store.get_schema(&k, SnapshotRef::Latest).await.unwrap();
+        assert_eq!(s.content_hash, "sh");
+
+        // planner gone
+        let planners = store
+            .list(&k, &SnapshotKind::Planner, TimeRange::default())
+            .await
+            .unwrap();
+        assert!(planners.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_before_schema_removes_whole_bundle() {
+        let (_dir, store) = temp_store();
+        let k = key();
+        store.put_schema(&k, &make_schema("sh")).await.unwrap();
+        store
+            .put_planner_stats(&k, &make_planner("sh", "ph"))
+            .await
+            .unwrap();
+
+        let cutoff = Utc::now() + chrono::Duration::seconds(60);
+        let removed = store
+            .delete_before(&k, &SnapshotKind::Schema, cutoff)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let schemas = store
+            .list(&k, &SnapshotKind::Schema, TimeRange::default())
+            .await
+            .unwrap();
+        assert!(schemas.is_empty());
+        let planners = store
+            .list(&k, &SnapshotKind::Planner, TimeRange::default())
+            .await
+            .unwrap();
+        assert!(planners.is_empty());
     }
 }
