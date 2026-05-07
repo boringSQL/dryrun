@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
@@ -10,9 +12,8 @@ use crate::history::{
     DatabaseId, ProjectId, PutOutcome, SnapshotKey, SnapshotKind, SnapshotRef, SnapshotStore,
     SnapshotSummary, StoredSnapshot, TimeRange, parse_snapshot_filename, snapshot_path,
 };
-use crate::schema::SchemaSnapshot;
+use crate::schema::{ActivityStatsSnapshot, PlannerStatsSnapshot, SchemaSnapshot};
 
-// schema-only for now
 pub struct FilesystemStore {
     root: Arc<PathBuf>,
 }
@@ -29,23 +30,27 @@ impl FilesystemStore {
     }
 }
 
-fn unsupported(kind: &SnapshotKind) -> Error {
-    Error::History(format!(
-        "FilesystemStore: only schema snapshots supported (got {})",
-        kind.db_kind()
-    ))
+#[derive(Debug, Serialize, Deserialize)]
+struct Bundle {
+    schema: SchemaSnapshot,
+    #[serde(default)]
+    planner: Option<PlannerStatsSnapshot>,
+    #[serde(default)]
+    activity: BTreeMap<String, ActivityStatsSnapshot>,
 }
 
 #[async_trait]
 impl SnapshotStore for FilesystemStore {
     async fn put(&self, key: &SnapshotKey, snap: &StoredSnapshot) -> Result<PutOutcome> {
-        let schema = match snap {
-            StoredSnapshot::Schema(s) => s.clone(),
-            other => return Err(unsupported(&other.kind())),
-        };
         let root = self.root.clone();
         let key = key.clone();
-        run_blocking(move || put_schema(&root, &key, schema)).await
+        let snap = snap.clone();
+        run_blocking(move || match snap {
+            StoredSnapshot::Schema(s) => put_schema(&root, &key, s),
+            StoredSnapshot::Planner(p) => put_planner(&root, &key, p),
+            StoredSnapshot::Activity(a) => put_activity(&root, &key, a),
+        })
+        .await
     }
 
     async fn get(
@@ -54,12 +59,10 @@ impl SnapshotStore for FilesystemStore {
         kind: &SnapshotKind,
         at: SnapshotRef,
     ) -> Result<StoredSnapshot> {
-        if !matches!(kind, SnapshotKind::Schema) {
-            return Err(unsupported(kind));
-        }
         let root = self.root.clone();
         let key = key.clone();
-        run_blocking(move || get_schema(&root, &key, at).map(StoredSnapshot::Schema)).await
+        let kind = kind.clone();
+        run_blocking(move || get_kind(&root, &key, &kind, at)).await
     }
 
     async fn list(
@@ -68,12 +71,10 @@ impl SnapshotStore for FilesystemStore {
         kind: &SnapshotKind,
         range: TimeRange,
     ) -> Result<Vec<SnapshotSummary>> {
-        if !matches!(kind, SnapshotKind::Schema) {
-            return Ok(Vec::new());
-        }
         let root = self.root.clone();
         let key = key.clone();
-        run_blocking(move || list_schema(&root, &key, range)).await
+        let kind = kind.clone();
+        run_blocking(move || list_kind(&root, &key, &kind, range)).await
     }
 
     async fn latest(
@@ -94,32 +95,22 @@ impl SnapshotStore for FilesystemStore {
         kind: &SnapshotKind,
         cutoff: DateTime<Utc>,
     ) -> Result<usize> {
-        if !matches!(kind, SnapshotKind::Schema) {
-            return Err(unsupported(kind));
-        }
         let root = self.root.clone();
         let key = key.clone();
-        run_blocking(move || delete_schema_before(&root, &key, cutoff)).await
+        let kind = kind.clone();
+        run_blocking(move || delete_before(&root, &key, &kind, cutoff)).await
     }
 
     async fn list_kinds(&self, key: &SnapshotKey) -> Result<Vec<SnapshotKind>> {
         let root = self.root.clone();
         let key = key.clone();
-        run_blocking(move || {
-            let entries = read_stream_entries(&stream_dir(&root, &key))?;
-            Ok(if entries.is_empty() {
-                Vec::new()
-            } else {
-                vec![SnapshotKind::Schema]
-            })
-        })
-        .await
+        run_blocking(move || list_kinds_sync(&root, &key)).await
     }
 }
 
 fn put_schema(root: &Path, key: &SnapshotKey, snap: SchemaSnapshot) -> Result<PutOutcome> {
-    let stream_dir = stream_dir(root, key);
-    if let Some(latest) = read_latest_hash(&stream_dir)?
+    let dir = stream_dir(root, key);
+    if let Some(latest) = read_latest_hash(&dir)?
         && latest == snap.content_hash
     {
         debug!(hash = %snap.content_hash, "schema unchanged, skipping put");
@@ -132,15 +123,12 @@ fn put_schema(root: &Path, key: &SnapshotKey, snap: SchemaSnapshot) -> Result<Pu
             .map_err(|e| Error::History(format!("create_dir_all {}: {e}", parent.display())))?;
     }
 
-    let tmp = path.with_extension("zst.tmp");
-    let json = serde_json::to_vec(&snap)
-        .map_err(|e| Error::History(format!("cannot serialize snapshot: {e}")))?;
-    let compressed = zstd::encode_all(json.as_slice(), 3)
-        .map_err(|e| Error::History(format!("zstd encode: {e}")))?;
-    std::fs::write(&tmp, compressed)
-        .map_err(|e| Error::History(format!("write {}: {e}", tmp.display())))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| Error::History(format!("rename to {}: {e}", path.display())))?;
+    let bundle = Bundle {
+        schema: snap.clone(),
+        planner: None,
+        activity: BTreeMap::new(),
+    };
+    write_bundle(&path, &bundle)?;
 
     info!(
         hash = %snap.content_hash,
@@ -151,66 +139,328 @@ fn put_schema(root: &Path, key: &SnapshotKey, snap: SchemaSnapshot) -> Result<Pu
     Ok(PutOutcome::Inserted)
 }
 
-fn get_schema(root: &Path, key: &SnapshotKey, at: SnapshotRef) -> Result<SchemaSnapshot> {
-    let entries = read_stream_entries(&stream_dir(root, key))?;
-    let chosen = match &at {
-        SnapshotRef::Latest => entries.into_iter().max_by_key(|(ts, _, _)| *ts),
-        SnapshotRef::At(target) => entries
-            .into_iter()
-            .filter(|(ts, _, _)| *ts <= *target)
-            .max_by_key(|(ts, _, _)| *ts),
-        SnapshotRef::Hash(h) => entries.into_iter().find(|(_, hash, _)| hash == h),
-    };
+fn put_planner(root: &Path, key: &SnapshotKey, snap: PlannerStatsSnapshot) -> Result<PutOutcome> {
+    let dir = stream_dir(root, key);
+    let (path, mut bundle) =
+        find_bundle_by_schema_hash(&dir, &snap.schema_ref_hash)?.ok_or_else(|| {
+            Error::History(format!(
+                "FilesystemStore: planner orphan — no schema bundle for ref {}",
+                snap.schema_ref_hash
+            ))
+        })?;
 
-    let (_, _, path) = chosen.ok_or_else(|| {
-        let detail = match &at {
-            SnapshotRef::Latest => "latest".to_string(),
-            SnapshotRef::At(ts) => format!("at-or-before {ts}"),
-            SnapshotRef::Hash(h) => format!("hash {h}"),
+    if let Some(existing) = &bundle.planner
+        && existing.content_hash == snap.content_hash
+    {
+        return Ok(PutOutcome::Deduped);
+    }
+
+    bundle.planner = Some(snap);
+    write_bundle(&path, &bundle)?;
+    Ok(PutOutcome::Inserted)
+}
+
+fn put_activity(root: &Path, key: &SnapshotKey, snap: ActivityStatsSnapshot) -> Result<PutOutcome> {
+    let dir = stream_dir(root, key);
+    let (path, mut bundle) =
+        find_bundle_by_schema_hash(&dir, &snap.schema_ref_hash)?.ok_or_else(|| {
+            Error::History(format!(
+                "FilesystemStore: activity orphan — no schema bundle for ref {}",
+                snap.schema_ref_hash
+            ))
+        })?;
+
+    let label = snap.node.label.clone();
+    if let Some(existing) = bundle.activity.get(&label)
+        && existing.content_hash == snap.content_hash
+    {
+        return Ok(PutOutcome::Deduped);
+    }
+
+    bundle.activity.insert(label, snap);
+    write_bundle(&path, &bundle)?;
+    Ok(PutOutcome::Inserted)
+}
+
+fn get_kind(
+    root: &Path,
+    key: &SnapshotKey,
+    kind: &SnapshotKind,
+    at: SnapshotRef,
+) -> Result<StoredSnapshot> {
+    let dir = stream_dir(root, key);
+    let entries = read_stream_entries(&dir)?;
+
+    match kind {
+        SnapshotKind::Schema => {
+            let chosen = match &at {
+                SnapshotRef::Latest => entries.into_iter().max_by_key(|(ts, _, _)| *ts),
+                SnapshotRef::At(target) => entries
+                    .into_iter()
+                    .filter(|(ts, _, _)| *ts <= *target)
+                    .max_by_key(|(ts, _, _)| *ts),
+                SnapshotRef::Hash(h) => entries.into_iter().find(|(_, hash, _)| hash == h),
+            };
+            let (_, _, path) = chosen.ok_or_else(|| not_found_err("schema", &at))?;
+            let bundle = read_bundle(&path)?;
+            Ok(StoredSnapshot::Schema(bundle.schema))
+        }
+        SnapshotKind::Planner => {
+            let mut bundles: Vec<(DateTime<Utc>, Bundle)> = entries
+                .into_iter()
+                .filter_map(|(ts, _, p)| read_bundle(&p).ok().map(|b| (ts, b)))
+                .filter(|(_, b)| b.planner.is_some())
+                .collect();
+            bundles.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+            let chosen = match &at {
+                SnapshotRef::Latest => bundles.into_iter().next(),
+                SnapshotRef::At(target) => bundles.into_iter().find(|(ts, _)| *ts <= *target),
+                SnapshotRef::Hash(h) => bundles
+                    .into_iter()
+                    .find(|(_, b)| b.planner.as_ref().map(|p| &p.content_hash) == Some(h)),
+            };
+            let (_, bundle) = chosen.ok_or_else(|| not_found_err("planner", &at))?;
+            Ok(StoredSnapshot::Planner(bundle.planner.expect("filtered")))
+        }
+        SnapshotKind::Activity { node_label } => {
+            let mut bundles: Vec<(DateTime<Utc>, Bundle)> = entries
+                .into_iter()
+                .filter_map(|(ts, _, p)| read_bundle(&p).ok().map(|b| (ts, b)))
+                .filter(|(_, b)| b.activity.contains_key(node_label))
+                .collect();
+            bundles.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+            let chosen = match &at {
+                SnapshotRef::Latest => bundles.into_iter().next(),
+                SnapshotRef::At(target) => bundles.into_iter().find(|(ts, _)| *ts <= *target),
+                SnapshotRef::Hash(h) => bundles
+                    .into_iter()
+                    .find(|(_, b)| b.activity.get(node_label).map(|a| &a.content_hash) == Some(h)),
+            };
+            let (_, mut bundle) = chosen.ok_or_else(|| not_found_err("activity", &at))?;
+            let act = bundle.activity.remove(node_label).expect("filtered above");
+            Ok(StoredSnapshot::Activity(act))
+        }
+    }
+}
+
+fn list_kind(
+    root: &Path,
+    key: &SnapshotKey,
+    kind: &SnapshotKind,
+    range: TimeRange,
+) -> Result<Vec<SnapshotSummary>> {
+    let dir = stream_dir(root, key);
+    let entries = read_stream_entries(&dir)?;
+
+    let mut out: Vec<SnapshotSummary> = Vec::new();
+    for (_schema_ts, _schema_hash, path) in entries {
+        let bundle = match read_bundle(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
         };
-        Error::History(format!("snapshot not found ({detail})"))
-    })?;
+        if let Some(s) = bundle_summary_for_kind(&bundle, key, kind) {
+            if range.from.is_none_or(|f| s.timestamp >= f)
+                && range.to.is_none_or(|t| s.timestamp < t)
+            {
+                out.push(s);
+            }
+        }
+    }
+    out.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
+    Ok(out)
+}
 
-    let bytes = std::fs::read(&path)
-        .map_err(|e| Error::History(format!("read {}: {e}", path.display())))?;
+fn delete_before(
+    root: &Path,
+    key: &SnapshotKey,
+    kind: &SnapshotKind,
+    cutoff: DateTime<Utc>,
+) -> Result<usize> {
+    let dir = stream_dir(root, key);
+    let entries = read_stream_entries(&dir)?;
+    let mut affected = 0usize;
+
+    match kind {
+        SnapshotKind::Schema => {
+            for (_ts, _h, path) in entries {
+                let bundle = match read_bundle(&path) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                if bundle.schema.timestamp < cutoff {
+                    std::fs::remove_file(&path)
+                        .map_err(|e| Error::History(format!("remove {}: {e}", path.display())))?;
+                    affected += 1;
+                }
+            }
+        }
+        SnapshotKind::Planner => {
+            for (_ts, _h, path) in entries {
+                let mut bundle = match read_bundle(&path) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let drop = bundle
+                    .planner
+                    .as_ref()
+                    .is_some_and(|p| p.timestamp < cutoff);
+                if drop {
+                    bundle.planner = None;
+                    write_bundle(&path, &bundle)?;
+                    affected += 1;
+                }
+            }
+        }
+        SnapshotKind::Activity { node_label } => {
+            for (_ts, _h, path) in entries {
+                let mut bundle = match read_bundle(&path) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let drop = bundle
+                    .activity
+                    .get(node_label)
+                    .is_some_and(|a| a.timestamp < cutoff);
+                if drop {
+                    bundle.activity.remove(node_label);
+                    write_bundle(&path, &bundle)?;
+                    affected += 1;
+                }
+            }
+        }
+    }
+    Ok(affected)
+}
+
+fn list_kinds_sync(root: &Path, key: &SnapshotKey) -> Result<Vec<SnapshotKind>> {
+    let dir = stream_dir(root, key);
+    let entries = read_stream_entries(&dir)?;
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut has_schema = false;
+    let mut has_planner = false;
+    let mut activity_labels: std::collections::BTreeSet<String> = Default::default();
+
+    for (_ts, _h, path) in entries {
+        let bundle = match read_bundle(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        has_schema = true;
+        if bundle.planner.is_some() {
+            has_planner = true;
+        }
+        for label in bundle.activity.keys() {
+            activity_labels.insert(label.clone());
+        }
+    }
+
+    let mut out = Vec::new();
+    if has_schema {
+        out.push(SnapshotKind::Schema);
+    }
+    if has_planner {
+        out.push(SnapshotKind::Planner);
+    }
+    for label in activity_labels {
+        out.push(SnapshotKind::Activity { node_label: label });
+    }
+    Ok(out)
+}
+
+fn bundle_summary_for_kind(
+    bundle: &Bundle,
+    key: &SnapshotKey,
+    kind: &SnapshotKind,
+) -> Option<SnapshotSummary> {
+    let project = Some(key.project_id.0.clone());
+    let database = Some(key.database_id.0.clone());
+    let db_name = key.database_id.0.clone();
+    match kind {
+        SnapshotKind::Schema => Some(SnapshotSummary {
+            id: 0,
+            kind: SnapshotKind::Schema,
+            timestamp: bundle.schema.timestamp,
+            content_hash: bundle.schema.content_hash.clone(),
+            schema_ref_hash: None,
+            database: db_name,
+            project_id: project,
+            database_id: database,
+        }),
+        SnapshotKind::Planner => bundle.planner.as_ref().map(|p| SnapshotSummary {
+            id: 0,
+            kind: SnapshotKind::Planner,
+            timestamp: p.timestamp,
+            content_hash: p.content_hash.clone(),
+            schema_ref_hash: Some(bundle.schema.content_hash.clone()),
+            database: db_name,
+            project_id: project,
+            database_id: database,
+        }),
+        SnapshotKind::Activity { node_label } => {
+            bundle.activity.get(node_label).map(|a| SnapshotSummary {
+                id: 0,
+                kind: SnapshotKind::Activity {
+                    node_label: node_label.clone(),
+                },
+                timestamp: a.timestamp,
+                content_hash: a.content_hash.clone(),
+                schema_ref_hash: Some(bundle.schema.content_hash.clone()),
+                database: db_name,
+                project_id: project,
+                database_id: database,
+            })
+        }
+    }
+}
+
+fn find_bundle_by_schema_hash(dir: &Path, schema_hash: &str) -> Result<Option<(PathBuf, Bundle)>> {
+    for (_, _, path) in read_stream_entries(dir)? {
+        let bundle = match read_bundle(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        if bundle.schema.content_hash == schema_hash {
+            return Ok(Some((path, bundle)));
+        }
+    }
+    Ok(None)
+}
+
+fn read_bundle(path: &Path) -> Result<Bundle> {
+    let bytes =
+        std::fs::read(path).map_err(|e| Error::History(format!("read {}: {e}", path.display())))?;
     let json = zstd::decode_all(bytes.as_slice())
         .map_err(|e| Error::History(format!("zstd decode: {e}")))?;
     serde_json::from_slice(&json).map_err(|e| Error::History(format!("corrupt snapshot JSON: {e}")))
 }
 
-fn list_schema(root: &Path, key: &SnapshotKey, range: TimeRange) -> Result<Vec<SnapshotSummary>> {
-    let entries = read_stream_entries(&stream_dir(root, key))?;
-    let mut summaries: Vec<SnapshotSummary> = entries
-        .into_iter()
-        .filter(|(ts, _, _)| {
-            range.from.is_none_or(|from| *ts >= from) && range.to.is_none_or(|to| *ts < to)
-        })
-        .map(|(ts, hash, _)| SnapshotSummary {
-            id: 0,
-            kind: SnapshotKind::Schema,
-            timestamp: ts,
-            content_hash: hash,
-            schema_ref_hash: None,
-            database: key.database_id.0.clone(),
-            project_id: Some(key.project_id.0.clone()),
-            database_id: Some(key.database_id.0.clone()),
-        })
-        .collect();
-    summaries.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
-    Ok(summaries)
+fn write_bundle(path: &Path, bundle: &Bundle) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Error::History(format!("create_dir_all {}: {e}", parent.display())))?;
+    }
+    let tmp = path.with_extension("zst.tmp");
+    let json = serde_json::to_vec(bundle)
+        .map_err(|e| Error::History(format!("cannot serialize bundle: {e}")))?;
+    let compressed = zstd::encode_all(json.as_slice(), 3)
+        .map_err(|e| Error::History(format!("zstd encode: {e}")))?;
+    std::fs::write(&tmp, compressed)
+        .map_err(|e| Error::History(format!("write {}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| Error::History(format!("rename to {}: {e}", path.display())))?;
+    Ok(())
 }
 
-fn delete_schema_before(root: &Path, key: &SnapshotKey, cutoff: DateTime<Utc>) -> Result<usize> {
-    let entries = read_stream_entries(&stream_dir(root, key))?;
-    let mut deleted = 0usize;
-    for (ts, _, path) in entries {
-        if ts < cutoff {
-            std::fs::remove_file(&path)
-                .map_err(|e| Error::History(format!("remove {}: {e}", path.display())))?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+fn not_found_err(kind: &str, at: &SnapshotRef) -> Error {
+    let detail = match at {
+        SnapshotRef::Latest => "latest".to_string(),
+        SnapshotRef::At(ts) => format!("at-or-before {ts}"),
+        SnapshotRef::Hash(h) => format!("hash {h}"),
+    };
+    Error::History(format!("{kind} snapshot not found ({detail})"))
 }
 
 fn stream_dir(root: &Path, key: &SnapshotKey) -> PathBuf {
@@ -323,8 +573,9 @@ mod tests {
         }
     }
 
-    fn make_planner(schema_ref: &str, hash: &str) -> crate::schema::PlannerStatsSnapshot {
-        crate::schema::PlannerStatsSnapshot {
+    #[allow(dead_code)]
+    fn make_planner(schema_ref: &str, hash: &str) -> PlannerStatsSnapshot {
+        PlannerStatsSnapshot {
             pg_version: "PostgreSQL 17.0".into(),
             database: "auth".into(),
             timestamp: Utc::now(),
@@ -336,12 +587,9 @@ mod tests {
         }
     }
 
-    fn make_activity(
-        schema_ref: &str,
-        label: &str,
-        hash: &str,
-    ) -> crate::schema::ActivityStatsSnapshot {
-        crate::schema::ActivityStatsSnapshot {
+    #[allow(dead_code)]
+    fn make_activity(schema_ref: &str, label: &str, hash: &str) -> ActivityStatsSnapshot {
+        ActivityStatsSnapshot {
             pg_version: "PostgreSQL 17.0".into(),
             database: "auth".into(),
             timestamp: Utc::now(),
@@ -415,62 +663,5 @@ mod tests {
             PutOutcome::Inserted
         );
         assert_eq!(store.put_schema(&k, &s).await.unwrap(), PutOutcome::Deduped);
-    }
-
-    #[tokio::test]
-    async fn put_planner_returns_unsupported_error() {
-        let (_dir, store) = temp_store();
-        let k = key();
-        let err = store
-            .put_planner_stats(&k, &make_planner("schema-h1", "p1"))
-            .await
-            .unwrap_err();
-        assert!(format!("{err}").contains("only schema snapshots supported"));
-    }
-
-    #[tokio::test]
-    async fn put_activity_returns_unsupported_error() {
-        let (_dir, store) = temp_store();
-        let k = key();
-        let err = store
-            .put_activity_stats(&k, &make_activity("schema-h1", "primary", "a1"))
-            .await
-            .unwrap_err();
-        assert!(format!("{err}").contains("only schema snapshots supported"));
-    }
-
-    #[tokio::test]
-    async fn get_planner_returns_unsupported_error() {
-        let (_dir, store) = temp_store();
-        let k = key();
-        let err = store
-            .get(&k, &SnapshotKind::Planner, SnapshotRef::Latest)
-            .await
-            .unwrap_err();
-        assert!(format!("{err}").contains("only schema snapshots supported"));
-    }
-
-    #[tokio::test]
-    async fn list_returns_empty_for_non_schema_kinds() {
-        let (_dir, store) = temp_store();
-        let k = key();
-        store.put_schema(&k, &make_schema("h1")).await.unwrap();
-
-        let planner = store
-            .list(&k, &SnapshotKind::Planner, TimeRange::default())
-            .await
-            .unwrap();
-        assert!(planner.is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_kinds_returns_schema_only_when_files_present() {
-        let (_dir, store) = temp_store();
-        let k = key();
-        assert!(store.list_kinds(&k).await.unwrap().is_empty());
-
-        store.put_schema(&k, &make_schema("h1")).await.unwrap();
-        let kinds = store.list_kinds(&k).await.unwrap();
-        assert_eq!(kinds, vec![SnapshotKind::Schema]);
     }
 }
