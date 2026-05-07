@@ -384,7 +384,7 @@ async fn rebuild_after_refresh_preserves_replica_activity() {
     let schema = test_snapshot();
     let schema_hash = schema.content_hash.clone();
 
-    SnapshotStore::put(&store, &key, &schema)
+    SnapshotStore::put_schema(&store, &key, &schema)
         .await
         .expect("seed schema");
     let replica = make_activity_row(&schema_hash, "replica1", "replica-h1");
@@ -436,7 +436,7 @@ async fn reload_schema_prefers_history_over_json() {
 
     let schema = test_snapshot();
     let schema_hash = schema.content_hash.clone();
-    SnapshotStore::put(&store, &key, &schema)
+    SnapshotStore::put_schema(&store, &key, &schema)
         .await
         .expect("seed schema");
     store

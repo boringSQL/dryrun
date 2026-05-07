@@ -342,7 +342,7 @@ schema_file = ".dryrun/schema.json"
             .unwrap_or_else(|| ProjectConfig::parse(""))?;
         let resolved = config.resolve_profile(Some(db_url), None, None, &cwd)?;
         let key = complete_key(&resolved, &snapshot.database);
-        store.put(&key, &snapshot).await?;
+        store.put_schema(&key, &snapshot).await?;
 
         let planner = ctx.introspect_planner_stats(&snapshot.content_hash).await?;
         store.put_planner_stats(&key, &planner).await?;
@@ -478,7 +478,7 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
             let resolved = config.resolve_profile(Some(db_url), None, profile, &cwd)?;
             let key = complete_key(&resolved, &snapshot.database);
 
-            let schema_outcome = store.put(&key, &snapshot).await?;
+            let schema_outcome = store.put_schema(&key, &snapshot).await?;
             match schema_outcome {
                 PutOutcome::Inserted => {
                     println!("Snapshot saved: {}", snapshot.content_hash);
@@ -603,7 +603,7 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
         SnapshotAction::List { db, history_db } => {
             let store = open_history_store(history_db.as_deref())?;
             let key = resolve_read_key(db.as_deref(), profile).await?;
-            let rows = store.list(&key, TimeRange::default()).await?;
+            let rows = store.list_schema(&key, TimeRange::default()).await?;
 
             if rows.is_empty() {
                 println!(
@@ -642,15 +642,19 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
             let key = resolve_read_key(Some(db_url), profile).await?;
 
             let from_snapshot = if let Some(hash) = &from {
-                store.get(&key, SnapshotRef::Hash(hash.clone())).await?
+                store
+                    .get_schema(&key, SnapshotRef::Hash(hash.clone()))
+                    .await?
             } else if *latest {
-                store.get(&key, SnapshotRef::Latest).await?
+                store.get_schema(&key, SnapshotRef::Latest).await?
             } else {
                 anyhow::bail!("specify --from <hash> or --latest");
             };
 
             let to_snapshot = if let Some(hash) = &to {
-                store.get(&key, SnapshotRef::Hash(hash.clone())).await?
+                store
+                    .get_schema(&key, SnapshotRef::Hash(hash.clone()))
+                    .await?
             } else {
                 ctx.introspect_schema().await?
             };
@@ -675,10 +679,10 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
             let keys = store.list_keys()?;
             let mut written = 0usize;
             for key in &keys {
-                let summaries = store.list(key, TimeRange::default()).await?;
+                let summaries = store.list_schema(key, TimeRange::default()).await?;
                 for s in &summaries {
                     let snap = store
-                        .get(key, SnapshotRef::Hash(s.content_hash.clone()))
+                        .get_schema(key, SnapshotRef::Hash(s.content_hash.clone()))
                         .await?;
                     write_snapshot_export(&out_root, key, &snap)?;
                     written += 1;
