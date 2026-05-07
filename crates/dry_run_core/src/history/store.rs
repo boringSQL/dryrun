@@ -1236,4 +1236,202 @@ mod trait_tests {
         let primary = bundle.activity_by_node.get("primary").unwrap();
         assert_eq!(primary.content_hash, "act-2");
     }
+
+    // --- dedup correctness (commit 2f9a353) ---
+
+    #[tokio::test]
+    async fn put_planner_dedupes_only_within_same_schema_ref() {
+        // Same content_hash under a different schema_ref must NOT collapse.
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+        store
+            .put_schema(&k, &make_snap("schema-A", "auth"))
+            .await
+            .unwrap();
+        store
+            .put_schema(&k, &make_snap("schema-B", "auth"))
+            .await
+            .unwrap();
+
+        let p_a = make_planner("schema-A", "auth", "shared-hash");
+        let p_b = make_planner("schema-B", "auth", "shared-hash");
+
+        assert_eq!(
+            store.put_planner_stats(&k, &p_a).await.unwrap(),
+            PutOutcome::Inserted
+        );
+        assert_eq!(
+            store.put_planner_stats(&k, &p_a).await.unwrap(),
+            PutOutcome::Deduped
+        );
+        assert_eq!(
+            store.put_planner_stats(&k, &p_b).await.unwrap(),
+            PutOutcome::Inserted
+        );
+    }
+
+    #[tokio::test]
+    async fn put_activity_dedupes_only_within_same_schema_ref_and_node() {
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+        store
+            .put_schema(&k, &make_snap("schema-A", "auth"))
+            .await
+            .unwrap();
+        store
+            .put_schema(&k, &make_snap("schema-B", "auth"))
+            .await
+            .unwrap();
+
+        let a_primary_a = make_activity("schema-A", "auth", "primary", "shared-hash");
+        let a_primary_b = make_activity("schema-B", "auth", "primary", "shared-hash");
+        let a_replica_a = make_activity("schema-A", "auth", "replica", "shared-hash");
+
+        assert_eq!(
+            store.put_activity_stats(&k, &a_primary_a).await.unwrap(),
+            PutOutcome::Inserted
+        );
+        assert_eq!(
+            store.put_activity_stats(&k, &a_primary_a).await.unwrap(),
+            PutOutcome::Deduped
+        );
+        // different schema_ref, same node + hash → insert
+        assert_eq!(
+            store.put_activity_stats(&k, &a_primary_b).await.unwrap(),
+            PutOutcome::Inserted
+        );
+        // different node, same schema_ref + hash → insert
+        assert_eq!(
+            store.put_activity_stats(&k, &a_replica_a).await.unwrap(),
+            PutOutcome::Inserted
+        );
+    }
+
+    // --- kind-aware trait API (commit 1726fa1) ---
+
+    #[tokio::test]
+    async fn list_kinds_reports_distinct_kinds_and_node_labels() {
+        use crate::history::SnapshotKind;
+
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+        assert!(store.list_kinds(&k).await.unwrap().is_empty());
+
+        store
+            .put_schema(&k, &make_snap("schema-h1", "auth"))
+            .await
+            .unwrap();
+        store
+            .put_planner_stats(&k, &make_planner("schema-h1", "auth", "planner-h1"))
+            .await
+            .unwrap();
+        store
+            .put_activity_stats(&k, &make_activity("schema-h1", "auth", "primary", "act-p"))
+            .await
+            .unwrap();
+        store
+            .put_activity_stats(&k, &make_activity("schema-h1", "auth", "replica1", "act-r"))
+            .await
+            .unwrap();
+
+        let kinds = store.list_kinds(&k).await.unwrap();
+        assert!(kinds.contains(&SnapshotKind::Schema));
+        assert!(kinds.contains(&SnapshotKind::Planner));
+        assert!(kinds.contains(&SnapshotKind::Activity {
+            node_label: "primary".into()
+        }));
+        assert!(kinds.contains(&SnapshotKind::Activity {
+            node_label: "replica1".into()
+        }));
+    }
+
+    #[tokio::test]
+    async fn get_via_trait_returns_typed_payload_per_kind() {
+        use crate::history::SnapshotKind;
+
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+        store
+            .put_schema(&k, &make_snap("schema-h1", "auth"))
+            .await
+            .unwrap();
+        store
+            .put_planner_stats(&k, &make_planner("schema-h1", "auth", "planner-h1"))
+            .await
+            .unwrap();
+        store
+            .put_activity_stats(&k, &make_activity("schema-h1", "auth", "primary", "act-1"))
+            .await
+            .unwrap();
+
+        let s = store
+            .get(&k, &SnapshotKind::Schema, SnapshotRef::Latest)
+            .await
+            .unwrap()
+            .into_schema()
+            .unwrap();
+        assert_eq!(s.content_hash, "schema-h1");
+
+        let p = store
+            .get(&k, &SnapshotKind::Planner, SnapshotRef::Latest)
+            .await
+            .unwrap()
+            .into_planner()
+            .unwrap();
+        assert_eq!(p.content_hash, "planner-h1");
+
+        let a = store
+            .get(
+                &k,
+                &SnapshotKind::Activity {
+                    node_label: "primary".into(),
+                },
+                SnapshotRef::Latest,
+            )
+            .await
+            .unwrap()
+            .into_activity()
+            .unwrap();
+        assert_eq!(a.content_hash, "act-1");
+    }
+
+    #[tokio::test]
+    async fn delete_before_scoped_to_kind_only() {
+        // delete_before for activity must not touch planner or schema rows.
+        use crate::history::SnapshotKind;
+
+        let (_dir, store) = temp_store();
+        let k = key("p", "auth");
+        store
+            .put_schema(&k, &make_snap("schema-h1", "auth"))
+            .await
+            .unwrap();
+        store
+            .put_planner_stats(&k, &make_planner("schema-h1", "auth", "planner-h1"))
+            .await
+            .unwrap();
+        let mut a = make_activity("schema-h1", "auth", "primary", "act-1");
+        a.timestamp = Utc::now() - Duration::hours(2);
+        store.put_activity_stats(&k, &a).await.unwrap();
+
+        let removed = store
+            .delete_before(
+                &k,
+                &SnapshotKind::Activity {
+                    node_label: "primary".into(),
+                },
+                Utc::now() - Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        // schema and planner untouched
+        assert!(store.get_schema(&k, SnapshotRef::Latest).await.is_ok());
+        assert!(
+            store
+                .get(&k, &SnapshotKind::Planner, SnapshotRef::Latest)
+                .await
+                .is_ok()
+        );
+    }
 }
