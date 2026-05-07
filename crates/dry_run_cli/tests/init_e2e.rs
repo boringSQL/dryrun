@@ -139,7 +139,10 @@ async fn init_full_capture_writes_schema_planner_and_activity() {
         database_id: DatabaseId("postgres".into()),
     };
 
-    let summaries = store.list(&key, TimeRange::default()).await.expect("list");
+    let summaries = store
+        .list_schema(&key, TimeRange::default())
+        .await
+        .expect("list");
     assert_eq!(
         summaries.len(),
         1,
