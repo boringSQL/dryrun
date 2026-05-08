@@ -141,7 +141,9 @@ dryrun lint
 
 All commands work offline from the schema file. Each project has its own `dryrun.toml` and `.dryrun/`, there is no global state. Add `.dryrun/` to your `.gitignore`.
 
-Snapshots live in `~/.dryrun/history.db`, keyed by `(project_id, database_id)`. The MCP server reads from the history db first and falls back to `.dryrun/schema.json` for first-run or shared snapshots. After `dryrun snapshot take` it will switch to DB.
+Snapshots live in `.dryrun/history.db`, keyed by `(project_id, database_id)`. The MCP server reads from the history db first and falls back to `.dryrun/schema.json` for first-run or shared snapshots. After `dryrun snapshot take` it will switch to DB.
+
+Static file `schema.json` will be deprecated in future.
 
 ### Multi-node: capture activity from replicas
 
@@ -192,6 +194,35 @@ See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for all profile options.
 Every DB-related command (`init`, `import`, `probe`, `dump-schema`, `lint`, `drift`, `stats apply`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` and `schema_file` when the corresponding CLI flag is not provided.
 
 > **Note:** the MCP server is currently single-database. Using the default profile. Or the option is to run one `dryrun mcp-serve` process per database. Native multi-database support inside one MCP process is tracked in [#7](https://github.com/boringSQL/dryrun/issues/7).
+
+### Sharing snapshots across a team
+
+DryRun's value increases in team setup. Multiple developers can pull snapshots from any POSIX compliant directory.
+
+To publish the snapshots you need
+
+```sh
+cd project_name
+
+# apture from the live DB (use cwd name for project name)
+dryrun init --db "$DATABASE_URL"
+dryrun snapshot take --db "$DATABASE_URL"
+dryrun snapshot push --to-path ./snapshots --all
+```
+
+Developers can then import the snapshots to the local history
+
+```sh
+dryrun snapshot pull --from-path ./shared/snapshots --all
+```
+
+Snapshots are content-addressed (`{project}/{database}/{ts}-{hash}.json.zst`) and idempotent: pushing the same snapshot twice won't change it.
+
+The simplest deployment is a dedicated git repo. Create the snapshots repo and add `*.json.zst binary` to `.gitattributes` so git stops trying to diff bundles.`
+
+Offline tools (`lint`, `check_migration`, `drift`) work immediately after the pull.
+
+No server, no credentials. Same promise as before.
 
 ## MCP server
 
