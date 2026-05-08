@@ -1,0 +1,66 @@
+services:
+  pg-a:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: dryrun
+      POSTGRES_DB: app
+    # Ephemeral host port for run-native.sh — `docker compose port pg-a 5432`
+    # resolves it; in the runner container we still use service DNS.
+    ports:
+      - "5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  pg-b:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: dryrun
+      POSTGRES_DB: app
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  pg-c:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: dryrun
+      POSTGRES_DB: app
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  runner:
+    build:
+      context: ../..
+      dockerfile: tests/snapshot-e2e/Dockerfile.dryrun
+    depends_on:
+      pg-a: { condition: service_healthy }
+      pg-b: { condition: service_healthy }
+      pg-c: { condition: service_healthy }
+    environment:
+      PG_A_URL: postgres://postgres:dryrun@pg-a:5432/app
+      PG_B_URL: postgres://postgres:dryrun@pg-b:5432/app
+      PG_C_URL: postgres://postgres:dryrun@pg-c:5432/app
+    volumes:
+      - ./shared:/shared
+      - ./workstations:/workstations
+      - ./fixtures:/fixtures:ro
+      - ./scenarios:/scenarios:ro
+      - ./lib.sh:/lib.sh:ro
+      - ./run.sh:/run.sh:ro
+    working_dir: /work
+    # Stay alive so `harness.sh` can `docker compose exec` repeatedly.
+    command: ["sleep", "infinity"]
