@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
@@ -191,11 +192,13 @@ fn get_kind(
             Ok(StoredSnapshot::Schema(bundle.schema))
         }
         SnapshotKind::Planner => {
-            let mut bundles: Vec<(DateTime<Utc>, Bundle)> = entries
-                .into_iter()
-                .filter_map(|(ts, _, p)| read_bundle(&p).ok().map(|b| (ts, b)))
-                .filter(|(_, b)| b.planner.is_some())
-                .collect();
+            let mut bundles: Vec<(DateTime<Utc>, Bundle)> = Vec::new();
+            for (ts, _, p) in entries {
+                let b = read_bundle(&p)?;
+                if b.planner.is_some() {
+                    bundles.push((ts, b));
+                }
+            }
             bundles.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
             let chosen = match &at {
                 SnapshotRef::Latest => bundles.into_iter().next(),
@@ -208,11 +211,13 @@ fn get_kind(
             Ok(StoredSnapshot::Planner(bundle.planner.expect("filtered")))
         }
         SnapshotKind::Activity { node_label } => {
-            let mut bundles: Vec<(DateTime<Utc>, Bundle)> = entries
-                .into_iter()
-                .filter_map(|(ts, _, p)| read_bundle(&p).ok().map(|b| (ts, b)))
-                .filter(|(_, b)| b.activity.contains_key(node_label))
-                .collect();
+            let mut bundles: Vec<(DateTime<Utc>, Bundle)> = Vec::new();
+            for (ts, _, p) in entries {
+                let b = read_bundle(&p)?;
+                if b.activity.contains_key(node_label) {
+                    bundles.push((ts, b));
+                }
+            }
             bundles.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
             let chosen = match &at {
                 SnapshotRef::Latest => bundles.into_iter().next(),
@@ -239,10 +244,7 @@ fn list_kind(
 
     let mut out: Vec<SnapshotSummary> = Vec::new();
     for (_schema_ts, _schema_hash, path) in entries {
-        let bundle = match read_bundle(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
+        let bundle = read_bundle(&path)?;
         if let Some(s) = bundle_summary_for_kind(&bundle, key, kind) {
             if range.from.is_none_or(|f| s.timestamp >= f)
                 && range.to.is_none_or(|t| s.timestamp < t)
@@ -268,10 +270,7 @@ fn delete_before(
     match kind {
         SnapshotKind::Schema => {
             for (_ts, _h, path) in entries {
-                let bundle = match read_bundle(&path) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
+                let bundle = read_bundle(&path)?;
                 if bundle.schema.timestamp < cutoff {
                     std::fs::remove_file(&path)
                         .map_err(|e| Error::History(format!("remove {}: {e}", path.display())))?;
@@ -281,10 +280,7 @@ fn delete_before(
         }
         SnapshotKind::Planner => {
             for (_ts, _h, path) in entries {
-                let mut bundle = match read_bundle(&path) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
+                let mut bundle = read_bundle(&path)?;
                 let drop = bundle
                     .planner
                     .as_ref()
@@ -298,10 +294,7 @@ fn delete_before(
         }
         SnapshotKind::Activity { node_label } => {
             for (_ts, _h, path) in entries {
-                let mut bundle = match read_bundle(&path) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
+                let mut bundle = read_bundle(&path)?;
                 let drop = bundle
                     .activity
                     .get(node_label)
@@ -329,10 +322,7 @@ fn list_kinds_sync(root: &Path, key: &SnapshotKey) -> Result<Vec<SnapshotKind>> 
     let mut activity_labels: std::collections::BTreeSet<String> = Default::default();
 
     for (_ts, _h, path) in entries {
-        let bundle = match read_bundle(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
+        let bundle = read_bundle(&path)?;
         has_schema = true;
         if bundle.planner.is_some() {
             has_planner = true;
@@ -403,10 +393,7 @@ fn bundle_summary_for_kind(
 
 fn find_bundle_by_schema_hash(dir: &Path, schema_hash: &str) -> Result<Option<(PathBuf, Bundle)>> {
     for (_, _, path) in read_stream_entries(dir)? {
-        let bundle = match read_bundle(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
+        let bundle = read_bundle(&path)?;
         if bundle.schema.content_hash == schema_hash {
             return Ok(Some((path, bundle)));
         }
@@ -455,6 +442,10 @@ fn verify_bundle_hash(path: &Path, bundle: &Bundle) -> Result<()> {
         ))
     })?;
 
+    if !is_sha256_hex(&expected) {
+        return Ok(());
+    }
+
     if bundle.schema.content_hash != expected {
         return Err(Error::History(format!(
             "corrupt snapshot {}: filename hash {} != stored schema.content_hash {}",
@@ -482,7 +473,46 @@ fn verify_bundle_hash(path: &Path, bundle: &Bundle) -> Result<()> {
             recomputed,
         )));
     }
+
+    if let Some(planner) = &bundle.planner {
+        let mut p = planner.clone();
+        p.content_hash = String::new();
+        let recomputed = sha256_hex_of_serialized(&p)?;
+        if recomputed != planner.content_hash {
+            return Err(Error::History(format!(
+                "corrupt snapshot {}: planner content_hash {} != recomputed {}",
+                path.display(),
+                planner.content_hash,
+                recomputed,
+            )));
+        }
+    }
+
+    for (label, activity) in &bundle.activity {
+        let mut a = activity.clone();
+        a.content_hash = String::new();
+        let recomputed = sha256_hex_of_serialized(&a)?;
+        if recomputed != activity.content_hash {
+            return Err(Error::History(format!(
+                "corrupt snapshot {}: activity[{}] content_hash {} != recomputed {}",
+                path.display(),
+                label,
+                activity.content_hash,
+                recomputed,
+            )));
+        }
+    }
     Ok(())
+}
+
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn sha256_hex_of_serialized<T: serde::Serialize>(value: &T) -> Result<String> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|e| Error::History(format!("cannot serialize for hash check: {e}")))?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
 fn write_bundle(path: &Path, bundle: &Bundle) -> Result<()> {
