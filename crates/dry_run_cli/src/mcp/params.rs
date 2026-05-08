@@ -3,7 +3,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTablesParams {
     #[serde(default)]
-    #[schemars(description = "Schema filter (default: all schemas).")]
+    #[schemars(description = "Schema filter")]
     pub schema: Option<String>,
     #[serde(default)]
     #[schemars(description = "Sort by: 'name' (default), 'rows', or 'size'.")]
@@ -20,7 +20,7 @@ pub struct ListTablesParams {
 pub struct DescribeTableParams {
     pub table: String,
     #[serde(default)]
-    #[schemars(description = "Schema filter (default: all schemas).")]
+    #[schemars(description = "Schema filter")]
     pub schema: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -45,7 +45,7 @@ pub struct SearchSchemaParams {
 pub struct FindRelatedParams {
     pub table: String,
     #[serde(default)]
-    #[schemars(description = "Schema filter (default: all schemas).")]
+    #[schemars(description = "Schema filter")]
     pub schema: Option<String>,
 }
 
@@ -102,10 +102,10 @@ pub struct CheckMigrationParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LintSchemaParams {
     #[serde(default)]
-    #[schemars(description = "Schema filter (default: all schemas).")]
+    #[schemars(description = "Schema filter")]
     pub schema: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Table filter (default: all tables).")]
+    #[schemars(description = "Table filter")]
     pub table: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -118,27 +118,27 @@ pub struct LintSchemaParams {
 pub struct DetectParams {
     #[serde(default)]
     #[schemars(
-        description = "Detection kind: stale_stats, unused_indexes, bloated_indexes, or all (default)."
+        description = "Detection kind: stale_stats, unused_indexes, bloated_indexes, anomalies, or all (default)"
     )]
     pub kind: Option<String>,
     #[serde(default)]
     #[schemars(description = "Bloat ratio threshold (default 1.5).")]
     pub threshold: Option<f64>,
     #[serde(default)]
-    #[schemars(description = "Schema filter (default: all schemas).")]
+    #[schemars(description = "Schema filter")]
     pub schema: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Table filter (default: all tables).")]
+    #[schemars(description = "Table filter")]
     pub table: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct VacuumHealthParams {
     #[serde(default)]
-    #[schemars(description = "Schema filter (default: all schemas).")]
+    #[schemars(description = "Schema filter")]
     pub schema: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Table filter (default: all tables).")]
+    #[schemars(description = "Table filter")]
     pub table: Option<String>,
 }
 
@@ -146,7 +146,7 @@ pub struct VacuumHealthParams {
 pub struct CompareNodesParams {
     pub table: String,
     #[serde(default)]
-    #[schemars(description = "Schema filter (default: all schemas).")]
+    #[schemars(description = "Schema filter")]
     pub schema: Option<String>,
 }
 

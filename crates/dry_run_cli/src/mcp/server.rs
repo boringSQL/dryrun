@@ -364,9 +364,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(
-        description = "Table columns, types, constraints, indexes and stats. Per-node stats when present."
-    )]
+    #[tool(description = "Table columns, types, constraints, indexes, stats")]
     async fn describe_table(
         &self,
         Parameters(params): Parameters<DescribeTableParams>,
@@ -814,9 +812,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(
-        description = "Diff two snapshots, or the latest snapshot against the live schema. Needs --history."
-    )]
+    #[tool(description = "Diff two snapshots, or the latest against live schema")]
     async fn schema_diff(
         &self,
         Parameters(params): Parameters<SchemaDiffParams>,
@@ -867,9 +863,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(
-        description = "Parse SQL and check it against the schema. Flags missing tables or columns and common anti-patterns. Offline."
-    )]
+    #[tool(description = "Validate SQL against the schema; flags missing refs and anti-patterns")]
     async fn validate_query(
         &self,
         Parameters(params): Parameters<ValidateQueryParams>,
@@ -899,9 +893,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(
-        description = "Run EXPLAIN on a query. Pass analyze=true to run EXPLAIN ANALYZE. Needs live DB."
-    )]
+    #[tool(description = "EXPLAIN a query (analyze=true runs EXPLAIN ANALYZE)")]
     async fn explain_query(
         &self,
         Parameters(params): Parameters<ExplainQueryParams>,
@@ -939,9 +931,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(
-        description = "Plan analysis, anti-pattern checks and index suggestions for a query. Uses EXPLAIN when a live DB is available, static analysis otherwise."
-    )]
+    #[tool(description = "Plan, anti-pattern, and index advice for a query")]
     async fn advise(
         &self,
         Parameters(params): Parameters<AdviseParams>,
@@ -1018,9 +1008,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(
-        description = "Analyze an existing EXPLAIN plan (JSON) against the schema. Returns warnings, index and safety hints. Offline."
-    )]
+    #[tool(description = "Analyze an EXPLAIN JSON plan against the schema")]
     async fn analyze_plan(
         &self,
         Parameters(params): Parameters<AnalyzePlanParams>,
@@ -1120,9 +1108,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(
-        description = "Check a DDL statement for lock level, duration, table-size impact, and suggest safer alternatives."
-    )]
+    #[tool(description = "Check DDL for lock level, duration, and safer alternatives")]
     async fn check_migration(
         &self,
         Parameters(params): Parameters<CheckMigrationParams>,
@@ -1163,9 +1149,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(
-        description = "Schema quality checks. scope=conventions, audit, or all (default). Offline."
-    )]
+    #[tool(description = "Schema quality checks (lint + audit)")]
     async fn lint_schema(
         &self,
         Parameters(params): Parameters<LintSchemaParams>,
@@ -1225,9 +1209,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(
-        description = "Autovacuum status with thresholds, dead tuples and tuning hints. Offline."
-    )]
+    #[tool(description = "Autovacuum status, dead tuples, tuning hints")]
     async fn vacuum_health(
         &self,
         Parameters(params): Parameters<VacuumHealthParams>,
@@ -1257,9 +1239,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(
-        description = "Health checks. kind=stale_stats, unused_indexes, anomalies, bloated_indexes, or all (default). Offline."
-    )]
+    #[tool(description = "Health checks: stale stats, unused/bloated indexes, anomalies]")]
     async fn detect(
         &self,
         Parameters(params): Parameters<DetectParams>,
@@ -1369,9 +1349,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(
-        description = "Per-node stats for a table. Shows reltuples, relpages, scans, size and per-index numbers. Offline."
-    )]
+    #[tool(description = "Per-node stats: reltuples, relpages, scans, size, indexes")]
     async fn compare_nodes(
         &self,
         Parameters(params): Parameters<CompareNodesParams>,
@@ -1464,9 +1442,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(
-        description = "Compare the live local DB against the loaded production snapshot. Each diff is tagged ahead, behind or diverged. Needs live DB."
-    )]
+    #[tool(description = "Diff live DB against loaded snapshot (ahead/behind/diverged)")]
     async fn check_drift(&self) -> Result<CallToolResult, McpError> {
         let ctx = self.require_live_db()?;
         let prod_snapshot = self.get_schema().await?;
@@ -1487,7 +1463,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Force re-introspection of the database schema (requires live DB)")]
+    #[tool(description = "Force schema re-introspection")]
     async fn refresh_schema(&self) -> Result<CallToolResult, McpError> {
         let ctx = self.require_live_db()?;
         let schema = ctx
@@ -1540,9 +1516,7 @@ impl DryRunServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(
-        description = "Reload schema from history.db (with stats) or schema.json (DDL only) without restarting."
-    )]
+    #[tool(description = "Reload schema from history.db or schema.json")]
     async fn reload_schema(&self) -> Result<CallToolResult, McpError> {
         // history.db first; the schema.json fallback drops planner/activity stats
         if let (Some(store), Some(key)) = (self.history.as_ref(), self.snapshot_key.as_ref())
