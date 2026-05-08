@@ -434,7 +434,19 @@ fn read_bundle(path: &Path) -> Result<Bundle> {
         std::fs::read(path).map_err(|e| Error::History(format!("read {}: {e}", path.display())))?;
     let json = zstd::decode_all(bytes.as_slice())
         .map_err(|e| Error::History(format!("zstd decode: {e}")))?;
-    serde_json::from_slice(&json).map_err(|e| Error::History(format!("corrupt snapshot JSON: {e}")))
+    if let Ok(b) = serde_json::from_slice::<Bundle>(&json) {
+        return Ok(b);
+    }
+
+    // handle original base snapshot
+    // TODO: remove in about month time
+    let schema: SchemaSnapshot = serde_json::from_slice(&json)
+        .map_err(|e| Error::History(format!("corrupt snapshot JSON: {e}")))?;
+    Ok(Bundle {
+        schema,
+        planner: None,
+        activity: BTreeMap::new(),
+    })
 }
 
 fn write_bundle(path: &Path, bundle: &Bundle) -> Result<()> {
