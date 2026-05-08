@@ -1289,12 +1289,13 @@ impl DryRunServer {
             result.insert("conventions".into(), value);
         }
 
-        let (has_ddl_fixes, has_audit_findings) = if want_audit {
+        let (has_ddl_fixes, has_audit_findings, audit_findings_count) = if want_audit {
             // Audit needs planner sizing for the bloat / vacuum-defaults rules
             // — pass the annotated view so those have a chance to fire.
             let report = dry_run_core::audit::run_audit(&target.view(), &self.audit_config);
             let has_fixes = report.findings.iter().any(|f| f.ddl_fix.is_some());
-            let has_findings = !report.findings.is_empty();
+            let count = report.findings.len();
+            let has_findings = count > 0;
 
             let value = if full_mode {
                 serde_json::to_value(&report).unwrap_or(serde_json::Value::Null)
@@ -1332,14 +1333,22 @@ impl DryRunServer {
                 })
             };
             result.insert("audit".into(), value);
-            (has_fixes, has_findings)
+            (has_fixes, has_findings, count)
         } else {
-            (false, false)
+            (false, false, 0)
         };
+
+        // big result sets: skip auto next, should try to narrow them first
+        const FULL_NEXT_THRESHOLD: usize = 50;
+        let many_findings = audit_findings_count > FULL_NEXT_THRESHOLD;
 
         let hint = if full_mode && has_ddl_fixes {
             Some(
                 "Some findings include ddl_fix fields. Run those through check_migration before applying to verify lock safety.",
+            )
+        } else if !full_mode && has_audit_findings && many_findings {
+            Some(
+                "Summary view; many findings. Narrow with schema=, table=, or scope= before re-running with verbosity=\"full\".",
             )
         } else if !full_mode && has_audit_findings {
             Some(
@@ -1349,8 +1358,31 @@ impl DryRunServer {
             None
         };
 
+        let next: Vec<NextCall<'_>> = if !full_mode && has_audit_findings && !many_findings {
+            let mut args = serde_json::Map::new();
+            args.insert("verbosity".into(), serde_json::json!("full"));
+            if let Some(s) = &params.schema {
+                args.insert("schema".into(), serde_json::json!(s));
+            }
+            if let Some(t) = &params.table {
+                args.insert("table".into(), serde_json::json!(t));
+            }
+            if let Some(s) = &params.scope {
+                args.insert("scope".into(), serde_json::json!(s));
+            }
+            if let Some(f) = &params.fields {
+                args.insert("fields".into(), serde_json::json!(f));
+            }
+            vec![NextCall {
+                tool: "lint_schema",
+                args: serde_json::Value::Object(args),
+            }]
+        } else {
+            vec![]
+        };
+
         let mut json_val = serde_json::Value::Object(result);
-        self.inject_meta(&mut json_val, hint, &[]);
+        self.inject_meta(&mut json_val, hint, &next);
 
         let json = serde_json::to_string(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
