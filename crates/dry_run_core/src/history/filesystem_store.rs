@@ -410,11 +410,12 @@ fn read_bundle(path: &Path) -> Result<Bundle> {
             path.display()
         ))
     })?;
+    // v0.6.1 and earlier exported a bare SchemaSnapshot, not a Bundle.
+    // Accept both shapes so `dryrun snapshot pull` can read older shared
+    // dirs without a migration step.
     let bundle = if let Ok(b) = serde_json::from_slice::<Bundle>(&json) {
         b
     } else {
-        // handle original base snapshot
-        // TODO: remove in about month time
         let schema: SchemaSnapshot = serde_json::from_slice(&json).map_err(|e| {
             Error::History(format!("corrupt snapshot {}: JSON: {e}", path.display()))
         })?;
@@ -1049,5 +1050,30 @@ mod tests {
             })
             .collect();
         assert!(stragglers.is_empty(), "stray .tmp files: {stragglers:?}");
+    }
+
+    // Pins the v0.6.1 backward-compat path in read_bundle: a bare
+    // SchemaSnapshot JSON (no `schema`/`planner`/`activity` envelope) must
+    // still load. Removing the fallback would break `pull` against
+    // pre-bundling shared dirs.
+    #[tokio::test]
+    async fn read_bundle_accepts_v061_bare_schema_format() {
+        let (dir, store) = temp_store();
+        let k = key();
+        let snap = make_schema_with_real_hash("seed-legacy");
+
+        let path = snapshot_path(dir.path(), &k, snap.timestamp, &snap.content_hash);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let json = serde_json::to_vec(&snap).unwrap();
+        let compressed = zstd::encode_all(json.as_slice(), 3).unwrap();
+        std::fs::write(&path, compressed).unwrap();
+
+        let got = store
+            .get(&k, &SnapshotKind::Schema, SnapshotRef::Latest)
+            .await
+            .expect("v0.6.1 bare SchemaSnapshot must be readable")
+            .into_schema()
+            .expect("schema variant");
+        assert_eq!(got.content_hash, snap.content_hash);
     }
 }
