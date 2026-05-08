@@ -12,7 +12,9 @@ use crate::history::{
     DatabaseId, ProjectId, PutOutcome, SnapshotKey, SnapshotKind, SnapshotRef, SnapshotStore,
     SnapshotSummary, StoredSnapshot, TimeRange, parse_snapshot_filename, snapshot_path,
 };
-use crate::schema::{ActivityStatsSnapshot, PlannerStatsSnapshot, SchemaSnapshot};
+use crate::schema::{
+    ActivityStatsSnapshot, HashInput, PlannerStatsSnapshot, SchemaSnapshot, compute_content_hash,
+};
 
 pub struct FilesystemStore {
     root: Arc<PathBuf>,
@@ -415,21 +417,72 @@ fn find_bundle_by_schema_hash(dir: &Path, schema_hash: &str) -> Result<Option<(P
 fn read_bundle(path: &Path) -> Result<Bundle> {
     let bytes =
         std::fs::read(path).map_err(|e| Error::History(format!("read {}: {e}", path.display())))?;
-    let json = zstd::decode_all(bytes.as_slice())
-        .map_err(|e| Error::History(format!("zstd decode: {e}")))?;
-    if let Ok(b) = serde_json::from_slice::<Bundle>(&json) {
-        return Ok(b);
+    let json = zstd::decode_all(bytes.as_slice()).map_err(|e| {
+        Error::History(format!(
+            "corrupt snapshot {}: zstd decode: {e}",
+            path.display()
+        ))
+    })?;
+    let bundle = if let Ok(b) = serde_json::from_slice::<Bundle>(&json) {
+        b
+    } else {
+        // handle original base snapshot
+        // TODO: remove in about month time
+        let schema: SchemaSnapshot = serde_json::from_slice(&json).map_err(|e| {
+            Error::History(format!("corrupt snapshot {}: JSON: {e}", path.display()))
+        })?;
+        Bundle {
+            schema,
+            planner: None,
+            activity: BTreeMap::new(),
+        }
+    };
+
+    verify_bundle_hash(path, &bundle)?;
+    Ok(bundle)
+}
+
+// filename hash must match recomputed schema content_hash
+fn verify_bundle_hash(path: &Path, bundle: &Bundle) -> Result<()> {
+    let fname = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| Error::History(format!("non-utf8 filename: {}", path.display())))?;
+    let (_, expected) = parse_snapshot_filename(fname).ok_or_else(|| {
+        Error::History(format!(
+            "corrupt snapshot {}: filename does not match {{ts}}-{{hash}}.json.zst",
+            path.display()
+        ))
+    })?;
+
+    if bundle.schema.content_hash != expected {
+        return Err(Error::History(format!(
+            "corrupt snapshot {}: filename hash {} != stored schema.content_hash {}",
+            path.display(),
+            expected,
+            bundle.schema.content_hash,
+        )));
     }
 
-    // handle original base snapshot
-    // TODO: remove in about month time
-    let schema: SchemaSnapshot = serde_json::from_slice(&json)
-        .map_err(|e| Error::History(format!("corrupt snapshot JSON: {e}")))?;
-    Ok(Bundle {
-        schema,
-        planner: None,
-        activity: BTreeMap::new(),
-    })
+    let recomputed = compute_content_hash(&HashInput {
+        pg_version: &bundle.schema.pg_version,
+        tables: &bundle.schema.tables,
+        enums: &bundle.schema.enums,
+        domains: &bundle.schema.domains,
+        composites: &bundle.schema.composites,
+        views: &bundle.schema.views,
+        functions: &bundle.schema.functions,
+        extensions: &bundle.schema.extensions,
+    });
+    if recomputed != expected {
+        return Err(Error::History(format!(
+            "corrupt snapshot {}: filename hash {} != recomputed schema hash {}",
+            path.display(),
+            expected,
+            recomputed,
+        )));
+    }
+    Ok(())
 }
 
 fn write_bundle(path: &Path, bundle: &Bundle) -> Result<()> {
@@ -437,16 +490,28 @@ fn write_bundle(path: &Path, bundle: &Bundle) -> Result<()> {
         std::fs::create_dir_all(parent)
             .map_err(|e| Error::History(format!("create_dir_all {}: {e}", parent.display())))?;
     }
-    let tmp = path.with_extension("zst.tmp");
+    // unique tmp path so concurrent same-hash writers don't collide
+    let tmp = unique_tmp_path(path);
     let json = serde_json::to_vec(bundle)
         .map_err(|e| Error::History(format!("cannot serialize bundle: {e}")))?;
     let compressed = zstd::encode_all(json.as_slice(), 3)
         .map_err(|e| Error::History(format!("zstd encode: {e}")))?;
     std::fs::write(&tmp, compressed)
         .map_err(|e| Error::History(format!("write {}: {e}", tmp.display())))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| Error::History(format!("rename to {}: {e}", path.display())))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::History(format!("rename to {}: {e}", path.display())));
+    }
     Ok(())
+}
+
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let suffix = format!("zst.{pid}.{n}.tmp");
+    path.with_extension(suffix)
 }
 
 fn not_found_err(kind: &str, at: &SnapshotRef) -> Error {
