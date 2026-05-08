@@ -644,7 +644,18 @@ impl DryRunServer {
         } else {
             None
         };
-        self.inject_meta(&mut json_val, hint, &[]);
+        let next: Vec<NextCall<'_>> = if has_fks {
+            vec![NextCall {
+                tool: "find_related",
+                args: serde_json::json!({
+                    "table": params.table,
+                    "schema": schema_name,
+                }),
+            }]
+        } else {
+            vec![]
+        };
+        self.inject_meta(&mut json_val, hint, &next);
 
         let mut text = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
