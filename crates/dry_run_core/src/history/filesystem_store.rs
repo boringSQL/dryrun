@@ -77,18 +77,6 @@ impl SnapshotStore for FilesystemStore {
         run_blocking(move || list_kind(&root, &key, &kind, range)).await
     }
 
-    async fn latest(
-        &self,
-        key: &SnapshotKey,
-        kind: &SnapshotKind,
-    ) -> Result<Option<SnapshotSummary>> {
-        Ok(self
-            .list(key, kind, TimeRange::default())
-            .await?
-            .into_iter()
-            .next())
-    }
-
     async fn delete_before(
         &self,
         key: &SnapshotKey,
@@ -118,11 +106,6 @@ fn put_schema(root: &Path, key: &SnapshotKey, snap: SchemaSnapshot) -> Result<Pu
     }
 
     let path = snapshot_path(root, key, snap.timestamp, &snap.content_hash);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| Error::History(format!("create_dir_all {}: {e}", parent.display())))?;
-    }
-
     let bundle = Bundle {
         schema: snap.clone(),
         planner: None,
@@ -561,90 +544,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{
-        IndexActivity, IndexActivityEntry, NodeIdentity, QualifiedName, TableActivity,
-        TableActivityEntry,
-    };
+    use crate::history::test_fixtures;
     use tempfile::TempDir;
 
     fn make_schema(hash: &str) -> SchemaSnapshot {
-        SchemaSnapshot {
-            pg_version: "PostgreSQL 17.0".into(),
-            database: "auth".into(),
-            timestamp: Utc::now(),
-            content_hash: hash.into(),
-            source: None,
-            tables: vec![],
-            enums: vec![],
-            domains: vec![],
-            composites: vec![],
-            views: vec![],
-            functions: vec![],
-            extensions: vec![],
-            gucs: vec![],
-        }
+        test_fixtures::make_snap(hash, "auth")
     }
 
     fn make_planner(schema_ref: &str, hash: &str) -> PlannerStatsSnapshot {
-        PlannerStatsSnapshot {
-            pg_version: "PostgreSQL 17.0".into(),
-            database: "auth".into(),
-            timestamp: Utc::now(),
-            content_hash: hash.into(),
-            schema_ref_hash: schema_ref.into(),
-            tables: vec![],
-            columns: vec![],
-            indexes: vec![],
-        }
+        test_fixtures::make_planner(schema_ref, "auth", hash)
     }
 
     fn make_activity(schema_ref: &str, label: &str, hash: &str) -> ActivityStatsSnapshot {
-        ActivityStatsSnapshot {
-            pg_version: "PostgreSQL 17.0".into(),
-            database: "auth".into(),
-            timestamp: Utc::now(),
-            content_hash: hash.into(),
-            schema_ref_hash: schema_ref.into(),
-            node: NodeIdentity {
-                label: label.into(),
-                host: format!("host-{label}"),
-                is_standby: label != "primary",
-                replication_lag_bytes: None,
-                stats_reset: None,
-            },
-            tables: vec![TableActivityEntry {
-                table: QualifiedName::new("public", "orders"),
-                activity: TableActivity {
-                    seq_scan: 1,
-                    idx_scan: 2,
-                    n_live_tup: 0,
-                    n_dead_tup: 0,
-                    last_vacuum: None,
-                    last_autovacuum: None,
-                    last_analyze: None,
-                    last_autoanalyze: None,
-                    vacuum_count: 0,
-                    autovacuum_count: 0,
-                    analyze_count: 0,
-                    autoanalyze_count: 0,
-                },
-            }],
-            indexes: vec![IndexActivityEntry {
-                index: QualifiedName::new("public", "orders_pkey"),
-                activity: IndexActivity {
-                    idx_scan: 0,
-                    idx_tup_read: 0,
-                    idx_tup_fetch: 0,
-                },
-            }],
-        }
+        test_fixtures::make_activity(schema_ref, "auth", label, hash)
     }
 
     fn key() -> SnapshotKey {
-        SnapshotKey {
-            project_id: ProjectId("p".into()),
-            database_id: DatabaseId("auth".into()),
-        }
+        test_fixtures::key("p", "auth")
     }
 
     fn temp_store() -> (TempDir, FilesystemStore) {
