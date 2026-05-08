@@ -245,6 +245,137 @@ async fn lint_schema_summary_omits_ddl_fix() {
     assert!(text.contains("by_rule"), "summary mode emits by_rule");
 }
 
+#[tokio::test]
+async fn describe_table_without_fk_omits_next() {
+    let snapshot = test_snapshot();
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(snapshot),
+        None,
+        LintConfig::default(),
+        None,
+        "test",
+        vec![],
+    );
+    let result = server
+        .describe_table(Parameters(DescribeTableParams {
+            table: "orders".into(),
+            schema: None,
+            detail: None,
+            fields: None,
+        }))
+        .await
+        .unwrap();
+    let text = format!("{:?}", result.content.first().unwrap());
+    assert!(
+        !text.contains("\\\"next\\\""),
+        "no FK present, _meta.next should not be emitted"
+    );
+}
+
+#[tokio::test]
+async fn describe_table_with_fk_emits_find_related_next() {
+    let snapshot = test_snapshot_with_fk();
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(snapshot),
+        None,
+        LintConfig::default(),
+        None,
+        "test",
+        vec![],
+    );
+    let result = server
+        .describe_table(Parameters(DescribeTableParams {
+            table: "orders".into(),
+            schema: None,
+            detail: None,
+            fields: None,
+        }))
+        .await
+        .unwrap();
+    let text = format!("{:?}", result.content.first().unwrap());
+    assert!(
+        text.contains("\\\"next\\\""),
+        "FK present, next must be emitted"
+    );
+    assert!(
+        text.contains("find_related"),
+        "next should target find_related"
+    );
+    assert!(
+        text.contains("\\\"table\\\": \\\"orders\\\""),
+        "next args should carry the table name"
+    );
+}
+
+#[tokio::test]
+async fn lint_schema_summary_emits_next_to_full() {
+    let snapshot = test_snapshot();
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(snapshot),
+        None,
+        LintConfig::default(),
+        None,
+        "test",
+        vec![],
+    );
+    let result = server
+        .lint_schema(Parameters(LintSchemaParams {
+            schema: None,
+            table: None,
+            scope: None,
+            verbosity: None,
+            fields: None,
+        }))
+        .await
+        .unwrap();
+    let text = format!("{:?}", result.content.first().unwrap());
+    // Test fixture is small (1 table) — well under the 50-finding gate,
+    // so the next entry must be emitted when there are findings.
+    if text.contains("by_rule") && text.contains("\\\"count\\\"") {
+        assert!(
+            text.contains("lint_schema") && text.contains("verbosity"),
+            "summary mode with small result set should suggest verbosity=full"
+        );
+    }
+}
+
+#[tokio::test]
+async fn server_info_instructions_mention_meta_next() {
+    let snapshot = test_snapshot();
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(snapshot),
+        None,
+        LintConfig::default(),
+        None,
+        "test",
+        vec![],
+    );
+    let info = ServerHandler::get_info(&server);
+    let instr = info.instructions.unwrap_or_default();
+    assert!(
+        instr.contains("_meta.next"),
+        "instructions should describe the _meta.next contract"
+    );
+}
+
+fn test_snapshot_with_fk() -> dry_run_core::SchemaSnapshot {
+    use dry_run_core::schema::*;
+    let mut snap = test_snapshot();
+    if let Some(t) = snap.tables.first_mut() {
+        t.constraints.push(Constraint {
+            name: "orders_customer_id_fkey".into(),
+            kind: ConstraintKind::ForeignKey,
+            columns: vec!["customer_id".into()],
+            definition: Some("FOREIGN KEY (customer_id) REFERENCES customers(id)".into()),
+            fk_table: Some("customers".into()),
+            fk_columns: vec!["id".into()],
+            backing_index: None,
+            comment: None,
+        });
+    }
+    snap
+}
+
 fn test_snapshot() -> dry_run_core::SchemaSnapshot {
     use dry_run_core::schema::*;
     SchemaSnapshot {
