@@ -28,7 +28,7 @@ async fn persist_refresh(
     planner: Option<&dry_run_core::PlannerStatsSnapshot>,
     activity_by_node: &std::collections::BTreeMap<String, dry_run_core::ActivityStatsSnapshot>,
 ) {
-    if let Err(e) = store.put(key, schema).await {
+    if let Err(e) = store.put_schema(key, schema).await {
         tracing::warn!(error = %e, "failed to persist schema");
     }
     if let Some(p) = planner
@@ -834,18 +834,18 @@ impl DryRunServer {
 
         let from_snapshot = match &params.from {
             Some(hash) => store
-                .get(key, SnapshotRef::Hash(hash.clone()))
+                .get_schema(key, SnapshotRef::Hash(hash.clone()))
                 .await
                 .map_err(to_mcp_err)?,
             None => store
-                .get(key, SnapshotRef::Latest)
+                .get_schema(key, SnapshotRef::Latest)
                 .await
                 .map_err(to_mcp_err)?,
         };
 
         let to_snapshot = match &params.to {
             Some(hash) => store
-                .get(key, SnapshotRef::Hash(hash.clone()))
+                .get_schema(key, SnapshotRef::Hash(hash.clone()))
                 .await
                 .map_err(to_mcp_err)?,
             None => self.get_schema().await?,

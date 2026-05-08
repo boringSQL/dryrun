@@ -1,0 +1,30 @@
+# Two-stage build producing one image with both v0.6.1 and HEAD binaries.
+# Build context = repo root.
+
+FROM rust:1.88-bookworm AS old
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git pkg-config libssl-dev clang libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch v0.6.1 https://github.com/boringSQL/dryrun.git src
+WORKDIR /build/src
+RUN cargo build --release --bin dryrun
+RUN cp target/release/dryrun /dryrun-old
+
+FROM rust:1.88-bookworm AS new
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN cargo build --release --bin dryrun
+RUN cp target/release/dryrun /dryrun-new
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates jq postgresql-client bash coreutils && rm -rf /var/lib/apt/lists/*
+COPY --from=old /dryrun-old /usr/local/bin/dryrun-old
+COPY --from=new /dryrun-new /usr/local/bin/dryrun-new
+RUN ln -s /usr/local/bin/dryrun-new /usr/local/bin/dryrun
+WORKDIR /work
+CMD ["bash"]
