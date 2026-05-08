@@ -135,6 +135,7 @@ async fn describe_table_includes_pg_version() {
             table: "orders".into(),
             schema: None,
             detail: None,
+            fields: None,
         }))
         .await
         .unwrap();
@@ -144,6 +145,104 @@ async fn describe_table_includes_pg_version() {
         text_str.contains("pg_version"),
         "describe_table output should contain pg_version field"
     );
+}
+
+#[tokio::test]
+async fn describe_table_fields_whitelist_returns_only_listed_sections() {
+    let snapshot = test_snapshot();
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(snapshot),
+        None,
+        LintConfig::default(),
+        None,
+        "test",
+        vec![],
+    );
+    let result = server
+        .describe_table(Parameters(DescribeTableParams {
+            table: "orders".into(),
+            schema: None,
+            detail: None,
+            fields: Some(vec!["indexes".into()]),
+        }))
+        .await
+        .unwrap();
+    let text = format!("{:?}", result.content.first().unwrap());
+    // Identity + requested section + _meta survive; columns/constraints don't.
+    assert!(
+        text.contains("\\\"name\\\""),
+        "name (identity) should be present"
+    );
+    assert!(
+        text.contains("\\\"indexes\\\""),
+        "indexes should be present"
+    );
+    assert!(text.contains("_meta"), "_meta should be injected");
+    assert!(
+        !text.contains("\\\"columns\\\""),
+        "columns should be filtered out"
+    );
+    assert!(
+        !text.contains("\\\"constraints\\\""),
+        "constraints should be filtered out"
+    );
+}
+
+#[tokio::test]
+async fn describe_table_unknown_field_returns_error() {
+    let snapshot = test_snapshot();
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(snapshot),
+        None,
+        LintConfig::default(),
+        None,
+        "test",
+        vec![],
+    );
+    let result = server
+        .describe_table(Parameters(DescribeTableParams {
+            table: "orders".into(),
+            schema: None,
+            detail: None,
+            fields: Some(vec!["bogus".into()]),
+        }))
+        .await;
+    assert!(result.is_err(), "unknown field must return McpError");
+}
+
+#[tokio::test]
+async fn lint_schema_summary_omits_ddl_fix() {
+    let snapshot = test_snapshot();
+    let server = DryRunServer::from_annotated_with_db(
+        crate::mcp::wrap_schema_only(snapshot),
+        None,
+        LintConfig::default(),
+        None,
+        "test",
+        vec![],
+    );
+    let result = server
+        .lint_schema(Parameters(LintSchemaParams {
+            schema: None,
+            table: None,
+            scope: None,
+            verbosity: None,
+            fields: None,
+        }))
+        .await
+        .unwrap();
+    let text = format!("{:?}", result.content.first().unwrap());
+    // Summary collapses audit into by_rule counts — the raw findings array
+    // and ddl_fix keys do not appear. (Hint prose may mention ddl_fix.)
+    assert!(
+        !text.contains("\\\"ddl_fix\\\""),
+        "summary mode must not surface ddl_fix as a key"
+    );
+    assert!(
+        !text.contains("\\\"findings\\\""),
+        "summary mode replaces findings array with by_rule counts"
+    );
+    assert!(text.contains("by_rule"), "summary mode emits by_rule");
 }
 
 fn test_snapshot() -> dry_run_core::SchemaSnapshot {
