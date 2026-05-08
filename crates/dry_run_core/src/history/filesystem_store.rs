@@ -918,4 +918,136 @@ mod tests {
             .unwrap();
         assert!(planners.is_empty());
     }
+
+    // Produce a snapshot with a real sha256 content_hash so the
+    // is_sha256_hex gate engages and verify_bundle_hash actually runs.
+    fn make_schema_with_real_hash(seed: &str) -> SchemaSnapshot {
+        let mut s = test_fixtures::make_snap("placeholder", "auth");
+        s.pg_version = format!("PostgreSQL 17.0 ({seed})");
+        s.content_hash = compute_content_hash(&HashInput {
+            pg_version: &s.pg_version,
+            tables: &s.tables,
+            enums: &s.enums,
+            domains: &s.domains,
+            composites: &s.composites,
+            views: &s.views,
+            functions: &s.functions,
+            extensions: &s.extensions,
+        });
+        s
+    }
+
+    #[tokio::test]
+    async fn read_bundle_rejects_byte_flipped_file() {
+        let (dir, store) = temp_store();
+        let k = key();
+        let snap = make_schema_with_real_hash("seed-a");
+        store.put_schema(&k, &snap).await.unwrap();
+
+        let target = std::fs::read_dir(stream_dir(dir.path(), &k))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.path()
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.ends_with(".json.zst"))
+            })
+            .map(|e| e.path())
+            .expect("pushed bundle file");
+
+        // Flip a byte mid-file (zstd payload). Either zstd decode fails or
+        // the recomputed schema hash diverges; both must surface as an error.
+        let mut bytes = std::fs::read(&target).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&target, &bytes).unwrap();
+
+        let err = store
+            .get(&k, &SnapshotKind::Schema, SnapshotRef::Latest)
+            .await
+            .expect_err("corrupt file must error loudly");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("corrupt snapshot"),
+            "expected corruption error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_bundle_rejects_filename_hash_mismatch() {
+        let (dir, store) = temp_store();
+        let k = key();
+        let snap = make_schema_with_real_hash("seed-b");
+        store.put_schema(&k, &snap).await.unwrap();
+
+        // Rename the bundle to claim a different (but still 64-hex) hash.
+        let stream = stream_dir(dir.path(), &k);
+        let original = std::fs::read_dir(&stream)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "zst"))
+            .unwrap();
+        let renamed = stream.join(format!(
+            "{}-{}.json.zst",
+            snap.timestamp.format("%Y%m%dT%H%M%SZ"),
+            "f".repeat(64),
+        ));
+        std::fs::rename(&original, &renamed).unwrap();
+
+        let err = store
+            .get(&k, &SnapshotKind::Schema, SnapshotRef::Latest)
+            .await
+            .expect_err("filename-hash mismatch must error loudly");
+        assert!(format!("{err}").contains("corrupt snapshot"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_writers_same_hash_are_idempotent() {
+        let (dir, store) = temp_store();
+        let k = key();
+        let snap = make_schema_with_real_hash("seed-concurrent");
+        let store = std::sync::Arc::new(store);
+
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let s = store.clone();
+            let k = k.clone();
+            let snap = snap.clone();
+            tasks.push(tokio::spawn(async move { s.put_schema(&k, &snap).await }));
+        }
+        for t in tasks {
+            t.await
+                .expect("join")
+                .expect("put_schema must not race-fail");
+        }
+
+        let stream = stream_dir(dir.path(), &k);
+        let entries: Vec<_> = std::fs::read_dir(&stream)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+
+        let finals: Vec<_> = entries
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "zst"))
+            .collect();
+        assert_eq!(
+            finals.len(),
+            1,
+            "expected exactly one bundle, got {entries:?}"
+        );
+
+        let stragglers: Vec<_> = entries
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.contains(".tmp"))
+            })
+            .collect();
+        assert!(stragglers.is_empty(), "stray .tmp files: {stragglers:?}");
+    }
 }
