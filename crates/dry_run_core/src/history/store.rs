@@ -257,6 +257,17 @@ fn lock_conn(conn: &Mutex<Connection>) -> Result<std::sync::MutexGuard<'_, Conne
         .map_err(|e| Error::History(format!("lock poisoned: {e}")))
 }
 
+fn push_node_label_filter(
+    sql: &mut String,
+    bound: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    kind: &SnapshotKind,
+) {
+    if let SnapshotKind::Activity { node_label } = kind {
+        *sql += &format!(" AND node_label = ?{}", bound.len() + 1);
+        bound.push(Box::new(node_label.clone()));
+    }
+}
+
 fn row_to_summary(
     row: &rusqlite::Row<'_>,
     kind: SnapshotKind,
@@ -339,10 +350,7 @@ impl SnapshotStore for HistoryStore {
             );
             let mut bound: Vec<Box<dyn rusqlite::ToSql>> =
                 vec![Box::new(pid), Box::new(did), Box::new(kind.db_kind())];
-            if let SnapshotKind::Activity { node_label } = &kind {
-                sql += &format!(" AND node_label = ?{}", bound.len() + 1);
-                bound.push(Box::new(node_label.clone()));
-            }
+            push_node_label_filter(&mut sql, &mut bound, &kind);
             if let Some(from) = range.from {
                 sql += &format!(" AND timestamp >= ?{}", bound.len() + 1);
                 bound.push(Box::new(from.to_rfc3339()));
@@ -386,10 +394,7 @@ impl SnapshotStore for HistoryStore {
                 Box::new(kind.db_kind()),
                 Box::new(cutoff.to_rfc3339()),
             ];
-            if let SnapshotKind::Activity { node_label } = &kind {
-                sql += &format!(" AND node_label = ?{}", bound.len() + 1);
-                bound.push(Box::new(node_label.clone()));
-            }
+            push_node_label_filter(&mut sql, &mut bound, &kind);
             let params: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
             Ok(conn.execute(&sql, params.as_slice())?)
         })
