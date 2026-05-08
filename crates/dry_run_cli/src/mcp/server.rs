@@ -388,7 +388,20 @@ impl DryRunServer {
                 )
             })?;
 
-        let detail = params.detail.as_deref().unwrap_or("summary");
+        // some sections only exist in "full" — bump if caller asked for one
+        let needs_full_base = params.fields.as_ref().is_some_and(|fs| {
+            fs.iter().any(|f| {
+                matches!(
+                    f.as_str(),
+                    "policies" | "triggers" | "reloptions" | "rls_enabled"
+                )
+            })
+        });
+        let detail = if needs_full_base {
+            "full"
+        } else {
+            params.detail.as_deref().unwrap_or("summary")
+        };
         let qn = QualifiedName::new(schema_name, &params.table);
         let view = annotated.view();
         let table_rows = view.reltuples(&qn).unwrap_or(0.0);
@@ -578,6 +591,34 @@ impl DryRunServer {
             }
         };
 
+        // keep only requested sections; schema and name always stay
+        const KNOWN_FIELDS: &[&str] = &[
+            "columns",
+            "indexes",
+            "constraints",
+            "stats",
+            "partition_info",
+            "column_profiles",
+            "comment",
+            "policies",
+            "triggers",
+            "reloptions",
+            "rls_enabled",
+        ];
+        if let Some(fields) = &params.fields {
+            for f in fields {
+                if !KNOWN_FIELDS.contains(&f.as_str()) {
+                    return Err(McpError::invalid_params(
+                        format!("unknown field '{f}'; valid: {}", KNOWN_FIELDS.join(", ")),
+                        None,
+                    ));
+                }
+            }
+            if let Some(obj) = json_val.as_object_mut() {
+                obj.retain(|k, _| k == "schema" || k == "name" || fields.iter().any(|f| f == k));
+            }
+        }
+
         let has_fks = table
             .constraints
             .iter()
@@ -594,9 +635,14 @@ impl DryRunServer {
         let mut text = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
 
-        // Per-node breakdown trailer — only meaningful when we have ≥ 2
-        // nodes' worth of activity. Single-node clusters skip the section.
-        if let Some(breakdown) = format_node_table_breakdown(&annotated, schema_name, &params.table)
+        // breakdown is stats-shaped; skip if caller dropped indexes/stats
+        let breakdown_relevant = match &params.fields {
+            Some(fs) => fs.iter().any(|f| f == "indexes" || f == "stats"),
+            None => true,
+        };
+        if breakdown_relevant
+            && let Some(breakdown) =
+                format_node_table_breakdown(&annotated, schema_name, &params.table)
         {
             text.push_str(&breakdown);
         }

@@ -27,6 +27,11 @@ pub struct DescribeTableParams {
         description = "Detail level: 'summary' (default, compact with profiles), 'full' (all raw stats), 'stats' (only profiles and stats)."
     )]
     pub detail: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Whitelist of sections: columns, indexes, constraints, stats, partition, profiles, comment, policies, triggers, reloptions, rls. Overrides 'detail' when set."
+    )]
+    pub fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
