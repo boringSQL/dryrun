@@ -1802,8 +1802,10 @@ impl ServerHandler for DryRunServer {
                 "{version_header}\
                  {online_note}\n\n\
                  Start with list_tables or search_schema to explore. Use advise for query help. \
-                 Use check_migration before applying DDL. Each tool response includes a _meta.hint \
-                 field with contextual next-step guidance."
+                 Use check_migration before applying DDL. Each tool response includes _meta.hint \
+                 (prose) and may include _meta.next: an array of {{tool, args}} entries that are \
+                 pre-validated follow-up calls — copy the args verbatim instead of inferring them \
+                 from the hint."
             )),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
