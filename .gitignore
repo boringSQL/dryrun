@@ -1,9 +1,6 @@
-/target/
+/bin/
 .env
 *.db
-.sqlx/
-.dryrun/
-!examples/demo/.dryrun/
-SPEC.md
+vendor/
 ROADMAP-internal.md
-internal-docs
+CUSTOM-GUIDELINES.md

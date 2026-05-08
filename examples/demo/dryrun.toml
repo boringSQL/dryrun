@@ -1,6 +1,3 @@
-[project]
-id = "demo"
-
 [default]
 profile = "offline"
 
