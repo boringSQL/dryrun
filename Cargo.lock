@@ -627,7 +627,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dry_run_cli"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "cargo-husky",
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "dry_run_core"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
