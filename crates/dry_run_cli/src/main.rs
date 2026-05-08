@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use dry_run_core::history::{
-    DatabaseId, PutOutcome, SnapshotKey, SnapshotRef, SnapshotStore, TimeRange,
+    DatabaseId, FilesystemStore, PutOutcome, SnapshotKey, SnapshotKind, SnapshotRef, SnapshotStore,
+    TimeRange,
 };
 use dry_run_core::{DryRun, HistoryStore, ProjectConfig};
 use rmcp::ServiceExt;
@@ -137,6 +138,26 @@ enum SnapshotAction {
     Export {
         #[arg(long)]
         out: Option<PathBuf>,
+        #[arg(long)]
+        history_db: Option<PathBuf>,
+    },
+    Push {
+        #[arg(long)]
+        to_path: PathBuf,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
+        #[arg(long)]
+        history_db: Option<PathBuf>,
+    },
+    Pull {
+        #[arg(long)]
+        from_path: PathBuf,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, env = "DATABASE_URL")]
+        db: Option<String>,
         #[arg(long)]
         history_db: Option<PathBuf>,
     },
@@ -668,6 +689,52 @@ async fn cmd_snapshot(cli: &Cli, action: &SnapshotAction) -> anyhow::Result<()> 
             println!("{json}");
             Ok(())
         }
+        SnapshotAction::Push {
+            to_path,
+            all,
+            db,
+            history_db,
+        } => {
+            let store = open_history_store(history_db.as_deref())?;
+            let fs = FilesystemStore::new(to_path.clone());
+
+            let keys = if *all {
+                store.list_keys()?
+            } else {
+                vec![resolve_read_key(db.as_deref(), profile).await?]
+            };
+            if keys.is_empty() {
+                println!("No snapshots in history.db to push.");
+                return Ok(());
+            }
+
+            let outcomes = sync_keys(&store, &fs, &keys).await?;
+            print_sync_outcomes("push", &outcomes, to_path);
+            Ok(())
+        }
+        SnapshotAction::Pull {
+            from_path,
+            all,
+            db,
+            history_db,
+        } => {
+            let fs = FilesystemStore::new(from_path.clone());
+            let store = open_history_store(history_db.as_deref())?;
+
+            let keys = if *all {
+                fs.list_keys()?
+            } else {
+                vec![resolve_read_key(db.as_deref(), profile).await?]
+            };
+            if keys.is_empty() {
+                println!("No snapshots at {} to pull.", from_path.display());
+                return Ok(());
+            }
+
+            let outcomes = sync_keys(&fs, &store, &keys).await?;
+            print_sync_outcomes("pull", &outcomes, from_path);
+            Ok(())
+        }
         SnapshotAction::Export { out, history_db } => {
             let store = open_history_store(history_db.as_deref())?;
             let out_root = out.clone().unwrap_or_else(|| {
@@ -838,6 +905,108 @@ async fn cmd_drift(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct KindCount {
+    copied: usize,
+    up_to_date: usize,
+}
+
+#[derive(Debug)]
+struct SyncOutcome {
+    key: SnapshotKey,
+    schema: KindCount,
+    planner: KindCount,
+    activity: KindCount,
+}
+
+fn kind_order(k: &SnapshotKind) -> u8 {
+    match k {
+        SnapshotKind::Schema => 0,
+        SnapshotKind::Planner => 1,
+        SnapshotKind::Activity { .. } => 2,
+    }
+}
+
+async fn sync_keys(
+    src: &dyn SnapshotStore,
+    dst: &dyn SnapshotStore,
+    keys: &[SnapshotKey],
+) -> anyhow::Result<Vec<SyncOutcome>> {
+    let mut outcomes = Vec::with_capacity(keys.len());
+    for key in keys {
+        let mut outcome = SyncOutcome {
+            key: key.clone(),
+            schema: KindCount::default(),
+            planner: KindCount::default(),
+            activity: KindCount::default(),
+        };
+
+        let mut kinds = src.list_kinds(key).await?;
+        // schema first so FilesystemStore's orphan rule is satisfied
+        kinds.sort_by_key(kind_order);
+
+        for kind in &kinds {
+            let src_summaries = src.list(key, kind, TimeRange::default()).await?;
+            let dst_hashes: std::collections::HashSet<String> = dst
+                .list(key, kind, TimeRange::default())
+                .await?
+                .into_iter()
+                .map(|s| s.content_hash)
+                .collect();
+
+            let counter = match kind {
+                SnapshotKind::Schema => &mut outcome.schema,
+                SnapshotKind::Planner => &mut outcome.planner,
+                SnapshotKind::Activity { .. } => &mut outcome.activity,
+            };
+
+            for s in src_summaries {
+                if dst_hashes.contains(&s.content_hash) {
+                    counter.up_to_date += 1;
+                    continue;
+                }
+                let stored = src
+                    .get(key, kind, SnapshotRef::Hash(s.content_hash.clone()))
+                    .await?;
+                match dst.put(key, &stored).await? {
+                    PutOutcome::Inserted => counter.copied += 1,
+                    PutOutcome::Deduped => counter.up_to_date += 1,
+                }
+            }
+        }
+
+        outcomes.push(outcome);
+    }
+    Ok(outcomes)
+}
+
+fn print_sync_outcomes(verb: &str, outcomes: &[SyncOutcome], path: &std::path::Path) {
+    let mut total = (0usize, 0usize, 0usize, 0usize);
+    for o in outcomes {
+        println!(
+            "  project={} database={}: {} schema, {} planner, {} activity copied ({} up-to-date)",
+            o.key.project_id.0,
+            o.key.database_id.0,
+            o.schema.copied,
+            o.planner.copied,
+            o.activity.copied,
+            o.schema.up_to_date + o.planner.up_to_date + o.activity.up_to_date,
+        );
+        total.0 += o.schema.copied;
+        total.1 += o.planner.copied;
+        total.2 += o.activity.copied;
+        total.3 += o.schema.up_to_date + o.planner.up_to_date + o.activity.up_to_date;
+    }
+    println!(
+        "{verb}: {} schema, {} planner, {} activity copied / {} up-to-date ({})",
+        total.0,
+        total.1,
+        total.2,
+        total.3,
+        path.display(),
+    );
 }
 
 // helpers
