@@ -117,6 +117,16 @@ pub struct LintSchemaParams {
         description = "Scope: 'conventions' (lint only), 'audit' (audit only), or 'all' (default, both)."
     )]
     pub scope: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Verbosity: 'summary' (default, counts and rule names only) or 'full' (findings, examples, ddl_fix)."
+    )]
+    pub verbosity: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Whitelist of sections: conventions, audit. Overrides 'scope' when set."
+    )]
+    pub fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

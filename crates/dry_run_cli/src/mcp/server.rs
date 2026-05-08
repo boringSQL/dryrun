@@ -1211,36 +1211,114 @@ impl DryRunServer {
             target.schema.tables.retain(|t| &t.name == table_filter);
         }
 
-        let scope = params.scope.as_deref().unwrap_or("all");
+        // fields wins over scope
+        let (want_conventions, want_audit) = if let Some(fields) = &params.fields {
+            const KNOWN: &[&str] = &["conventions", "audit"];
+            for f in fields {
+                if !KNOWN.contains(&f.as_str()) {
+                    return Err(McpError::invalid_params(
+                        format!("unknown field '{f}'; valid: conventions, audit"),
+                        None,
+                    ));
+                }
+            }
+            (
+                fields.iter().any(|f| f == "conventions"),
+                fields.iter().any(|f| f == "audit"),
+            )
+        } else {
+            let scope = params.scope.as_deref().unwrap_or("all");
+            (
+                scope == "all" || scope == "conventions",
+                scope == "all" || scope == "audit",
+            )
+        };
+
+        // default summary; old callers see different shape now
+        let verbosity = params.verbosity.as_deref().unwrap_or("summary");
+        if !matches!(verbosity, "summary" | "full") {
+            return Err(McpError::invalid_params(
+                format!("verbosity must be 'summary' or 'full', got '{verbosity}'"),
+                None,
+            ));
+        }
+        let full_mode = verbosity == "full";
+
         let mut result = serde_json::Map::new();
 
-        if scope == "all" || scope == "conventions" {
+        if want_conventions {
             // Conventions/lint reads no stats — DDL only.
             let report = dry_run_core::lint::lint_schema(&target.schema, &self.lint_config);
             let compact = dry_run_core::lint::compact_report(&report, 5);
-            result.insert(
-                "conventions".into(),
-                serde_json::to_value(&compact).unwrap_or(serde_json::Value::Null),
-            );
+            let mut value = serde_json::to_value(&compact).unwrap_or(serde_json::Value::Null);
+            if !full_mode
+                && let Some(by_rule) = value.get_mut("by_rule").and_then(|v| v.as_array_mut())
+            {
+                for group in by_rule {
+                    if let Some(obj) = group.as_object_mut() {
+                        obj.remove("examples");
+                        obj.remove("recommendation");
+                    }
+                }
+            }
+            result.insert("conventions".into(), value);
         }
 
-        let has_ddl_fixes = if scope == "all" || scope == "audit" {
+        let (has_ddl_fixes, has_audit_findings) = if want_audit {
             // Audit needs planner sizing for the bloat / vacuum-defaults rules
             // — pass the annotated view so those have a chance to fire.
             let report = dry_run_core::audit::run_audit(&target.view(), &self.audit_config);
             let has_fixes = report.findings.iter().any(|f| f.ddl_fix.is_some());
-            result.insert(
-                "audit".into(),
-                serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
-            );
-            has_fixes
+            let has_findings = !report.findings.is_empty();
+
+            let value = if full_mode {
+                serde_json::to_value(&report).unwrap_or(serde_json::Value::Null)
+            } else {
+                // collapse findings to per-rule counts, drop rest
+                let mut groups: std::collections::BTreeMap<String, serde_json::Value> =
+                    std::collections::BTreeMap::new();
+                for f in &report.findings {
+                    let entry = groups.entry(f.rule.clone()).or_insert_with(|| {
+                        serde_json::json!({
+                            "rule": f.rule,
+                            "category": f.category,
+                            "severity": f.severity,
+                            "count": 0_usize,
+                            "tables_count": 0_usize,
+                        })
+                    });
+                    if let Some(obj) = entry.as_object_mut() {
+                        if let Some(c) = obj.get_mut("count").and_then(|v| v.as_u64()) {
+                            obj.insert("count".into(), serde_json::json!(c + 1));
+                        }
+                        if let Some(tc) = obj.get_mut("tables_count").and_then(|v| v.as_u64()) {
+                            obj.insert(
+                                "tables_count".into(),
+                                serde_json::json!(tc + f.tables.len() as u64),
+                            );
+                        }
+                    }
+                }
+                let by_rule: Vec<serde_json::Value> = groups.into_values().collect();
+                serde_json::json!({
+                    "by_rule": by_rule,
+                    "tables_analyzed": report.tables_analyzed,
+                    "summary": report.summary,
+                })
+            };
+            result.insert("audit".into(), value);
+            (has_fixes, has_findings)
         } else {
-            false
+            (false, false)
         };
 
-        let hint = if has_ddl_fixes {
+        let hint = if full_mode && has_ddl_fixes {
             Some(
                 "Some findings include ddl_fix fields. Run those through check_migration before applying to verify lock safety.",
+            )
+        } else if !full_mode && has_audit_findings {
+            Some(
+                "Summary view. Re-run with verbosity=\"full\" for findings, recommendations, and ddl_fix.",
             )
         } else {
             None
