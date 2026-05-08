@@ -2,6 +2,8 @@ pub mod filesystem_layout;
 mod filesystem_store;
 mod snapshot_store;
 mod store;
+#[cfg(test)]
+mod test_fixtures;
 
 pub use filesystem_layout::{SNAPSHOT_EXTENSION, parse_snapshot_filename, snapshot_path};
 pub use filesystem_store::FilesystemStore;

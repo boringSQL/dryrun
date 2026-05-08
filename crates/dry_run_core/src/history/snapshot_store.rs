@@ -170,7 +170,13 @@ pub trait SnapshotStore: Send + Sync {
         &self,
         key: &SnapshotKey,
         kind: &SnapshotKind,
-    ) -> Result<Option<SnapshotSummary>>;
+    ) -> Result<Option<SnapshotSummary>> {
+        Ok(self
+            .list(key, kind, TimeRange::default())
+            .await?
+            .into_iter()
+            .next())
+    }
     async fn delete_before(
         &self,
         key: &SnapshotKey,
