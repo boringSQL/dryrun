@@ -43,6 +43,13 @@ async fn persist_refresh(
     }
 }
 
+// follow-up call surfaced via _meta.next
+#[derive(Debug)]
+pub struct NextCall<'a> {
+    pub tool: &'a str,
+    pub args: serde_json::Value,
+}
+
 pub fn wrap_schema_only(schema: SchemaSnapshot) -> AnnotatedSnapshot {
     AnnotatedSnapshot {
         schema,
@@ -237,7 +244,7 @@ impl DryRunServer {
         }
     }
 
-    fn inject_meta(&self, val: &mut serde_json::Value, hint: Option<&str>) {
+    fn inject_meta(&self, val: &mut serde_json::Value, hint: Option<&str>, next: &[NextCall<'_>]) {
         let obj = val
             .as_object_mut()
             .expect("inject_meta expects a JSON object");
@@ -248,6 +255,13 @@ impl DryRunServer {
         });
         if let Some(h) = hint {
             meta["hint"] = serde_json::Value::String(h.into());
+        }
+        if !next.is_empty() {
+            meta["next"] = serde_json::Value::Array(
+                next.iter()
+                    .map(|n| serde_json::json!({ "tool": n.tool, "args": n.args }))
+                    .collect(),
+            );
         }
         obj.insert("_meta".into(), meta);
     }
@@ -630,7 +644,7 @@ impl DryRunServer {
         } else {
             None
         };
-        self.inject_meta(&mut json_val, hint);
+        self.inject_meta(&mut json_val, hint, &[]);
 
         let mut text = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -901,7 +915,7 @@ impl DryRunServer {
         }
 
         let mut json_val = serde_json::json!({ "changes": changeset });
-        self.inject_meta(&mut json_val, None);
+        self.inject_meta(&mut json_val, None, &[]);
 
         let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -931,7 +945,7 @@ impl DryRunServer {
 
         let mut json_val = serde_json::to_value(&result)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
-        self.inject_meta(&mut json_val, hint);
+        self.inject_meta(&mut json_val, hint, &[]);
 
         let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -969,7 +983,7 @@ impl DryRunServer {
 
         let mut json_val = serde_json::to_value(&result)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
-        self.inject_meta(&mut json_val, hint);
+        self.inject_meta(&mut json_val, hint, &[]);
 
         let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -1046,7 +1060,7 @@ impl DryRunServer {
                 "index_suggestions": advise_result.index_suggestions,
             })
         };
-        self.inject_meta(&mut result, hint);
+        self.inject_meta(&mut result, hint, &[]);
 
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -1146,7 +1160,7 @@ impl DryRunServer {
                 obj
             }),
         });
-        self.inject_meta(&mut result, hint);
+        self.inject_meta(&mut result, hint, &[]);
 
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -1187,7 +1201,7 @@ impl DryRunServer {
         };
 
         let mut json_val = serde_json::json!({ "checks": checks });
-        self.inject_meta(&mut json_val, hint);
+        self.inject_meta(&mut json_val, hint, &[]);
 
         let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -1325,7 +1339,7 @@ impl DryRunServer {
         };
 
         let mut json_val = serde_json::Value::Object(result);
-        self.inject_meta(&mut json_val, hint);
+        self.inject_meta(&mut json_val, hint, &[]);
 
         let json = serde_json::to_string(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -1356,7 +1370,7 @@ impl DryRunServer {
         }
 
         let mut json_val = serde_json::json!({ "tables": results });
-        self.inject_meta(&mut json_val, None);
+        self.inject_meta(&mut json_val, None, &[]);
 
         let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -1466,7 +1480,7 @@ impl DryRunServer {
         };
 
         let mut json_val = serde_json::Value::Object(result);
-        self.inject_meta(&mut json_val, hint);
+        self.inject_meta(&mut json_val, hint, &[]);
 
         let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
@@ -1579,7 +1593,7 @@ impl DryRunServer {
 
         let mut json_val = serde_json::to_value(&report)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
-        self.inject_meta(&mut json_val, None);
+        self.inject_meta(&mut json_val, None, &[]);
 
         let json = serde_json::to_string_pretty(&json_val)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
