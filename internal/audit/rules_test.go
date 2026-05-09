@@ -1,9 +1,11 @@
 package audit
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/boringsql/dryrun/internal/lint"
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
@@ -225,6 +227,182 @@ func TestVacuumLargeTableDefaults_VeryLargeTableWarning(t *testing.T) {
 	}
 	if findings[0].Severity != "warning" {
 		t.Errorf("expected warning severity for >10M rows, got %s", findings[0].Severity)
+	}
+}
+
+// Pins the four-way branching in checkDuplicateIndexes based on which duplicate
+// backs a constraint. Both-back yields a warning with no DDL fix; single-back
+// drops the non-backing index; neither-back drops idx_b as sufficient. Also
+// covers skip cases: different columns, different IndexType, invalid index.
+func TestDuplicateIndexes_Branching(t *testing.T) {
+	mkSnap := func(t *testing.T, a, b schema.Index) *schema.SchemaSnapshot {
+		t.Helper()
+		s := testSnap()
+		s.Tables = []schema.Table{{
+			Schema: "public", Name: "orders",
+			Indexes: []schema.Index{a, b},
+		}}
+		return s
+	}
+
+	idx := func(name string, cols []string, kind string, backs, valid bool) schema.Index {
+		return schema.Index{Name: name, Columns: cols, IndexType: kind, IsValid: valid, BacksConstraint: backs}
+	}
+
+	t.Run("both_back_constraints_warning_no_ddl", func(t *testing.T) {
+		snap := mkSnap(t,
+			idx("idx_a", []string{"user_id"}, "btree", true, true),
+			idx("idx_b", []string{"user_id"}, "btree", true, true),
+		)
+		findings := checkDuplicateIndexes(snap)
+		if len(findings) != 1 {
+			t.Fatalf("expected 1 finding, got %d", len(findings))
+		}
+		f := findings[0]
+		if f.Severity != lint.SeverityWarning {
+			t.Errorf("expected warning severity, got %s", f.Severity)
+		}
+		if f.DDLFix != nil {
+			t.Errorf("expected no DDLFix, got %v", *f.DDLFix)
+		}
+		if !strings.Contains(f.Message, "both back constraints") {
+			t.Errorf("expected message about both back constraints, got %q", f.Message)
+		}
+		if !strings.Contains(f.Recommendation, "FK") || !strings.Contains(f.Recommendation, "re-create") {
+			t.Errorf("expected recommendation mentioning FK + re-create, got %q", f.Recommendation)
+		}
+	})
+
+	t.Run("only_a_backs_constraint_drops_b", func(t *testing.T) {
+		snap := mkSnap(t,
+			idx("idx_a", []string{"user_id"}, "btree", true, true),
+			idx("idx_b", []string{"user_id"}, "btree", false, true),
+		)
+		findings := checkDuplicateIndexes(snap)
+		if len(findings) != 1 {
+			t.Fatalf("expected 1 finding, got %d", len(findings))
+		}
+		f := findings[0]
+		if f.Severity != lint.SeverityError {
+			t.Errorf("expected error severity, got %s", f.Severity)
+		}
+		if f.DDLFix == nil || !strings.Contains(*f.DDLFix, "DROP INDEX idx_b") {
+			t.Errorf("expected DDL to drop idx_b, got %v", f.DDLFix)
+		}
+		if !strings.Contains(f.Recommendation, "backs a constraint") {
+			t.Errorf("expected recommendation to mention backs a constraint, got %q", f.Recommendation)
+		}
+	})
+
+	t.Run("only_b_backs_constraint_drops_a", func(t *testing.T) {
+		snap := mkSnap(t,
+			idx("idx_a", []string{"user_id"}, "btree", false, true),
+			idx("idx_b", []string{"user_id"}, "btree", true, true),
+		)
+		findings := checkDuplicateIndexes(snap)
+		if len(findings) != 1 {
+			t.Fatalf("expected 1 finding, got %d", len(findings))
+		}
+		f := findings[0]
+		if f.Severity != lint.SeverityError {
+			t.Errorf("expected error severity, got %s", f.Severity)
+		}
+		if f.DDLFix == nil || !strings.Contains(*f.DDLFix, "DROP INDEX idx_a") {
+			t.Errorf("expected DDL to drop idx_a, got %v", f.DDLFix)
+		}
+		if !strings.Contains(f.Recommendation, "backs a constraint") {
+			t.Errorf("expected recommendation to mention backs a constraint, got %q", f.Recommendation)
+		}
+	})
+
+	t.Run("neither_backs_constraint_drops_b_sufficient", func(t *testing.T) {
+		snap := mkSnap(t,
+			idx("idx_a", []string{"user_id"}, "btree", false, true),
+			idx("idx_b", []string{"user_id"}, "btree", false, true),
+		)
+		findings := checkDuplicateIndexes(snap)
+		if len(findings) != 1 {
+			t.Fatalf("expected 1 finding, got %d", len(findings))
+		}
+		f := findings[0]
+		if f.Severity != lint.SeverityError {
+			t.Errorf("expected error severity, got %s", f.Severity)
+		}
+		if f.DDLFix == nil || !strings.Contains(*f.DDLFix, "DROP INDEX idx_b") {
+			t.Errorf("expected DDL to drop idx_b, got %v", f.DDLFix)
+		}
+		if !strings.Contains(f.Recommendation, "is sufficient") {
+			t.Errorf("expected recommendation 'is sufficient', got %q", f.Recommendation)
+		}
+	})
+
+	t.Run("different_columns_no_finding", func(t *testing.T) {
+		snap := mkSnap(t,
+			idx("idx_a", []string{"user_id"}, "btree", false, true),
+			idx("idx_b", []string{"order_id"}, "btree", false, true),
+		)
+		if findings := checkDuplicateIndexes(snap); len(findings) != 0 {
+			t.Errorf("expected 0 findings for different columns, got %d", len(findings))
+		}
+	})
+
+	t.Run("different_index_type_no_finding", func(t *testing.T) {
+		snap := mkSnap(t,
+			idx("idx_a", []string{"user_id"}, "btree", false, true),
+			idx("idx_b", []string{"user_id"}, "hash", false, true),
+		)
+		if findings := checkDuplicateIndexes(snap); len(findings) != 0 {
+			t.Errorf("expected 0 findings for different IndexType, got %d", len(findings))
+		}
+	})
+
+	t.Run("invalid_index_skipped", func(t *testing.T) {
+		snap := mkSnap(t,
+			idx("idx_a", []string{"user_id"}, "btree", false, true),
+			idx("idx_b", []string{"user_id"}, "btree", false, false),
+		)
+		if findings := checkDuplicateIndexes(snap); len(findings) != 0 {
+			t.Errorf("expected 0 findings when one index invalid, got %d", len(findings))
+		}
+	})
+}
+
+// verifies the DDL fix for vacuum/large_table_defaults sets all four knobs
+// (vacuum + analyze scale factor and threshold) and that the recommendation
+// explains why scale factors alone aren't enough. Also sanity-checks that
+// SuggestedVacuumKnobs returns a sensible scale factor for a 10M row table.
+func TestVacuumLargeTableDefaults_FourKnobDDL(t *testing.T) {
+	snap := testSnap()
+	snap.Tables = []schema.Table{{
+		Schema: "public", Name: "events",
+		Stats: &schema.TableStats{Reltuples: 10_000_000, DeadTuples: 0},
+	}}
+	findings := checkVacuumLargeTableDefaults(snap)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.DDLFix == nil {
+		t.Fatal("expected DDLFix")
+	}
+	ddl := *f.DDLFix
+	for _, knob := range []string{
+		"autovacuum_vacuum_scale_factor",
+		"autovacuum_vacuum_threshold",
+		"autovacuum_analyze_scale_factor",
+		"autovacuum_analyze_threshold",
+	} {
+		if !strings.Contains(ddl, knob) {
+			t.Errorf("expected DDL to contain %s, got %s", knob, ddl)
+		}
+	}
+	if !strings.Contains(f.Recommendation, "scale factors alone aren't enough") {
+		t.Errorf("expected recommendation mentioning scale factors alone aren't enough, got %q", f.Recommendation)
+	}
+
+	vacSF, _, _, _ := schema.SuggestedVacuumKnobs(10_000_000)
+	if vacSF <= 0 || vacSF > 0.1 {
+		t.Errorf("expected scale factor in (0, 0.1] for 10M rows, got %v", vacSF)
 	}
 }
 
