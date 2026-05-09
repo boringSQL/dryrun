@@ -152,9 +152,9 @@ func TestOfflineMCPTools(t *testing.T) {
 
 	t.Run("lint_schema_default_all", func(t *testing.T) {
 		out := callTool(t, c, "lint_schema", nil)
-		assertContains(t, out, "findings")
-		// default scope=all should include both convention and audit rules
-		assertContains(t, out, "config_source")
+		// scope=all returns conventions (compact) and audit
+		assertContains(t, out, "conventions")
+		assertContains(t, out, "audit")
 	})
 
 	t.Run("compare_nodes", func(t *testing.T) {
@@ -214,25 +214,25 @@ func TestOfflineMCPTools(t *testing.T) {
 
 	t.Run("lint_schema_scope_conventions", func(t *testing.T) {
 		out := callTool(t, c, "lint_schema", map[string]any{"scope": "conventions"})
-		assertContains(t, out, "findings")
 		assertContains(t, out, "conventions")
+		assertContains(t, out, "rule_groups")
 	})
 
 	t.Run("lint_schema_scope_audit", func(t *testing.T) {
 		out := callTool(t, c, "lint_schema", map[string]any{"scope": "audit"})
-		assertContains(t, out, "findings")
 		assertContains(t, out, "audit")
+		assertContains(t, out, "findings")
 	})
 
 	t.Run("lint_schema_scope_all", func(t *testing.T) {
 		out := callTool(t, c, "lint_schema", map[string]any{"scope": "all"})
-		assertContains(t, out, "findings")
-		assertContains(t, out, "all")
+		assertContains(t, out, "conventions")
+		assertContains(t, out, "audit")
 	})
 
 	t.Run("lint_schema_with_schema_filter", func(t *testing.T) {
 		out := callTool(t, c, "lint_schema", map[string]any{"schema": "public"})
-		assertContains(t, out, "findings")
+		assertContains(t, out, "conventions")
 	})
 
 	t.Run("vacuum_health", func(t *testing.T) {
@@ -265,17 +265,36 @@ var conventionRulePrefixes = []string{"types/", "timestamps/", "constraints/", "
 func TestLintSchemaScopeIsolation(t *testing.T) {
 	c := setupOfflineTest(t)
 
-	parseFindings := func(t *testing.T, out string) []lint.Finding {
+	// response shape: {"conventions": CompactReport, "audit": Report}
+	type lintOut struct {
+		Conventions *lint.CompactReport `json:"conventions,omitempty"`
+		Audit       *lint.Report        `json:"audit,omitempty"`
+	}
+	parse := func(t *testing.T, out string) lintOut {
 		t.Helper()
-		var report lint.Report
-		if err := json.Unmarshal([]byte(out), &report); err != nil {
-			t.Fatalf("failed to parse report: %v", err)
+		var lo lintOut
+		if err := json.Unmarshal([]byte(out), &lo); err != nil {
+			t.Fatalf("failed to parse lint output: %v", err)
 		}
-		return report.Findings
+		return lo
 	}
 
-	hasRulePrefix := func(findings []lint.Finding, prefix string) bool {
-		for _, f := range findings {
+	conventionsHasPrefix := func(lo lintOut, prefix string) bool {
+		if lo.Conventions == nil {
+			return false
+		}
+		for _, g := range lo.Conventions.RuleGroups {
+			if strings.HasPrefix(g.Rule, prefix) || g.Rule == prefix {
+				return true
+			}
+		}
+		return false
+	}
+	auditHasPrefix := func(lo lintOut, prefix string) bool {
+		if lo.Audit == nil {
+			return false
+		}
+		for _, f := range lo.Audit.Findings {
 			if strings.HasPrefix(f.Rule, prefix) || f.Rule == prefix {
 				return true
 			}
@@ -284,54 +303,47 @@ func TestLintSchemaScopeIsolation(t *testing.T) {
 	}
 
 	t.Run("conventions_excludes_audit_rules", func(t *testing.T) {
-		out := callTool(t, c, "lint_schema", map[string]any{"scope": "conventions"})
-		findings := parseFindings(t, out)
+		lo := parse(t, callTool(t, c, "lint_schema", map[string]any{"scope": "conventions"}))
 		for _, prefix := range auditRulePrefixes {
-			if hasRulePrefix(findings, prefix) {
+			if conventionsHasPrefix(lo, prefix) {
 				t.Errorf("conventions scope should not contain audit rule %q", prefix)
 			}
 		}
 	})
 
 	t.Run("audit_excludes_convention_rules", func(t *testing.T) {
-		out := callTool(t, c, "lint_schema", map[string]any{"scope": "audit"})
-		findings := parseFindings(t, out)
+		lo := parse(t, callTool(t, c, "lint_schema", map[string]any{"scope": "audit"}))
 		for _, prefix := range conventionRulePrefixes {
-			if hasRulePrefix(findings, prefix) {
+			if auditHasPrefix(lo, prefix) {
 				t.Errorf("audit scope should not contain convention rule %q", prefix)
 			}
 		}
 	})
 
-	t.Run("all_is_superset", func(t *testing.T) {
-		allOut := callTool(t, c, "lint_schema", map[string]any{"scope": "all"})
-		convOut := callTool(t, c, "lint_schema", map[string]any{"scope": "conventions"})
-		auditOut := callTool(t, c, "lint_schema", map[string]any{"scope": "audit"})
-
-		allFindings := parseFindings(t, allOut)
-		convFindings := parseFindings(t, convOut)
-		auditFindings := parseFindings(t, auditOut)
-
-		if len(allFindings) < len(convFindings) {
-			t.Errorf("all scope (%d findings) should have >= conventions (%d)", len(allFindings), len(convFindings))
+	t.Run("all_has_both_branches", func(t *testing.T) {
+		allLo := parse(t, callTool(t, c, "lint_schema", map[string]any{"scope": "all"}))
+		if allLo.Conventions == nil {
+			t.Error("all scope should include conventions")
 		}
-		if len(allFindings) < len(auditFindings) {
-			t.Errorf("all scope (%d findings) should have >= audit (%d)", len(allFindings), len(auditFindings))
-		}
-		if len(allFindings) != len(convFindings)+len(auditFindings) {
-			t.Errorf("all (%d) should equal conventions (%d) + audit (%d)", len(allFindings), len(convFindings), len(auditFindings))
+		if allLo.Audit == nil {
+			t.Error("all scope should include audit")
 		}
 	})
 
 	t.Run("schema_filter_reduces_findings", func(t *testing.T) {
-		allOut := callTool(t, c, "lint_schema", nil)
-		filteredOut := callTool(t, c, "lint_schema", map[string]any{"schema": "nonexistent_schema"})
+		allLo := parse(t, callTool(t, c, "lint_schema", nil))
+		filteredLo := parse(t, callTool(t, c, "lint_schema", map[string]any{"schema": "nonexistent_schema"}))
 
-		allFindings := parseFindings(t, allOut)
-		filteredFindings := parseFindings(t, filteredOut)
+		var allCount, filteredCount int
+		if allLo.Audit != nil {
+			allCount = len(allLo.Audit.Findings)
+		}
+		if filteredLo.Audit != nil {
+			filteredCount = len(filteredLo.Audit.Findings)
+		}
 
-		if len(filteredFindings) >= len(allFindings) && len(allFindings) > 0 {
-			t.Errorf("filtering by nonexistent schema should reduce findings, got %d vs %d", len(filteredFindings), len(allFindings))
+		if filteredCount >= allCount && allCount > 0 {
+			t.Errorf("filtering by nonexistent schema should reduce findings, got %d vs %d", filteredCount, allCount)
 		}
 	})
 }

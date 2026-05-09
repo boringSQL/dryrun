@@ -98,6 +98,11 @@ type (
 )
 
 func CompactReportFromReport(r Report) CompactReport {
+	return CompactReportFromReportN(r, 0)
+}
+
+// maxExamples=0 keeps all items
+func CompactReportFromReportN(r Report, maxExamples int) CompactReport {
 	groups := make(map[string]*RuleGroup)
 	var order []string
 
@@ -109,9 +114,11 @@ func CompactReportFromReport(r Report) CompactReport {
 			order = append(order, f.Rule)
 		}
 		g.Count++
-		g.Items = append(g.Items, CompactFinding{
-			Tables: f.Tables, Column: f.Column,
-		})
+		if maxExamples == 0 || len(g.Items) < maxExamples {
+			g.Items = append(g.Items, CompactFinding{
+				Tables: f.Tables, Column: f.Column,
+			})
+		}
 	}
 
 	ruleGroups := make([]RuleGroup, 0, len(order))

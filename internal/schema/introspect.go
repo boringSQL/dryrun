@@ -144,6 +144,27 @@ func IntrospectSchema(ctx context.Context, pool *pgxpool.Pool) (*SchemaSnapshot,
 		return nil, fmt.Errorf("fetch gucs: %w", err)
 	}
 
+	isStandby, err := FetchIsStandby(ctx, pool)
+	if err != nil {
+		return nil, fmt.Errorf("fetch is_standby: %w", err)
+	}
+
+	if len(rawTableStats) > 0 {
+		withVacuum := 0
+		for _, s := range rawTableStats {
+			if s.lastAutovacuum != nil {
+				withVacuum++
+			}
+		}
+		if withVacuum == 0 {
+			if isStandby {
+				slog.Info("all vacuum timestamps are null; expected on standby")
+			} else {
+				slog.Warn("all vacuum/analyze timestamps are null on primary! check that the role has pg_read_all_stats privilege")
+			}
+		}
+	}
+
 	tables := assembleTables(
 		rawTables,
 		rawColumns,
@@ -211,14 +232,15 @@ type (
 	}
 
 	rawConstraint struct {
-		tableOID   uint32
-		name       string
-		contype    string
-		columns    []string
-		definition *string
-		fkTable    *string
-		fkColumns  []string
-		comment    *string
+		tableOID     uint32
+		name         string
+		contype      string
+		columns      []string
+		definition   *string
+		fkTable      *string
+		fkColumns    []string
+		backingIndex *string
+		comment      *string
 	}
 
 	rawTableComment struct {
@@ -233,15 +255,16 @@ type (
 	}
 
 	rawIndex struct {
-		tableOID       uint32
-		name           string
-		columns        []string
-		includeColumns []string
-		indexType      string
-		isUnique       bool
-		isPrimary      bool
-		predicate      *string
-		definition     string
+		tableOID        uint32
+		name            string
+		columns         []string
+		includeColumns  []string
+		indexType       string
+		isUnique        bool
+		isPrimary       bool
+		predicate       *string
+		definition      string
+		backsConstraint bool
 	}
 
 	rawTableStats struct {
@@ -347,7 +370,7 @@ func fetchConstraints(ctx context.Context, pool *pgxpool.Pool) ([]rawConstraint,
 	return scanAll(rows, func(r pgx.Rows) (rawConstraint, error) {
 		var oid int32
 		var rc rawConstraint
-		err := r.Scan(&oid, &rc.name, &rc.contype, &rc.definition, &rc.columns, &rc.fkTable, &rc.fkColumns, &rc.comment)
+		err := r.Scan(&oid, &rc.name, &rc.contype, &rc.definition, &rc.columns, &rc.fkTable, &rc.fkColumns, &rc.backingIndex, &rc.comment)
 		rc.tableOID = uint32(oid)
 		return rc, err
 	})
@@ -474,7 +497,7 @@ func fetchIndexes(ctx context.Context, pool *pgxpool.Pool) ([]rawIndex, error) {
 		if err := r.Scan(
 			&oid, &ri.name, &ri.indexType,
 			&ri.isUnique, &ri.isPrimary, &ri.predicate,
-			&ri.definition, &nKeyAtts, &allCols, &totalCols,
+			&ri.definition, &nKeyAtts, &ri.backsConstraint, &allCols, &totalCols,
 		); err != nil {
 			return ri, err
 		}
@@ -717,13 +740,14 @@ func assembleTables(
 			continue
 		}
 		constraintsByOID[rc.tableOID] = append(constraintsByOID[rc.tableOID], Constraint{
-			Name:       rc.name,
-			Kind:       kind,
-			Columns:    rc.columns,
-			Definition: rc.definition,
-			FKTable:    rc.fkTable,
-			FKColumns:  rc.fkColumns,
-			Comment:    rc.comment,
+			Name:         rc.name,
+			Kind:         kind,
+			Columns:      rc.columns,
+			Definition:   rc.definition,
+			FKTable:      rc.fkTable,
+			FKColumns:    rc.fkColumns,
+			BackingIndex: rc.backingIndex,
+			Comment:      rc.comment,
 		})
 	}
 
@@ -787,14 +811,15 @@ func assembleTables(
 	indexesByOID := make(map[uint32][]Index)
 	for _, ri := range rawIndexes {
 		idx := Index{
-			Name:           ri.name,
-			Columns:        ri.columns,
-			IncludeColumns: ri.includeColumns,
-			IndexType:      ri.indexType,
-			IsUnique:       ri.isUnique,
-			IsPrimary:      ri.isPrimary,
-			Predicate:      ri.predicate,
-			Definition:     ri.definition,
+			Name:            ri.name,
+			Columns:         ri.columns,
+			IncludeColumns:  ri.includeColumns,
+			IndexType:       ri.indexType,
+			IsUnique:        ri.isUnique,
+			IsPrimary:       ri.isPrimary,
+			Predicate:       ri.predicate,
+			Definition:      ri.definition,
+			BacksConstraint: ri.backsConstraint,
 		}
 		if s, ok := idxStatsMap[idxKey{ri.tableOID, ri.name}]; ok {
 			idx.Stats = s

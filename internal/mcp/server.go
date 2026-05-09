@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -25,13 +26,15 @@ import (
 
 type (
 	Server struct {
-		pool            *pgxpool.Pool
-		dbURL           string
-		snap            *schema.SchemaSnapshot
-		mu              sync.RWMutex
-		history         *history.Store
-		lintConfig      lint.Config
-		pgmustardClient *pgmustard.Client
+		pool             *pgxpool.Pool
+		dbURL            string
+		snap             *schema.SchemaSnapshot
+		mu               sync.RWMutex
+		history          *history.Store
+		lintConfig       lint.Config
+		pgmustardClient  *pgmustard.Client
+		schemaCandidates []string
+		uninitialized    bool
 	}
 )
 
@@ -51,13 +54,96 @@ func NewOfflineServer(snap *schema.SchemaSnapshot, lintCfg lint.Config) *Server 
 	return &Server{snap: snap, lintConfig: lintCfg, pgmustardClient: pgmustard.NewClient("")}
 }
 
+func (s *Server) SetSchemaCandidates(paths []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.schemaCandidates = paths
+}
+
+func (s *Server) SetUninitialized(paths []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.schemaCandidates = paths
+	s.uninitialized = true
+}
+
 func (s *Server) getSchema() (*schema.SchemaSnapshot, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.snap == nil {
-		return nil, fmt.Errorf("schema not available")
+	if s.snap == nil || s.uninitialized {
+		return nil, fmt.Errorf("no schema loaded — initialize first:\n\n1. Run `dryrun dump-schema --db <DATABASE_URL>` in a terminal\n2. Call the `reload_schema` tool in this session\n\nThe schema will be picked up without restarting the server.")
 	}
 	return s.snap, nil
+}
+
+func (s *Server) modeStr() string {
+	if s.pool != nil {
+		return "live"
+	}
+	return "offline"
+}
+
+func (s *Server) pgDisplay() string {
+	snap, err := s.getSchema()
+	if err != nil || snap.PgVersion == "" {
+		return ""
+	}
+	if v, err := dryrun.ParsePgVersion(snap.PgVersion); err == nil {
+		return v.String()
+	}
+	return snap.PgVersion
+}
+
+func (s *Server) databaseName() string {
+	snap, err := s.getSchema()
+	if err != nil {
+		return ""
+	}
+	return snap.Database
+}
+
+func (s *Server) wrapText(body, hint string) string {
+	header := fmt.Sprintf("PostgreSQL %s | %s | %s\n", s.pgDisplay(), s.databaseName(), s.modeStr())
+	if hint != "" {
+		return header + body + "\n\n> " + hint
+	}
+	return header + body
+}
+
+func (s *Server) injectMeta(val map[string]any, hint string) {
+	meta := map[string]any{
+		"pg_version": s.pgDisplay(),
+		"database":   s.databaseName(),
+		"mode":       s.modeStr(),
+	}
+	if hint != "" {
+		meta["hint"] = hint
+	}
+	val["_meta"] = meta
+}
+
+// Round-trips payload through map so we can attach _meta without struct churn.
+func (s *Server) metaJSONResult(payload any, key, hint string) *mcp.CallToolResult {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return errResult(fmt.Sprintf("serialization error: %v", err))
+	}
+	wrapper := map[string]any{}
+	// merge if payload is already an object; otherwise nest under `key`
+	var asObj map[string]any
+	if err := json.Unmarshal(data, &asObj); err == nil && asObj != nil {
+		wrapper = asObj
+	} else if key != "" {
+		var raw any
+		_ = json.Unmarshal(data, &raw)
+		wrapper[key] = raw
+	}
+	s.injectMeta(wrapper, hint)
+	out, err := json.MarshalIndent(wrapper, "", "  ")
+	if err != nil {
+		return errResult(fmt.Sprintf("serialization error: %v", err))
+	}
+	return mcp.NewToolResultText(string(out))
 }
 
 func (s *Server) requirePool() (*pgxpool.Pool, error) {
@@ -142,6 +228,59 @@ func pageEnd(offset, limit, total int) int {
 		return offset + limit
 	}
 	return total
+}
+
+// Shallow-copy snap, retaining tables + per-node stats matching filters.
+// empty filter means no filtering on that axis
+func filterSnap(snap *schema.SchemaSnapshot, schemaFilter, tableFilter string) *schema.SchemaSnapshot {
+	if schemaFilter == "" && tableFilter == "" {
+		return snap
+	}
+	out := *snap
+	tables := make([]schema.Table, 0, len(snap.Tables))
+	for _, t := range snap.Tables {
+		if schemaFilter != "" && t.Schema != schemaFilter {
+			continue
+		}
+		if tableFilter != "" && t.Name != tableFilter {
+			continue
+		}
+		tables = append(tables, t)
+	}
+	out.Tables = tables
+
+	if len(snap.NodeStats) > 0 {
+		nodes := make([]schema.NodeStats, len(snap.NodeStats))
+		for i, ns := range snap.NodeStats {
+			nodes[i] = ns
+			if schemaFilter != "" || tableFilter != "" {
+				ts := make([]schema.NodeTableStats, 0, len(ns.TableStats))
+				for _, t := range ns.TableStats {
+					if schemaFilter != "" && t.Schema != schemaFilter {
+						continue
+					}
+					if tableFilter != "" && t.Table != tableFilter {
+						continue
+					}
+					ts = append(ts, t)
+				}
+				is := make([]schema.NodeIndexStats, 0, len(ns.IndexStats))
+				for _, x := range ns.IndexStats {
+					if schemaFilter != "" && x.Schema != schemaFilter {
+						continue
+					}
+					if tableFilter != "" && x.Table != tableFilter {
+						continue
+					}
+					is = append(is, x)
+				}
+				nodes[i].TableStats = ts
+				nodes[i].IndexStats = is
+			}
+		}
+		out.NodeStats = nodes
+	}
+	return &out
 }
 
 func buildAnomalies(snap *schema.SchemaSnapshot) []map[string]any {
@@ -236,6 +375,9 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			mcp.WithString("schema",
 				mcp.Description("Filter to a specific schema (e.g. public)"),
 			),
+			mcp.WithString("table",
+				mcp.Description("Filter to a single table"),
+			),
 		),
 		s.handleLintSchema,
 	)
@@ -252,10 +394,31 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 				mcp.DefaultNumber(4.0),
 				mcp.Description("Bloat ratio threshold (only for bloated_indexes/all)."),
 			),
+			mcp.WithString("schema",
+				mcp.Description("Filter to a specific schema (e.g. public)"),
+			),
+			mcp.WithString("table",
+				mcp.Description("Filter to a single table"),
+			),
 		),
 		s.handleDetect,
 	)
-	srv.AddTool(tool("vacuum_health", "Analyze autovacuum health: effective settings, trigger thresholds, and recommendations per table"), s.handleVacuumHealth)
+	srv.AddTool(
+		mcp.NewTool("vacuum_health",
+			mcp.WithDescription("Analyze autovacuum health: effective settings, trigger thresholds, and recommendations per table"),
+			mcp.WithString("schema",
+				mcp.Description("Filter to a specific schema (e.g. public)"),
+			),
+			mcp.WithString("table",
+				mcp.Description("Filter to a single table"),
+			),
+		),
+		s.handleVacuumHealth,
+	)
+	srv.AddTool(
+		tool("reload_schema", "Reload schema from disk. Use after running `dryrun dump-schema` to pick up the schema without restarting the server."),
+		s.handleReloadSchema,
+	)
 
 	// require live db
 	if s.pool != nil {
@@ -342,20 +505,15 @@ func (s *Server) handleListTables(_ context.Context, req mcp.CallToolRequest) (*
 
 	total := len(entries)
 
-	var header string
-	if ver, err := dryrun.ParsePgVersion(snap.PgVersion); err == nil {
-		header = fmt.Sprintf("PostgreSQL %s | database: %s\n", ver, snap.Database)
-	}
-
 	if total == 0 {
-		return textResult(header + "No tables found."), nil
+		return textResult(s.wrapText("No tables found.", "")), nil
 	}
 
 	offset := int(getFloatArg(req, "offset", 0))
 	limit := int(getFloatArg(req, "limit", 50))
 
 	if offset >= total {
-		return textResult(fmt.Sprintf("%s%d table(s) total. Offset %d is beyond the end.", header, total, offset)), nil
+		return textResult(s.wrapText(fmt.Sprintf("%d table(s) total. Offset %d is beyond the end.", total, offset), "")), nil
 	}
 	end := pageEnd(offset, limit, total)
 	entries = entries[offset:end]
@@ -365,11 +523,13 @@ func (s *Server) handleListTables(_ context.Context, req mcp.CallToolRequest) (*
 		lines[i] = e.line
 	}
 
+	var body string
 	if offset == 0 && end == total {
-		return textResult(fmt.Sprintf("%s%d table(s):\n%s", header, total, strings.Join(lines, "\n"))), nil
+		body = fmt.Sprintf("%d table(s):\n%s", total, strings.Join(lines, "\n"))
+	} else {
+		body = fmt.Sprintf("Showing %d-%d of %d table(s):\n%s", offset+1, end, total, strings.Join(lines, "\n"))
 	}
-	return textResult(fmt.Sprintf("%sShowing %d-%d of %d table(s):\n%s",
-		header, offset+1, end, total, strings.Join(lines, "\n"))), nil
+	return textResult(s.wrapText(body, "")), nil
 }
 
 func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -400,9 +560,7 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 				}
 			}
 
-			result := map[string]any{
-				"pg_version": snap.PgVersion,
-			}
+			result := map[string]any{}
 
 			switch detail {
 			case "full":
@@ -445,6 +603,15 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 					t.PartitionInfo.Strategy, t.PartitionInfo.Key,
 					len(t.PartitionInfo.Children), t.PartitionInfo.Key)
 			}
+
+			hint := ""
+			for _, c := range t.Constraints {
+				if c.Kind == schema.ConstraintForeignKey {
+					hint = "This table has foreign keys — use find_related for JOIN patterns with related tables."
+					break
+				}
+			}
+			s.injectMeta(result, hint)
 			return jsonResult(result), nil
 		}
 	}
@@ -579,23 +746,26 @@ func (s *Server) handleSearchSchema(_ context.Context, req mcp.CallToolRequest) 
 
 	total := len(results)
 	if total == 0 {
-		return textResult(fmt.Sprintf("No matches for '%s'.", getArg(req, "query"))), nil
+		return textResult(s.wrapText(fmt.Sprintf("No matches for '%s'.", getArg(req, "query")), "")), nil
 	}
 
 	offset := int(getFloatArg(req, "offset", 0))
 	limit := int(getFloatArg(req, "limit", 30))
 
 	if offset >= total {
-		return textResult(fmt.Sprintf("%d match(es) for '%s'. Offset %d is beyond the end.", total, getArg(req, "query"), offset)), nil
+		return textResult(s.wrapText(fmt.Sprintf("%d match(es) for '%s'. Offset %d is beyond the end.", total, getArg(req, "query"), offset), "")), nil
 	}
 	end := pageEnd(offset, limit, total)
 	shown := results[offset:end]
 
+	var body string
 	if offset == 0 && end == total {
-		return textResult(fmt.Sprintf("%d match(es) for '%s':\n%s", total, getArg(req, "query"), strings.Join(shown, "\n"))), nil
+		body = fmt.Sprintf("%d match(es) for '%s':\n%s", total, getArg(req, "query"), strings.Join(shown, "\n"))
+	} else {
+		body = fmt.Sprintf("Showing %d-%d of %d match(es) for '%s':\n%s",
+			offset+1, end, total, getArg(req, "query"), strings.Join(shown, "\n"))
 	}
-	return textResult(fmt.Sprintf("Showing %d-%d of %d match(es) for '%s':\n%s",
-		offset+1, end, total, getArg(req, "query"), strings.Join(shown, "\n"))), nil
+	return textResult(s.wrapText(body, "")), nil
 }
 
 func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -655,7 +825,7 @@ func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (
 		lines = append(lines, incoming...)
 	}
 
-	return textResult(strings.Join(lines, "\n")), nil
+	return textResult(s.wrapText(strings.Join(lines, "\n"), "")), nil
 }
 
 func (s *Server) handleValidateQuery(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -668,7 +838,14 @@ func (s *Server) handleValidateQuery(_ context.Context, req mcp.CallToolRequest)
 	if err != nil {
 		return errResult(fmt.Sprintf("SQL parse error: %v", err)), nil
 	}
-	return jsonResult(result), nil
+
+	hint := ""
+	if result.Valid && len(result.Warnings) > 0 {
+		hint = "Query is valid but has warnings. Use advise for index suggestions and plan analysis."
+	} else if result.Valid {
+		hint = "Query is valid. Use advise if you need optimization suggestions."
+	}
+	return s.metaJSONResult(result, "", hint), nil
 }
 
 func (s *Server) handleExplainQuery(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -736,7 +913,11 @@ func (s *Server) handleExplainQuery(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
-	return jsonResult(result), nil
+	hint := ""
+	if len(result.Warnings) > 0 {
+		hint = "Warnings detected. Use advise for index suggestions and actionable recommendations."
+	}
+	return s.metaJSONResult(result, "", hint), nil
 }
 
 func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -753,7 +934,17 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 	if len(checks) == 0 {
 		return textResult("Could not identify a specific DDL operation to check."), nil
 	}
-	return jsonResult(checks), nil
+
+	hint := ""
+	for _, c := range checks {
+		if c.Safety == query.SafetyDangerous {
+			hint = "DANGEROUS operations detected. Check the recommendation and rollback_ddl fields for safe alternatives."
+			break
+		}
+	}
+	wrapper := map[string]any{"checks": checks}
+	s.injectMeta(wrapper, hint)
+	return jsonResult(wrapper), nil
 }
 
 func (s *Server) handleSuggestIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -780,7 +971,13 @@ func (s *Server) handleSuggestIndex(ctx context.Context, req mcp.CallToolRequest
 	if len(suggestions) == 0 {
 		return textResult("No index suggestions."), nil
 	}
-	return jsonResult(suggestions), nil
+	hint := ""
+	if len(suggestions) > 0 {
+		hint = "Index suggestions contain DDL. Run each through check_migration before applying — it checks lock safety and duration."
+	}
+	wrapper := map[string]any{"index_suggestions": suggestions}
+	s.injectMeta(wrapper, hint)
+	return jsonResult(wrapper), nil
 }
 
 func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -789,40 +986,40 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 		return errResult(err.Error()), nil
 	}
 
-	target := snap
-	if schemaFilter := getArg(req, "schema"); schemaFilter != "" {
-		filtered := *snap
-		var tables []schema.Table
-		for _, t := range filtered.Tables {
-			if t.Schema == schemaFilter {
-				tables = append(tables, t)
-			}
-		}
-		filtered.Tables = tables
-		target = &filtered
-	}
+	target := filterSnap(snap, getArg(req, "schema"), getArg(req, "table"))
 
 	scope := argOr(req, "scope", "all")
+	result := map[string]any{}
 
-	var findings []lint.Finding
-	configSource := ""
-	switch scope {
-	case "conventions":
-		findings = lint.RunRules(target, &s.lintConfig)
-		configSource = "conventions"
-	case "audit":
+	if scope == "all" || scope == "conventions" {
+		findings := lint.RunRules(target, &s.lintConfig)
+		report := lint.NewReport(findings, len(target.Tables), "conventions")
+		result["conventions"] = lint.CompactReportFromReportN(report, 5)
+	}
+	hasDDLFixes := false
+	if scope == "all" || scope == "audit" {
 		auditCfg := audit.DefaultConfig()
-		findings = audit.RunRules(target, &auditCfg)
-		configSource = "audit"
-	default:
-		findings = lint.RunRules(target, &s.lintConfig)
-		auditCfg := audit.DefaultConfig()
-		findings = append(findings, audit.RunRules(target, &auditCfg)...)
-		configSource = "all"
+		findings := audit.RunRules(target, &auditCfg)
+		for _, f := range findings {
+			if f.DDLFix != nil {
+				hasDDLFixes = true
+				break
+			}
+		}
+		result["audit"] = lint.NewReport(findings, len(target.Tables), "audit")
 	}
 
-	report := lint.NewReport(findings, len(target.Tables), configSource)
-	return jsonResult(report), nil
+	hint := ""
+	if hasDDLFixes {
+		hint = "Some findings include ddl_fix fields. Run those through check_migration before applying to verify lock safety."
+	}
+	s.injectMeta(result, hint)
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		return errResult(fmt.Sprintf("serialization error: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(data)), nil
 }
 
 func (s *Server) handleRefreshSchema(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -874,9 +1071,9 @@ func (s *Server) handleCompareNodes(_ context.Context, req mcp.CallToolRequest) 
 	}
 
 	if len(lines) == 1 {
-		return textResult(fmt.Sprintf("No stats found for %s.%s across nodes.", schemaName, tableName)), nil
+		return textResult(s.wrapText(fmt.Sprintf("No stats found for %s.%s across nodes.", schemaName, tableName), "")), nil
 	}
-	return textResult(strings.Join(lines, "\n")), nil
+	return textResult(s.wrapText(strings.Join(lines, "\n"), "")), nil
 }
 
 func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -899,10 +1096,11 @@ func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mc
 }
 
 func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+	rawSnap, err := s.getSchema()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	snap := filterSnap(rawSnap, getArg(req, "schema"), getArg(req, "table"))
 
 	staleDays := int64(7)
 	staleEntries := schema.DetectStaleStats(snap.NodeStats, staleDays)
@@ -913,19 +1111,31 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 
 	anomalies := buildAnomalies(snap)
 
-	return jsonResult(map[string]any{
+	wrapper := map[string]any{
 		"stale_stats":     map[string]any{"entries": staleEntries, "count": len(staleEntries)},
 		"unused_indexes":  map[string]any{"entries": unusedEntries, "count": len(unusedEntries)},
 		"anomalies":       map[string]any{"entries": anomalies, "count": len(anomalies)},
 		"bloated_indexes": map[string]any{"entries": bloatEntries, "count": len(bloatEntries)},
-	}), nil
+	}
+	hint := ""
+	switch {
+	case len(staleEntries) > 0 && len(unusedEntries) > 0:
+		hint = "Stale stats may cause bad plans — run ANALYZE. Unused indexes add write overhead — verify with compare_nodes before dropping."
+	case len(staleEntries) > 0:
+		hint = "Stale stats may cause bad query plans — consider running ANALYZE."
+	case len(unusedEntries) > 0:
+		hint = "Unused indexes add write overhead. Use compare_nodes to verify across all replicas before dropping."
+	}
+	s.injectMeta(wrapper, hint)
+	return jsonResult(wrapper), nil
 }
 
 func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+	rawSnap, err := s.getSchema()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	snap := filterSnap(rawSnap, getArg(req, "schema"), getArg(req, "table"))
 
 	staleDays := int64(7)
 	if len(snap.NodeStats) == 0 {
@@ -962,10 +1172,11 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 }
 
 func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+	rawSnap, err := s.getSchema()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	snap := filterSnap(rawSnap, getArg(req, "schema"), getArg(req, "table"))
 
 	entries := schema.DetectUnusedIndexes(snap.NodeStats, snap.Tables)
 	if len(entries) == 0 {
@@ -978,10 +1189,11 @@ func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRe
 }
 
 func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+	rawSnap, err := s.getSchema()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	snap := filterSnap(rawSnap, getArg(req, "schema"), getArg(req, "table"))
 
 	if len(snap.NodeStats) == 0 {
 		return textResult("No node statistics available for anomaly detection."), nil
@@ -995,10 +1207,11 @@ func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolReques
 }
 
 func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+	rawSnap, err := s.getSchema()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	snap := filterSnap(rawSnap, getArg(req, "schema"), getArg(req, "table"))
 
 	threshold := getFloatArg(req, "threshold", 4.0)
 	entries := schema.DetectBloatedIndexes(snap.NodeStats, snap.Tables, threshold)
@@ -1017,25 +1230,51 @@ func (s *Server) handleVacuumHealth(_ context.Context, req mcp.CallToolRequest) 
 		return errResult(err.Error()), nil
 	}
 
-	results := schema.AnalyzeVacuumHealth(snap)
-
-	if tableName := getArg(req, "table"); tableName != "" {
-		filtered := results[:0]
-		for _, vh := range results {
-			if vh.Table == tableName {
-				filtered = append(filtered, vh)
-			}
-		}
-		results = filtered
-	}
+	target := filterSnap(snap, getArg(req, "schema"), getArg(req, "table"))
+	results := schema.AnalyzeVacuumHealth(target)
 
 	if len(results) == 0 {
-		return textResult("No vacuum health concerns found."), nil
+		return textResult(s.wrapText("No vacuum health concerns found.", "")), nil
 	}
-	return jsonResult(map[string]any{
+	wrapper := map[string]any{
 		"vacuum_health": results,
 		"count":         len(results),
-	}), nil
+	}
+	s.injectMeta(wrapper, "")
+	return jsonResult(wrapper), nil
+}
+
+func (s *Server) handleReloadSchema(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.mu.RLock()
+	candidates := append([]string(nil), s.schemaCandidates...)
+	s.mu.RUnlock()
+
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		snap, err := schema.LoadSchemaFile(path)
+		if err != nil {
+			return errResult(fmt.Sprintf("failed to load %s: %v", path, err)), nil
+		}
+		s.mu.Lock()
+		s.snap = snap
+		s.uninitialized = false
+		s.mu.Unlock()
+		return textResult(fmt.Sprintf("Schema loaded from %s: %d tables, %d views, %d functions",
+			path, len(snap.Tables), len(snap.Views), len(snap.Functions))), nil
+	}
+
+	var lines []string
+	for _, p := range candidates {
+		lines = append(lines, "  - "+p)
+	}
+	msg := "no schema file found at any expected location"
+	if len(lines) > 0 {
+		msg += ":\n" + strings.Join(lines, "\n")
+	}
+	msg += "\n\nRun `dryrun dump-schema --db <DATABASE_URL>` first."
+	return errResult(msg), nil
 }
 
 func (s *Server) handleCheckDrift(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1056,8 +1295,8 @@ func (s *Server) handleCheckDrift(ctx context.Context, req mcp.CallToolRequest) 
 	report := diff.ClassifyDrift(savedSnap, liveSnap)
 
 	if report.Direction == diff.DriftIdentical {
-		return textResult(fmt.Sprintf("No drift detected. Schema hash: %s", report.LiveHash)), nil
+		return textResult(s.wrapText(fmt.Sprintf("No drift detected. Schema hash: %s", report.LiveHash), "")), nil
 	}
 
-	return jsonResult(report), nil
+	return s.metaJSONResult(report, "", ""), nil
 }

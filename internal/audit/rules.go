@@ -2,7 +2,6 @@ package audit
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	"github.com/boringsql/dryrun/internal/lint"
@@ -62,16 +61,42 @@ func checkDuplicateIndexes(snap *schema.SchemaSnapshot) []lint.Finding {
 				if !a.IsValid || !b.IsValid {
 					continue
 				}
-				if sliceEqual(a.Columns, b.Columns) && a.IndexType == b.IndexType {
-					findings = append(findings, lint.Finding{
-						Rule: "indexes/duplicate", Severity: lint.SeverityError,
-						Tables: []string{qualified},
-						Message: fmt.Sprintf("Indexes '%s' and '%s' have identical columns: [%s]",
-							a.Name, b.Name, strings.Join(a.Columns, ", ")),
-						Recommendation: "Drop one of the duplicate indexes",
-						DDLFix:         new(fmt.Sprintf("DROP INDEX %s;", b.Name)),
-					})
+				if !sliceEqual(a.Columns, b.Columns) || a.IndexType != b.IndexType {
+					continue
 				}
+
+				// both back constraints; can't just drop one (UNIQUE/PK on one side,
+				// FK depending on other), so emit warning without DDL fix
+				if a.BacksConstraint && b.BacksConstraint {
+					findings = append(findings, lint.Finding{
+						Rule: "indexes/duplicate", Severity: lint.SeverityWarning,
+						Tables: []string{qualified},
+						Message: fmt.Sprintf("Indexes '%s' and '%s' have identical columns [%s] but both back constraints",
+							a.Name, b.Name, strings.Join(a.Columns, ", ")),
+						Recommendation: "One index is redundant but a FK depends on it — drop the FK first, then the extra index, then re-create the FK so PG picks the remaining index",
+					})
+					continue
+				}
+
+				// keep the constraint-backing one
+				toDrop, toKeep := b, a
+				if a.BacksConstraint && !b.BacksConstraint {
+					toDrop, toKeep = b, a
+				} else if !a.BacksConstraint && b.BacksConstraint {
+					toDrop, toKeep = a, b
+				}
+				suffix := " is sufficient"
+				if toKeep.BacksConstraint {
+					suffix = " backs a constraint"
+				}
+				findings = append(findings, lint.Finding{
+					Rule: "indexes/duplicate", Severity: lint.SeverityError,
+					Tables: []string{qualified},
+					Message: fmt.Sprintf("Indexes '%s' and '%s' have identical columns: [%s]",
+						toDrop.Name, toKeep.Name, strings.Join(a.Columns, ", ")),
+					Recommendation: fmt.Sprintf("Drop '%s' — '%s'%s", toDrop.Name, toKeep.Name, suffix),
+					DDLFix:         new(fmt.Sprintf("DROP INDEX %s;", toDrop.Name)),
+				})
 			}
 		}
 	}
@@ -543,11 +568,7 @@ func checkVacuumLargeTableDefaults(snap *schema.SchemaSnapshot) []lint.Finding {
 			severity = lint.SeverityWarning
 		}
 
-		suggestedSF := 100_000.0 / vh.Reltuples
-		suggestedSF = math.Round(suggestedSF*1000) / 1000
-		if suggestedSF < 0.001 {
-			suggestedSF = 0.001
-		}
+		vacSF, vacThresh, azSF, azThresh := schema.SuggestedVacuumKnobs(vh.Reltuples)
 
 		findings = append(findings, lint.Finding{
 			Rule:     "vacuum/large_table_defaults",
@@ -556,10 +577,10 @@ func checkVacuumLargeTableDefaults(snap *schema.SchemaSnapshot) []lint.Finding {
 			Message: fmt.Sprintf(
 				"Table %s has %dk rows with default autovacuum settings. VACCUM won't trigger until %dk dead tuples accumulate",
 				qualified, int64(vh.Reltuples)/1000, int64(vh.VacuumTriggerAt)/1000),
-			Recommendation: "Large tables benefit from lower autovacuum_vacuum_scale_factor to prevent dead tuple buildup and table bloat",
+			Recommendation: "consider tuning autovacuum for large tables — lower scale factors alone aren't enough without explicit thresholds",
 			DDLFix: new(fmt.Sprintf(
-				"ALTER TABLE %s SET (autovacuum_vacuum_scale_factor = %g);",
-				qualified, suggestedSF)),
+				"ALTER TABLE %s SET (\n  autovacuum_vacuum_scale_factor = %g,\n  autovacuum_vacuum_threshold = %d,\n  autovacuum_analyze_scale_factor = %g,\n  autovacuum_analyze_threshold = %d\n);",
+				qualified, vacSF, vacThresh, azSF, azThresh)),
 		})
 	}
 	return findings
