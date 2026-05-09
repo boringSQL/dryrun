@@ -326,6 +326,158 @@ func TestParseReloptions(t *testing.T) {
 	}
 }
 
+// Pins the monotonicity contract of SuggestedVacuumKnobs: as table size grows,
+// the vacuum scale factor must strictly decrease. Also checks invariants at each
+// size: thresholds positive, analyze scale factor positive and not above vacSF.
+func TestSuggestedVacuumKnobs_Monotonic(t *testing.T) {
+	sizes := []float64{1_000, 100_000, 1_000_000, 100_000_000}
+	var prevSF float64 = 1e9
+	for _, n := range sizes {
+		vacSF, vacThresh, azSF, azThresh := SuggestedVacuumKnobs(n)
+		if vacSF <= 0 {
+			t.Errorf("rows=%v: vacSF must be positive, got %v", n, vacSF)
+		}
+		if vacSF >= prevSF {
+			t.Errorf("rows=%v: expected vacSF to decrease (prev=%v, got=%v)", n, prevSF, vacSF)
+		}
+		prevSF = vacSF
+		if azSF <= 0 || azSF > vacSF+1e-9 {
+			t.Errorf("rows=%v: analyze sf should be > 0 and <= vacSF, got az=%v vac=%v", n, azSF, vacSF)
+		}
+		if vacThresh <= 0 {
+			t.Errorf("rows=%v: vacThresh must be positive, got %d", n, vacThresh)
+		}
+		if azThresh <= 0 {
+			t.Errorf("rows=%v: azThresh must be positive, got %d", n, azThresh)
+		}
+	}
+}
+
+// pins the explicit clamps in SuggestedVacuumKnobs: vacSF >= 0.001,
+// vacThresh in [500, 5000], azThresh >= 250. Exercises both extreme ends,
+// a trillion-row table for the upper caps and a tiny one for the floors.
+func TestSuggestedVacuumKnobs_BoundsClamp(t *testing.T) {
+	// extremely large table: vacSF clamped at 0.001 floor
+	vacSF, vacThresh, _, azThresh := SuggestedVacuumKnobs(1_000_000_000_000)
+	if vacSF < 0.001 {
+		t.Errorf("expected vacSF floored at 0.001, got %v", vacSF)
+	}
+	if vacThresh > 5000 {
+		t.Errorf("expected vacThresh capped at 5000, got %d", vacThresh)
+	}
+	if azThresh < 250 {
+		t.Errorf("expected azThresh floored at 250, got %d", azThresh)
+	}
+
+	// tiny table: vacThresh floored at 500
+	_, vacThresh2, _, azThresh2 := SuggestedVacuumKnobs(1_000)
+	if vacThresh2 < 500 {
+		t.Errorf("expected vacThresh floored at 500, got %d", vacThresh2)
+	}
+	if azThresh2 < 250 {
+		t.Errorf("expected azThresh floored at 250, got %d", azThresh2)
+	}
+}
+
+// Verifies that AggregateTableStats sources vacuum/analyze timestamps only from
+// the primary, never from standbys, even when standby timestamps are newer.
+// Covers three shapes: primary plus standbys, standbys only (timestamps must be
+// nil), and single node without an explicit standby flag still aggregating.
+func TestAggregateTableStats_PrimaryOnlyVacuumTimestamps(t *testing.T) {
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	recent := time.Now().UTC().Add(-1 * time.Hour)
+	newer := time.Now().UTC()
+
+	t.Run("primary_timestamps_win_over_newer_standby", func(t *testing.T) {
+		nodes := []NodeStats{
+			{Source: "primary", IsStandby: false, TableStats: []NodeTableStats{{
+				Schema: "public", Table: "t",
+				Stats: TableStats{
+					Reltuples:       100,
+					LastVacuum:      &old,
+					LastAutovacuum:  &recent,
+					LastAnalyze:     &old,
+					LastAutoanalyze: &recent,
+				},
+			}}},
+			{Source: "standby1", IsStandby: true, TableStats: []NodeTableStats{{
+				Schema: "public", Table: "t",
+				// newer standby timestamps must be ignored
+				Stats: TableStats{
+					LastVacuum:      &newer,
+					LastAutovacuum:  &newer,
+					LastAnalyze:     &newer,
+					LastAutoanalyze: &newer,
+				},
+			}}},
+			{Source: "standby2", IsStandby: true, TableStats: []NodeTableStats{{
+				Schema: "public", Table: "t",
+				Stats: TableStats{LastVacuum: &newer},
+			}}},
+		}
+		got := AggregateTableStats(nodes, "public", "t")
+		if got == nil {
+			t.Fatal("expected aggregated stats")
+		}
+		if got.LastVacuum == nil || !got.LastVacuum.Equal(old) {
+			t.Errorf("expected LastVacuum from primary (%v), got %v", old, got.LastVacuum)
+		}
+		if got.LastAutovacuum == nil || !got.LastAutovacuum.Equal(recent) {
+			t.Errorf("expected LastAutovacuum from primary (%v), got %v", recent, got.LastAutovacuum)
+		}
+		if got.LastAnalyze == nil || !got.LastAnalyze.Equal(old) {
+			t.Errorf("expected LastAnalyze from primary (%v), got %v", old, got.LastAnalyze)
+		}
+		if got.LastAutoanalyze == nil || !got.LastAutoanalyze.Equal(recent) {
+			t.Errorf("expected LastAutoanalyze from primary (%v), got %v", recent, got.LastAutoanalyze)
+		}
+	})
+
+	t.Run("all_standbys_timestamps_nil", func(t *testing.T) {
+		nodes := []NodeStats{
+			{Source: "s1", IsStandby: true, TableStats: []NodeTableStats{{
+				Schema: "public", Table: "t",
+				Stats: TableStats{Reltuples: 50, LastVacuum: &newer, LastAutovacuum: &newer, LastAnalyze: &newer, LastAutoanalyze: &newer},
+			}}},
+			{Source: "s2", IsStandby: true, TableStats: []NodeTableStats{{
+				Schema: "public", Table: "t",
+				Stats: TableStats{Reltuples: 100, LastVacuum: &recent},
+			}}},
+		}
+		got := AggregateTableStats(nodes, "public", "t")
+		if got == nil {
+			t.Fatal("expected aggregated stats")
+		}
+		if got.LastVacuum != nil || got.LastAutovacuum != nil || got.LastAnalyze != nil || got.LastAutoanalyze != nil {
+			t.Errorf("expected all timestamps nil from standby-only, got vac=%v av=%v an=%v aan=%v",
+				got.LastVacuum, got.LastAutovacuum, got.LastAnalyze, got.LastAutoanalyze)
+		}
+		// non-timestamp aggregates still work
+		if got.Reltuples != 100 {
+			t.Errorf("expected Reltuples=100, got %v", got.Reltuples)
+		}
+	})
+
+	t.Run("single_node_no_standby_flag_still_aggregates", func(t *testing.T) {
+		nodes := []NodeStats{
+			{Source: "only", TableStats: []NodeTableStats{{
+				Schema: "public", Table: "t",
+				Stats: TableStats{Reltuples: 10, LastVacuum: &recent, LastAutoanalyze: &recent},
+			}}},
+		}
+		got := AggregateTableStats(nodes, "public", "t")
+		if got == nil {
+			t.Fatal("expected aggregated stats")
+		}
+		if got.LastVacuum == nil || !got.LastVacuum.Equal(recent) {
+			t.Errorf("expected LastVacuum from single node, got %v", got.LastVacuum)
+		}
+		if got.LastAutoanalyze == nil || !got.LastAutoanalyze.Equal(recent) {
+			t.Errorf("expected LastAutoanalyze from single node, got %v", got.LastAutoanalyze)
+		}
+	})
+}
+
 func TestParseReloptions_Empty(t *testing.T) {
 	opts := parseReloptions(nil)
 	if len(opts) != 0 {
