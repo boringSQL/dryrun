@@ -22,7 +22,12 @@ SELECT a.attrelid::int4   AS table_oid,
            WHEN 'a' THEN 'always'
            WHEN 'd' THEN 'by_default'
            ELSE NULL
-       END AS identity
+       END AS identity,
+       NULLIF(a.attstattarget, -1)::int2 AS statistics_target,
+       CASE a.attgenerated
+           WHEN 's' THEN 'stored'
+           ELSE NULL
+       END AS generated
   FROM pg_catalog.pg_attribute a
   JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace

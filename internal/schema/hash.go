@@ -51,12 +51,14 @@ func tableToStructural(t *Table) map[string]any {
 
 func columnToStructural(c *Column) map[string]any {
 	return map[string]any{
-		"name":      c.Name,
-		"ordinal":   c.Ordinal,
-		"type_name": c.TypeName,
-		"nullable":  c.Nullable,
-		"default":   c.Default,
-		"identity":  c.Identity,
-		"comment":   c.Comment,
+		"name":              c.Name,
+		"ordinal":           c.Ordinal,
+		"type_name":         c.TypeName,
+		"nullable":          c.Nullable,
+		"default":           c.Default,
+		"identity":          c.Identity,
+		"comment":           c.Comment,
+		"statistics_target": c.StatisticsTarget,
+		"generated":         c.Generated,
 	}
 }

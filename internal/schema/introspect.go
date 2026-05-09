@@ -222,13 +222,15 @@ type (
 	}
 
 	rawColumn struct {
-		tableOID uint32
-		name     string
-		ordinal  int16
-		typeName string
-		nullable bool
-		dflt     *string
-		identity *string
+		tableOID         uint32
+		name             string
+		ordinal          int16
+		typeName         string
+		nullable         bool
+		dflt             *string
+		identity         *string
+		statisticsTarget *int16
+		generated        *string
 	}
 
 	rawConstraint struct {
@@ -356,7 +358,7 @@ func fetchColumns(ctx context.Context, pool *pgxpool.Pool) ([]rawColumn, error) 
 	return scanAll(rows, func(r pgx.Rows) (rawColumn, error) {
 		var oid int32
 		var rc rawColumn
-		err := r.Scan(&oid, &rc.name, &rc.ordinal, &rc.typeName, &rc.nullable, &rc.dflt, &rc.identity)
+		err := r.Scan(&oid, &rc.name, &rc.ordinal, &rc.typeName, &rc.nullable, &rc.dflt, &rc.identity, &rc.statisticsTarget, &rc.generated)
 		rc.tableOID = uint32(oid)
 		return rc, err
 	})
@@ -723,12 +725,14 @@ func assembleTables(
 	columnsByOID := make(map[uint32][]Column)
 	for _, rc := range rawColumns {
 		columnsByOID[rc.tableOID] = append(columnsByOID[rc.tableOID], Column{
-			Name:     rc.name,
-			Ordinal:  rc.ordinal,
-			TypeName: rc.typeName,
-			Nullable: rc.nullable,
-			Default:  rc.dflt,
-			Identity: rc.identity,
+			Name:             rc.name,
+			Ordinal:          rc.ordinal,
+			TypeName:         rc.typeName,
+			Nullable:         rc.nullable,
+			Default:          rc.dflt,
+			Identity:         rc.identity,
+			StatisticsTarget: rc.statisticsTarget,
+			Generated:        rc.generated,
 		})
 	}
 

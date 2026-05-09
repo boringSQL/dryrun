@@ -620,13 +620,15 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 
 type (
 	compactColumn struct {
-		Name     string  `json:"name"`
-		Ordinal  int16   `json:"ordinal"`
-		TypeName string  `json:"type_name"`
-		Nullable bool    `json:"nullable"`
-		Default  *string `json:"default,omitempty"`
-		Identity *string `json:"identity,omitempty"`
-		Comment  *string `json:"comment,omitempty"`
+		Name             string  `json:"name"`
+		Ordinal          int16   `json:"ordinal"`
+		TypeName         string  `json:"type_name"`
+		Nullable         bool    `json:"nullable"`
+		Default          *string `json:"default,omitempty"`
+		Identity         *string `json:"identity,omitempty"`
+		Comment          *string `json:"comment,omitempty"`
+		StatisticsTarget *int16  `json:"statistics_target,omitempty"`
+		Generated        *string `json:"generated,omitempty"`
 	}
 
 	compactIndex struct {
@@ -674,7 +676,7 @@ func toCompactTable(t *schema.Table) compactTable {
 	}
 	out.Columns = make([]compactColumn, len(t.Columns))
 	for i, c := range t.Columns {
-		out.Columns[i] = compactColumn{c.Name, c.Ordinal, c.TypeName, c.Nullable, c.Default, c.Identity, c.Comment}
+		out.Columns[i] = compactColumn{c.Name, c.Ordinal, c.TypeName, c.Nullable, c.Default, c.Identity, c.Comment, c.StatisticsTarget, c.Generated}
 	}
 	out.Indexes = make([]compactIndex, len(t.Indexes))
 	for i, idx := range t.Indexes {
