@@ -836,21 +836,27 @@ func mcpServeCmd() *cobra.Command {
 			if effectiveSchemaFile == "" && flagSchemaFile != "" {
 				effectiveSchemaFile = flagSchemaFile
 			}
-			if effectiveSchemaFile == "" {
-				cwd, _ := os.Getwd()
-				if _, cfg, err := loadProjectConfig(); err == nil {
-					if resolved, err := cfg.ResolveProfile(nilIfEmpty(flagDB), nil, nilIfEmpty(flagProfile), cwd); err == nil && resolved.SchemaFile != nil {
-						if _, err := os.Stat(*resolved.SchemaFile); err == nil {
-							effectiveSchemaFile = *resolved.SchemaFile
-						}
-					}
+
+			// reload_schema reuses this list later
+			var candidates []string
+			if effectiveSchemaFile != "" {
+				candidates = append(candidates, effectiveSchemaFile)
+			}
+			cwd, _ := os.Getwd()
+			if _, cfg, err := loadProjectConfig(); err == nil {
+				if resolved, err := cfg.ResolveProfile(nilIfEmpty(flagDB), nil, nilIfEmpty(flagProfile), cwd); err == nil && resolved.SchemaFile != nil {
+					candidates = append(candidates, *resolved.SchemaFile)
 				}
-				if effectiveSchemaFile == "" {
-					if dataDir, err := history.DefaultDataDir(); err == nil {
-						candidate := dataDir + "/schema.json"
-						if _, err := os.Stat(candidate); err == nil {
-							effectiveSchemaFile = candidate
-						}
+			}
+			if dataDir, err := history.DefaultDataDir(); err == nil {
+				candidates = append(candidates, dataDir+"/schema.json")
+			}
+
+			if effectiveSchemaFile == "" {
+				for _, c := range candidates {
+					if _, err := os.Stat(c); err == nil {
+						effectiveSchemaFile = c
+						break
 					}
 				}
 			}
@@ -870,6 +876,7 @@ func mcpServeCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "dryrun: loaded schema from %s (%d tables, offline mode)\n",
 					effectiveSchemaFile, len(snap.Tables))
 				server = drmcp.NewOfflineServer(snap, lintCfg)
+				server.SetSchemaCandidates(candidates)
 			case flagDB != "":
 				ctx := context.Background()
 				conn, err := schema.Connect(ctx, flagDB)
@@ -889,10 +896,12 @@ func mcpServeCmd() *cobra.Command {
 				}
 
 				server = drmcp.NewServer(conn.Pool(), flagDB, snap, hist, lintCfg, pgMustardAPIKey)
+				server.SetSchemaCandidates(candidates)
 			default:
-				fmt.Fprintln(os.Stderr, "dryrun: no schema source found, starting with empty schema")
-				fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun import <file>' or 'dryrun --db <url> init' to load a schema")
+				fmt.Fprintln(os.Stderr, "dryrun: no schema found — starting in uninitialized mode")
+				fmt.Fprintln(os.Stderr, "dryrun: use the reload_schema tool after running dump-schema")
 				server = drmcp.NewOfflineServer(&schema.SchemaSnapshot{}, lintCfg)
+				server.SetUninitialized(candidates)
 			}
 
 			mcpSrv := mcpserver.NewMCPServer("dryrun", getVersion(),

@@ -24,12 +24,24 @@ func ExtractNodeStats(ctx context.Context, pool *pgxpool.Pool, source string) (*
 		return nil, fmt.Errorf("extract column stats: %w", err)
 	}
 
+	isStandby, err := FetchIsStandby(ctx, pool)
+	if err != nil {
+		return nil, fmt.Errorf("fetch is_standby: %w", err)
+	}
+
 	return &NodeStats{
 		Source:      source,
+		IsStandby:   isStandby,
 		TableStats:  tableStats,
 		IndexStats:  indexStats,
 		ColumnStats: columnStats,
 	}, nil
+}
+
+func FetchIsStandby(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
+	var b bool
+	err := pool.QueryRow(ctx, "SELECT pg_catalog.pg_is_in_recovery()").Scan(&b)
+	return b, err
 }
 
 func extractTableStats(ctx context.Context, pool *pgxpool.Pool) ([]NodeTableStats, error) {

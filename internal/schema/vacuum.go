@@ -22,17 +22,20 @@ type (
 	}
 
 	VacuumHealth struct {
-		Schema             string   `json:"schema"`
-		Table              string   `json:"table"`
-		Reltuples          float64  `json:"reltuples"`
-		DeadTuples         int64    `json:"dead_tuples"`
-		VacuumTriggerAt    float64  `json:"vacuum_trigger_at"`
-		VacuumProgress     float64  `json:"vacuum_progress"`
-		HasOverrides       bool     `json:"has_overrides"`
-		EffectiveThreshold int64    `json:"effective_threshold"`
-		EffectiveScale     float64  `json:"effective_scale_factor"`
-		AutovacuumEnabled  bool     `json:"autovacuum_enabled"`
-		Recommendations    []string `json:"recommendations,omitempty"`
+		Schema                    string   `json:"schema"`
+		Table                     string   `json:"table"`
+		Reltuples                 float64  `json:"reltuples"`
+		DeadTuples                int64    `json:"dead_tuples"`
+		VacuumTriggerAt           float64  `json:"vacuum_trigger_at"`
+		VacuumProgress            float64  `json:"vacuum_progress"`
+		HasOverrides              bool     `json:"has_overrides"`
+		EffectiveThreshold        int64    `json:"effective_threshold"`
+		EffectiveScale            float64  `json:"effective_scale_factor"`
+		EffectiveAnalyzeThreshold int64    `json:"effective_analyze_threshold"`
+		EffectiveAnalyzeScale     float64  `json:"effective_analyze_scale_factor"`
+		AnalyzeTriggerAt          float64  `json:"analyze_trigger_at"`
+		AutovacuumEnabled         bool     `json:"autovacuum_enabled"`
+		Recommendations           []string `json:"recommendations,omitempty"`
 	}
 )
 
@@ -124,6 +127,8 @@ func AnalyzeVacuumHealth(snap *SchemaSnapshot) []VacuumHealth {
 		// effective settings
 		threshold := defaults.VacuumThreshold
 		scaleFactor := defaults.VacuumScaleFactor
+		analyzeThreshold := defaults.AnalyzeThreshold
+		analyzeScaleFactor := defaults.AnalyzeScaleFactor
 		avEnabled := defaults.Enabled
 
 		if v, ok := opts["autovacuum_vacuum_threshold"]; ok {
@@ -136,27 +141,41 @@ func AnalyzeVacuumHealth(snap *SchemaSnapshot) []VacuumHealth {
 				scaleFactor = parsed
 			}
 		}
+		if v, ok := opts["autovacuum_analyze_threshold"]; ok {
+			if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+				analyzeThreshold = parsed
+			}
+		}
+		if v, ok := opts["autovacuum_analyze_scale_factor"]; ok {
+			if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+				analyzeScaleFactor = parsed
+			}
+		}
 		if v, ok := opts["autovacuum_enabled"]; ok {
 			avEnabled = v == "on" || v == "true"
 		}
 
 		triggerAt := float64(threshold) + scaleFactor*stats.Reltuples
+		analyzeTrigger := float64(analyzeThreshold) + analyzeScaleFactor*stats.Reltuples
 		var progress float64
 		if triggerAt > 0 {
 			progress = float64(stats.DeadTuples) / triggerAt
 		}
 
 		vh := VacuumHealth{
-			Schema:             t.Schema,
-			Table:              t.Name,
-			Reltuples:          stats.Reltuples,
-			DeadTuples:         stats.DeadTuples,
-			VacuumTriggerAt:    triggerAt,
-			VacuumProgress:     progress,
-			HasOverrides:       hasOverrides,
-			EffectiveThreshold: threshold,
-			EffectiveScale:     scaleFactor,
-			AutovacuumEnabled:  avEnabled,
+			Schema:                    t.Schema,
+			Table:                     t.Name,
+			Reltuples:                 stats.Reltuples,
+			DeadTuples:                stats.DeadTuples,
+			VacuumTriggerAt:           triggerAt,
+			VacuumProgress:            progress,
+			HasOverrides:              hasOverrides,
+			EffectiveThreshold:        threshold,
+			EffectiveScale:            scaleFactor,
+			EffectiveAnalyzeThreshold: analyzeThreshold,
+			EffectiveAnalyzeScale:     analyzeScaleFactor,
+			AnalyzeTriggerAt:          analyzeTrigger,
+			AutovacuumEnabled:         avEnabled,
 		}
 
 		if !avEnabled {
@@ -164,15 +183,12 @@ func AnalyzeVacuumHealth(snap *SchemaSnapshot) []VacuumHealth {
 				"autovacuum is disabled for this table! This won't end good; you've been warned")
 		}
 		if stats.Reltuples >= 1_000_000 && !hasOverrides {
-			// target ~100k dead tuples before vacuum triggers, rounded to 1 sig digit
-			suggestedSF := 100_000.0 / stats.Reltuples
-			suggestedSF = math.Round(suggestedSF*1000) / 1000
-			if suggestedSF < 0.001 {
-				suggestedSF = 0.001
-			}
+			vacSF, vacThresh, azSF, azThresh := suggestedVacuumKnobs(stats.Reltuples)
 			vh.Recommendations = append(vh.Recommendations,
-				fmt.Sprintf("large table (%dk rows) using default autovacuum settings; consider lowering autovacuum_vacuum_scale_factor (e.g. %g)",
-					int64(stats.Reltuples)/1000, suggestedSF))
+				fmt.Sprintf("large table (%dk rows) using default autovacuum settings; consider: "+
+					"autovacuum_vacuum_scale_factor=%g, autovacuum_vacuum_threshold=%d, "+
+					"autovacuum_analyze_scale_factor=%g, autovacuum_analyze_threshold=%d",
+					int64(stats.Reltuples)/1000, vacSF, vacThresh, azSF, azThresh))
 		}
 		if stats.Reltuples > 0 && float64(stats.DeadTuples)/stats.Reltuples > 0.10 {
 			vh.Recommendations = append(vh.Recommendations,
@@ -193,4 +209,30 @@ func AnalyzeVacuumHealth(snap *SchemaSnapshot) []VacuumHealth {
 		return results[i].VacuumProgress > results[j].VacuumProgress
 	})
 	return results
+}
+
+// Shared with audit/rules.go so both sides recommend the same numbers.
+func SuggestedVacuumKnobs(reltuples float64) (vacSF float64, vacThresh int64, azSF float64, azThresh int64) {
+	return suggestedVacuumKnobs(reltuples)
+}
+
+func suggestedVacuumKnobs(reltuples float64) (vacSF float64, vacThresh int64, azSF float64, azThresh int64) {
+	vacSF = 100_000.0 / reltuples
+	vacSF = math.Round(vacSF*1000) / 1000
+	if vacSF < 0.001 {
+		vacSF = 0.001
+	}
+	azSF = math.Round(vacSF/2*1000) / 1000
+
+	vacThresh = int64(reltuples * 0.01)
+	if vacThresh < 500 {
+		vacThresh = 500
+	} else if vacThresh > 5000 {
+		vacThresh = 5000
+	}
+	azThresh = vacThresh / 2
+	if azThresh < 250 {
+		azThresh = 250
+	}
+	return
 }

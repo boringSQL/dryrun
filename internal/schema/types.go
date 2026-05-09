@@ -48,13 +48,14 @@ type Column struct {
 }
 
 type Constraint struct {
-	Name       string         `json:"name"`
-	Kind       ConstraintKind `json:"kind"`
-	Columns    []string       `json:"columns"`
-	Definition *string        `json:"definition,omitempty"`
-	FKTable    *string        `json:"fk_table,omitempty"`
-	FKColumns  []string       `json:"fk_columns"`
-	Comment    *string        `json:"comment,omitempty"`
+	Name         string         `json:"name"`
+	Kind         ConstraintKind `json:"kind"`
+	Columns      []string       `json:"columns"`
+	Definition   *string        `json:"definition,omitempty"`
+	FKTable      *string        `json:"fk_table,omitempty"`
+	FKColumns    []string       `json:"fk_columns"`
+	BackingIndex *string        `json:"backing_index,omitempty"`
+	Comment      *string        `json:"comment,omitempty"`
 }
 
 type ConstraintKind string
@@ -85,16 +86,17 @@ func ConstraintKindFromPg(contype string) (ConstraintKind, bool) {
 }
 
 type Index struct {
-	Name           string      `json:"name"`
-	Columns        []string    `json:"columns"`
-	IncludeColumns []string    `json:"include_columns"`
-	IndexType      string      `json:"index_type"`
-	IsUnique       bool        `json:"is_unique"`
-	IsPrimary      bool        `json:"is_primary"`
-	Predicate      *string     `json:"predicate,omitempty"`
-	Definition     string      `json:"definition"`
-	IsValid        bool        `json:"is_valid"`
-	Stats          *IndexStats `json:"stats,omitempty"`
+	Name            string      `json:"name"`
+	Columns         []string    `json:"columns"`
+	IncludeColumns  []string    `json:"include_columns"`
+	IndexType       string      `json:"index_type"`
+	IsUnique        bool        `json:"is_unique"`
+	IsPrimary       bool        `json:"is_primary"`
+	Predicate       *string     `json:"predicate,omitempty"`
+	Definition      string      `json:"definition"`
+	IsValid         bool        `json:"is_valid"`
+	BacksConstraint bool        `json:"backs_constraint,omitempty"`
+	Stats           *IndexStats `json:"stats,omitempty"`
 }
 
 type IndexStats struct {
@@ -259,6 +261,7 @@ type GucSetting struct {
 type NodeStats struct {
 	Source      string            `json:"source"`
 	Timestamp   time.Time         `json:"timestamp"`
+	IsStandby   bool              `json:"is_standby,omitempty"`
 	TableStats  []NodeTableStats  `json:"table_stats"`
 	IndexStats  []NodeIndexStats  `json:"index_stats"`
 	ColumnStats []NodeColumnStats `json:"column_stats,omitempty"`
@@ -313,6 +316,35 @@ func AggregateTableStats(nodeStats []NodeStats, schemaName, tableName string) *T
 		result.IdxScan += s.IdxScan
 		if s.TableSize > result.TableSize {
 			result.TableSize = s.TableSize
+		}
+	}
+
+	// vacuum/analyze timestamps come only from primaries, standbys don't run autovacuum
+	maxTime := func(a, b *time.Time) *time.Time {
+		if a == nil {
+			return b
+		}
+		if b == nil {
+			return a
+		}
+		if b.After(*a) {
+			return b
+		}
+		return a
+	}
+	for i := range nodeStats {
+		if nodeStats[i].IsStandby {
+			continue
+		}
+		for j := range nodeStats[i].TableStats {
+			nts := &nodeStats[i].TableStats[j]
+			if nts.Schema != schemaName || nts.Table != tableName {
+				continue
+			}
+			result.LastVacuum = maxTime(result.LastVacuum, nts.Stats.LastVacuum)
+			result.LastAutovacuum = maxTime(result.LastAutovacuum, nts.Stats.LastAutovacuum)
+			result.LastAnalyze = maxTime(result.LastAnalyze, nts.Stats.LastAnalyze)
+			result.LastAutoanalyze = maxTime(result.LastAutoanalyze, nts.Stats.LastAutoanalyze)
 		}
 	}
 	return result

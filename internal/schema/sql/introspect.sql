@@ -57,10 +57,13 @@ SELECT con.conrelid::int4     AS table_oid,
                 ON a.attrelid = con.confrelid AND a.attnum = ord.attnum
            )
        END AS fk_col_names,
+       ci.relname::text AS backing_index,
        d.description AS comment
   FROM pg_catalog.pg_constraint con
   JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  LEFT JOIN pg_catalog.pg_class ci
+    ON ci.oid = con.conindid
   LEFT JOIN pg_catalog.pg_description d
     ON d.objoid = con.oid AND d.objsubid = 0
  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
@@ -147,6 +150,11 @@ SELECT i.indrelid::int4      AS table_oid,
        pg_catalog.pg_get_expr(i.indpred, i.indrelid) AS predicate,
        pg_catalog.pg_get_indexdef(i.indexrelid) AS definition,
        i.indnkeyatts          AS n_key_atts,
+       -- check when index backs a UNIQUE/PK/EXCLUSION constraint
+       EXISTS (
+           SELECT 1 FROM pg_catalog.pg_constraint con
+            WHERE con.conindid = i.indexrelid
+       ) AS backs_constraint,
        -- All column names (key + include)
        (SELECT array_agg(a.attname ORDER BY ord.n)
           FROM unnest(i.indkey) WITH ORDINALITY AS ord(attnum, n)
