@@ -37,14 +37,16 @@ type Table struct {
 }
 
 type Column struct {
-	Name     string       `json:"name"`
-	Ordinal  int16        `json:"ordinal"`
-	TypeName string       `json:"type_name"`
-	Nullable bool         `json:"nullable"`
-	Default  *string      `json:"default,omitempty"`
-	Identity *string      `json:"identity,omitempty"`
-	Comment  *string      `json:"comment,omitempty"`
-	Stats    *ColumnStats `json:"stats,omitempty"`
+	Name              string       `json:"name"`
+	Ordinal           int16        `json:"ordinal"`
+	TypeName          string       `json:"type_name"`
+	Nullable          bool         `json:"nullable"`
+	Default           *string      `json:"default,omitempty"`
+	Identity          *string      `json:"identity,omitempty"`
+	Comment           *string      `json:"comment,omitempty"`
+	StatisticsTarget  *int16       `json:"statistics_target,omitempty"`
+	Generated         *string      `json:"generated,omitempty"`
+	Stats             *ColumnStats `json:"stats,omitempty"`
 }
 
 type Constraint struct {
