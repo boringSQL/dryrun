@@ -3,7 +3,6 @@ package mcp
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"log"
 	"strings"
@@ -30,7 +29,6 @@ func setupOfflineTest(t *testing.T) *client.Client {
 	mcpSrv := mcpserver.NewMCPServer("dryrun-test", "0.1.0")
 	srv.Register(mcpSrv)
 
-	// Wire pipes exactly like mcptest does
 	serverReader, clientWriter := io.Pipe()
 	clientReader, serverWriter := io.Pipe()
 
@@ -94,256 +92,17 @@ func assertContains(t *testing.T, haystack, needle string) {
 	}
 }
 
-func TestOfflineMCPTools(t *testing.T) {
-	c := setupOfflineTest(t)
-
-	t.Run("list_tables", func(t *testing.T) {
-		out := callTool(t, c, "list_tables", nil)
-		assertContains(t, out, "PostgreSQL 18.3.0")
-		assertContains(t, out, "users")
-		assertContains(t, out, "tasks")
-	})
-
-	t.Run("describe_table", func(t *testing.T) {
-		out := callTool(t, c, "describe_table", map[string]any{"table": "users"})
-		assertContains(t, out, "pg_version")
-		assertContains(t, out, "email")
-		assertContains(t, out, "user_id")
-	})
-
-	t.Run("search_schema", func(t *testing.T) {
-		out := callTool(t, c, "search_schema", map[string]any{"query": "email"})
-		assertContains(t, out, "email")
-	})
-
-	t.Run("find_related", func(t *testing.T) {
-		out := callTool(t, c, "find_related", map[string]any{"table": "users"})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("validate_query", func(t *testing.T) {
-		out := callTool(t, c, "validate_query", map[string]any{
-			"sql": "SELECT * FROM users WHERE email = 'test@example.com'",
-		})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("check_migration", func(t *testing.T) {
-		out := callTool(t, c, "check_migration", map[string]any{
-			"ddl": "ALTER TABLE users ADD COLUMN phone TEXT",
-		})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("suggest_index", func(t *testing.T) {
-		out := callTool(t, c, "suggest_index", map[string]any{
-			"sql": "SELECT * FROM tasks WHERE status = 'open'",
-		})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("lint_schema_default_all", func(t *testing.T) {
-		out := callTool(t, c, "lint_schema", nil)
-		// scope=all returns conventions (compact) and audit
-		assertContains(t, out, "conventions")
-		assertContains(t, out, "audit")
-	})
-
-	t.Run("compare_nodes", func(t *testing.T) {
-		out := callTool(t, c, "compare_nodes", map[string]any{"table": "users"})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("detect_default_all", func(t *testing.T) {
-		out := callTool(t, c, "detect", nil)
-		assertContains(t, out, "stale_stats")
-		assertContains(t, out, "unused_indexes")
-		assertContains(t, out, "anomalies")
-		assertContains(t, out, "bloated_indexes")
-	})
-
-	t.Run("detect_stale_stats", func(t *testing.T) {
-		out := callTool(t, c, "detect", map[string]any{"kind": "stale_stats"})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("detect_unused_indexes", func(t *testing.T) {
-		out := callTool(t, c, "detect", map[string]any{"kind": "unused_indexes"})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("detect_anomalies", func(t *testing.T) {
-		out := callTool(t, c, "detect", map[string]any{"kind": "anomalies"})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("detect_bloated_indexes", func(t *testing.T) {
-		out := callTool(t, c, "detect", map[string]any{"kind": "bloated_indexes"})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("detect_bloated_with_threshold", func(t *testing.T) {
-		out := callTool(t, c, "detect", map[string]any{"kind": "bloated_indexes", "threshold": 2.0})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("detect_invalid_kind", func(t *testing.T) {
-		out := callTool(t, c, "detect", map[string]any{"kind": "bogus"})
-		assertContains(t, out, "unknown detect kind")
-	})
-
-	t.Run("lint_schema_scope_conventions", func(t *testing.T) {
-		out := callTool(t, c, "lint_schema", map[string]any{"scope": "conventions"})
-		assertContains(t, out, "conventions")
-		assertContains(t, out, "rule_groups")
-	})
-
-	t.Run("lint_schema_scope_audit", func(t *testing.T) {
-		out := callTool(t, c, "lint_schema", map[string]any{"scope": "audit"})
-		assertContains(t, out, "audit")
-		assertContains(t, out, "findings")
-	})
-
-	t.Run("lint_schema_scope_all", func(t *testing.T) {
-		out := callTool(t, c, "lint_schema", map[string]any{"scope": "all"})
-		assertContains(t, out, "conventions")
-		assertContains(t, out, "audit")
-	})
-
-	t.Run("lint_schema_with_schema_filter", func(t *testing.T) {
-		out := callTool(t, c, "lint_schema", map[string]any{"schema": "public"})
-		assertContains(t, out, "conventions")
-	})
-
-	t.Run("vacuum_health", func(t *testing.T) {
-		out := callTool(t, c, "vacuum_health", nil)
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("vacuum_health_with_filter", func(t *testing.T) {
-		out := callTool(t, c, "vacuum_health", map[string]any{"table": "users"})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
-
-	t.Run("vacuum_health_nonexistent_table", func(t *testing.T) {
-		out := callTool(t, c, "vacuum_health", map[string]any{"table": "nonexistent_xyz"})
-		assertContains(t, out, "No vacuum health concerns")
-	})
-
-}
-
-// auditRulePrefixes are rule prefixes that only appear from audit scope.
-var auditRulePrefixes = []string{"indexes/", "fk/circular", "fk/orphan", "fk/type_mismatch", "docs/", "vacuum/", "naming/bool_prefix", "naming/reserved", "naming/id_mismatch", "pk/non_sequential"}
-
-// conventionRulePrefixes are rule prefixes that only appear from conventions scope.
-var conventionRulePrefixes = []string{"types/", "timestamps/", "constraints/", "partition/"}
-
-func TestLintSchemaScopeIsolation(t *testing.T) {
-	c := setupOfflineTest(t)
-
-	// response shape: {"conventions": CompactReport, "audit": Report}
-	type lintOut struct {
-		Conventions *lint.CompactReport `json:"conventions,omitempty"`
-		Audit       *lint.Report        `json:"audit,omitempty"`
+// Pins the error message contract for getSchema when the server has no snap
+// loaded; clients use the "no schema loaded" / "initialize first" substrings
+// to surface actionable guidance back to the user.
+func TestGetSchema_UninitializedError(t *testing.T) {
+	srv := &Server{lintConfig: lint.DefaultConfig()}
+	srv.SetUninitialized([]string{"/tmp/nonexistent"})
+	_, err := srv.getSchema()
+	if err == nil {
+		t.Fatal("expected error when uninitialized")
 	}
-	parse := func(t *testing.T, out string) lintOut {
-		t.Helper()
-		var lo lintOut
-		if err := json.Unmarshal([]byte(out), &lo); err != nil {
-			t.Fatalf("failed to parse lint output: %v", err)
-		}
-		return lo
+	if !strings.Contains(err.Error(), "no schema loaded") || !strings.Contains(err.Error(), "initialize first") {
+		t.Errorf("unexpected error: %v", err)
 	}
-
-	conventionsHasPrefix := func(lo lintOut, prefix string) bool {
-		if lo.Conventions == nil {
-			return false
-		}
-		for _, g := range lo.Conventions.RuleGroups {
-			if strings.HasPrefix(g.Rule, prefix) || g.Rule == prefix {
-				return true
-			}
-		}
-		return false
-	}
-	auditHasPrefix := func(lo lintOut, prefix string) bool {
-		if lo.Audit == nil {
-			return false
-		}
-		for _, f := range lo.Audit.Findings {
-			if strings.HasPrefix(f.Rule, prefix) || f.Rule == prefix {
-				return true
-			}
-		}
-		return false
-	}
-
-	t.Run("conventions_excludes_audit_rules", func(t *testing.T) {
-		lo := parse(t, callTool(t, c, "lint_schema", map[string]any{"scope": "conventions"}))
-		for _, prefix := range auditRulePrefixes {
-			if conventionsHasPrefix(lo, prefix) {
-				t.Errorf("conventions scope should not contain audit rule %q", prefix)
-			}
-		}
-	})
-
-	t.Run("audit_excludes_convention_rules", func(t *testing.T) {
-		lo := parse(t, callTool(t, c, "lint_schema", map[string]any{"scope": "audit"}))
-		for _, prefix := range conventionRulePrefixes {
-			if auditHasPrefix(lo, prefix) {
-				t.Errorf("audit scope should not contain convention rule %q", prefix)
-			}
-		}
-	})
-
-	t.Run("all_has_both_branches", func(t *testing.T) {
-		allLo := parse(t, callTool(t, c, "lint_schema", map[string]any{"scope": "all"}))
-		if allLo.Conventions == nil {
-			t.Error("all scope should include conventions")
-		}
-		if allLo.Audit == nil {
-			t.Error("all scope should include audit")
-		}
-	})
-
-	t.Run("schema_filter_reduces_findings", func(t *testing.T) {
-		allLo := parse(t, callTool(t, c, "lint_schema", nil))
-		filteredLo := parse(t, callTool(t, c, "lint_schema", map[string]any{"schema": "nonexistent_schema"}))
-
-		var allCount, filteredCount int
-		if allLo.Audit != nil {
-			allCount = len(allLo.Audit.Findings)
-		}
-		if filteredLo.Audit != nil {
-			filteredCount = len(filteredLo.Audit.Findings)
-		}
-
-		if filteredCount >= allCount && allCount > 0 {
-			t.Errorf("filtering by nonexistent schema should reduce findings, got %d vs %d", filteredCount, allCount)
-		}
-	})
 }

@@ -1,9 +1,13 @@
 package mcp
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/boringsql/dryrun/internal/lint"
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
@@ -144,5 +148,84 @@ func TestFilterSnap_MultiNodeFilters(t *testing.T) {
 	// original snap untouched
 	if len(snap.NodeStats[0].TableStats) != 3 {
 		t.Errorf("original snap mutated: primary TableStats len=%d", len(snap.NodeStats[0].TableStats))
+	}
+}
+
+// Pins the _meta block shape produced by injectMeta for an offline server:
+// mode=offline, database and pg_version from the snapshot, and the hint field
+// is present when non-empty, omitted when empty.
+func TestInjectMeta_OfflineMode(t *testing.T) {
+	snap := &schema.SchemaSnapshot{
+		PgVersion: "PostgreSQL 17.2 on x86_64", Database: "appdb",
+		Timestamp: time.Now().UTC(),
+	}
+	srv := NewOfflineServer(snap, lint.DefaultConfig())
+
+	t.Run("with_hint", func(t *testing.T) {
+		out := map[string]any{"foo": "bar"}
+		srv.injectMeta(out, "do the thing")
+		meta, ok := out["_meta"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected _meta map, got %T", out["_meta"])
+		}
+		if meta["mode"] != "offline" {
+			t.Errorf("expected mode=offline, got %v", meta["mode"])
+		}
+		if meta["database"] != "appdb" {
+			t.Errorf("expected database=appdb, got %v", meta["database"])
+		}
+		if _, has := meta["pg_version"]; !has {
+			t.Error("expected pg_version key")
+		}
+		if meta["hint"] != "do the thing" {
+			t.Errorf("expected hint set, got %v", meta["hint"])
+		}
+	})
+
+	t.Run("empty_hint_omitted", func(t *testing.T) {
+		out := map[string]any{}
+		srv.injectMeta(out, "")
+		meta, _ := out["_meta"].(map[string]any)
+		if _, has := meta["hint"]; has {
+			t.Error("expected no hint key when empty")
+		}
+	})
+}
+
+// verifies metaJSONResult returns a TextContent whose body is valid JSON that
+// merges the payload at top level with an injected _meta block. Confirms hint
+// propagation end-to-end through the JSON serializer.
+func TestMetaJSONResult_ProducesValidJSON(t *testing.T) {
+	snap := &schema.SchemaSnapshot{
+		PgVersion: "PostgreSQL 17.2 on x86_64", Database: "appdb",
+		Timestamp: time.Now().UTC(),
+	}
+	srv := NewOfflineServer(snap, lint.DefaultConfig())
+
+	payload := map[string]any{"valid": true, "warnings": []string{"w1"}}
+	res := srv.metaJSONResult(payload, "", "use advise")
+	if res == nil || len(res.Content) == 0 {
+		t.Fatal("expected non-empty result")
+	}
+	tc, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", res.Content[0])
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(tc.Text), &decoded); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, tc.Text)
+	}
+	meta, ok := decoded["_meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected _meta object, got %T", decoded["_meta"])
+	}
+	if meta["mode"] != "offline" {
+		t.Errorf("expected offline mode, got %v", meta["mode"])
+	}
+	if meta["hint"] != "use advise" {
+		t.Errorf("expected hint set, got %v", meta["hint"])
+	}
+	if decoded["valid"] != true {
+		t.Errorf("expected payload merged: valid=true")
 	}
 }
