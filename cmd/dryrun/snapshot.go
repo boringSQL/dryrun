@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -37,53 +38,58 @@ func snapshotExportCmd() *cobra.Command {
 				outRoot = filepath.Join(dataDir, "snapshots")
 			}
 
-			ctx := cmd.Context()
-			keys, err := store.ListKeys(ctx)
+			written, streams, err := runSnapshotExport(cmd.Context(), store, outRoot)
 			if err != nil {
 				return err
 			}
-
-			enc, err := zstd.NewWriter(nil)
-			if err != nil {
-				return err
-			}
-			defer enc.Close()
-
-			var written int
-			for _, key := range keys {
-				summaries, err := store.List(ctx, key, history.TimeRange{})
-				if err != nil {
-					return err
-				}
-				for _, s := range summaries {
-					snap, err := store.Get(ctx, key, history.NewRefHash(s.ContentHash))
-					if err != nil {
-						return err
-					}
-					dir := filepath.Join(outRoot, string(key.ProjectID), string(key.DatabaseID))
-					if err := os.MkdirAll(dir, 0o755); err != nil {
-						return err
-					}
-					name := fmt.Sprintf("%s-%s.json.zst",
-						s.Timestamp.UTC().Format("20060102T150405Z"), s.ContentHash)
-					raw, err := json.Marshal(snap)
-					if err != nil {
-						return err
-					}
-					compressed := enc.EncodeAll(raw, nil)
-					if err := os.WriteFile(filepath.Join(dir, name), compressed, 0o644); err != nil {
-						return err
-					}
-					written++
-				}
-			}
-
-			fmt.Printf("Exported %d snapshot(s) from %d stream(s) to %s\n",
-				written, len(keys), outRoot)
+			fmt.Printf("Exported %d snapshot(s) from %d stream(s) to %s\n", written, streams, outRoot)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&out, "out", "", "output directory (default: .dryrun/snapshots)")
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
 	return cmd
+}
+
+// runSnapshotExport drives the export loop against any SnapshotStore so tests
+// can seed an in-memory store without going through cobra/flags.
+func runSnapshotExport(ctx context.Context, store history.SnapshotStore, outRoot string) (written, streams int, err error) {
+	keys, err := store.ListKeys(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	enc, err := zstd.NewWriter(nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer enc.Close()
+
+	for _, key := range keys {
+		summaries, err := store.List(ctx, key, history.TimeRange{})
+		if err != nil {
+			return written, len(keys), err
+		}
+		for _, s := range summaries {
+			snap, err := store.Get(ctx, key, history.NewRefHash(s.ContentHash))
+			if err != nil {
+				return written, len(keys), err
+			}
+			dir := filepath.Join(outRoot, string(key.ProjectID), string(key.DatabaseID))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return written, len(keys), err
+			}
+			name := fmt.Sprintf("%s-%s.json.zst",
+				s.Timestamp.UTC().Format("20060102T150405Z"), s.ContentHash)
+			raw, err := json.Marshal(snap)
+			if err != nil {
+				return written, len(keys), err
+			}
+			if err := os.WriteFile(filepath.Join(dir, name), enc.EncodeAll(raw, nil), 0o644); err != nil {
+				return written, len(keys), err
+			}
+			written++
+		}
+	}
+	return written, len(keys), nil
 }
