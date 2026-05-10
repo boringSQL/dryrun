@@ -176,7 +176,7 @@ schema_file = ".dryrun/schema.json"
 				slog.Warn("could not open history store", "error", err)
 			} else {
 				defer store.Close()
-				if _, err := store.SaveSnapshot(flagDB, snap); err != nil {
+				if _, err := store.Put(cmd.Context(), resolveSnapshotKey(), snap); err != nil {
 					slog.Warn("could not save snapshot", "error", err)
 				}
 			}
@@ -459,11 +459,11 @@ func snapshotCmd() *cobra.Command {
 				return err
 			}
 
-			saved, err := store.SaveSnapshot(flagDB, snap)
+			outcome, err := store.Put(cmd.Context(), resolveSnapshotKey(), snap)
 			if err != nil {
 				return err
 			}
-			if saved {
+			if outcome == history.PutInserted {
 				fmt.Printf("Snapshot saved: %s\n", snap.ContentHash)
 				fmt.Printf("  %d tables, %d views, %d functions\n", len(snap.Tables), len(snap.Views), len(snap.Functions))
 			} else {
@@ -478,17 +478,13 @@ func snapshotCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List saved snapshots",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dbURL, err := requireDB()
-			if err != nil {
-				return err
-			}
 			store, err := openHistoryStore(historyDB)
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			summaries, err := store.ListSnapshots(dbURL)
+			summaries, err := store.List(cmd.Context(), resolveSnapshotKey(), history.TimeRange{})
 			if err != nil {
 				return err
 			}
@@ -528,15 +524,9 @@ func snapshotCmd() *cobra.Command {
 			}
 			defer store.Close()
 
+			key := resolveSnapshotKey()
 			loadByHash := func(h string) (*schema.SchemaSnapshot, error) {
-				s, err := store.LoadSnapshot(h)
-				if err != nil {
-					return nil, err
-				}
-				if s == nil {
-					return nil, fmt.Errorf("snapshot with hash '%s' not found", h)
-				}
-				return s, nil
+				return store.Get(cmd.Context(), key, history.NewRefHash(h))
 			}
 
 			var fromSnap *schema.SchemaSnapshot
@@ -544,10 +534,7 @@ func snapshotCmd() *cobra.Command {
 			case fromHash != "":
 				fromSnap, err = loadByHash(fromHash)
 			case latest:
-				fromSnap, err = store.LatestSnapshot(flagDB)
-				if err == nil && fromSnap == nil {
-					err = fmt.Errorf("no saved snapshots found for this database")
-				}
+				fromSnap, err = store.Get(cmd.Context(), key, history.NewRefLatest())
 			default:
 				return fmt.Errorf("specify --from <hash> or --latest")
 			}
@@ -812,6 +799,19 @@ func openHistoryStore(path string) (*history.Store, error) {
 		return history.Open(path)
 	}
 	return history.OpenDefault()
+}
+
+func resolveSnapshotKey() history.SnapshotKey {
+	cwd, _ := os.Getwd()
+	if _, cfg, err := loadProjectConfig(); err == nil {
+		if resolved, rerr := cfg.ResolveProfile(nilIfEmpty(flagDB), nilIfEmpty(flagSchemaFile), nilIfEmpty(flagProfile), cwd); rerr == nil {
+			return resolved.SnapshotKey()
+		}
+	}
+	// no config — synthesize the same shape ResolvedProfile would have produced for a CLI override
+	empty := &config.ProjectConfig{}
+	pid := empty.ProjectID(cwd)
+	return history.SnapshotKey{ProjectID: pid, DatabaseID: history.DatabaseId(pid)}
 }
 
 func nilIfEmpty(s string) *string {
