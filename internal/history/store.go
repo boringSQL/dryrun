@@ -112,7 +112,7 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 
-	// in-place upgrade for pre-v0.6 history.db: columns added nullable; legacy rows stay NULL
+	// in-place upgrade for legacy history.db: columns added nullable; legacy rows stay NULL
 	for _, col := range []string{"project_id", "database_id"} {
 		if _, err := s.db.Exec("ALTER TABLE snapshots ADD COLUMN " + col + " TEXT"); err != nil {
 			if !strings.Contains(err.Error(), "duplicate column name") {
@@ -274,6 +274,28 @@ func (s *Store) DeleteBefore(ctx context.Context, key SnapshotKey, cutoff time.T
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// rows with NULL project/database are legacy and not exportable as keyed streams
+func (s *Store) ListKeys(ctx context.Context) ([]SnapshotKey, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT project_id, database_id FROM snapshots
+		  WHERE project_id IS NOT NULL AND database_id IS NOT NULL
+		  ORDER BY project_id, database_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []SnapshotKey
+	for rows.Next() {
+		var pid, did string
+		if err := rows.Scan(&pid, &did); err != nil {
+			return nil, err
+		}
+		out = append(out, SnapshotKey{ProjectID: ProjectId(pid), DatabaseID: DatabaseId(did)})
+	}
+	return out, rows.Err()
 }
 
 // compile-time check that *Store satisfies SnapshotStore
