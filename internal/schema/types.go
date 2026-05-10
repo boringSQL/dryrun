@@ -401,3 +401,117 @@ func EffectiveTableStats(t *Table, snap *SchemaSnapshot) *TableStats {
 	}
 	return t.Stats
 }
+
+// JSON map keys must be strings, so (schema, name) keying uses entry slices
+type QualifiedName struct {
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+}
+
+func (q QualifiedName) String() string {
+	if q.Schema == "" {
+		return q.Name
+	}
+	return q.Schema + "." + q.Name
+}
+
+// Sizing inputs the planner uses: row estimate, on-disk footprint
+type TableSizing struct {
+	Reltuples         float64 `json:"reltuples"`
+	Relpages          int64   `json:"relpages"`
+	TableSize         int64   `json:"table_size"`
+	TotalRelationSize int64   `json:"total_relation_size"`
+	IndexesSize       int64   `json:"indexes_size"`
+	ToastSize         int64   `json:"toast_size,omitempty"`
+}
+
+// Counters and vacuum/analyze timestamps from pg_stat_user_tables
+type TableActivity struct {
+	SeqScan          int64      `json:"seq_scan"`
+	SeqTupRead       int64      `json:"seq_tup_read"`
+	IdxScan          int64      `json:"idx_scan"`
+	IdxTupFetch      int64      `json:"idx_tup_fetch"`
+	NTupIns          int64      `json:"n_tup_ins"`
+	NTupUpd          int64      `json:"n_tup_upd"`
+	NTupDel          int64      `json:"n_tup_del"`
+	NTupHotUpd       int64      `json:"n_tup_hot_upd"`
+	NLiveTup         int64      `json:"n_live_tup"`
+	NDeadTup         int64      `json:"n_dead_tup"`
+	LastVacuum       *time.Time `json:"last_vacuum,omitempty"`
+	LastAutovacuum   *time.Time `json:"last_autovacuum,omitempty"`
+	LastAnalyze      *time.Time `json:"last_analyze,omitempty"`
+	LastAutoanalyze  *time.Time `json:"last_autoanalyze,omitempty"`
+	VacuumCount      int64      `json:"vacuum_count"`
+	AutovacuumCount  int64      `json:"autovacuum_count"`
+	AnalyzeCount     int64      `json:"analyze_count"`
+	AutoanalyzeCount int64      `json:"autoanalyze_count"`
+}
+
+type IndexSizing struct {
+	Relpages  int64   `json:"relpages"`
+	Reltuples float64 `json:"reltuples"`
+	Size      int64   `json:"size"`
+}
+
+type IndexActivity struct {
+	IdxScan     int64 `json:"idx_scan"`
+	IdxTupRead  int64 `json:"idx_tup_read"`
+	IdxTupFetch int64 `json:"idx_tup_fetch"`
+}
+
+// Identifies the node that produced an ActivityStatsSnapshot
+type NodeIdentity struct {
+	Source    string    `json:"source"`
+	Label     *string   `json:"label,omitempty"`
+	IsStandby bool      `json:"is_standby"`
+	PgVersion string    `json:"pg_version"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+type TableSizingEntry struct {
+	Table  QualifiedName `json:"table"`
+	Sizing TableSizing   `json:"sizing"`
+}
+
+type IndexSizingEntry struct {
+	Table  QualifiedName `json:"table"`
+	Index  string        `json:"index"`
+	Sizing IndexSizing   `json:"sizing"`
+}
+
+type ColumnStatsEntry struct {
+	Table  QualifiedName `json:"table"`
+	Column string        `json:"column"`
+	Stats  ColumnStats   `json:"stats"`
+}
+
+type TableActivityEntry struct {
+	Table    QualifiedName `json:"table"`
+	Activity TableActivity `json:"activity"`
+}
+
+type IndexActivityEntry struct {
+	Table    QualifiedName `json:"table"`
+	Index    string        `json:"index"`
+	Activity IndexActivity `json:"activity"`
+}
+
+// Persisted planner inputs; schema_ref_hash binds rows to a SchemaSnapshot
+type PlannerStatsSnapshot struct {
+	SchemaRefHash string             `json:"schema_ref_hash"`
+	ContentHash   string             `json:"content_hash"`
+	Database      string             `json:"database"`
+	Timestamp     time.Time          `json:"timestamp"`
+	Tables        []TableSizingEntry `json:"tables"`
+	Indexes       []IndexSizingEntry `json:"indexes"`
+	Columns       []ColumnStatsEntry `json:"columns"`
+}
+
+// Persisted per-node activity counters
+type ActivityStatsSnapshot struct {
+	SchemaRefHash string               `json:"schema_ref_hash"`
+	ContentHash   string               `json:"content_hash"`
+	Node          NodeIdentity         `json:"node"`
+	Tables        []TableActivityEntry `json:"tables"`
+	Indexes       []IndexActivityEntry `json:"indexes"`
+}

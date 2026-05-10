@@ -107,6 +107,36 @@ func (s *Store) migrate() error {
 			ON snapshots(content_hash);
 		CREATE INDEX IF NOT EXISTS snapshots_by_key_taken_at
 			ON snapshots(project_id, database_id, timestamp DESC);
+
+		CREATE TABLE IF NOT EXISTS planner_stats (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id      TEXT,
+			database_id     TEXT,
+			schema_ref_hash TEXT NOT NULL,
+			content_hash    TEXT NOT NULL,
+			timestamp       TEXT NOT NULL,
+			payload_json    TEXT NOT NULL,
+			UNIQUE(schema_ref_hash, content_hash)
+		);
+		CREATE INDEX IF NOT EXISTS planner_stats_by_key_taken_at
+			ON planner_stats(project_id, database_id, timestamp DESC);
+		CREATE INDEX IF NOT EXISTS planner_stats_by_schema_ref
+			ON planner_stats(schema_ref_hash);
+
+		CREATE TABLE IF NOT EXISTS activity_stats (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id      TEXT,
+			database_id     TEXT,
+			schema_ref_hash TEXT NOT NULL,
+			content_hash    TEXT NOT NULL,
+			node_source     TEXT NOT NULL,
+			timestamp       TEXT NOT NULL,
+			payload_json    TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS activity_stats_by_key_taken_at
+			ON activity_stats(project_id, database_id, timestamp DESC);
+		CREATE INDEX IF NOT EXISTS activity_stats_by_schema_ref
+			ON activity_stats(schema_ref_hash, node_source, timestamp DESC);
 	`)
 	if err != nil {
 		return fmt.Errorf("migration failed: %w", err)
