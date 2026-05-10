@@ -282,6 +282,119 @@ func TestParseDemoFixture(t *testing.T) {
 	}
 }
 
+// TestResolvePrecedence walks each rung of the documented precedence ladder:
+// --db > --schema > --profile > [default].profile > single-profile fallback.
+// Each sub-test removes the higher-priority input and verifies the next rung
+// takes over.
+func TestResolvePrecedence(t *testing.T) {
+	toml := `
+[default]
+profile = "prod"
+
+[profiles.dev]
+db_url = "postgres://dev/x"
+
+[profiles.prod]
+db_url = "postgres://prod/x"
+`
+	cfg, err := Parse(toml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := "/tmp/demo"
+	os.Unsetenv("PROFILE")
+
+	cliDB := "postgres://cli/x"
+	cliSchema := "/tmp/schema.json"
+	dev := "dev"
+
+	// rung 1: --db wins over everything
+	rp, err := cfg.ResolveProfile(&cliDB, &cliSchema, &dev, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.DBURL == nil || *rp.DBURL != cliDB {
+		t.Errorf("--db rung: got %v, want %s", rp.DBURL, cliDB)
+	}
+
+	// rung 2: --schema wins when --db absent
+	rp, err = cfg.ResolveProfile(nil, &cliSchema, &dev, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.SchemaFile == nil || *rp.SchemaFile != cliSchema || rp.DBURL != nil {
+		t.Errorf("--schema rung: got schema=%v db=%v", rp.SchemaFile, rp.DBURL)
+	}
+
+	// rung 3: --profile wins over [default].profile
+	rp, err = cfg.ResolveProfile(nil, nil, &dev, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.Name != "dev" {
+		t.Errorf("--profile rung: got %q, want dev", rp.Name)
+	}
+
+	// rung 4: [default].profile when no CLI selector
+	rp, err = cfg.ResolveProfile(nil, nil, nil, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.Name != "prod" {
+		t.Errorf("[default].profile rung: got %q, want prod", rp.Name)
+	}
+}
+
+// TestResolveSingleProfileFallback: with no [default] and a single profile,
+// resolution implicitly picks it. Adding a second profile breaks the fallback
+// (resolver must require an explicit selector).
+func TestResolveSingleProfileFallback(t *testing.T) {
+	one, _ := Parse(`
+[profiles.only]
+db_url = "postgres://only/x"
+`)
+	rp, err := one.ResolveProfile(nil, nil, nil, "/tmp/demo")
+	if err != nil {
+		t.Fatalf("single-profile fallback: %v", err)
+	}
+	if rp.Name != "only" || rp.DBURL == nil || *rp.DBURL != "postgres://only/x" {
+		t.Errorf("got %+v", rp)
+	}
+
+	two, _ := Parse(`
+[profiles.a]
+db_url = "postgres://a/x"
+
+[profiles.b]
+db_url = "postgres://b/x"
+`)
+	tmp := t.TempDir() // ensure no .dryrun/schema.json under cwd
+	if _, err := two.ResolveProfile(nil, nil, nil, tmp); err == nil {
+		t.Error("expected error with two profiles and no selector")
+	}
+}
+
+// TestResolveProfilePlusDB: --db must beat --profile even when the profile
+// exists and has its own db_url. The CLI override is a hard short-circuit.
+func TestResolveProfilePlusDB(t *testing.T) {
+	cfg, _ := Parse(`
+[profiles.staging]
+db_url = "postgres://stg/x"
+`)
+	cliDB := "postgres://override/x"
+	staging := "staging"
+	rp, err := cfg.ResolveProfile(&cliDB, nil, &staging, "/tmp/demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.DBURL == nil || *rp.DBURL != cliDB {
+		t.Errorf("--db should override --profile: got %v", rp.DBURL)
+	}
+	if rp.Name != "<cli>" {
+		t.Errorf("expected Name=<cli>, got %q", rp.Name)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	for i := 0; i+len(needle) <= len(haystack); i++ {
 		if haystack[i:i+len(needle)] == needle {
