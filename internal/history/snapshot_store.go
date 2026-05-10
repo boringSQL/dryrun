@@ -55,4 +55,5 @@ type SnapshotStore interface {
 	List(ctx context.Context, key SnapshotKey, rng TimeRange) ([]SnapshotSummary, error)
 	Latest(ctx context.Context, key SnapshotKey) (*SnapshotSummary, error)
 	DeleteBefore(ctx context.Context, key SnapshotKey, cutoff time.Time) (int64, error)
+	ListKeys(ctx context.Context) ([]SnapshotKey, error)
 }
