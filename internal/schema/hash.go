@@ -62,3 +62,29 @@ func columnToStructural(c *Column) map[string]any {
 		"generated":         c.Generated,
 	}
 }
+
+// SHA-256 over the captured planner data; schema_ref binds to the DDL snapshot
+func ComputePlannerContentHash(p *PlannerStatsSnapshot) string {
+	canonical := map[string]any{
+		"schema_ref_hash": p.SchemaRefHash,
+		"tables":          p.Tables,
+		"indexes":         p.Indexes,
+		"columns":         p.Columns,
+	}
+	b, _ := json.Marshal(canonical)
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("%x", h)
+}
+
+// Per-node activity; node.source included so two nodes never collide
+func ComputeActivityContentHash(a *ActivityStatsSnapshot) string {
+	canonical := map[string]any{
+		"schema_ref_hash": a.SchemaRefHash,
+		"node_source":     a.Node.Source,
+		"tables":          a.Tables,
+		"indexes":         a.Indexes,
+	}
+	b, _ := json.Marshal(canonical)
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("%x", h)
+}
