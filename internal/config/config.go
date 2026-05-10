@@ -148,6 +148,13 @@ func (c *ProjectConfig) ResolveProfile(cliDB, cliSchema, cliProfile *string, pro
 		return resolveProfileConfig(profileName, &profile, projectRoot, projectID), nil
 	}
 
+	// one profile defined, treat it as the default
+	if len(c.Profiles) == 1 {
+		for name, profile := range c.Profiles {
+			return resolveProfileConfig(name, &profile, projectRoot, projectID), nil
+		}
+	}
+
 	autoSchema := filepath.Join(projectRoot, ".dryrun", "schema.json")
 	if info, err := os.Stat(autoSchema); err == nil && !info.IsDir() {
 		return &ResolvedProfile{Name: "<auto>", SchemaFile: &autoSchema, ProjectID: projectID}, nil
