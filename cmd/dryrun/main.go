@@ -685,10 +685,26 @@ func statsCmd() *cobra.Command {
 }
 
 func requireDB() (string, error) {
-	if flagDB == "" {
-		return "", fmt.Errorf("--db or DATABASE_URL is required")
+	if flagDB != "" {
+		return flagDB, nil
 	}
-	return flagDB, nil
+	if url, ok := dbURLFromProfile(); ok {
+		return url, nil
+	}
+	return "", fmt.Errorf("--db, DATABASE_URL, or a profile with db_url is required")
+}
+
+func dbURLFromProfile() (string, bool) {
+	cwd, _ := os.Getwd()
+	_, cfg, err := loadProjectConfig()
+	if err != nil {
+		return "", false
+	}
+	resolved, err := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd)
+	if err != nil || resolved.DBURL == nil || *resolved.DBURL == "" {
+		return "", false
+	}
+	return *resolved.DBURL, true
 }
 
 // connectDB calls requireDB then opens a schema connection.
