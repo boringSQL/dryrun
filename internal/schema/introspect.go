@@ -4,7 +4,6 @@ import (
 	"context"
 	"embed"
 	"fmt"
-	"log/slog"
 	"sort"
 	"time"
 
@@ -48,7 +47,7 @@ func q(name string) string {
 	return store.MustHaveQuery(name).Query()
 }
 
-// Full introspection of the connected db, returns point-in-time snapshot
+// DDL-only introspection; planner/activity stats now flow through CapturePlannerStats / CaptureActivityStats
 func IntrospectSchema(ctx context.Context, pool *pgxpool.Pool) (*SchemaSnapshot, error) {
 	var pgVersion string
 	if err := pool.QueryRow(ctx, "SELECT version()").Scan(&pgVersion); err != nil {
@@ -85,14 +84,6 @@ func IntrospectSchema(ctx context.Context, pool *pgxpool.Pool) (*SchemaSnapshot,
 	if err != nil {
 		return nil, fmt.Errorf("fetch indexes: %w", err)
 	}
-	rawTableStats, err := fetchTableStats(ctx, pool)
-	if err != nil {
-		return nil, fmt.Errorf("fetch table stats: %w", err)
-	}
-	rawColumnStats, err := fetchColumnStats(ctx, pool)
-	if err != nil {
-		return nil, fmt.Errorf("fetch column stats: %w", err)
-	}
 	rawPartitions, err := fetchPartitionInfo(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("fetch partition info: %w", err)
@@ -108,10 +99,6 @@ func IntrospectSchema(ctx context.Context, pool *pgxpool.Pool) (*SchemaSnapshot,
 	rawTriggers, err := fetchTriggers(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("fetch triggers: %w", err)
-	}
-	rawIdxStats, err := fetchIndexStats(ctx, pool)
-	if err != nil {
-		return nil, fmt.Errorf("fetch index stats: %w", err)
 	}
 
 	// top-level objects
@@ -144,27 +131,6 @@ func IntrospectSchema(ctx context.Context, pool *pgxpool.Pool) (*SchemaSnapshot,
 		return nil, fmt.Errorf("fetch gucs: %w", err)
 	}
 
-	isStandby, err := FetchIsStandby(ctx, pool)
-	if err != nil {
-		return nil, fmt.Errorf("fetch is_standby: %w", err)
-	}
-
-	if len(rawTableStats) > 0 {
-		withVacuum := 0
-		for _, s := range rawTableStats {
-			if s.lastAutovacuum != nil {
-				withVacuum++
-			}
-		}
-		if withVacuum == 0 {
-			if isStandby {
-				slog.Info("all vacuum timestamps are null; expected on standby")
-			} else {
-				slog.Warn("all vacuum/analyze timestamps are null on primary! check that the role has pg_read_all_stats privilege")
-			}
-		}
-	}
-
 	tables := assembleTables(
 		rawTables,
 		rawColumns,
@@ -172,13 +138,13 @@ func IntrospectSchema(ctx context.Context, pool *pgxpool.Pool) (*SchemaSnapshot,
 		tableComments,
 		columnComments,
 		rawIndexes,
-		rawTableStats,
-		rawColumnStats,
+		nil,
+		nil,
 		rawPartitions,
 		rawPartitionChildren,
 		rawPolicies,
 		rawTriggers,
-		rawIdxStats,
+		nil,
 	)
 
 	snap := &SchemaSnapshot{
@@ -195,18 +161,6 @@ func IntrospectSchema(ctx context.Context, pool *pgxpool.Pool) (*SchemaSnapshot,
 		GUCs:       gucs,
 	}
 	snap.ContentHash = ComputeContentHash(snap)
-
-	slog.Info("schema introspection complete",
-		"tables", len(snap.Tables),
-		"enums", len(snap.Enums),
-		"domains", len(snap.Domains),
-		"composites", len(snap.Composites),
-		"views", len(snap.Views),
-		"functions", len(snap.Functions),
-		"extensions", len(snap.Extensions),
-		"hash", snap.ContentHash,
-	)
-
 	return snap, nil
 }
 
