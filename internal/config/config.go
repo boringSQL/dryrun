@@ -8,15 +8,21 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/lint"
 )
 
 type (
 	ProjectConfig struct {
+		Project     *ProjectMeta             `toml:"project"`
 		Default     *DefaultConfig           `toml:"default"`
 		Profiles    map[string]ProfileConfig `toml:"profiles"`
 		Conventions *ConventionsConfig       `toml:"conventions"`
 		Services    *ServicesConfig          `toml:"services"`
+	}
+
+	ProjectMeta struct {
+		ID *string `toml:"id"`
 	}
 
 	ServicesConfig struct {
@@ -30,6 +36,7 @@ type (
 	ProfileConfig struct {
 		DBURL      *string `toml:"db_url"`
 		SchemaFile *string `toml:"schema_file"`
+		DatabaseID *string `toml:"database_id"`
 	}
 
 	ConventionsConfig struct {
@@ -58,8 +65,18 @@ type (
 		Name       string
 		DBURL      *string
 		SchemaFile *string
+		ProjectID  history.ProjectId
+		DatabaseID *history.DatabaseId
 	}
 )
+
+func (r *ResolvedProfile) SnapshotKey() history.SnapshotKey {
+	did := history.DatabaseId(string(r.ProjectID))
+	if r.DatabaseID != nil {
+		did = *r.DatabaseID
+	}
+	return history.SnapshotKey{ProjectID: r.ProjectID, DatabaseID: did}
+}
 
 func Parse(content string) (*ProjectConfig, error) {
 	var cfg ProjectConfig
@@ -104,12 +121,14 @@ func Discover(startDir string) (string, *ProjectConfig, bool) {
 
 // Priority: CLI flags > env var > config default > auto-discovery
 func (c *ProjectConfig) ResolveProfile(cliDB, cliSchema, cliProfile *string, projectRoot string) (*ResolvedProfile, error) {
+	projectID := c.ProjectID(projectRoot)
+
 	if cliDB != nil {
 		expanded := ExpandEnvVars(*cliDB)
-		return &ResolvedProfile{Name: "<cli>", DBURL: &expanded}, nil
+		return &ResolvedProfile{Name: "<cli>", DBURL: &expanded, ProjectID: projectID}, nil
 	}
 	if cliSchema != nil {
-		return &ResolvedProfile{Name: "<cli>", SchemaFile: cliSchema}, nil
+		return &ResolvedProfile{Name: "<cli>", SchemaFile: cliSchema, ProjectID: projectID}, nil
 	}
 
 	var profileName string
@@ -126,17 +145,28 @@ func (c *ProjectConfig) ResolveProfile(cliDB, cliSchema, cliProfile *string, pro
 		if !ok {
 			return nil, fmt.Errorf("profile '%s' not found in dryrun.toml", profileName)
 		}
-		return resolveProfileConfig(profileName, &profile, projectRoot), nil
+		return resolveProfileConfig(profileName, &profile, projectRoot, projectID), nil
 	}
 
 	autoSchema := filepath.Join(projectRoot, ".dryrun", "schema.json")
 	if info, err := os.Stat(autoSchema); err == nil && !info.IsDir() {
-		return &ResolvedProfile{Name: "<auto>", SchemaFile: &autoSchema}, nil
+		return &ResolvedProfile{Name: "<auto>", SchemaFile: &autoSchema, ProjectID: projectID}, nil
 	}
 
 	return nil, fmt.Errorf("no profile found: specify --profile, set PROFILE, " +
 		"configure [default].profile in dryrun.toml, " +
 		"or place a schema at .dryrun/schema.json")
+}
+
+func (c *ProjectConfig) ProjectID(projectRoot string) history.ProjectId {
+	if c.Project != nil && c.Project.ID != nil && *c.Project.ID != "" {
+		return history.ProjectId(*c.Project.ID)
+	}
+	base := filepath.Base(projectRoot)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return history.ProjectId("default")
+	}
+	return history.ProjectId(base)
 }
 
 func (c *ProjectConfig) LintConfig() lint.Config {
@@ -182,8 +212,8 @@ func (c *ProjectConfig) LintConfig() lint.Config {
 	return cfg
 }
 
-func resolveProfileConfig(name string, profile *ProfileConfig, projectRoot string) *ResolvedProfile {
-	rp := &ResolvedProfile{Name: name}
+func resolveProfileConfig(name string, profile *ProfileConfig, projectRoot string, projectID history.ProjectId) *ResolvedProfile {
+	rp := &ResolvedProfile{Name: name, ProjectID: projectID}
 	if profile.DBURL != nil {
 		expanded := ExpandEnvVars(*profile.DBURL)
 		rp.DBURL = &expanded
@@ -195,6 +225,12 @@ func resolveProfileConfig(name string, profile *ProfileConfig, projectRoot strin
 		}
 		rp.SchemaFile = &p
 	}
+	did := name
+	if profile.DatabaseID != nil && *profile.DatabaseID != "" {
+		did = *profile.DatabaseID
+	}
+	d := history.DatabaseId(did)
+	rp.DatabaseID = &d
 	return rp
 }
 
