@@ -46,10 +46,35 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		),
 		s.handleSearchSchema,
 	)
-	srv.AddTool(tool("find_related", "Incoming and outgoing foreign keys for a table, with sample JOINs."), s.handleFindRelated)
-	srv.AddTool(tool("validate_query", "Parse SQL and check it against the schema. Flags missing tables or columns and common anti-patterns. Offline."), s.handleValidateQuery)
-	srv.AddTool(tool("check_migration", "Check a DDL statement for lock level, duration, table-size impact, and suggest safer alternatives."), s.handleCheckMigration)
-	srv.AddTool(tool("suggest_index", "Suggest indexes for a SQL query."), s.handleSuggestIndex)
+	srv.AddTool(
+		mcp.NewTool("find_related",
+			mcp.WithDescription("Incoming and outgoing foreign keys for a table, with sample JOINs."),
+			mcp.WithString("table", mcp.Required(), mcp.Description("Table name.")),
+			mcp.WithString("schema", mcp.Description("Schema filter (default: all schemas).")),
+		),
+		s.handleFindRelated,
+	)
+	srv.AddTool(
+		mcp.NewTool("validate_query",
+			mcp.WithDescription("Parse SQL and check it against the schema. Flags missing tables or columns and common anti-patterns. Offline."),
+			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
+		),
+		s.handleValidateQuery,
+	)
+	srv.AddTool(
+		mcp.NewTool("check_migration",
+			mcp.WithDescription("Check a DDL statement for lock level, duration, table-size impact, and suggest safer alternatives."),
+			mcp.WithString("ddl", mcp.Required(), mcp.Description("DDL statement.")),
+		),
+		s.handleCheckMigration,
+	)
+	srv.AddTool(
+		mcp.NewTool("suggest_index",
+			mcp.WithDescription("Suggest indexes for a SQL query."),
+			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
+		),
+		s.handleSuggestIndex,
+	)
 	srv.AddTool(
 		mcp.NewTool("lint_schema",
 			mcp.WithDescription("Schema quality checks. scope=conventions, audit, or all (default). Offline."),
@@ -63,7 +88,14 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		),
 		s.handleLintSchema,
 	)
-	srv.AddTool(tool("compare_nodes", "Per-node stats for a table. Shows reltuples, relpages, scans, size and per-index numbers. Offline."), s.handleCompareNodes)
+	srv.AddTool(
+		mcp.NewTool("compare_nodes",
+			mcp.WithDescription("Per-node stats for a table. Shows reltuples, relpages, scans, size and per-index numbers. Offline."),
+			mcp.WithString("table", mcp.Required(), mcp.Description("Table name.")),
+			mcp.WithString("schema", mcp.Description("Schema filter (default: all schemas).")),
+		),
+		s.handleCompareNodes,
+	)
 	srv.AddTool(
 		mcp.NewTool("detect",
 			mcp.WithDescription("Health checks. kind=stale_stats, unused_indexes, anomalies, bloated_indexes, or all (default). Offline."),
@@ -90,7 +122,9 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		s.handleVacuumHealth,
 	)
 	srv.AddTool(
-		tool("reload_schema", "Reload the on-disk schema without restarting. Run after `dryrun dump-schema`."),
+		mcp.NewTool("reload_schema",
+			mcp.WithDescription("Reload the on-disk schema without restarting. Run after `dryrun dump-schema`."),
+		),
 		s.handleReloadSchema,
 	)
 
@@ -107,8 +141,18 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			),
 			s.handleExplainQuery,
 		)
-		srv.AddTool(tool("refresh_schema", "Re-introspect the database schema."), s.handleRefreshSchema)
-		srv.AddTool(tool("check_drift", "Compare the live local DB against the loaded production snapshot. Each diff is tagged ahead, behind or diverged. Needs live DB."), s.handleCheckDrift)
+		srv.AddTool(
+			mcp.NewTool("refresh_schema",
+				mcp.WithDescription("Re-introspect the database schema."),
+			),
+			s.handleRefreshSchema,
+		)
+		srv.AddTool(
+			mcp.NewTool("check_drift",
+				mcp.WithDescription("Compare the live local DB against the loaded production snapshot. Each diff is tagged ahead, behind or diverged. Needs live DB."),
+			),
+			s.handleCheckDrift,
+		)
 	} else {
 		slog.Info("offline mode: explain_query, refresh_schema, check_drift not available")
 	}
