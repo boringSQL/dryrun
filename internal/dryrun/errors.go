@@ -13,6 +13,7 @@ const (
 	ErrHistory
 	ErrConfig
 	ErrDatabase
+	ErrReplicaCapture
 )
 
 type Error struct {
