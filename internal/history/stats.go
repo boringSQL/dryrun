@@ -139,6 +139,38 @@ func (s *Store) LatestPlanner(ctx context.Context, key SnapshotKey) (*schema.Pla
 	return &p, nil
 }
 
+// ErrSnapshotNotFound only when schema is missing; planner/activity can be absent
+func (s *Store) GetAnnotated(ctx context.Context, key SnapshotKey, at SnapshotRef) (*schema.AnnotatedSchema, error) {
+	snap, err := s.Get(ctx, key, at)
+	if err != nil {
+		return nil, err
+	}
+	out := &schema.AnnotatedSchema{Schema: snap}
+
+	if planner, err := s.GetPlanner(ctx, key, snap.ContentHash); err == nil {
+		out.Planner = planner
+	} else if !errors.Is(err, ErrSnapshotNotFound) {
+		return nil, err
+	}
+
+	acts, err := s.GetActivity(ctx, key, snap.ContentHash)
+	if err != nil {
+		return nil, err
+	}
+	if len(acts) > 0 {
+		nodes := make([]schema.NodeActivity, len(acts))
+		for i := range acts {
+			nodes[i] = schema.NodeActivity{
+				Node:    acts[i].Node,
+				Tables:  acts[i].Tables,
+				Indexes: acts[i].Indexes,
+			}
+		}
+		out.Merged = &schema.MergedActivity{Nodes: nodes}
+	}
+	return out, nil
+}
+
 // one row per node, taken at the most recent timestamp per node_source
 func (s *Store) LatestActivity(ctx context.Context, key SnapshotKey) ([]schema.ActivityStatsSnapshot, error) {
 	rows, err := s.db.QueryContext(ctx,

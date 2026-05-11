@@ -913,6 +913,7 @@ func mcpServeCmd() *cobra.Command {
 
 				server = drmcp.NewServer(conn.Pool(), flagDB, snap, hist, lintCfg, pgMustardAPIKey)
 				server.SetSchemaCandidates(candidates)
+				server.SetSnapshotKey(resolveSnapshotKey())
 			default:
 				fmt.Fprintln(os.Stderr, "dryrun: no schema found — starting in uninitialized mode")
 				fmt.Fprintln(os.Stderr, "dryrun: use the reload_schema tool after running dump-schema")
