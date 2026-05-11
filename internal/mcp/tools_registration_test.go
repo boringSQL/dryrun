@@ -65,6 +65,51 @@ func TestToolsRegistration_EveryListedToolHasHandler(t *testing.T) {
 	}
 }
 
+// Every registered tool must advertise a non-empty inputSchema with
+// type:"object". MCP clients use this to validate arguments and to render
+// parameter UIs; the empty {"properties":{},"required":[],"type":""} shape
+// the old tool() shorthand produced broke both. The expected-required map
+// below pins the required-args contract for each tool that has any.
+func TestToolsRegistration_InputSchemaShape(t *testing.T) {
+	c := setupOfflineTest(t)
+
+	list, err := c.ListTools(context.Background(), mcp.ListToolsRequest{})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	expectedRequired := map[string][]string{
+		"describe_table":  {"table"},
+		"search_schema":   {"query"},
+		"find_related":    {"table"},
+		"validate_query":  {"sql"},
+		"check_migration": {"ddl"},
+		"suggest_index":   {"sql"},
+		"compare_nodes":   {"table"},
+	}
+
+	for _, tool := range list.Tools {
+		t.Run(tool.Name, func(t *testing.T) {
+			if tool.InputSchema.Type != "object" {
+				t.Errorf("tool %s: inputSchema.type = %q, want \"object\"", tool.Name, tool.InputSchema.Type)
+			}
+			want, ok := expectedRequired[tool.Name]
+			if !ok {
+				return
+			}
+			got := map[string]bool{}
+			for _, r := range tool.InputSchema.Required {
+				got[r] = true
+			}
+			for _, r := range want {
+				if !got[r] {
+					t.Errorf("tool %s: required %q missing (have %v)", tool.Name, r, tool.InputSchema.Required)
+				}
+			}
+		})
+	}
+}
+
 // Pins the offline-mode tool surface. If a tool is added or removed from
 // Register, this list must be updated in lockstep — that's the point: it
 // turns "I forgot to wire/unwire X" into a failing test.
