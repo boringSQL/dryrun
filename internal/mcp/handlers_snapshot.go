@@ -18,24 +18,39 @@ func (s *Server) handleRefreshSchema(ctx context.Context, _ mcp.CallToolRequest)
 		return errResult(err.Error()), nil
 	}
 
-	snap, err := schema.IntrospectSchema(ctx, pool)
+	refreshed, err := schema.IntrospectSchema(ctx, pool)
 	if err != nil {
 		return errResult(fmt.Sprintf("introspection failed: %v", err)), nil
 	}
 
 	s.mu.Lock()
-	s.snap = snap
+	rebuilt := schema.RebuildAfterRefresh(s.annotated, refreshed)
+	s.annotated = rebuilt
 	s.mu.Unlock()
 
-	hash := snap.ContentHash
+	hash := refreshed.ContentHash
 	if len(hash) > 16 {
 		hash = hash[:16]
 	}
-	return textResult(fmt.Sprintf("Schema refreshed: %d tables, %d views, %d functions (hash: %s)",
-		len(snap.Tables), len(snap.Views), len(snap.Functions), hash)), nil
+	preserved := ""
+	if rebuilt.Planner != nil {
+		preserved = " (planner preserved)"
+	}
+	return textResult(fmt.Sprintf("Schema refreshed: %d tables, %d views, %d functions (hash: %s)%s",
+		len(refreshed.Tables), len(refreshed.Views), len(refreshed.Functions), hash, preserved)), nil
 }
 
-func (s *Server) handleReloadSchema(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleReloadSchema(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// history.db wins — it carries planner/activity
+	if a, ok := s.loadAnnotatedFromHistory(ctx); ok && a.Schema != nil {
+		s.mu.Lock()
+		s.annotated = a
+		s.uninitialized = false
+		s.mu.Unlock()
+		return textResult(fmt.Sprintf("Schema loaded from history.db: %d tables, %d views, %d functions",
+			len(a.Schema.Tables), len(a.Schema.Views), len(a.Schema.Functions))), nil
+	}
+
 	s.mu.RLock()
 	candidates := append([]string(nil), s.schemaCandidates...)
 	s.mu.RUnlock()
@@ -49,7 +64,7 @@ func (s *Server) handleReloadSchema(_ context.Context, _ mcp.CallToolRequest) (*
 			return errResult(fmt.Sprintf("failed to load %s: %v", path, err)), nil
 		}
 		s.mu.Lock()
-		s.snap = snap
+		s.annotated = &schema.AnnotatedSchema{Schema: snap}
 		s.uninitialized = false
 		s.mu.Unlock()
 		return textResult(fmt.Sprintf("Schema loaded from %s: %d tables, %d views, %d functions",

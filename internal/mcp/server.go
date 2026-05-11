@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -18,9 +19,10 @@ type (
 	Server struct {
 		pool             *pgxpool.Pool
 		dbURL            string
-		snap             *schema.SchemaSnapshot
+		annotated        *schema.AnnotatedSchema
 		mu               sync.RWMutex
 		history          *history.Store
+		snapshotKey      history.SnapshotKey
 		lintConfig       lint.Config
 		pgmustardClient  *pgmustard.Client
 		schemaCandidates []string
@@ -32,7 +34,7 @@ func NewServer(pool *pgxpool.Pool, dbURL string, snap *schema.SchemaSnapshot, hi
 	return &Server{
 		pool:            pool,
 		dbURL:           dbURL,
-		snap:            snap,
+		annotated:       &schema.AnnotatedSchema{Schema: snap},
 		history:         hist,
 		lintConfig:      lintCfg,
 		pgmustardClient: pgmustard.NewClient(pgMustardAPIKey),
@@ -41,7 +43,11 @@ func NewServer(pool *pgxpool.Pool, dbURL string, snap *schema.SchemaSnapshot, hi
 
 func NewOfflineServer(snap *schema.SchemaSnapshot, lintCfg lint.Config) *Server {
 	slog.Info("loaded schema from file", "tables", len(snap.Tables), "database", snap.Database)
-	return &Server{snap: snap, lintConfig: lintCfg, pgmustardClient: pgmustard.NewClient("")}
+	return &Server{
+		annotated:       &schema.AnnotatedSchema{Schema: snap},
+		lintConfig:      lintCfg,
+		pgmustardClient: pgmustard.NewClient(""),
+	}
 }
 
 func (s *Server) SetSchemaCandidates(paths []string) {
@@ -57,13 +63,44 @@ func (s *Server) SetUninitialized(paths []string) {
 	s.uninitialized = true
 }
 
-func (s *Server) getSchema() (*schema.SchemaSnapshot, error) {
+// Required before reload_schema can prefer history.db over schema.json
+func (s *Server) SetSnapshotKey(key history.SnapshotKey) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshotKey = key
+}
+
+func (s *Server) loadAnnotatedFromHistory(ctx context.Context) (*schema.AnnotatedSchema, bool) {
+	s.mu.RLock()
+	hist := s.history
+	key := s.snapshotKey
+	s.mu.RUnlock()
+	if hist == nil || key.ProjectID == "" {
+		return nil, false
+	}
+	a, err := hist.GetAnnotated(ctx, key, history.NewRefLatest())
+	if err != nil {
+		slog.Debug("history.GetAnnotated miss", "error", err)
+		return nil, false
+	}
+	return a, true
+}
+
+func (s *Server) getAnnotated() (*schema.AnnotatedSchema, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.snap == nil || s.uninitialized {
+	if s.annotated == nil || s.annotated.Schema == nil || s.uninitialized {
 		return nil, fmt.Errorf("no schema loaded — initialize first:\n\n1. Run `dryrun dump-schema --db <DATABASE_URL>` in a terminal\n2. Call the `reload_schema` tool in this session\n\nThe schema will be picked up without restarting the server.")
 	}
-	return s.snap, nil
+	return s.annotated, nil
+}
+
+func (s *Server) getSchema() (*schema.SchemaSnapshot, error) {
+	a, err := s.getAnnotated()
+	if err != nil {
+		return nil, err
+	}
+	return a.Schema, nil
 }
 
 func (s *Server) modeStr() string {
