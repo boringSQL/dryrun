@@ -2,10 +2,6 @@ package mcp
 
 import "github.com/mark3labs/mcp-go/mcp"
 
-func tool(name, description string) mcp.Tool {
-	return mcp.Tool{Name: name, Description: description}
-}
-
 func getArg(req mcp.CallToolRequest, key string) string {
 	args := req.GetArguments()
 	if args == nil {
