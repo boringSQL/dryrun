@@ -1,11 +1,9 @@
 package schema
 
 import (
-	"fmt"
 	"sort"
 )
 
-// Per-table summary aggregated across all nodes
 type TableSummary struct {
 	Schema       string         `json:"schema"`
 	Table        string         `json:"table"`
@@ -19,23 +17,26 @@ type NodeSeqEntry struct {
 	SeqScan int64  `json:"seq_scan"`
 }
 
-func SummarizeTableStats(nodeStats []NodeStats) []TableSummary {
+func SummarizeTableStats(a *AnnotatedSchema) []TableSummary {
+	if a == nil || a.Merged == nil {
+		return nil
+	}
 	type key struct{ schema, table string }
 	agg := make(map[key]*TableSummary)
 	var order []key
 
-	for _, ns := range nodeStats {
-		for _, ts := range ns.TableStats {
-			k := key{ts.Schema, ts.Table}
+	for _, n := range a.Merged.Nodes {
+		for _, ts := range n.Tables {
+			k := key{ts.Table.Schema, ts.Table.Name}
 			s, ok := agg[k]
 			if !ok {
-				s = &TableSummary{Schema: ts.Schema, Table: ts.Table}
+				s = &TableSummary{Schema: ts.Table.Schema, Table: ts.Table.Name}
 				agg[k] = s
 				order = append(order, k)
 			}
-			s.TotalSeqScan += ts.Stats.SeqScan
-			s.TotalIdxScan += ts.Stats.IdxScan
-			s.PerNodeSeq = append(s.PerNodeSeq, NodeSeqEntry{Source: ns.Source, SeqScan: ts.Stats.SeqScan})
+			s.TotalSeqScan += ts.Activity.SeqScan
+			s.TotalIdxScan += ts.Activity.IdxScan
+			s.PerNodeSeq = append(s.PerNodeSeq, NodeSeqEntry{Source: n.Node.Source, SeqScan: ts.Activity.SeqScan})
 		}
 	}
 
@@ -54,7 +55,7 @@ const (
 	FlagNodeImbalance   TableFlag = "node_imbalance"
 )
 
-func DetectTableFlags(summary *TableSummary, nodeStats []NodeStats) []TableFlag {
+func DetectTableFlags(summary *TableSummary, a *AnnotatedSchema) []TableFlag {
 	var flags []TableFlag
 
 	if summary.TotalSeqScan > 100 && summary.TotalIdxScan > 0 {
@@ -66,7 +67,7 @@ func DetectTableFlags(summary *TableSummary, nodeStats []NodeStats) []TableFlag 
 		flags = append(flags, FlagSeqScanOnly)
 	}
 
-	if DetectSeqScanImbalance(nodeStats, summary.Schema, summary.Table) != nil {
+	if DetectSeqScanImbalance(a, QualifiedName{Schema: summary.Schema, Name: summary.Table}) != nil {
 		flags = append(flags, FlagNodeImbalance)
 	}
 
@@ -79,16 +80,19 @@ type NodeImbalanceInfo struct {
 }
 
 // Flags when one node carries disproportionate seq_scans
-func DetectSeqScanImbalance(nodeStats []NodeStats, schemaName, tableName string) *NodeImbalanceInfo {
+func DetectSeqScanImbalance(a *AnnotatedSchema, q QualifiedName) *NodeImbalanceInfo {
+	if a == nil || a.Merged == nil {
+		return nil
+	}
 	type entry struct {
 		source  string
 		seqScan int64
 	}
 	var entries []entry
-	for _, ns := range nodeStats {
-		for _, ts := range ns.TableStats {
-			if ts.Schema == schemaName && ts.Table == tableName {
-				entries = append(entries, entry{ns.Source, ts.Stats.SeqScan})
+	for _, n := range a.Merged.Nodes {
+		for _, ts := range n.Tables {
+			if ts.Table == q {
+				entries = append(entries, entry{n.Node.Source, ts.Activity.SeqScan})
 			}
 		}
 	}
@@ -129,78 +133,33 @@ type UnusedIndexEntry struct {
 	Definition     string `json:"definition"`
 }
 
-func DetectUnusedIndexes(nodeStats []NodeStats, tables []Table) []UnusedIndexEntry {
+func DetectUnusedIndexes(a *AnnotatedSchema) []UnusedIndexEntry {
+	if a == nil || a.Schema == nil {
+		return nil
+	}
 	var entries []UnusedIndexEntry
-
-	if len(nodeStats) == 0 {
-		// single-node fallback
-		for _, t := range tables {
-			for _, idx := range t.Indexes {
-				if idx.IsPrimary {
-					continue
-				}
-				if idx.Stats != nil && idx.Stats.IdxScan == 0 {
-					entries = append(entries, UnusedIndexEntry{
-						Schema: t.Schema, Table: t.Name, IndexName: idx.Name,
-						TotalSizeBytes: idx.Stats.Size, IsUnique: idx.IsUnique,
-						Definition: idx.Definition,
-					})
-				}
-			}
-		}
-	} else {
-		// multi-node: aggregate
-		type idxKey struct{ schema, table, name string }
-		type agg struct {
-			totalScan int64
-			maxSize   int64
-		}
-		aggMap := make(map[idxKey]*agg)
-		for _, ns := range nodeStats {
-			for _, is := range ns.IndexStats {
-				k := idxKey{is.Schema, is.Table, is.IndexName}
-				a, ok := aggMap[k]
-				if !ok {
-					a = &agg{}
-					aggMap[k] = a
-				}
-				a.totalScan += is.Stats.IdxScan
-				if is.Stats.Size > a.maxSize {
-					a.maxSize = is.Stats.Size
-				}
-			}
-		}
-
-		idxLookup := make(map[string]*Index)
-		for i := range tables {
-			for j := range tables[i].Indexes {
-				key := fmt.Sprintf("%s.%s.%s", tables[i].Schema, tables[i].Name, tables[i].Indexes[j].Name)
-				idxLookup[key] = &tables[i].Indexes[j]
-			}
-		}
-
-		for k, a := range aggMap {
-			if a.totalScan != 0 {
+	for i := range a.Schema.Tables {
+		t := &a.Schema.Tables[i]
+		qual := t.Qual()
+		for _, idx := range t.Indexes {
+			if idx.IsPrimary {
 				continue
 			}
-			lookupKey := fmt.Sprintf("%s.%s.%s", k.schema, k.table, k.name)
-			idx := idxLookup[lookupKey]
-			if idx != nil && idx.IsPrimary {
+			total := a.TotalIndexScans(qual, idx.Name)
+			if total != 0 {
 				continue
 			}
-
-			e := UnusedIndexEntry{
-				Schema: k.schema, Table: k.table, IndexName: k.name,
-				TotalSizeBytes: a.maxSize,
+			var size int64
+			if sz := a.IndexSizingFor(qual, idx.Name); sz != nil {
+				size = sz.Size
 			}
-			if idx != nil {
-				e.IsUnique = idx.IsUnique
-				e.Definition = idx.Definition
-			}
-			entries = append(entries, e)
+			entries = append(entries, UnusedIndexEntry{
+				Schema: t.Schema, Table: t.Name, IndexName: idx.Name,
+				TotalSizeBytes: size, IsUnique: idx.IsUnique,
+				Definition: idx.Definition,
+			})
 		}
 	}
-
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].TotalSizeBytes > entries[j].TotalSizeBytes
 	})
@@ -218,82 +177,31 @@ type BloatedIndexEntry struct {
 	IndexType     string  `json:"index_type"`
 }
 
-func DetectBloatedIndexes(nodeStats []NodeStats, tables []Table, threshold float64) []BloatedIndexEntry {
+func DetectBloatedIndexes(a *AnnotatedSchema, threshold float64) []BloatedIndexEntry {
+	if a == nil || a.Schema == nil {
+		return nil
+	}
 	var entries []BloatedIndexEntry
-
-	if len(nodeStats) == 0 {
-		for _, t := range tables {
-			for _, idx := range t.Indexes {
-				est, ok := EstimateIndexBloat(idx, t)
-				if !ok {
-					continue
-				}
-				if est.BloatRatio > threshold {
-					var size int64
-					if idx.Stats != nil {
-						size = idx.Stats.Size
-					}
-					entries = append(entries, BloatedIndexEntry{
-						Schema: t.Schema, Table: t.Name, IndexName: idx.Name,
-						BloatRatio: est.BloatRatio, ActualPages: est.ActualPages,
-						ExpectedPages: est.ExpectedPages, ActualSize: size,
-						IndexType: idx.IndexType,
-					})
-				}
+	for i := range a.Schema.Tables {
+		t := &a.Schema.Tables[i]
+		qual := t.Qual()
+		for _, idx := range t.Indexes {
+			sz := a.IndexSizingFor(qual, idx.Name)
+			if sz == nil {
+				continue
 			}
-		}
-	} else {
-		// table lookup for column type resolution
-		type tblKey struct{ schema, table string }
-		tblMap := make(map[tblKey]*Table)
-		for i := range tables {
-			tblMap[tblKey{tables[i].Schema, tables[i].Name}] = &tables[i]
-		}
-
-		// max bloat per index across nodes
-		type idxKey struct{ schema, table, name string }
-		best := make(map[idxKey]*BloatedIndexEntry)
-
-		for _, ns := range nodeStats {
-			for _, is := range ns.IndexStats {
-				t := tblMap[tblKey{is.Schema, is.Table}]
-				if t == nil {
-					continue
-				}
-				// find index definition for column names and type
-				var idxDef *Index
-				for j := range t.Indexes {
-					if t.Indexes[j].Name == is.IndexName {
-						idxDef = &t.Indexes[j]
-						break
-					}
-				}
-				if idxDef == nil {
-					continue
-				}
-
-				est, ok := EstimateIndexBloatFromStats(is.Stats, idxDef.Columns, *t, idxDef.IndexType)
-				if !ok || est.BloatRatio <= threshold {
-					continue
-				}
-
-				k := idxKey{is.Schema, is.Table, is.IndexName}
-				if prev, exists := best[k]; !exists || est.BloatRatio > prev.BloatRatio {
-					best[k] = &BloatedIndexEntry{
-						Schema: is.Schema, Table: is.Table, IndexName: is.IndexName,
-						BloatRatio: est.BloatRatio, ActualPages: est.ActualPages,
-						ExpectedPages: est.ExpectedPages, ActualSize: is.Stats.Size,
-						IndexType: idxDef.IndexType,
-					}
-				}
+			est, ok := EstimateIndexBloat(*sz, idx.Columns, *t, idx.IndexType)
+			if !ok || est.BloatRatio <= threshold {
+				continue
 			}
-		}
-
-		for _, e := range best {
-			entries = append(entries, *e)
+			entries = append(entries, BloatedIndexEntry{
+				Schema: t.Schema, Table: t.Name, IndexName: idx.Name,
+				BloatRatio: est.BloatRatio, ActualPages: est.ActualPages,
+				ExpectedPages: est.ExpectedPages, ActualSize: sz.Size,
+				IndexType: idx.IndexType,
+			})
 		}
 	}
-
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].BloatRatio > entries[j].BloatRatio
 	})

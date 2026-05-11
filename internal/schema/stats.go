@@ -168,19 +168,6 @@ func fetchActivityIndexes(ctx context.Context, pool *pgxpool.Pool) ([]IndexActiv
 	})
 }
 
-// Legacy NodeStats path retained until L7d removes its consumers
-func ExtractNodeStats(ctx context.Context, pool *pgxpool.Pool, source string) (*NodeStats, error) {
-	isStandby, err := FetchIsStandby(ctx, pool)
-	if err != nil {
-		return nil, fmt.Errorf("fetch is_standby: %w", err)
-	}
-	return &NodeStats{
-		Source:    source,
-		IsStandby: isStandby,
-		Timestamp: time.Now().UTC(),
-	}, nil
-}
-
 func FetchIsStandby(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
 	var b bool
 	err := pool.QueryRow(ctx, "SELECT pg_catalog.pg_is_in_recovery()").Scan(&b)

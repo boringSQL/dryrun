@@ -26,7 +26,10 @@ func (r *InjectResult) warn(format string, args ...any) {
 }
 
 // PG18+ uses pg_restore_*_stats(), older versions fall back to direct catalog manipulation
-func InjectStats(ctx context.Context, pool *pgxpool.Pool, snap *SchemaSnapshot, pgMajor int) (*InjectResult, error) {
+func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pgMajor int) (*InjectResult, error) {
+	if a == nil || a.Schema == nil || a.Planner == nil {
+		return nil, errors.New("annotated schema with planner stats required")
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
@@ -40,56 +43,60 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, snap *SchemaSnapshot, 
 		result.Method = "pg_class_update"
 	}
 
-	for _, t := range snap.Tables {
-		// relation stats -> pg_class
-		if t.Stats != nil {
-			if err := injectRelationStats(ctx, tx, pgMajor, t.Schema, t.Name, t.Stats.Relpages, t.Stats.Reltuples); err != nil {
+	for _, t := range a.Schema.Tables {
+		qual := t.Qual()
+
+		if sz := a.SizingFor(qual); sz != nil {
+			if err := injectRelationStats(ctx, tx, pgMajor, t.Schema, t.Name, sz.Relpages, sz.Reltuples); err != nil {
 				result.warn("table %s.%s: %v", t.Schema, t.Name, err)
 			} else {
 				result.TablesUpdated++
 			}
 		}
 
-		// index stats -> pg_class
 		for _, idx := range t.Indexes {
-			if idx.Stats == nil {
+			isz := a.IndexSizingFor(qual, idx.Name)
+			if isz == nil {
 				continue
 			}
-			if err := injectRelationStats(ctx, tx, pgMajor, t.Schema, idx.Name, idx.Stats.Relpages, idx.Stats.Reltuples); err != nil {
+			if err := injectRelationStats(ctx, tx, pgMajor, t.Schema, idx.Name, isz.Relpages, isz.Reltuples); err != nil {
 				result.warn("index %s.%s: %v", t.Schema, idx.Name, err)
 			} else {
 				result.IndexesUpdated++
 			}
 		}
 
-		// column stats -> pg_statistic; legacy path batches OID lookups
-		colsWithStats := columnsWithStats(t.Columns)
+		colsWithStats := collectColumnsWithStats(a, t)
 		if len(colsWithStats) == 0 {
 			continue
 		}
 
 		if pgMajor >= 18 {
-			for _, col := range colsWithStats {
-				if err := injectColumnStatsPG18(ctx, tx, pgMajor, t.Schema, t.Name, col); err != nil {
-					result.warn("column %s.%s.%s: %v", t.Schema, t.Name, col.Name, err)
+			for _, cs := range colsWithStats {
+				if err := injectColumnStatsPG18(ctx, tx, pgMajor, t.Schema, t.Name, cs.col, cs.stats); err != nil {
+					result.warn("column %s.%s.%s: %v", t.Schema, t.Name, cs.col.Name, err)
 				} else {
 					result.ColumnsUpdated++
 				}
 			}
 		} else {
-			meta, err := batchLookupColumnMeta(ctx, tx, t.Schema, t.Name, colsWithStats)
+			names := make([]Column, len(colsWithStats))
+			for i, cs := range colsWithStats {
+				names[i] = cs.col
+			}
+			meta, err := batchLookupColumnMeta(ctx, tx, t.Schema, t.Name, names)
 			if err != nil {
 				result.warn("column metadata lookup %s.%s: %v", t.Schema, t.Name, err)
 				continue
 			}
-			for _, col := range colsWithStats {
-				cm, ok := meta[col.Name]
+			for _, cs := range colsWithStats {
+				cm, ok := meta[cs.col.Name]
 				if !ok {
-					result.warn("column %s.%s.%s: not found in target database", t.Schema, t.Name, col.Name)
+					result.warn("column %s.%s.%s: not found in target database", t.Schema, t.Name, cs.col.Name)
 					continue
 				}
-				if err := injectColumnStatsLegacy(ctx, tx, cm, col); err != nil {
-					result.warn("column %s.%s.%s: %v", t.Schema, t.Name, col.Name, err)
+				if err := injectColumnStatsLegacy(ctx, tx, cm, cs.stats); err != nil {
+					result.warn("column %s.%s.%s: %v", t.Schema, t.Name, cs.col.Name, err)
 				} else {
 					result.ColumnsUpdated++
 				}
@@ -110,11 +117,17 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, snap *SchemaSnapshot, 
 	return result, nil
 }
 
-func columnsWithStats(cols []Column) []Column {
-	var out []Column
-	for _, c := range cols {
-		if c.Stats != nil {
-			out = append(out, c)
+type colWithStats struct {
+	col   Column
+	stats *ColumnStats
+}
+
+func collectColumnsWithStats(a *AnnotatedSchema, t Table) []colWithStats {
+	qual := t.Qual()
+	var out []colWithStats
+	for _, c := range t.Columns {
+		if s := a.ColumnStats(qual, c.Name); s != nil {
+			out = append(out, colWithStats{col: c, stats: s})
 		}
 	}
 	return out
@@ -124,7 +137,7 @@ type columnMeta struct {
 	relOID   uint32
 	attNum   int16
 	typeOID  uint32
-	typeName string // e.g. "integer", "character varying"
+	typeName string
 	eqOpOID  uint32 // 0 when type has no equality operator
 }
 
@@ -173,8 +186,7 @@ func injectRelationStats(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName
 	return nil
 }
 
-// PG18+ path; only non-nil stat fields are sent
-func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName, tableName string, col Column) error {
+func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName, tableName string, col Column, s *ColumnStats) error {
 	parts := []string{
 		"'version', $1::int",
 		"'schemaname', $2::name",
@@ -185,34 +197,34 @@ func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaNa
 	args := []any{pgMajor, schemaName, tableName, col.Name}
 	idx := 5
 
-	if col.Stats.NullFrac != nil {
+	if s.NullFrac != nil {
 		parts = append(parts, fmt.Sprintf("'null_frac', $%d::real", idx))
-		args = append(args, float32(*col.Stats.NullFrac))
+		args = append(args, float32(*s.NullFrac))
 		idx++
 	}
-	if col.Stats.NDistinct != nil {
+	if s.NDistinct != nil {
 		parts = append(parts, fmt.Sprintf("'n_distinct', $%d::real", idx))
-		args = append(args, float32(*col.Stats.NDistinct))
+		args = append(args, float32(*s.NDistinct))
 		idx++
 	}
-	if col.Stats.MostCommonVals != nil {
+	if s.MostCommonVals != nil {
 		parts = append(parts, fmt.Sprintf("'most_common_vals', $%d::text", idx))
-		args = append(args, *col.Stats.MostCommonVals)
+		args = append(args, *s.MostCommonVals)
 		idx++
 	}
-	if col.Stats.MostCommonFreqs != nil {
+	if s.MostCommonFreqs != nil {
 		parts = append(parts, fmt.Sprintf("'most_common_freqs', $%d::text", idx))
-		args = append(args, *col.Stats.MostCommonFreqs)
+		args = append(args, *s.MostCommonFreqs)
 		idx++
 	}
-	if col.Stats.HistogramBounds != nil {
+	if s.HistogramBounds != nil {
 		parts = append(parts, fmt.Sprintf("'histogram_bounds', $%d::text", idx))
-		args = append(args, *col.Stats.HistogramBounds)
+		args = append(args, *s.HistogramBounds)
 		idx++
 	}
-	if col.Stats.Correlation != nil {
+	if s.Correlation != nil {
 		parts = append(parts, fmt.Sprintf("'correlation', $%d::real", idx))
-		args = append(args, float32(*col.Stats.Correlation))
+		args = append(args, float32(*s.Correlation))
 		idx++
 	}
 
@@ -221,56 +233,47 @@ func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaNa
 	return err
 }
 
-// PG <18 path: direct pg_statistic manipulation
-func injectColumnStatsLegacy(ctx context.Context, tx pgx.Tx, cm columnMeta, col Column) error {
-	// remove existing non-inherited stats
+func injectColumnStatsLegacy(ctx context.Context, tx pgx.Tx, cm columnMeta, s *ColumnStats) error {
 	_, err := tx.Exec(ctx, q("delete-column-stats-legacy"), cm.relOID, cm.attNum)
 	if err != nil {
 		return fmt.Errorf("delete old stats: %w", err)
 	}
 
 	nullFrac := float32(0)
-	if col.Stats.NullFrac != nil {
-		nullFrac = float32(*col.Stats.NullFrac)
+	if s.NullFrac != nil {
+		nullFrac = float32(*s.NullFrac)
 	}
 	nDistinct := float32(0)
-	if col.Stats.NDistinct != nil {
-		nDistinct = float32(*col.Stats.NDistinct)
+	if s.NDistinct != nil {
+		nDistinct = float32(*s.NDistinct)
 	}
 
-	// build slot values; types without equality op (json, xml, ...) can't have MCV or histogram slots - staop is required there
+	// build slot values; types without equality op (json, xml, ...) can't have MCV or histogram slots
 	type slot struct {
 		kind    int16
 		op      uint32
-		numbers string // empty or real[] literal
-		values  string // empty or typed array literal
+		numbers string
+		values  string
 	}
 
 	hasEqOp := cm.eqOpOID != 0
 	slots := [5]slot{}
 
-	// slot 1: MCV (stakind=1), needs equality op
-	if hasEqOp && col.Stats.MostCommonVals != nil && col.Stats.MostCommonFreqs != nil {
-		slots[0] = slot{kind: 1, op: cm.eqOpOID, numbers: *col.Stats.MostCommonFreqs, values: *col.Stats.MostCommonVals}
+	if hasEqOp && s.MostCommonVals != nil && s.MostCommonFreqs != nil {
+		slots[0] = slot{kind: 1, op: cm.eqOpOID, numbers: *s.MostCommonFreqs, values: *s.MostCommonVals}
+	}
+	if hasEqOp && s.HistogramBounds != nil {
+		slots[1] = slot{kind: 2, op: cm.eqOpOID, values: *s.HistogramBounds}
+	}
+	if s.Correlation != nil {
+		slots[2] = slot{kind: 3, numbers: fmt.Sprintf("{%v}", *s.Correlation)}
 	}
 
-	// slot 2: histogram (stakind=2), needs equality op for range comparison
-	if hasEqOp && col.Stats.HistogramBounds != nil {
-		slots[1] = slot{kind: 2, op: cm.eqOpOID, values: *col.Stats.HistogramBounds}
-	}
-
-	// slot 3: correlation (stakind=3), no operator needed
-	if col.Stats.Correlation != nil {
-		slots[2] = slot{kind: 3, numbers: fmt.Sprintf("{%v}", *col.Stats.Correlation)}
-	}
-
-	// types with spaces ("character varying", "timestamp with time zone") need quoting for ::type[] cast
 	arrayCast := cm.typeName + "[]"
 	if strings.Contains(cm.typeName, " ") {
 		arrayCast = fmt.Sprintf(`"%s"[]`, cm.typeName)
 	}
 
-	// stavalues are anyarray and need explicit cast to the column's actual type
 	var valueParts []string
 	var args []any
 	argN := 1
@@ -282,21 +285,20 @@ func injectColumnStatsLegacy(ctx context.Context, tx pgx.Tx, cm columnMeta, col 
 		return placeholder
 	}
 
-	// starelid, staattnum, stainherit, stanullfrac, stawidth, stadistinct
 	valueParts = append(valueParts, addArg(cm.relOID), addArg(cm.attNum), "false", addArg(nullFrac), "0", addArg(nDistinct))
 
-	for _, s := range slots {
-		valueParts = append(valueParts, addArg(s.kind))
-		valueParts = append(valueParts, addArg(s.op))
+	for _, sl := range slots {
+		valueParts = append(valueParts, addArg(sl.kind))
+		valueParts = append(valueParts, addArg(sl.op))
 
-		if s.numbers != "" {
-			valueParts = append(valueParts, addArg(s.numbers)+"::real[]")
+		if sl.numbers != "" {
+			valueParts = append(valueParts, addArg(sl.numbers)+"::real[]")
 		} else {
 			valueParts = append(valueParts, "NULL")
 		}
 
-		if s.values != "" {
-			valueParts = append(valueParts, addArg(s.values)+"::"+arrayCast)
+		if sl.values != "" {
+			valueParts = append(valueParts, addArg(sl.values)+"::"+arrayCast)
 		} else {
 			valueParts = append(valueParts, "NULL")
 		}
@@ -319,101 +321,12 @@ func injectColumnStatsLegacy(ctx context.Context, tx pgx.Tx, cm columnMeta, col 
 	return nil
 }
 
-func hasColumnStats(snap *SchemaSnapshot) bool {
-	for _, t := range snap.Tables {
-		for _, c := range t.Columns {
-			if c.Stats != nil {
-				return true
-			}
-		}
+func CanInjectStats(a *AnnotatedSchema) error {
+	if a == nil || a.Planner == nil {
+		return errors.New("annotated schema has no planner stats to inject")
 	}
-	return false
-}
-
-// Overlays node-specific stats onto tables/indexes/columns in snap
-func ApplyNodeStats(snap *SchemaSnapshot, node string) error {
-	var ns *NodeStats
-	for i := range snap.NodeStats {
-		if snap.NodeStats[i].Source == node {
-			ns = &snap.NodeStats[i]
-			break
-		}
-	}
-	if ns == nil {
-		return fmt.Errorf("node %q not found in snapshot (available: %s)", node, nodeSourceList(snap.NodeStats))
-	}
-
-	tableIdx := make(map[string]int, len(snap.Tables))
-	for i := range snap.Tables {
-		key := snap.Tables[i].Schema + "." + snap.Tables[i].Name
-		tableIdx[key] = i
-	}
-
-	for _, nts := range ns.TableStats {
-		key := nts.Schema + "." + nts.Table
-		if ti, ok := tableIdx[key]; ok {
-			stats := nts.Stats
-			snap.Tables[ti].Stats = &stats
-		}
-	}
-
-	for _, nis := range ns.IndexStats {
-		key := nis.Schema + "." + nis.Table
-		ti, ok := tableIdx[key]
-		if !ok {
-			continue
-		}
-		for j := range snap.Tables[ti].Indexes {
-			if snap.Tables[ti].Indexes[j].Name == nis.IndexName {
-				stats := nis.Stats
-				snap.Tables[ti].Indexes[j].Stats = &stats
-				break
-			}
-		}
-	}
-
-	for _, ncs := range ns.ColumnStats {
-		key := ncs.Schema + "." + ncs.Table
-		ti, ok := tableIdx[key]
-		if !ok {
-			continue
-		}
-		for j := range snap.Tables[ti].Columns {
-			if snap.Tables[ti].Columns[j].Name == ncs.Column {
-				stats := ncs.Stats
-				snap.Tables[ti].Columns[j].Stats = &stats
-				break
-			}
-		}
-	}
-
-	return nil
-}
-
-func CanInjectStats(snap *SchemaSnapshot) error {
-	hasRelStats := false
-	for _, t := range snap.Tables {
-		if t.Stats != nil {
-			hasRelStats = true
-			break
-		}
-	}
-	if !hasRelStats && !hasColumnStats(snap) {
-		return errors.New("snapshot contains no statistics to inject")
+	if len(a.Planner.Tables) == 0 && len(a.Planner.Columns) == 0 {
+		return errors.New("planner snapshot is empty")
 	}
 	return nil
-}
-
-func nodeSourceList(nodes []NodeStats) string {
-	if len(nodes) == 0 {
-		return "none"
-	}
-	s := ""
-	for i, n := range nodes {
-		if i > 0 {
-			s += ", "
-		}
-		s += n.Source
-	}
-	return s
 }

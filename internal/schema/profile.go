@@ -17,11 +17,11 @@ type ColumnProfile struct {
 	Note          string   `json:"note,omitempty"`
 }
 
-func ProfileColumn(col Column, tableRows float64) *ColumnProfile {
-	if col.Stats == nil {
+func ProfileColumn(col Column, stats *ColumnStats, tableRows float64) *ColumnProfile {
+	if stats == nil {
 		return nil
 	}
-	s := col.Stats
+	s := stats
 
 	p := &ColumnProfile{
 		Nulls: profileNulls(s, tableRows),
@@ -244,11 +244,11 @@ func parsePgArray(s string) []string {
 }
 
 // Estimated selectivity for equality on column, in [0..1] (lower = more selective)
-func ColumnSelectivity(col Column, tableRows float64) float64 {
-	if col.Stats == nil || col.Stats.NDistinct == nil || tableRows <= 0 {
+func ColumnSelectivity(stats *ColumnStats, tableRows float64) float64 {
+	if stats == nil || stats.NDistinct == nil || tableRows <= 0 {
 		return 0.5 // unknown, assume moderate
 	}
-	nd := *col.Stats.NDistinct
+	nd := *stats.NDistinct
 	if nd < 0 {
 		// negative = fraction of rows that are distinct
 		distinct := -nd * tableRows

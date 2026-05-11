@@ -138,13 +138,10 @@ func IntrospectSchema(ctx context.Context, pool *pgxpool.Pool) (*SchemaSnapshot,
 		tableComments,
 		columnComments,
 		rawIndexes,
-		nil,
-		nil,
 		rawPartitions,
 		rawPartitionChildren,
 		rawPolicies,
 		rawTriggers,
-		nil,
 	)
 
 	snap := &SchemaSnapshot{
@@ -223,30 +220,6 @@ type (
 		backsConstraint bool
 	}
 
-	rawTableStats struct {
-		tableOID        uint32
-		reltuples       float64
-		deadTuples      int64
-		lastVacuum      *time.Time
-		lastAutovacuum  *time.Time
-		lastAnalyze     *time.Time
-		lastAutoanalyze *time.Time
-		seqScan         int64
-		idxScan         int64
-		tableSize       int64
-	}
-
-	rawColumnStats struct {
-		tableOID        uint32
-		columnName      string
-		nullFrac        *float64
-		nDistinct       *float64
-		mostCommonVals  *string
-		mostCommonFreqs *string
-		histogramBounds *string
-		correlation     *float64
-	}
-
 	rawPartitionInfo struct {
 		tableOID uint32
 		strategy string
@@ -276,16 +249,6 @@ type (
 		definition string
 	}
 
-	rawIndexStats struct {
-		tableOID    uint32
-		indexName   string
-		idxScan     int64
-		idxTupRead  int64
-		idxTupFetch int64
-		size        int64
-		relpages    int64
-		reltuples   float64
-	}
 )
 
 // Fetchers - each uses a named query from sql/introspect.sql
@@ -469,44 +432,6 @@ func fetchIndexes(ctx context.Context, pool *pgxpool.Pool) ([]rawIndex, error) {
 	})
 }
 
-func fetchTableStats(ctx context.Context, pool *pgxpool.Pool) ([]rawTableStats, error) {
-	rows, err := query(ctx, pool, "fetch-table-stats")
-	if err != nil {
-		return nil, err
-	}
-	return scanAll(rows, func(r pgx.Rows) (rawTableStats, error) {
-		var oid int32
-		var rs rawTableStats
-		err := r.Scan(
-			&oid, &rs.reltuples, &rs.deadTuples,
-			&rs.lastVacuum, &rs.lastAutovacuum,
-			&rs.lastAnalyze, &rs.lastAutoanalyze,
-			&rs.seqScan, &rs.idxScan, &rs.tableSize,
-		)
-		rs.tableOID = uint32(oid)
-		return rs, err
-	})
-}
-
-func fetchColumnStats(ctx context.Context, pool *pgxpool.Pool) ([]rawColumnStats, error) {
-	rows, err := query(ctx, pool, "fetch-column-stats")
-	if err != nil {
-		return nil, err
-	}
-	return scanAll(rows, func(r pgx.Rows) (rawColumnStats, error) {
-		var oid int32
-		var cs rawColumnStats
-		err := r.Scan(
-			&oid, &cs.columnName,
-			&cs.nullFrac, &cs.nDistinct,
-			&cs.mostCommonVals, &cs.mostCommonFreqs,
-			&cs.histogramBounds, &cs.correlation,
-		)
-		cs.tableOID = uint32(oid)
-		return cs, err
-	})
-}
-
 func fetchPartitionInfo(ctx context.Context, pool *pgxpool.Pool) ([]rawPartitionInfo, error) {
 	rows, err := query(ctx, pool, "fetch-partition-info")
 	if err != nil {
@@ -569,19 +494,6 @@ func fetchTriggers(ctx context.Context, pool *pgxpool.Pool) ([]rawTrigger, error
 	})
 }
 
-func fetchIndexStats(ctx context.Context, pool *pgxpool.Pool) ([]rawIndexStats, error) {
-	rows, err := query(ctx, pool, "fetch-index-stats")
-	if err != nil {
-		return nil, err
-	}
-	return scanAll(rows, func(r pgx.Rows) (rawIndexStats, error) {
-		var oid int32
-		var rs rawIndexStats
-		err := r.Scan(&oid, &rs.indexName, &rs.idxScan, &rs.idxTupRead, &rs.idxTupFetch, &rs.size, &rs.relpages, &rs.reltuples)
-		rs.tableOID = uint32(oid)
-		return rs, err
-	})
-}
 
 func fetchViews(ctx context.Context, pool *pgxpool.Pool) ([]View, error) {
 	rows, err := query(ctx, pool, "fetch-views")
@@ -667,13 +579,10 @@ func assembleTables(
 	tableComments []rawTableComment,
 	columnComments []rawColumnComment,
 	rawIndexes []rawIndex,
-	rawTableStats []rawTableStats,
-	rawColumnStats []rawColumnStats,
 	rawPartitions []rawPartitionInfo,
 	rawPartitionChildren []rawPartitionChild,
 	rawPolicies []rawPolicy,
 	rawTriggers []rawTrigger,
-	rawIdxStats []rawIndexStats,
 ) []Table {
 	// Columns
 	columnsByOID := make(map[uint32][]Column)
@@ -728,47 +637,10 @@ func assembleTables(
 		}
 	}
 
-	// Column stats
-	colStatsMap := make(map[colKey]ColumnStats, len(rawColumnStats))
-	for _, cs := range rawColumnStats {
-		colStatsMap[colKey{cs.tableOID, cs.columnName}] = ColumnStats{
-			NullFrac:        cs.nullFrac,
-			NDistinct:       cs.nDistinct,
-			MostCommonVals:  cs.mostCommonVals,
-			MostCommonFreqs: cs.mostCommonFreqs,
-			HistogramBounds: cs.histogramBounds,
-			Correlation:     cs.correlation,
-		}
-	}
-	for oid, cols := range columnsByOID {
-		for i := range cols {
-			if stats, ok := colStatsMap[colKey{oid, cols[i].Name}]; ok {
-				columnsByOID[oid][i].Stats = &stats
-			}
-		}
-	}
-
-	// Index stats lookup
-	type idxKey struct {
-		oid  uint32
-		name string
-	}
-	idxStatsMap := make(map[idxKey]*IndexStats, len(rawIdxStats))
-	for _, is := range rawIdxStats {
-		idxStatsMap[idxKey{is.tableOID, is.indexName}] = &IndexStats{
-			IdxScan:     is.idxScan,
-			IdxTupRead:  is.idxTupRead,
-			IdxTupFetch: is.idxTupFetch,
-			Size:        is.size,
-			Relpages:    is.relpages,
-			Reltuples:   is.reltuples,
-		}
-	}
-
 	// Indexes
 	indexesByOID := make(map[uint32][]Index)
 	for _, ri := range rawIndexes {
-		idx := Index{
+		indexesByOID[ri.tableOID] = append(indexesByOID[ri.tableOID], Index{
 			Name:            ri.name,
 			Columns:         ri.columns,
 			IncludeColumns:  ri.includeColumns,
@@ -778,27 +650,7 @@ func assembleTables(
 			Predicate:       ri.predicate,
 			Definition:      ri.definition,
 			BacksConstraint: ri.backsConstraint,
-		}
-		if s, ok := idxStatsMap[idxKey{ri.tableOID, ri.name}]; ok {
-			idx.Stats = s
-		}
-		indexesByOID[ri.tableOID] = append(indexesByOID[ri.tableOID], idx)
-	}
-
-	// Table stats
-	statsByOID := make(map[uint32]TableStats, len(rawTableStats))
-	for _, s := range rawTableStats {
-		statsByOID[s.tableOID] = TableStats{
-			Reltuples:       s.reltuples,
-			DeadTuples:      s.deadTuples,
-			LastVacuum:      s.lastVacuum,
-			LastAutovacuum:  s.lastAutovacuum,
-			LastAnalyze:     s.lastAnalyze,
-			LastAutoanalyze: s.lastAutoanalyze,
-			SeqScan:         s.seqScan,
-			IdxScan:         s.idxScan,
-			TableSize:       s.tableSize,
-		}
+		})
 	}
 
 	// Partition info
@@ -863,9 +715,6 @@ func assembleTables(
 		}
 		if comment, ok := tableCommentMap[rt.oid]; ok {
 			t.Comment = &comment
-		}
-		if stats, ok := statsByOID[rt.oid]; ok {
-			t.Stats = &stats
 		}
 		if pi, ok := partInfoByOID[rt.oid]; ok {
 			t.PartitionInfo = &pi

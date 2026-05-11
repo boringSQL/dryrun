@@ -22,10 +22,11 @@ type (
 )
 
 func (s *Server) handleListTables(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	snap := a.Schema
 
 	schemaFilter := getArg(req, "schema")
 	var entries []tableEntry
@@ -36,10 +37,10 @@ func (s *Server) handleListTables(_ context.Context, req mcp.CallToolRequest) (*
 		line := t.Schema + "." + t.Name
 		var rows float64
 		var size int64
-		stats := schema.EffectiveTableStats(&t, snap)
-		if stats != nil {
-			rows = stats.Reltuples
-			size = stats.TableSize
+		sizing := a.SizingFor(t.Qual())
+		if sizing != nil {
+			rows = sizing.Reltuples
+			size = sizing.TableSize
 			line += fmt.Sprintf(" (~%d rows)", int64(rows))
 		}
 		if t.PartitionInfo != nil {
@@ -92,10 +93,11 @@ func (s *Server) handleListTables(_ context.Context, req mcp.CallToolRequest) (*
 }
 
 func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	snap := a.Schema
 
 	tableName := getArg(req, "table")
 	schemaName := schemaArg(req)
@@ -104,14 +106,17 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 	for i := range snap.Tables {
 		t := &snap.Tables[i]
 		if t.Name == tableName && t.Schema == schemaName {
+			qual := t.Qual()
+			sizing := a.SizingFor(qual)
 			var tableRows float64
-			if stats := schema.EffectiveTableStats(t, snap); stats != nil {
-				tableRows = stats.Reltuples
+			if sizing != nil {
+				tableRows = sizing.Reltuples
 			}
 
 			var profiles []map[string]any
 			for _, col := range t.Columns {
-				if p := schema.ProfileColumn(col, tableRows); p != nil {
+				cs := a.ColumnStats(qual, col.Name)
+				if p := schema.ProfileColumn(col, cs, tableRows); p != nil {
 					profiles = append(profiles, map[string]any{
 						"column":  col.Name,
 						"profile": p,
@@ -125,28 +130,32 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 			case "full":
 				result["table"] = t
 			case "stats":
-				if stats := schema.EffectiveTableStats(t, snap); stats != nil {
-					result["table_stats"] = stats
+				if sizing != nil {
+					result["sizing"] = sizing
+				}
+				if act := a.PrimaryActivity(qual); act != nil {
+					result["activity"] = act
 				}
 			default:
-				result["table"] = toCompactTable(t)
+				result["table"] = toCompactTable(t, sizing)
 			}
 
 			if len(profiles) > 0 {
 				result["column_profiles"] = profiles
 			}
 
-			if len(snap.NodeStats) > 0 {
+			if a.Merged != nil {
 				var nodeBreakdown []map[string]any
-				for _, ns := range snap.NodeStats {
-					for _, ts := range ns.TableStats {
-						if ts.Schema == schemaName && ts.Table == tableName {
-							nodeBreakdown = append(nodeBreakdown, map[string]any{
-								"source":    ns.Source,
-								"timestamp": ns.Timestamp.Format("2006-01-02T15:04:05Z07:00"),
-								"stats":     ts.Stats,
-							})
+				for _, n := range a.Merged.Nodes {
+					for _, ts := range n.Tables {
+						if ts.Table != qual {
+							continue
 						}
+						nodeBreakdown = append(nodeBreakdown, map[string]any{
+							"source":    n.Node.Source,
+							"timestamp": n.Node.Timestamp.Format("2006-01-02T15:04:05Z07:00"),
+							"activity":  ts.Activity,
+						})
 					}
 				}
 				if len(nodeBreakdown) > 0 {
@@ -159,6 +168,20 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 						"Always include '%s' in WHERE clauses for partition pruning.",
 					t.PartitionInfo.Strategy, t.PartitionInfo.Key,
 					len(t.PartitionInfo.Children), t.PartitionInfo.Key)
+
+				// per-partition child sizing — Rust 60ca7e3
+				var childSizing []map[string]any
+				for _, ch := range t.PartitionInfo.Children {
+					csz := a.SizingFor(schema.QualifiedName{Schema: ch.Schema, Name: ch.Name})
+					if csz != nil {
+						childSizing = append(childSizing, map[string]any{
+							"schema": ch.Schema, "name": ch.Name, "sizing": csz,
+						})
+					}
+				}
+				if len(childSizing) > 0 {
+					result["partition_child_sizing"] = childSizing
+				}
 			}
 
 			hint := ""

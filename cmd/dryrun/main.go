@@ -190,12 +190,9 @@ schema_file = ".dryrun/schema.json"
 }
 
 func importCmd() *cobra.Command {
-	var statsFiles []string
-
 	cmd := &cobra.Command{
 		Use:   "import <schema-file>",
 		Short: "Import a schema JSON file into .dryrun/",
-		Long:  "Validates and imports a schema JSON file. Optionally merges node stats from replica dumps.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			snap, err := schema.LoadSchemaFile(args[0])
@@ -205,14 +202,6 @@ func importCmd() *cobra.Command {
 
 			if len(snap.Tables) == 0 && len(snap.Views) == 0 {
 				return fmt.Errorf("schema file contains no tables or views")
-			}
-
-			for _, sf := range statsFiles {
-				statsSnap, err := schema.LoadSchemaFile(sf)
-				if err != nil {
-					return fmt.Errorf("invalid stats file %s: %w", sf, err)
-				}
-				snap.NodeStats = append(snap.NodeStats, statsSnap.NodeStats...)
 			}
 
 			snap.ContentHash = schema.ComputeContentHash(snap)
@@ -232,23 +221,19 @@ func importCmd() *cobra.Command {
 
 			fmt.Fprintf(os.Stderr, "Imported %d tables, %d views to %s\n",
 				len(snap.Tables), len(snap.Views), outputPath)
-			if len(snap.NodeStats) > 0 {
-				fmt.Fprintf(os.Stderr, "  %d node stats attached\n", len(snap.NodeStats))
-			}
 			return nil
 		},
 	}
-	cmd.Flags().StringSliceVar(&statsFiles, "stats", nil, "node stats files to merge")
 	return cmd
 }
 
 func dumpSchemaCmd() *cobra.Command {
-	var pretty, statsOnly bool
+	var pretty bool
 	var output, name string
 
 	cmd := &cobra.Command{
 		Use:   "dump-schema",
-		Short: "Export schema from live database to JSON",
+		Short: "Export DDL schema from live database to JSON",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, conn, err := connectDB()
 			if err != nil {
@@ -256,35 +241,13 @@ func dumpSchemaCmd() *cobra.Command {
 			}
 			defer conn.Close()
 
-			var snap *schema.SchemaSnapshot
-
-			if statsOnly {
-				if name == "" {
-					return fmt.Errorf("--stats-only requires --name")
-				}
-				ns, err := schema.ExtractNodeStats(ctx, conn.Pool(), name)
-				if err != nil {
-					return fmt.Errorf("extract stats: %w", err)
-				}
+			snap, err := conn.Introspect(ctx)
+			if err != nil {
+				return err
+			}
+			if name != "" {
 				src := name
-				snap = &schema.SchemaSnapshot{
-					Source:    &src,
-					NodeStats: []schema.NodeStats{*ns},
-				}
-			} else {
-				snap, err = conn.Introspect(ctx)
-				if err != nil {
-					return err
-				}
-
-				if name != "" {
-					src := name
-					snap.Source = &src
-					ns, err := schema.ExtractNodeStats(ctx, conn.Pool(), name)
-					if err == nil && ns != nil {
-						snap.NodeStats = append(snap.NodeStats, *ns)
-					}
-				}
+				snap.Source = &src
 			}
 
 			if output != "" {
@@ -299,9 +262,8 @@ func dumpSchemaCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&pretty, "pretty", false, "pretty-print JSON")
-	cmd.Flags().BoolVar(&statsOnly, "stats-only", false, "export only node statistics (no schema)")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "output file path")
-	cmd.Flags().StringVar(&name, "name", "", "source name for node stats")
+	cmd.Flags().StringVar(&name, "name", "", "source name (sets snapshot.Source)")
 	return cmd
 }
 
@@ -632,11 +594,9 @@ func profileCmd() *cobra.Command {
 func statsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "stats", Short: "Manage statistics injection"}
 
-	var node string
-
 	applyCmd := &cobra.Command{
 		Use:   "apply",
-		Short: "Inject production statistics into local database for realistic EXPLAIN plans",
+		Short: "Inject production planner stats into local database for realistic EXPLAIN plans",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, conn, err := connectDB()
 			if err != nil {
@@ -649,23 +609,22 @@ func statsCmd() *cobra.Command {
 				return fmt.Errorf("probe: %w", err)
 			}
 
-			snap, err := loadSchemaForLint()
+			store, err := history.OpenDefault()
 			if err != nil {
+				return fmt.Errorf("open history store: %w", err)
+			}
+			defer store.Close()
+
+			annotated, err := store.GetAnnotated(cmd.Context(), resolveSnapshotKey(), history.NewRefLatest())
+			if err != nil {
+				return fmt.Errorf("load annotated snapshot from history: %w", err)
+			}
+
+			if err := schema.CanInjectStats(annotated); err != nil {
 				return err
 			}
 
-			if node != "" {
-				if err := schema.ApplyNodeStats(snap, node); err != nil {
-					return err
-				}
-				fmt.Fprintf(os.Stderr, "Using stats from node %q\n", node)
-			}
-
-			if err := schema.CanInjectStats(snap); err != nil {
-				return err
-			}
-
-			result, err := schema.InjectStats(ctx, conn.Pool(), snap, probe.Version.Major)
+			result, err := schema.InjectStats(ctx, conn.Pool(), annotated, probe.Version.Major)
 			if err != nil {
 				return err
 			}
@@ -678,7 +637,6 @@ func statsCmd() *cobra.Command {
 			return nil
 		},
 	}
-	applyCmd.Flags().StringVar(&node, "node", "", "use stats from specific node (e.g. primary)")
 
 	cmd.AddCommand(applyCmd)
 	return cmd
