@@ -21,7 +21,6 @@ func migrationTestSchema() *schema.SchemaSnapshot {
 					{Name: "id", TypeName: "bigint"},
 					{Name: "email", TypeName: "text"},
 				},
-				Stats: &schema.TableStats{Reltuples: 1_000_000, TableSize: 100_000_000},
 			},
 		},
 	}

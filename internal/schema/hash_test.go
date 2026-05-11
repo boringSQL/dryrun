@@ -39,17 +39,14 @@ func TestContentHash_SensitiveToStatisticsTargetAndGenerated(t *testing.T) {
 	}
 }
 
-// Runtime stats must stay outside the hash — confirms the new fields
-// didn't accidentally inherit through some stats-bearing path.
-func TestContentHash_StableAcrossStatsOnlyChanges(t *testing.T) {
-	base := ComputeContentHash(baselineSnap())
-
-	snap := baselineSnap()
-	snap.Tables[0].Stats = &TableStats{Reltuples: 1234, DeadTuples: 9}
-	snap.Tables[0].Columns[0].Stats = &ColumnStats{}
-
-	if h := ComputeContentHash(snap); h != base {
-		t.Errorf("hash drifted on stats-only change: base=%s got=%s", base, h)
+// After the DDL-only refactor SchemaSnapshot no longer carries stats, so
+// stats-only mutation is impossible by construction. We keep a smoke test
+// that the hash itself is deterministic across two identical snapshots.
+func TestContentHash_DeterministicOnIdenticalSnapshots(t *testing.T) {
+	a := ComputeContentHash(baselineSnap())
+	b := ComputeContentHash(baselineSnap())
+	if a != b {
+		t.Errorf("hash non-deterministic: %s vs %s", a, b)
 	}
 }
 
@@ -164,11 +161,6 @@ func TestSchemaRefHash_PlannerBindsToSchemaContentHash(t *testing.T) {
 			planner.SchemaRefHash, ComputeContentHash(snap))
 	}
 
-	// Mutating stats-only fields on the underlying schema must not break the binding.
-	snap.Tables[0].Stats = &TableStats{Reltuples: 999}
-	if planner.SchemaRefHash != ComputeContentHash(snap) {
-		t.Errorf("schema_ref binding broke after stats-only mutation")
-	}
 }
 
 // Same invariant for activity snapshots. Two nodes producing different

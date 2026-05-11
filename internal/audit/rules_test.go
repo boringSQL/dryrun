@@ -127,108 +127,9 @@ func TestReservedWord(t *testing.T) {
 	}
 }
 
-func TestBloatedIndexRule(t *testing.T) {
-	snap := testSnap()
-	snap.Tables = []schema.Table{{
-		Schema: "public", Name: "orders",
-		Columns: []schema.Column{{Name: "id", TypeName: "integer"}},
-		Indexes: []schema.Index{{
-			Name: "idx_orders_id", Columns: []string{"id"}, IndexType: "btree",
-			Stats: &schema.IndexStats{Relpages: 5000, Reltuples: 100000},
-		}},
-	}}
-	config := DefaultConfig()
-	findings := checkBloatedIndexes(snap, &config)
-	if len(findings) != 1 {
-		t.Fatalf("expected 1 bloated finding, got %d", len(findings))
-	}
-	if findings[0].Rule != "indexes/bloated" {
-		t.Errorf("expected rule indexes/bloated, got %s", findings[0].Rule)
-	}
-	if findings[0].DDLFix == nil || *findings[0].DDLFix == "" {
-		t.Error("expected DDL fix")
-	}
-}
-
-func TestBloatedIndexRule_BelowThreshold(t *testing.T) {
-	snap := testSnap()
-	snap.Tables = []schema.Table{{
-		Schema: "public", Name: "orders",
-		Columns: []schema.Column{{Name: "id", TypeName: "integer"}},
-		Indexes: []schema.Index{{
-			Name: "idx_orders_id", Columns: []string{"id"}, IndexType: "btree",
-			// ~163 expected pages for 100k int tuples, 200 actual → ratio ~1.2
-			Stats: &schema.IndexStats{Relpages: 200, Reltuples: 100000},
-		}},
-	}}
-	config := DefaultConfig()
-	findings := checkBloatedIndexes(snap, &config)
-	if len(findings) != 0 {
-		t.Errorf("expected 0 findings below threshold, got %d", len(findings))
-	}
-}
-
-func TestVacuumLargeTableDefaults_LargeTableNoOverrides(t *testing.T) {
-	snap := testSnap()
-	snap.Tables = []schema.Table{{
-		Schema: "public", Name: "events",
-		Stats: &schema.TableStats{Reltuples: 5_000_000, DeadTuples: 100},
-	}}
-	findings := checkVacuumLargeTableDefaults(snap)
-	if len(findings) != 1 {
-		t.Fatalf("expected 1 finding, got %d", len(findings))
-	}
-	f := findings[0]
-	if f.Rule != "vacuum/large_table_defaults" {
-		t.Errorf("expected rule vacuum/large_table_defaults, got %s", f.Rule)
-	}
-	if f.DDLFix == nil || *f.DDLFix == "" {
-		t.Error("expected DDL fix")
-	}
-	if len(f.Tables) != 1 || f.Tables[0] != "public.events" {
-		t.Errorf("expected tables [public.events], got %v", f.Tables)
-	}
-}
-
-func TestVacuumLargeTableDefaults_SmallTable(t *testing.T) {
-	snap := testSnap()
-	snap.Tables = []schema.Table{{
-		Schema: "public", Name: "small",
-		Stats: &schema.TableStats{Reltuples: 500_000, DeadTuples: 100},
-	}}
-	findings := checkVacuumLargeTableDefaults(snap)
-	if len(findings) != 0 {
-		t.Errorf("expected 0 findings for <1M rows, got %d", len(findings))
-	}
-}
-
-func TestVacuumLargeTableDefaults_HasOverrides(t *testing.T) {
-	snap := testSnap()
-	snap.Tables = []schema.Table{{
-		Schema: "public", Name: "tuned",
-		Stats:      &schema.TableStats{Reltuples: 5_000_000, DeadTuples: 100},
-		Reloptions: []string{"autovacuum_vacuum_scale_factor=0.01"},
-	}}
-	findings := checkVacuumLargeTableDefaults(snap)
-	if len(findings) != 0 {
-		t.Errorf("expected 0 findings for table with overrides, got %d", len(findings))
-	}
-}
-
-func TestVacuumLargeTableDefaults_VeryLargeTableWarning(t *testing.T) {
-	snap := testSnap()
-	snap.Tables = []schema.Table{{
-		Schema: "public", Name: "huge",
-		Stats: &schema.TableStats{Reltuples: 50_000_000, DeadTuples: 0},
-	}}
-	findings := checkVacuumLargeTableDefaults(snap)
-	if len(findings) != 1 {
-		t.Fatalf("expected 1 finding, got %d", len(findings))
-	}
-	if findings[0].Severity != "warning" {
-		t.Errorf("expected warning severity for >10M rows, got %s", findings[0].Severity)
-	}
-}
+// indexes/bloated and vacuum/large_table_defaults are stats-dependent rules
+// that the audit harness can no longer feed — coverage moved to the MCP
+// detect tool tests. See TestDetectBloatedIndexes_* in schema/summarize_test.go.
 
 // Pins the four-way branching in checkDuplicateIndexes based on which duplicate
 // backs a constraint. Both-back yields a warning with no DDL fix; single-back
@@ -367,39 +268,9 @@ func TestDuplicateIndexes_Branching(t *testing.T) {
 	})
 }
 
-// verifies the DDL fix for vacuum/large_table_defaults sets all four knobs
-// (vacuum + analyze scale factor and threshold) and that the recommendation
-// explains why scale factors alone aren't enough. Also sanity-checks that
-// SuggestedVacuumKnobs returns a sensible scale factor for a 10M row table.
-func TestVacuumLargeTableDefaults_FourKnobDDL(t *testing.T) {
-	snap := testSnap()
-	snap.Tables = []schema.Table{{
-		Schema: "public", Name: "events",
-		Stats: &schema.TableStats{Reltuples: 10_000_000, DeadTuples: 0},
-	}}
-	findings := checkVacuumLargeTableDefaults(snap)
-	if len(findings) != 1 {
-		t.Fatalf("expected 1 finding, got %d", len(findings))
-	}
-	f := findings[0]
-	if f.DDLFix == nil {
-		t.Fatal("expected DDLFix")
-	}
-	ddl := *f.DDLFix
-	for _, knob := range []string{
-		"autovacuum_vacuum_scale_factor",
-		"autovacuum_vacuum_threshold",
-		"autovacuum_analyze_scale_factor",
-		"autovacuum_analyze_threshold",
-	} {
-		if !strings.Contains(ddl, knob) {
-			t.Errorf("expected DDL to contain %s, got %s", knob, ddl)
-		}
-	}
-	if !strings.Contains(f.Recommendation, "scale factors alone aren't enough") {
-		t.Errorf("expected recommendation mentioning scale factors alone aren't enough, got %q", f.Recommendation)
-	}
-
+// Sanity-checks that SuggestedVacuumKnobs returns a sensible scale factor for a 10M row table.
+// (The DDL fix that used to be exercised here moved to the MCP vacuum_health path.)
+func TestSuggestedVacuumKnobs_LargeTable(t *testing.T) {
 	vacSF, _, _, _ := schema.SuggestedVacuumKnobs(10_000_000)
 	if vacSF <= 0 || vacSF > 0.1 {
 		t.Errorf("expected scale factor in (0, 0.1] for 10M rows, got %v", vacSF)
