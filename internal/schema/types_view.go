@@ -89,6 +89,98 @@ func (a *AnnotatedSchema) Nodes() []NodeIdentity {
 	return out
 }
 
+// First non-standby's row; standbys don't run autovacuum so timestamps live on primaries
+func (a *AnnotatedSchema) PrimaryActivity(q QualifiedName) *TableActivity {
+	if a == nil || a.Merged == nil {
+		return nil
+	}
+	var fallback *TableActivity
+	for i := range a.Merged.Nodes {
+		n := &a.Merged.Nodes[i]
+		for j := range n.Tables {
+			if n.Tables[j].Table != q {
+				continue
+			}
+			if !n.Node.IsStandby {
+				return &n.Tables[j].Activity
+			}
+			if fallback == nil {
+				fallback = &n.Tables[j].Activity
+			}
+		}
+	}
+	return fallback
+}
+
+func (a *AnnotatedSchema) PrimaryIndexActivity(table QualifiedName, index string) *IndexActivity {
+	if a == nil || a.Merged == nil {
+		return nil
+	}
+	var fallback *IndexActivity
+	for i := range a.Merged.Nodes {
+		n := &a.Merged.Nodes[i]
+		for j := range n.Indexes {
+			e := &n.Indexes[j]
+			if e.Table != table || e.Index != index {
+				continue
+			}
+			if !n.Node.IsStandby {
+				return &e.Activity
+			}
+			if fallback == nil {
+				fallback = &e.Activity
+			}
+		}
+	}
+	return fallback
+}
+
+// Sums seq_scan / idx_scan across every node for the table
+func (a *AnnotatedSchema) TotalTableScans(q QualifiedName) (seq, idx int64) {
+	if a == nil || a.Merged == nil {
+		return 0, 0
+	}
+	for i := range a.Merged.Nodes {
+		for j := range a.Merged.Nodes[i].Tables {
+			if a.Merged.Nodes[i].Tables[j].Table == q {
+				seq += a.Merged.Nodes[i].Tables[j].Activity.SeqScan
+				idx += a.Merged.Nodes[i].Tables[j].Activity.IdxScan
+			}
+		}
+	}
+	return seq, idx
+}
+
+// Sums IdxScan across every node for the index
+func (a *AnnotatedSchema) TotalIndexScans(table QualifiedName, index string) int64 {
+	if a == nil || a.Merged == nil {
+		return 0
+	}
+	var n int64
+	for i := range a.Merged.Nodes {
+		for j := range a.Merged.Nodes[i].Indexes {
+			e := &a.Merged.Nodes[i].Indexes[j]
+			if e.Table == table && e.Index == index {
+				n += e.Activity.IdxScan
+			}
+		}
+	}
+	return n
+}
+
+func (a *AnnotatedSchema) ColumnStats(table QualifiedName, column string) *ColumnStats {
+	if a == nil || a.Planner == nil {
+		return nil
+	}
+	for i := range a.Planner.Columns {
+		e := &a.Planner.Columns[i]
+		if e.Table == table && e.Column == column {
+			return &e.Stats
+		}
+	}
+	return nil
+}
+
 // Preserves prior planner/merged only when schema_ref still matches the new DDL
 func RebuildAfterRefresh(prev *AnnotatedSchema, refreshed *SchemaSnapshot) *AnnotatedSchema {
 	out := &AnnotatedSchema{Schema: refreshed}

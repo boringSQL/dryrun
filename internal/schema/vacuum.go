@@ -104,15 +104,25 @@ func parseReloptions(reloptions []string) map[string]string {
 	return opts
 }
 
-func AnalyzeVacuumHealth(snap *SchemaSnapshot) []VacuumHealth {
-	defaults := ParseAutovacuumDefaults(snap.GUCs)
+func AnalyzeVacuumHealth(a *AnnotatedSchema) []VacuumHealth {
+	if a == nil || a.Schema == nil {
+		return nil
+	}
+	defaults := ParseAutovacuumDefaults(a.Schema.GUCs)
 
 	var results []VacuumHealth
-	for i := range snap.Tables {
-		t := &snap.Tables[i]
-		stats := EffectiveTableStats(t, snap)
-		if stats == nil || stats.Reltuples < 10_000 {
+	for i := range a.Schema.Tables {
+		t := &a.Schema.Tables[i]
+		qual := t.Qual()
+		sizing := a.SizingFor(qual)
+		activity := a.PrimaryActivity(qual)
+		if sizing == nil || sizing.Reltuples < 10_000 {
 			continue
+		}
+		var reltuples float64 = sizing.Reltuples
+		var deadTuples int64
+		if activity != nil {
+			deadTuples = activity.NDeadTup
 		}
 
 		opts := parseReloptions(t.Reloptions)
@@ -155,18 +165,18 @@ func AnalyzeVacuumHealth(snap *SchemaSnapshot) []VacuumHealth {
 			avEnabled = v == "on" || v == "true"
 		}
 
-		triggerAt := float64(threshold) + scaleFactor*stats.Reltuples
-		analyzeTrigger := float64(analyzeThreshold) + analyzeScaleFactor*stats.Reltuples
+		triggerAt := float64(threshold) + scaleFactor*reltuples
+		analyzeTrigger := float64(analyzeThreshold) + analyzeScaleFactor*reltuples
 		var progress float64
 		if triggerAt > 0 {
-			progress = float64(stats.DeadTuples) / triggerAt
+			progress = float64(deadTuples) / triggerAt
 		}
 
 		vh := VacuumHealth{
 			Schema:                    t.Schema,
 			Table:                     t.Name,
-			Reltuples:                 stats.Reltuples,
-			DeadTuples:                stats.DeadTuples,
+			Reltuples:                 reltuples,
+			DeadTuples:                deadTuples,
 			VacuumTriggerAt:           triggerAt,
 			VacuumProgress:            progress,
 			HasOverrides:              hasOverrides,
@@ -182,19 +192,19 @@ func AnalyzeVacuumHealth(snap *SchemaSnapshot) []VacuumHealth {
 			vh.Recommendations = append(vh.Recommendations,
 				"autovacuum is disabled for this table! This won't end good; you've been warned")
 		}
-		if stats.Reltuples >= 1_000_000 && !hasOverrides {
-			vacSF, vacThresh, azSF, azThresh := suggestedVacuumKnobs(stats.Reltuples)
+		if reltuples >= 1_000_000 && !hasOverrides {
+			vacSF, vacThresh, azSF, azThresh := suggestedVacuumKnobs(reltuples)
 			vh.Recommendations = append(vh.Recommendations,
 				fmt.Sprintf("large table (%dk rows) using default autovacuum settings; consider: "+
 					"autovacuum_vacuum_scale_factor=%g, autovacuum_vacuum_threshold=%d, "+
 					"autovacuum_analyze_scale_factor=%g, autovacuum_analyze_threshold=%d",
-					int64(stats.Reltuples)/1000, vacSF, vacThresh, azSF, azThresh))
+					int64(reltuples)/1000, vacSF, vacThresh, azSF, azThresh))
 		}
-		if stats.Reltuples > 0 && float64(stats.DeadTuples)/stats.Reltuples > 0.10 {
+		if reltuples > 0 && float64(deadTuples)/reltuples > 0.10 {
 			vh.Recommendations = append(vh.Recommendations,
 				fmt.Sprintf("high dead tuple ratio: %d dead / %dk live (%.1f%%)",
-					stats.DeadTuples, int64(stats.Reltuples)/1000,
-					float64(stats.DeadTuples)/stats.Reltuples*100))
+					deadTuples, int64(reltuples)/1000,
+					float64(deadTuples)/reltuples*100))
 		}
 		if triggerAt > 10_000_000 {
 			vh.Recommendations = append(vh.Recommendations,

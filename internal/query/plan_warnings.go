@@ -34,21 +34,9 @@ func detectSeqScanLargeTable(node *PlanNode, snap *schema.SchemaSnapshot, warnin
 	}
 	tableName := *node.RelationName
 
+	// fallback row count from AnnotatedSchema.SizingFor moved to caller; trust the plan estimate
+	_ = snap
 	rowCount := node.PlanRows
-	if rowCount <= 0 && snap != nil {
-		schemaName := "public"
-		if node.Schema != nil {
-			schemaName = *node.Schema
-		}
-		for _, t := range snap.Tables {
-			if t.Name == tableName && t.Schema == schemaName {
-				if t.Stats != nil {
-					rowCount = t.Stats.Reltuples
-				}
-				break
-			}
-		}
-	}
 
 	if rowCount >= seqScanRowThreshold {
 		*warnings = append(*warnings, PlanWarning{

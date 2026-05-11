@@ -11,27 +11,36 @@ import (
 )
 
 func (s *Server) handleCompareNodes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
 
 	tableName := getArg(req, "table")
 	schemaName := schemaArg(req)
+	qual := schema.QualifiedName{Schema: schemaName, Name: tableName}
 
-	if len(snap.NodeStats) == 0 {
+	if a.Merged == nil {
 		return textResult("No node statistics available. Import stats from multiple nodes first."), nil
 	}
 
 	var lines []string
 	lines = append(lines, fmt.Sprintf("Node comparison for %s.%s:\n", schemaName, tableName))
 
-	for _, ns := range snap.NodeStats {
-		for _, ts := range ns.TableStats {
-			if ts.Schema == schemaName && ts.Table == tableName {
-				lines = append(lines, fmt.Sprintf("  %s: %.0f rows, seq_scan=%d, idx_scan=%d, size=%d",
-					ns.Source, ts.Stats.Reltuples, ts.Stats.SeqScan, ts.Stats.IdxScan, ts.Stats.TableSize))
+	sz := a.SizingFor(qual)
+	for _, n := range a.Merged.Nodes {
+		for _, ts := range n.Tables {
+			if ts.Table != qual {
+				continue
 			}
+			rt := 0.0
+			tableSize := int64(0)
+			if sz != nil {
+				rt = sz.Reltuples
+				tableSize = sz.TableSize
+			}
+			lines = append(lines, fmt.Sprintf("  %s: %.0f rows, seq_scan=%d, idx_scan=%d, size=%d",
+				n.Node.Source, rt, ts.Activity.SeqScan, ts.Activity.IdxScan, tableSize))
 		}
 	}
 
@@ -61,20 +70,19 @@ func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mc
 }
 
 func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	rawSnap, err := s.getSchema()
+	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-	snap := filterSnap(rawSnap, getArg(req, "schema"), getArg(req, "table"))
 
 	staleDays := int64(7)
-	staleEntries := schema.DetectStaleStats(snap.NodeStats, staleDays)
-	unusedEntries := schema.DetectUnusedIndexes(snap.NodeStats, snap.Tables)
+	staleEntries := schema.DetectStaleStats(a, staleDays)
+	unusedEntries := schema.DetectUnusedIndexes(a)
 
 	threshold := getFloatArg(req, "threshold", 4.0)
-	bloatEntries := schema.DetectBloatedIndexes(snap.NodeStats, snap.Tables, threshold)
+	bloatEntries := schema.DetectBloatedIndexes(a, threshold)
 
-	anomalies := buildAnomalies(snap)
+	anomalies := buildAnomalies(a)
 
 	wrapper := map[string]any{
 		"stale_stats":     map[string]any{"entries": staleEntries, "count": len(staleEntries)},
@@ -96,32 +104,14 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 }
 
 func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	rawSnap, err := s.getSchema()
+	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-	snap := filterSnap(rawSnap, getArg(req, "schema"), getArg(req, "table"))
 
-	staleDays := int64(7)
-	if len(snap.NodeStats) == 0 {
-		var stale []string
-		for _, t := range snap.Tables {
-			if t.Stats == nil {
-				continue
-			}
-			if t.Stats.LastAnalyze == nil && t.Stats.LastAutoanalyze == nil {
-				stale = append(stale, fmt.Sprintf("  %s.%s: never analyzed", t.Schema, t.Name))
-			}
-		}
-		if len(stale) == 0 {
-			return textResult("No stale statistics detected."), nil
-		}
-		return textResult(fmt.Sprintf("Tables with stale/missing statistics:\n%s", strings.Join(stale, "\n"))), nil
-	}
-
-	entries := schema.DetectStaleStats(snap.NodeStats, staleDays)
+	entries := schema.DetectStaleStats(a, int64(7))
 	if len(entries) == 0 {
-		return textResult("No stale statistics detected across nodes."), nil
+		return textResult("No stale statistics detected."), nil
 	}
 
 	var lines []string
@@ -136,13 +126,12 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 }
 
 func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	rawSnap, err := s.getSchema()
+	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-	snap := filterSnap(rawSnap, getArg(req, "schema"), getArg(req, "table"))
 
-	entries := schema.DetectUnusedIndexes(snap.NodeStats, snap.Tables)
+	entries := schema.DetectUnusedIndexes(a)
 	if len(entries) == 0 {
 		return textResult("No unused indexes detected. All indexes have at least one scan recorded."), nil
 	}
@@ -153,17 +142,16 @@ func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRe
 }
 
 func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	rawSnap, err := s.getSchema()
+	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-	snap := filterSnap(rawSnap, getArg(req, "schema"), getArg(req, "table"))
 
-	if len(snap.NodeStats) == 0 {
+	if a.Merged == nil {
 		return textResult("No node statistics available for anomaly detection."), nil
 	}
 
-	anomalies := buildAnomalies(snap)
+	anomalies := buildAnomalies(a)
 	if len(anomalies) == 0 {
 		return textResult("No anomalies detected."), nil
 	}
@@ -171,14 +159,13 @@ func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolReques
 }
 
 func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	rawSnap, err := s.getSchema()
+	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-	snap := filterSnap(rawSnap, getArg(req, "schema"), getArg(req, "table"))
 
 	threshold := getFloatArg(req, "threshold", 4.0)
-	entries := schema.DetectBloatedIndexes(snap.NodeStats, snap.Tables, threshold)
+	entries := schema.DetectBloatedIndexes(a, threshold)
 	if len(entries) == 0 {
 		return textResult("No bloated indexes detected."), nil
 	}
@@ -188,14 +175,13 @@ func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolR
 	}), nil
 }
 
-func (s *Server) handleVacuumHealth(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+func (s *Server) handleVacuumHealth(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
 
-	target := filterSnap(snap, getArg(req, "schema"), getArg(req, "table"))
-	results := schema.AnalyzeVacuumHealth(target)
+	results := schema.AnalyzeVacuumHealth(a)
 
 	if len(results) == 0 {
 		return textResult(s.wrapText("No vacuum health concerns found.", "")), nil

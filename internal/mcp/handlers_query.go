@@ -39,28 +39,22 @@ func (s *Server) handleExplainQuery(ctx context.Context, req mcp.CallToolRequest
 	snap, _ := s.getSchema()
 
 	withStats := getBoolArg(req, "with_stats")
-	node := getArg(req, "node")
 
 	var injectResult *schema.InjectResult
 
 	if withStats {
-		if snap == nil {
-			return errResult("no schema snapshot available for stats injection"), nil
+		annotated, err := s.getAnnotated()
+		if err != nil {
+			return errResult("no annotated schema available for stats injection"), nil
 		}
-		snap = snap.CloneForStats()
-		if node != "" {
-			if err := schema.ApplyNodeStats(snap, node); err != nil {
-				return errResult(fmt.Sprintf("node stats: %v", err)), nil
-			}
-		}
-		if err := schema.CanInjectStats(snap); err != nil {
+		if err := schema.CanInjectStats(annotated); err != nil {
 			return errResult(fmt.Sprintf("cannot inject stats: %v", err)), nil
 		}
 		pgVer, err := dryrun.ParsePgVersion(snap.PgVersion)
 		if err != nil {
 			return errResult(fmt.Sprintf("cannot parse PG version: %v", err)), nil
 		}
-		injectResult, err = schema.InjectStats(ctx, pool, snap, pgVer.Major)
+		injectResult, err = schema.InjectStats(ctx, pool, annotated, pgVer.Major)
 		if err != nil {
 			return errResult(fmt.Sprintf("stats injection failed: %v", err)), nil
 		}

@@ -40,21 +40,9 @@ func detectUnboundedQuery(parsed *ParsedQuery, snap *schema.SchemaSnapshot, warn
 		if ref.Schema != nil {
 			schemaName = *ref.Schema
 		}
-		for i := range snap.Tables {
-			t := &snap.Tables[i]
-			if t.Name == ref.Name && t.Schema == schemaName {
-				stats := schema.EffectiveTableStats(t, snap)
-				if stats != nil && stats.Reltuples > largeTableThreshold {
-					*warnings = append(*warnings, ValidationWarning{
-						Severity: SeverityWarning,
-						Message: fmt.Sprintf(
-							"unbounded query on %s.%s (~%d rows) with no WHERE or LIMIT - consider adding a filter or LIMIT clause",
-							t.Schema, t.Name, int64(stats.Reltuples)),
-					})
-				}
-				break
-			}
-		}
+		// table-size refinement requires AnnotatedSchema; ValidateQuery doesn't carry one
+		_ = schemaName
+		_ = ref
 	}
 }
 

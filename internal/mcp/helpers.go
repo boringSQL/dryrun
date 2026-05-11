@@ -65,8 +65,7 @@ func (s *Server) metaJSONResult(payload any, key, hint string) *mcp.CallToolResu
 	return mcp.NewToolResultText(string(out))
 }
 
-// Shallow-copy snap, retaining tables + per-node stats matching filters.
-// empty filter means no filtering on that axis
+// Shallow-copy snap, retaining tables matching filters. Empty filter = no filtering on that axis.
 func filterSnap(snap *schema.SchemaSnapshot, schemaFilter, tableFilter string) *schema.SchemaSnapshot {
 	if schemaFilter == "" && tableFilter == "" {
 		return snap
@@ -83,48 +82,16 @@ func filterSnap(snap *schema.SchemaSnapshot, schemaFilter, tableFilter string) *
 		tables = append(tables, t)
 	}
 	out.Tables = tables
-
-	if len(snap.NodeStats) > 0 {
-		nodes := make([]schema.NodeStats, len(snap.NodeStats))
-		for i, ns := range snap.NodeStats {
-			nodes[i] = ns
-			if schemaFilter != "" || tableFilter != "" {
-				ts := make([]schema.NodeTableStats, 0, len(ns.TableStats))
-				for _, t := range ns.TableStats {
-					if schemaFilter != "" && t.Schema != schemaFilter {
-						continue
-					}
-					if tableFilter != "" && t.Table != tableFilter {
-						continue
-					}
-					ts = append(ts, t)
-				}
-				is := make([]schema.NodeIndexStats, 0, len(ns.IndexStats))
-				for _, x := range ns.IndexStats {
-					if schemaFilter != "" && x.Schema != schemaFilter {
-						continue
-					}
-					if tableFilter != "" && x.Table != tableFilter {
-						continue
-					}
-					is = append(is, x)
-				}
-				nodes[i].TableStats = ts
-				nodes[i].IndexStats = is
-			}
-		}
-		out.NodeStats = nodes
-	}
 	return &out
 }
 
-func buildAnomalies(snap *schema.SchemaSnapshot) []map[string]any {
-	if len(snap.NodeStats) == 0 {
+func buildAnomalies(a *schema.AnnotatedSchema) []map[string]any {
+	if a == nil || a.Merged == nil {
 		return nil
 	}
 	var anomalies []map[string]any
-	for _, sm := range schema.SummarizeTableStats(snap.NodeStats) {
-		flags := schema.DetectTableFlags(&sm, snap.NodeStats)
+	for _, sm := range schema.SummarizeTableStats(a) {
+		flags := schema.DetectTableFlags(&sm, a)
 		if len(flags) == 0 {
 			continue
 		}
@@ -174,7 +141,7 @@ type (
 		Indexes       []compactIndex      `json:"indexes"`
 		RLSEnabled    bool                `json:"rls_enabled"`
 		Comment       *string             `json:"comment,omitempty"`
-		Stats         *schema.TableStats  `json:"stats,omitempty"`
+		Sizing        *schema.TableSizing `json:"sizing,omitempty"`
 		Policies      []schema.RlsPolicy  `json:"policies,omitempty"`
 		Triggers      []schema.Trigger    `json:"triggers,omitempty"`
 		Reloptions    []string            `json:"reloptions,omitempty"`
@@ -190,11 +157,11 @@ type (
 	}
 )
 
-func toCompactTable(t *schema.Table) compactTable {
+func toCompactTable(t *schema.Table, sizing *schema.TableSizing) compactTable {
 	out := compactTable{
 		OID: t.OID, Schema: t.Schema, Name: t.Name,
 		Constraints: t.Constraints, RLSEnabled: t.RLSEnabled,
-		Comment: t.Comment, Stats: t.Stats,
+		Comment: t.Comment, Sizing: sizing,
 		Policies: t.Policies, Triggers: t.Triggers, Reloptions: t.Reloptions,
 	}
 	out.Columns = make([]compactColumn, len(t.Columns))

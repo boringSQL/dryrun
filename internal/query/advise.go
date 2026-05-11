@@ -19,12 +19,12 @@ type Advice struct {
 	IndexSuggestions []IndexSuggestion `json:"index_suggestions,omitempty"`
 }
 
-// Walks plan tree, with per-node seq_scan breakdown when node stats present
-func Advise(plan *PlanNode, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion) []Advice {
+// Walks plan tree, with per-node seq_scan breakdown when merged activity present
+func Advise(plan *PlanNode, a *schema.AnnotatedSchema, pgVersion *dryrun.PgVersion) []Advice {
 	var advice []Advice
-	walkForAdvice(plan, snap, pgVersion, &advice)
+	snap := a.Schema
+	walkForAdvice(plan, a, pgVersion, &advice)
 
-	// attach index suggestions to advice entries that have a table
 	if suggestions, err := SuggestIndex("", snap, plan, pgVersion); err == nil && len(suggestions) > 0 {
 		for i := range advice {
 			if advice[i].Table == nil {
@@ -38,10 +38,10 @@ func Advise(plan *PlanNode, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVer
 		}
 	}
 
-	if len(snap.NodeStats) > 0 {
+	if a.Merged != nil {
 		for i := range advice {
 			if advice[i].Table != nil && strings.Contains(advice[i].Issue, "sequential scan") {
-				breakdown := perNodeBreakdown(snap, *advice[i].Table)
+				breakdown := perNodeBreakdown(a, *advice[i].Table)
 				if breakdown != "" {
 					advice[i].Recommendation += "\n\nPer-node breakdown:\n" + breakdown
 				}
@@ -52,37 +52,40 @@ func Advise(plan *PlanNode, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVer
 	return advice
 }
 
-func perNodeBreakdown(snap *schema.SchemaSnapshot, qualified string) string {
+func perNodeBreakdown(a *schema.AnnotatedSchema, qualified string) string {
+	if a == nil || a.Merged == nil {
+		return ""
+	}
 	parts := strings.SplitN(qualified, ".", 2)
 	if len(parts) != 2 {
 		return ""
 	}
-	schemaName, tableName := parts[0], parts[1]
+	q := schema.QualifiedName{Schema: parts[0], Name: parts[1]}
 
 	var lines []string
-	for _, ns := range snap.NodeStats {
-		for _, ts := range ns.TableStats {
-			if ts.Schema == schemaName && ts.Table == tableName {
-				lines = append(lines, fmt.Sprintf("  %s: seq_scan=%d, idx_scan=%d", ns.Source, ts.Stats.SeqScan, ts.Stats.IdxScan))
+	for _, n := range a.Merged.Nodes {
+		for _, ts := range n.Tables {
+			if ts.Table == q {
+				lines = append(lines, fmt.Sprintf("  %s: seq_scan=%d, idx_scan=%d", n.Node.Source, ts.Activity.SeqScan, ts.Activity.IdxScan))
 			}
 		}
 	}
 	return strings.Join(lines, "\n")
 }
 
-func walkForAdvice(node *PlanNode, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion, advice *[]Advice) {
-	adviseSeqScan(node, snap, pgVersion, advice)
+func walkForAdvice(node *PlanNode, a *schema.AnnotatedSchema, pgVersion *dryrun.PgVersion, advice *[]Advice) {
+	adviseSeqScan(node, a, pgVersion, advice)
 	adviseNestedLoopSeqScan(node, pgVersion, advice)
-	adviseSort(node, snap, pgVersion, advice)
-	adviseIndexScanBloat(node, snap, advice)
+	adviseSort(node, a.Schema, pgVersion, advice)
+	adviseIndexScanBloat(node, a, advice)
 	adviseCTE(node, advice)
 
 	for i := range node.Children {
-		walkForAdvice(&node.Children[i], snap, pgVersion, advice)
+		walkForAdvice(&node.Children[i], a, pgVersion, advice)
 	}
 }
 
-func adviseSeqScan(node *PlanNode, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion, advice *[]Advice) {
+func adviseSeqScan(node *PlanNode, a *schema.AnnotatedSchema, pgVersion *dryrun.PgVersion, advice *[]Advice) {
 	if node.NodeType != "Seq Scan" || node.RelationName == nil || node.PlanRows < 10_000 {
 		return
 	}
@@ -93,11 +96,12 @@ func adviseSeqScan(node *PlanNode, snap *schema.SchemaSnapshot, pgVersion *dryru
 		schemaName = *node.Schema
 	}
 	qualified := schemaName + "." + tableName
+	qual := schema.QualifiedName{Schema: schemaName, Name: tableName}
 
 	var table *schema.Table
-	for i := range snap.Tables {
-		if snap.Tables[i].Name == tableName && snap.Tables[i].Schema == schemaName {
-			table = &snap.Tables[i]
+	for i := range a.Schema.Tables {
+		if a.Schema.Tables[i].Name == tableName && a.Schema.Tables[i].Schema == schemaName {
+			table = &a.Schema.Tables[i]
 			break
 		}
 	}
@@ -115,16 +119,17 @@ func adviseSeqScan(node *PlanNode, snap *schema.SchemaSnapshot, pgVersion *dryru
 	}
 
 	if matchingIdx != nil {
-		// bloated index -> REINDEX, not ANALYZE
-		if est, ok := schema.EstimateIndexBloat(*matchingIdx, *table); ok && est.BloatRatio > 3.0 {
-			*advice = append(*advice, Advice{
-				Issue:          fmt.Sprintf("sequential scan on '%s' (~%d rows) - index '%s' exists but appears bloated (%.1fx)", qualified, int64(node.PlanRows), matchingIdx.Name, est.BloatRatio),
-				Severity:       "warning",
-				Table:          strp(qualified),
-				Recommendation: fmt.Sprintf("Index '%s' is estimated at %.1fx bloat. Rebuild it to restore accurate planner cost estimates.", matchingIdx.Name, est.BloatRatio),
-				DDL:            strp(fmt.Sprintf("REINDEX CONCURRENTLY %s;", matchingIdx.Name)),
-			})
-			return
+		if sz := a.IndexSizingFor(qual, matchingIdx.Name); sz != nil {
+			if est, ok := schema.EstimateIndexBloat(*sz, matchingIdx.Columns, *table, matchingIdx.IndexType); ok && est.BloatRatio > 3.0 {
+				*advice = append(*advice, Advice{
+					Issue:          fmt.Sprintf("sequential scan on '%s' (~%d rows) - index '%s' exists but appears bloated (%.1fx)", qualified, int64(node.PlanRows), matchingIdx.Name, est.BloatRatio),
+					Severity:       "warning",
+					Table:          strp(qualified),
+					Recommendation: fmt.Sprintf("Index '%s' is estimated at %.1fx bloat. Rebuild it to restore accurate planner cost estimates.", matchingIdx.Name, est.BloatRatio),
+					DDL:            strp(fmt.Sprintf("REINDEX CONCURRENTLY %s;", matchingIdx.Name)),
+				})
+				return
+			}
 		}
 
 		ddl := fmt.Sprintf("ANALYZE %s.%s;", schemaName, tableName)
@@ -157,25 +162,28 @@ func adviseSeqScan(node *PlanNode, snap *schema.SchemaSnapshot, pgVersion *dryru
 		idxType, rec := suggestIndexType(qualified, colType, filterCol)
 		recommendation = rec
 
-		// stats-aware refinements
-		if col != nil && col.Stats != nil {
+		colStats := a.ColumnStats(qual, filterCol)
+		if col != nil && colStats != nil {
 			tableRows := node.PlanRows
-			if table != nil && table.Stats != nil && table.Stats.Reltuples > tableRows {
-				tableRows = table.Stats.Reltuples
+			if sz := a.SizingFor(qual); sz != nil && sz.Reltuples > tableRows {
+				tableRows = sz.Reltuples
 			}
-			recommendation += statsAwareAdvice(col, filterCol, tableRows)
+			recommendation += statsAwareAdvice(colStats, filterCol, tableRows)
 		}
 
 		idxName := fmt.Sprintf("idx_%s_%s", tableName, filterCol)
 
-		// partial index when column is mostly NULL
-		if col != nil && col.Stats != nil && col.Stats.NullFrac != nil && *col.Stats.NullFrac > 0.5 {
+		if colStats != nil && colStats.NullFrac != nil && *colStats.NullFrac > 0.5 {
 			ddl = strp(fmt.Sprintf("CREATE INDEX CONCURRENTLY %s ON %s.%s USING %s(%s) WHERE %s IS NOT NULL;",
 				idxName, schemaName, tableName, idxType, filterCol, filterCol))
-		} else if dominant, freq, skewed := schema.HasSkewedDistribution(col.Stats, 0.5); skewed {
-			_ = freq
-			ddl = strp(fmt.Sprintf("CREATE INDEX CONCURRENTLY %s ON %s.%s USING %s(%s) WHERE %s != '%s';",
-				idxName, schemaName, tableName, idxType, filterCol, filterCol, dominant))
+		} else if colStats != nil {
+			if dominant, _, skewed := schema.HasSkewedDistribution(colStats, 0.5); skewed {
+				ddl = strp(fmt.Sprintf("CREATE INDEX CONCURRENTLY %s ON %s.%s USING %s(%s) WHERE %s != '%s';",
+					idxName, schemaName, tableName, idxType, filterCol, filterCol, dominant))
+			} else {
+				ddl = strp(fmt.Sprintf("CREATE INDEX CONCURRENTLY %s ON %s.%s USING %s(%s);",
+					idxName, schemaName, tableName, idxType, filterCol))
+			}
 		} else {
 			ddl = strp(fmt.Sprintf("CREATE INDEX CONCURRENTLY %s ON %s.%s USING %s(%s);",
 				idxName, schemaName, tableName, idxType, filterCol))
@@ -313,7 +321,7 @@ func versionNoteForIndex(pgVersion *dryrun.PgVersion) *string {
 	return nil
 }
 
-func adviseIndexScanBloat(node *PlanNode, snap *schema.SchemaSnapshot, advice *[]Advice) {
+func adviseIndexScanBloat(node *PlanNode, a *schema.AnnotatedSchema, advice *[]Advice) {
 	if node.IndexName == nil {
 		return
 	}
@@ -332,11 +340,12 @@ func adviseIndexScanBloat(node *PlanNode, snap *schema.SchemaSnapshot, advice *[
 	if tableName == "" {
 		return
 	}
+	qual := schema.QualifiedName{Schema: schemaName, Name: tableName}
 
 	var table *schema.Table
-	for i := range snap.Tables {
-		if snap.Tables[i].Name == tableName && snap.Tables[i].Schema == schemaName {
-			table = &snap.Tables[i]
+	for i := range a.Schema.Tables {
+		if a.Schema.Tables[i].Name == tableName && a.Schema.Tables[i].Schema == schemaName {
+			table = &a.Schema.Tables[i]
 			break
 		}
 	}
@@ -346,31 +355,35 @@ func adviseIndexScanBloat(node *PlanNode, snap *schema.SchemaSnapshot, advice *[
 
 	indexName := *node.IndexName
 	for _, idx := range table.Indexes {
-		if idx.Name == indexName {
-			est, ok := schema.EstimateIndexBloat(idx, *table)
-			if ok && est.BloatRatio > 3.0 {
-				qualified := schemaName + "." + tableName
-				*advice = append(*advice, Advice{
-					Issue:          fmt.Sprintf("index '%s' on '%s' appears bloated (%.1fx) - cost estimates may be inflated", indexName, qualified, est.BloatRatio),
-					Severity:       "info",
-					Table:          strp(qualified),
-					Recommendation: fmt.Sprintf("Rebuild index to improve cost accuracy: REINDEX CONCURRENTLY %s;", indexName),
-					DDL:            strp(fmt.Sprintf("REINDEX CONCURRENTLY %s;", indexName)),
-				})
-			}
+		if idx.Name != indexName {
+			continue
+		}
+		sz := a.IndexSizingFor(qual, indexName)
+		if sz == nil {
 			break
 		}
+		est, ok := schema.EstimateIndexBloat(*sz, idx.Columns, *table, idx.IndexType)
+		if ok && est.BloatRatio > 3.0 {
+			qualified := schemaName + "." + tableName
+			*advice = append(*advice, Advice{
+				Issue:          fmt.Sprintf("index '%s' on '%s' appears bloated (%.1fx) - cost estimates may be inflated", indexName, qualified, est.BloatRatio),
+				Severity:       "info",
+				Table:          strp(qualified),
+				Recommendation: fmt.Sprintf("Rebuild index to improve cost accuracy: REINDEX CONCURRENTLY %s;", indexName),
+				DDL:            strp(fmt.Sprintf("REINDEX CONCURRENTLY %s;", indexName)),
+			})
+		}
+		break
 	}
 }
 
-func statsAwareAdvice(col *schema.Column, filterCol string, tableRows float64) string {
-	s := col.Stats
+func statsAwareAdvice(s *schema.ColumnStats, filterCol string, tableRows float64) string {
 	if s == nil {
 		return ""
 	}
 	var parts []string
 
-	sel := schema.ColumnSelectivity(*col, tableRows)
+	sel := schema.ColumnSelectivity(s, tableRows)
 	if s.NDistinct != nil {
 		nd := *s.NDistinct
 		if nd > 0 && nd <= 5 {
@@ -389,7 +402,6 @@ func statsAwareAdvice(col *schema.Column, filterCol string, tableRows float64) s
 		parts = append(parts, fmt.Sprintf("Column is %.0f%% NULL (~%d rows). Use a partial index WHERE %s IS NOT NULL to index only the non-null rows.", *s.NullFrac*100, nullRows, filterCol))
 	}
 
-	// random correlation hurts range scans
 	if s.Correlation != nil {
 		c := *s.Correlation
 		if c > -0.3 && c < 0.3 && tableRows > 10_000 {

@@ -133,8 +133,8 @@ func suggestFromQueryStructure(parsed *ParsedQuery, snap *schema.SchemaSnapshot,
 			continue
 		}
 
-		isLarge := table.Stats != nil && table.Stats.Reltuples >= 1000
-		if isLarge && !hasLeadingIndex(table, fc.Column) {
+		// row-count gate removed with Table.Stats; AnnotatedSchema-aware version belongs in advise.go
+		if !hasLeadingIndex(table, fc.Column) {
 			idxType := chooseIndexType(table, fc.Column)
 			qualified := table.Schema + "." + table.Name
 			idxName := fmt.Sprintf("idx_%s_%s", table.Name, fc.Column)
@@ -144,9 +144,8 @@ func suggestFromQueryStructure(parsed *ParsedQuery, snap *schema.SchemaSnapshot,
 				Columns:   []string{fc.Column},
 				DDL: fmt.Sprintf("CREATE INDEX CONCURRENTLY %s ON %s USING %s(%s);",
 					idxName, qualified, idxType, fc.Column),
-				Rationale: fmt.Sprintf("WHERE clause filters on '%s' on table '%s' (~%d rows)",
-					fc.Column, qualified, int64(table.Stats.Reltuples)),
-				EstimatedImpact: estimateImpact(table.Stats.Reltuples),
+				Rationale: fmt.Sprintf("WHERE clause filters on '%s' on table '%s'",
+					fc.Column, qualified),
 			})
 		}
 	}

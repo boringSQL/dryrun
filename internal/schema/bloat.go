@@ -55,21 +55,14 @@ type BloatEstimate struct {
 	ExpectedPages int64   `json:"expected_pages"`
 	ActualPages   int64   `json:"actual_pages"`
 	AvgKeyWidth   int     `json:"avg_key_width"`
+	SizeBytes     int64   `json:"size_bytes"`
 }
 
-func EstimateIndexBloat(idx Index, table Table) (BloatEstimate, bool) {
-	if idx.Stats == nil {
-		return BloatEstimate{}, false
-	}
-	return EstimateIndexBloatFromStats(*idx.Stats, idx.Columns, table, idx.IndexType)
-}
-
-// Variant for multi-node where stats come from NodeIndexStats
-func EstimateIndexBloatFromStats(stats IndexStats, columns []string, table Table, indexType string) (BloatEstimate, bool) {
+func EstimateIndexBloat(sizing IndexSizing, columns []string, table Table, indexType string) (BloatEstimate, bool) {
 	if indexType != "btree" {
 		return BloatEstimate{}, false
 	}
-	if stats.Reltuples <= 0 || stats.Relpages <= 0 {
+	if sizing.Reltuples <= 0 || sizing.Relpages <= 0 {
 		return BloatEstimate{}, false
 	}
 
@@ -96,16 +89,17 @@ func EstimateIndexBloatFromStats(stats IndexStats, columns []string, table Table
 	usable := float64(pageSize) * btreeFillfactor
 	tupleSize := float64(tupleOverhead + avgKeyWidth)
 	tuplesPerPage := usable / tupleSize
-	expectedPages := int64(math.Ceil(stats.Reltuples / tuplesPerPage))
+	expectedPages := int64(math.Ceil(sizing.Reltuples / tuplesPerPage))
 	if expectedPages < 1 {
 		expectedPages = 1
 	}
 
 	return BloatEstimate{
-		BloatRatio:    float64(stats.Relpages) / float64(expectedPages),
+		BloatRatio:    float64(sizing.Relpages) / float64(expectedPages),
 		ExpectedPages: expectedPages,
-		ActualPages:   stats.Relpages,
+		ActualPages:   sizing.Relpages,
 		AvgKeyWidth:   avgKeyWidth,
+		SizeBytes:     sizing.Size,
 	}, true
 }
 

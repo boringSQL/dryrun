@@ -197,28 +197,9 @@ func checkWideColumnIndexes(snap *schema.SchemaSnapshot) []lint.Finding {
 	return findings
 }
 
-func checkBloatedIndexes(snap *schema.SchemaSnapshot, config *Config) []lint.Finding {
-	var findings []lint.Finding
-	for _, t := range snap.Tables {
-		qualified := t.Schema + "." + t.Name
-		for _, idx := range t.Indexes {
-			est, ok := schema.EstimateIndexBloat(idx, t)
-			if !ok {
-				continue
-			}
-			if est.BloatRatio > config.BloatThreshold {
-				findings = append(findings, lint.Finding{
-					Rule: "indexes/bloated", Severity: lint.SeverityWarning,
-					Tables:         []string{qualified},
-					Message:        fmt.Sprintf("Index '%s' appears bloated (%.1fx, %d actual vs %d expected pages)", idx.Name, est.BloatRatio, est.ActualPages, est.ExpectedPages),
-					Recommendation: "Rebuild the index to reclaim space and improve planner cost estimates",
-					DDLFix:         new(fmt.Sprintf("REINDEX CONCURRENTLY %s;", idx.Name)),
-					MinPgVersion:   new(12),
-				})
-			}
-		}
-	}
-	return findings
+// stats-dependent; audit harness only passes DDL — detect/bloated_indexes MCP tool covers the live path
+func checkBloatedIndexes(_ *schema.SchemaSnapshot, _ *Config) []lint.Finding {
+	return nil
 }
 
 func checkFKTypeMismatch(snap *schema.SchemaSnapshot) []lint.Finding {
@@ -554,36 +535,9 @@ func sliceEqual(a, b []string) bool {
 	return true
 }
 
-func checkVacuumLargeTableDefaults(snap *schema.SchemaSnapshot) []lint.Finding {
-	var findings []lint.Finding
-	for _, vh := range schema.AnalyzeVacuumHealth(snap) {
-		if vh.HasOverrides || vh.Reltuples < 1_000_000 {
-			continue
-		}
-
-		qualified := vh.Schema + "." + vh.Table
-
-		severity := lint.SeverityInfo
-		if vh.Reltuples > 10_000_000 {
-			severity = lint.SeverityWarning
-		}
-
-		vacSF, vacThresh, azSF, azThresh := schema.SuggestedVacuumKnobs(vh.Reltuples)
-
-		findings = append(findings, lint.Finding{
-			Rule:     "vacuum/large_table_defaults",
-			Severity: severity,
-			Tables:   []string{qualified},
-			Message: fmt.Sprintf(
-				"Table %s has %dk rows with default autovacuum settings. VACCUM won't trigger until %dk dead tuples accumulate",
-				qualified, int64(vh.Reltuples)/1000, int64(vh.VacuumTriggerAt)/1000),
-			Recommendation: "consider tuning autovacuum for large tables — lower scale factors alone aren't enough without explicit thresholds",
-			DDLFix: new(fmt.Sprintf(
-				"ALTER TABLE %s SET (\n  autovacuum_vacuum_scale_factor = %g,\n  autovacuum_vacuum_threshold = %d,\n  autovacuum_analyze_scale_factor = %g,\n  autovacuum_analyze_threshold = %d\n);",
-				qualified, vacSF, vacThresh, azSF, azThresh)),
-		})
-	}
-	return findings
+// stats-dependent; audit harness only passes DDL — vacuum_health MCP tool covers the live path
+func checkVacuumLargeTableDefaults(_ *schema.SchemaSnapshot) []lint.Finding {
+	return nil
 }
 
 func isPrefix(prefix, full []string) bool {

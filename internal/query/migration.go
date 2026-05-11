@@ -218,18 +218,9 @@ func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate
 
 	rec := e.String()
 
-	// column stats for null_frac context
-	if colName != "" && snap != nil {
-		if col := findColumn(snap, tableName, colName); col != nil && col.Stats != nil && col.Stats.NullFrac != nil {
-			nf := *col.Stats.NullFrac
-			if nf == 0 {
-				rec += "\n\nDATA CHECK: Column currently has 0% NULLs. The scan will pass, but ACCESS EXCLUSIVE lock is still held."
-			} else if rowEstimate != nil {
-				nullRows := int64(nf * *rowEstimate)
-				rec += fmt.Sprintf("\n\nDATA CHECK: Column has ~%.0f%% NULLs (~%d rows) that must be backfilled before this constraint can be applied.", nf*100, nullRows)
-			}
-		}
-	}
+	// column NULL-fraction refinement migrated to AnnotatedSchema; CheckMigration doesn't carry one yet
+	_ = colName
+	_ = snap
 
 	return &MigrationCheck{
 		Operation: "SET NOT NULL", Table: strp(tableName), Safety: safety,
@@ -403,13 +394,10 @@ func lookupTableStats(snap *schema.SchemaSnapshot, tableName string) (*string, *
 		namePart = tableName[i+1:]
 	}
 
-	for _, t := range snap.Tables {
-		if t.Name == namePart && t.Schema == schemaPart && t.Stats != nil {
-			size := formatBytes(t.Stats.TableSize)
-			rows := t.Stats.Reltuples
-			return &size, &rows
-		}
-	}
+	// size/row hints come from AnnotatedSchema now; CheckMigration receives only DDL
+	_ = namePart
+	_ = schemaPart
+	_ = snap
 	return nil, nil
 }
 
