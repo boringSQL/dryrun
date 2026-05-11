@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -101,89 +100,6 @@ func probeCmd() *cobra.Command {
 			fmt.Printf("  pg_catalog:           %s\n", okDenied(report.PgCatalog))
 			fmt.Printf("  information_schema:   %s\n", okDenied(report.InformationSchema))
 			fmt.Printf("  pg_stat_user_tables:  %s\n", okDenied(report.PgStatUserTables))
-			return nil
-		},
-	}
-}
-
-func initCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "init [config-file]",
-		Short: "Scaffold dryrun.toml and .dryrun/; with --db, also capture schema snapshot",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			configPath := "dryrun.toml"
-			if len(args) > 0 {
-				configPath = args[0]
-			}
-
-			if _, err := os.Stat(configPath); os.IsNotExist(err) {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				profileName := filepath.Base(cwd)
-				content := fmt.Sprintf(`[default]
-profile = %q
-
-[profiles.%s]
-schema_file = ".dryrun/schema.json"
-
-# [profiles.dev]
-# db_url = "${DATABASE_URL}"
-
-# [conventions]
-# See: https://boringsql.com/dryrun/docs/dryrun-toml
-`, profileName, profileName)
-				if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
-					return err
-				}
-				fmt.Fprintf(os.Stderr, "Created %s (profile %q)\n", configPath, profileName)
-			} else {
-				fmt.Fprintf(os.Stderr, "%s already exists, skipping\n", configPath)
-			}
-
-			dataDir, err := history.DefaultDataDir()
-			if err != nil {
-				return err
-			}
-			if err := os.MkdirAll(dataDir, 0o755); err != nil {
-				return err
-			}
-
-			if flagDB == "" {
-				fmt.Fprintf(os.Stderr, "Run 'dryrun --db <url> init' to capture a schema snapshot\n")
-				return nil
-			}
-
-			ctx, conn, err := connectDB()
-			if err != nil {
-				return err
-			}
-			defer conn.Close()
-
-			snap, err := conn.Introspect(ctx)
-			if err != nil {
-				return err
-			}
-
-			schemaPath := dataDir + "/schema.json"
-			if err := writeJSONFile(schemaPath, snap, true); err != nil {
-				return err
-			}
-
-			if store, err := history.OpenDefault(); err != nil {
-				slog.Warn("could not open history store", "error", err)
-			} else {
-				defer store.Close()
-				if _, err := store.Put(cmd.Context(), resolveSnapshotKey(), snap); err != nil {
-					slog.Warn("could not save snapshot", "error", err)
-				}
-			}
-
-			fmt.Fprintf(os.Stderr, "Captured schema: %d tables, %d views, %d functions\n",
-				len(snap.Tables), len(snap.Views), len(snap.Functions))
-			fmt.Fprintf(os.Stderr, "  Schema: %s\n", schemaPath)
 			return nil
 		},
 	}
