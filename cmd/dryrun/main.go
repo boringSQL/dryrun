@@ -441,7 +441,7 @@ func snapshotCmd() *cobra.Command {
 	addHistFlag(diffCmd)
 	diffCmd.Flags().BoolVar(&prettyDiff, "pretty", false, "pretty-print JSON")
 
-	cmd.AddCommand(takeCmd, listCmd, diffCmd, snapshotExportCmd())
+	cmd.AddCommand(takeCmd, listCmd, diffCmd, snapshotExportCmd(), snapshotActivityCmd())
 	return cmd
 }
 
