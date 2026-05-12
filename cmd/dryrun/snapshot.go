@@ -119,7 +119,7 @@ func runSnapshotActivity(ctx context.Context, cap initCapturer, store initWriter
 	}
 
 	schemaRef := ""
-	if snap, err := store.Get(ctx, key, history.NewRefLatest()); err == nil && snap != nil {
+	if snap, err := store.GetSchema(ctx, key, history.NewRefLatest()); err == nil && snap != nil {
 		schemaRef = snap.ContentHash
 	}
 	if schemaRef == "" && !opts.AllowOrphan {
@@ -158,26 +158,24 @@ func runSnapshotExport(ctx context.Context, store history.SnapshotStore, outRoot
 	defer enc.Close()
 
 	for _, key := range keys {
-		summaries, err := store.List(ctx, key, history.TimeRange{})
+		summaries, err := store.List(ctx, key, history.SchemaKind(), history.TimeRange{})
 		if err != nil {
 			return written, len(keys), err
 		}
 		for _, s := range summaries {
-			snap, err := store.Get(ctx, key, history.NewRefHash(s.ContentHash))
+			stored, err := store.Get(ctx, key, history.SchemaKind(), history.NewRefHash(s.ContentHash))
 			if err != nil {
 				return written, len(keys), err
 			}
-			dir := filepath.Join(outRoot, string(key.ProjectID), string(key.DatabaseID))
+			dir := history.BundleDir(outRoot, key)
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return written, len(keys), err
 			}
-			name := fmt.Sprintf("%s-%s.json.zst",
-				s.Timestamp.UTC().Format("20060102T150405Z"), s.ContentHash)
-			raw, err := json.Marshal(snap)
+			raw, err := json.Marshal(stored.AsSchema())
 			if err != nil {
 				return written, len(keys), err
 			}
-			if err := os.WriteFile(filepath.Join(dir, name), enc.EncodeAll(raw, nil), 0o644); err != nil {
+			if err := os.WriteFile(history.BundlePath(outRoot, key, s.Timestamp, s.ContentHash), enc.EncodeAll(raw, nil), 0o644); err != nil {
 				return written, len(keys), err
 			}
 			written++
