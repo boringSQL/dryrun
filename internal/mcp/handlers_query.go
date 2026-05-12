@@ -287,35 +287,3 @@ func extractPlanNode(v any) (json.RawMessage, error) {
 	return nil, fmt.Errorf("no Plan key and no Node Type at root")
 }
 
-func (s *Server) handleSuggestIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
-	if err != nil {
-		return errResult(err.Error()), nil
-	}
-
-	sql := getArg(req, "sql")
-	pgVersion, _ := dryrun.ParsePgVersion(snap.PgVersion)
-
-	var plan *query.PlanNode
-	if s.pool != nil {
-		result, err := query.ExplainQuery(ctx, s.pool, sql, false, snap)
-		if err == nil {
-			plan = &result.Plan
-		}
-	}
-
-	suggestions, err := query.SuggestIndex(sql, snap, plan, &pgVersion)
-	if err != nil {
-		return errResult(fmt.Sprintf("analysis failed: %v", err)), nil
-	}
-	if len(suggestions) == 0 {
-		return textResult("No index suggestions."), nil
-	}
-	hint := ""
-	if len(suggestions) > 0 {
-		hint = "Index suggestions contain DDL. Run each through check_migration before applying — it checks lock safety and duration."
-	}
-	wrapper := map[string]any{"index_suggestions": suggestions}
-	s.injectMeta(wrapper, hint)
-	return jsonResult(wrapper), nil
-}
