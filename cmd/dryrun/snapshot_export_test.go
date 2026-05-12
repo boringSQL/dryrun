@@ -51,7 +51,7 @@ func TestSnapshotExportRoundTrip(t *testing.T) {
 			ProjectID:  history.ProjectId(s.project),
 			DatabaseID: history.DatabaseId(s.database),
 		}
-		if _, err := store.Put(ctx, k, snap); err != nil {
+		if _, err := store.PutSchema(ctx, k, snap); err != nil {
 			t.Fatalf("seed %s/%s: %v", s.project, s.database, err)
 		}
 	}
