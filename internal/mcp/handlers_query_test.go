@@ -6,7 +6,7 @@ import (
 )
 
 // Smoke tests for query-family tools: validate_query, check_migration,
-// suggest_index. Each subtest issues one representative call against the
+// advise. Each subtest issues one representative call against the
 // demo schema; failures here mean handler wiring or arg parsing has drifted.
 func TestQueryHandlers_OfflineSmoke(t *testing.T) {
 	c := setupOfflineTest(t)
@@ -29,8 +29,8 @@ func TestQueryHandlers_OfflineSmoke(t *testing.T) {
 		}
 	})
 
-	t.Run("suggest_index", func(t *testing.T) {
-		out := callTool(t, c, "suggest_index", map[string]any{
+	t.Run("advise", func(t *testing.T) {
+		out := callTool(t, c, "advise", map[string]any{
 			"sql": "SELECT * FROM tasks WHERE status = 'open'",
 		})
 		if out == "" {
