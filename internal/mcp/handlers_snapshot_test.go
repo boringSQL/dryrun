@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/lint"
+	"github.com/boringsql/dryrun/internal/schema"
 )
 
 // verifies that reload_schema picks up a candidate path written at runtime,
@@ -63,5 +66,64 @@ func TestReloadSchema_NoCandidates(t *testing.T) {
 	tc := res.Content[0].(mcp.TextContent)
 	if !strings.Contains(tc.Text, "no schema file found") {
 		t.Errorf("expected not-found message, got %s", tc.Text)
+	}
+}
+
+// Locks down the v0.6 lookup order: when both history.db and a schema.json
+// candidate are present, reload_schema must prefer history.db so the
+// planner/activity streams come along for the ride. If this test ever
+// regresses, stats apply and the activity-aware tools silently lose data.
+func TestReloadSchema_HistoryBeatsSchemaFile(t *testing.T) {
+	dir := t.TempDir()
+	store, err := history.Open(filepath.Join(dir, "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	histSnap := &schema.SchemaSnapshot{
+		Database:    "from_history",
+		ContentHash: "hist-1",
+		Tables:      []schema.Table{{Schema: "public", Name: "t_from_history"}},
+	}
+	if _, err := store.Put(context.Background(), key, histSnap); err != nil {
+		t.Fatal(err)
+	}
+
+	// candidate file carries a different table name; if reload picks it, getSchema
+	// will see t_from_file instead of t_from_history.
+	fileSnap := &schema.SchemaSnapshot{
+		Database:    "from_file",
+		ContentHash: "file-1",
+		Tables:      []schema.Table{{Schema: "public", Name: "t_from_file"}},
+	}
+	path := filepath.Join(dir, "schema.json")
+	data, err := json.Marshal(fileSnap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{lintConfig: lint.DefaultConfig(), history: store, snapshotKey: key}
+	srv.SetUninitialized([]string{path})
+
+	res, err := srv.handleReloadSchema(context.Background(), mcp.CallToolRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := res.Content[0].(mcp.TextContent)
+	if !strings.Contains(tc.Text, "history.db") {
+		t.Errorf("expected history.db source in reload output, got: %s", tc.Text)
+	}
+
+	snap, err := srv.getSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Tables) == 0 || snap.Tables[0].Name != "t_from_history" {
+		t.Errorf("expected table from history.db, got %+v", snap.Tables)
 	}
 }
