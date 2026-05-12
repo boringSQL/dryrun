@@ -100,7 +100,7 @@ func ExplainQuery(ctx context.Context, pool *pgxpool.Pool, sql string, analyze b
 		}
 	}
 
-	warnings := detectPlanWarnings(plan, snap)
+	warnings := DetectPlanWarnings(plan, snap)
 
 	return &ExplainResult{
 		Plan:          *plan,

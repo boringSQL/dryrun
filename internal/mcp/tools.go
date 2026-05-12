@@ -76,6 +76,15 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		s.handleSuggestIndex,
 	)
 	srv.AddTool(
+		mcp.NewTool("analyze_plan",
+			mcp.WithDescription("Analyze a pre-captured EXPLAIN-JSON plan. Offline. Accepts both {\"Plan\":...} and [{\"Plan\":...}] shapes."),
+			mcp.WithString("sql", mcp.Required(), mcp.Description("The original SQL query text.")),
+			mcp.WithObject("plan_json", mcp.Required(), mcp.Description("EXPLAIN output in JSON format (EXPLAIN (FORMAT JSON)).")),
+			mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
+		),
+		s.handleAnalyzePlan,
+	)
+	srv.AddTool(
 		mcp.NewTool("advise",
 			mcp.WithDescription("Analyze a SQL query: validation, anti-patterns, plan-based advice (online), and index suggestions. Offline-capable."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
