@@ -23,13 +23,16 @@ type Store struct {
 }
 
 type SnapshotSummary struct {
-	ID          int64     `json:"id"`
-	DBURLHash   string    `json:"db_url_hash"`
-	Timestamp   time.Time `json:"timestamp"`
-	ContentHash string    `json:"content_hash"`
-	Database    string    `json:"database"`
-	ProjectID   *string   `json:"project_id,omitempty"`
-	DatabaseID  *string   `json:"database_id,omitempty"`
+	ID            int64     `json:"id"`
+	Kind          SnapshotKind `json:"-"`
+	DBURLHash     string    `json:"db_url_hash,omitempty"`
+	Timestamp     time.Time `json:"timestamp"`
+	ContentHash   string    `json:"content_hash"`
+	Database      string    `json:"database,omitempty"`
+	SchemaRefHash string    `json:"schema_ref_hash,omitempty"`
+	NodeLabel     string    `json:"node_label,omitempty"`
+	ProjectID     *string   `json:"project_id,omitempty"`
+	DatabaseID    *string   `json:"database_id,omitempty"`
 }
 
 // Opens (or creates) sqlite history db at path
@@ -63,7 +66,7 @@ func OpenDefault() (*Store, error) {
 	return Open(path)
 }
 
-func scanSummary(rows interface{ Scan(...any) error }) (SnapshotSummary, error) {
+func scanSchemaSummary(rows interface{ Scan(...any) error }) (SnapshotSummary, error) {
 	var (
 		ss    SnapshotSummary
 		tsStr string
@@ -73,7 +76,9 @@ func scanSummary(rows interface{ Scan(...any) error }) (SnapshotSummary, error) 
 	if err := rows.Scan(&ss.ID, &ss.DBURLHash, &tsStr, &ss.ContentHash, &ss.Database, &pid, &did); err != nil {
 		return ss, err
 	}
+	ss.Kind = SchemaKind()
 	ss.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
+	ss.SchemaRefHash = ss.ContentHash
 	if pid.Valid {
 		v := pid.String
 		ss.ProjectID = &v
@@ -159,7 +164,8 @@ func syntheticDBURLHash(key SnapshotKey) string {
 	return fmt.Sprintf("%x", h)[:16]
 }
 
-func (s *Store) Put(ctx context.Context, key SnapshotKey, snap *schema.SchemaSnapshot) (PutOutcome, error) {
+// schema-specific wrapper; mirror of Rust's `put_schema` default method.
+func (s *Store) PutSchema(ctx context.Context, key SnapshotKey, snap *schema.SchemaSnapshot) (PutOutcome, error) {
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
 
@@ -198,7 +204,7 @@ func (s *Store) Put(ctx context.Context, key SnapshotKey, snap *schema.SchemaSna
 
 var ErrSnapshotNotFound = errors.New("snapshot not found")
 
-func (s *Store) Get(ctx context.Context, key SnapshotKey, at SnapshotRef) (*schema.SchemaSnapshot, error) {
+func (s *Store) GetSchema(ctx context.Context, key SnapshotKey, at SnapshotRef) (*schema.SchemaSnapshot, error) {
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
 
@@ -250,7 +256,7 @@ func (s *Store) Get(ctx context.Context, key SnapshotKey, at SnapshotRef) (*sche
 	return &snap, nil
 }
 
-func (s *Store) List(ctx context.Context, key SnapshotKey, rng TimeRange) ([]SnapshotSummary, error) {
+func (s *Store) ListSchema(ctx context.Context, key SnapshotKey, rng TimeRange) ([]SnapshotSummary, error) {
 	var (
 		sb   strings.Builder
 		args []any
@@ -276,7 +282,7 @@ func (s *Store) List(ctx context.Context, key SnapshotKey, rng TimeRange) ([]Sna
 
 	var out []SnapshotSummary
 	for rows.Next() {
-		ss, err := scanSummary(rows)
+		ss, err := scanSchemaSummary(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -285,8 +291,8 @@ func (s *Store) List(ctx context.Context, key SnapshotKey, rng TimeRange) ([]Sna
 	return out, rows.Err()
 }
 
-func (s *Store) Latest(ctx context.Context, key SnapshotKey) (*SnapshotSummary, error) {
-	list, err := s.List(ctx, key, TimeRange{})
+func (s *Store) LatestSchema(ctx context.Context, key SnapshotKey) (*SnapshotSummary, error) {
+	list, err := s.ListSchema(ctx, key, TimeRange{})
 	if err != nil || len(list) == 0 {
 		return nil, err
 	}
@@ -294,7 +300,7 @@ func (s *Store) Latest(ctx context.Context, key SnapshotKey) (*SnapshotSummary, 
 	return &first, nil
 }
 
-func (s *Store) DeleteBefore(ctx context.Context, key SnapshotKey, cutoff time.Time) (int64, error) {
+func (s *Store) DeleteSchemaBefore(ctx context.Context, key SnapshotKey, cutoff time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM snapshots
 		  WHERE project_id = ? AND database_id = ? AND timestamp < ?`,
@@ -328,6 +334,139 @@ func (s *Store) ListKeys(ctx context.Context) ([]SnapshotKey, error) {
 	return out, rows.Err()
 }
 
+// Put dispatches on the StoredSnapshot variant to the right kind-specific path.
+func (s *Store) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (PutOutcome, error) {
+	switch {
+	case snap.AsSchema() != nil:
+		return s.PutSchema(ctx, key, snap.AsSchema())
+	case snap.AsPlanner() != nil:
+		return s.PutPlanner(ctx, key, snap.AsPlanner())
+	case snap.AsActivity() != nil:
+		return s.PutActivity(ctx, key, snap.AsActivity())
+	}
+	return PutInserted, fmt.Errorf("empty StoredSnapshot")
+}
+
+func (s *Store) Get(ctx context.Context, key SnapshotKey, kind SnapshotKind, at SnapshotRef) (StoredSnapshot, error) {
+	switch kind.Tag {
+	case KindSchema:
+		snap, err := s.GetSchema(ctx, key, at)
+		if err != nil {
+			return StoredSnapshot{}, err
+		}
+		return WrapSchema(snap), nil
+	case KindPlanner:
+		p, err := s.getPlannerRef(ctx, key, at)
+		if err != nil {
+			return StoredSnapshot{}, err
+		}
+		return WrapPlanner(p), nil
+	case KindActivity:
+		a, err := s.getActivityRef(ctx, key, kind.NodeLabel, at)
+		if err != nil {
+			return StoredSnapshot{}, err
+		}
+		return WrapActivity(a), nil
+	}
+	return StoredSnapshot{}, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
+}
+
+func (s *Store) List(ctx context.Context, key SnapshotKey, kind SnapshotKind, rng TimeRange) ([]SnapshotSummary, error) {
+	switch kind.Tag {
+	case KindSchema:
+		return s.ListSchema(ctx, key, rng)
+	case KindPlanner:
+		return s.listPlanner(ctx, key, rng)
+	case KindActivity:
+		return s.listActivity(ctx, key, kind.NodeLabel, rng)
+	}
+	return nil, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
+}
+
+func (s *Store) Latest(ctx context.Context, key SnapshotKey, kind SnapshotKind) (*SnapshotSummary, error) {
+	list, err := s.List(ctx, key, kind, TimeRange{})
+	if err != nil || len(list) == 0 {
+		return nil, err
+	}
+	first := list[0]
+	return &first, nil
+}
+
+func (s *Store) DeleteBefore(ctx context.Context, key SnapshotKey, kind SnapshotKind, cutoff time.Time) (int64, error) {
+	switch kind.Tag {
+	case KindSchema:
+		return s.DeleteSchemaBefore(ctx, key, cutoff)
+	case KindPlanner:
+		res, err := s.db.ExecContext(ctx,
+			`DELETE FROM planner_stats
+			  WHERE project_id = ? AND database_id = ? AND timestamp < ?`,
+			string(key.ProjectID), string(key.DatabaseID), cutoff.Format(time.RFC3339),
+		)
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	case KindActivity:
+		query := `DELETE FROM activity_stats
+			  WHERE project_id = ? AND database_id = ? AND timestamp < ?`
+		args := []any{string(key.ProjectID), string(key.DatabaseID), cutoff.Format(time.RFC3339)}
+		if kind.NodeLabel != "" {
+			query += " AND node_source = ?"
+			args = append(args, kind.NodeLabel)
+		}
+		res, err := s.db.ExecContext(ctx, query, args...)
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	}
+	return 0, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
+}
+
+func (s *Store) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error) {
+	pid := string(key.ProjectID)
+	did := string(key.DatabaseID)
+
+	var out []SnapshotKind
+	var n int
+
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM snapshots WHERE project_id = ? AND database_id = ?`,
+		pid, did).Scan(&n); err != nil {
+		return nil, err
+	}
+	if n > 0 {
+		out = append(out, SchemaKind())
+	}
+
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM planner_stats WHERE project_id = ? AND database_id = ?`,
+		pid, did).Scan(&n); err != nil {
+		return nil, err
+	}
+	if n > 0 {
+		out = append(out, PlannerKind())
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT node_source FROM activity_stats
+		  WHERE project_id = ? AND database_id = ?
+		  ORDER BY node_source`,
+		pid, did)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			return nil, err
+		}
+		out = append(out, ActivityKind(label))
+	}
+	return out, rows.Err()
+}
+
 // compile-time check that *Store satisfies SnapshotStore
 var _ SnapshotStore = (*Store)(nil)
 
@@ -346,4 +485,3 @@ func DefaultDataDir() (string, error) {
 	}
 	return filepath.Join(cwd, ".dryrun"), nil
 }
-

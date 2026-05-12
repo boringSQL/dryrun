@@ -24,8 +24,8 @@ type initCapturer interface {
 }
 
 type initWriter interface {
-	Get(ctx context.Context, key history.SnapshotKey, at history.SnapshotRef) (*schema.SchemaSnapshot, error)
-	Put(ctx context.Context, key history.SnapshotKey, snap *schema.SchemaSnapshot) (history.PutOutcome, error)
+	GetSchema(ctx context.Context, key history.SnapshotKey, at history.SnapshotRef) (*schema.SchemaSnapshot, error)
+	PutSchema(ctx context.Context, key history.SnapshotKey, snap *schema.SchemaSnapshot) (history.PutOutcome, error)
 	PutPlanner(ctx context.Context, key history.SnapshotKey, p *schema.PlannerStatsSnapshot) (history.PutOutcome, error)
 	PutActivity(ctx context.Context, key history.SnapshotKey, a *schema.ActivityStatsSnapshot) (history.PutOutcome, error)
 }
@@ -134,7 +134,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		// schema_ref_hash is unknown on a standby without a prior primary snapshot;
 		// leave it empty so the row binds when a matching schema lands.
 		schemaRef := ""
-		if snap, err := store.Get(ctx, key, history.NewRefLatest()); err == nil && snap != nil {
+		if snap, err := store.GetSchema(ctx, key, history.NewRefLatest()); err == nil && snap != nil {
 			schemaRef = snap.ContentHash
 		}
 		activity, err := cap.CaptureActivity(ctx, schemaRef, source)
@@ -152,7 +152,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 	if err != nil {
 		return err
 	}
-	if _, err := store.Put(ctx, key, snap); err != nil {
+	if _, err := store.PutSchema(ctx, key, snap); err != nil {
 		slog.Warn("could not save snapshot", "error", err)
 	}
 

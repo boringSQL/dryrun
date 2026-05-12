@@ -115,7 +115,7 @@ func (s *Server) resolveSnapshotForDiff(ctx context.Context, hash, side string) 
 		if hist == nil || key.ProjectID == "" {
 			return nil, fmt.Errorf("no history store available; cannot resolve %s=%s", side, hash)
 		}
-		snap, err := hist.Get(ctx, key, history.NewRefHash(hash))
+		snap, err := hist.GetSchema(ctx, key, history.NewRefHash(hash))
 		if err != nil {
 			return nil, fmt.Errorf("history lookup for %s=%s failed: %v", side, hash, err)
 		}
@@ -134,7 +134,7 @@ func (s *Server) resolveSnapshotForDiff(ctx context.Context, hash, side string) 
 	if hist == nil || key.ProjectID == "" {
 		return nil, fmt.Errorf("from omitted but no history store available")
 	}
-	snap, err := hist.Get(ctx, key, history.NewRefLatest())
+	snap, err := hist.GetSchema(ctx, key, history.NewRefLatest())
 	if err != nil {
 		return nil, fmt.Errorf("history lookup for latest snapshot failed: %v", err)
 	}

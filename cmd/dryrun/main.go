@@ -355,7 +355,7 @@ func snapshotCmd() *cobra.Command {
 				return err
 			}
 
-			outcome, err := store.Put(cmd.Context(), resolveSnapshotKey(), snap)
+			outcome, err := store.PutSchema(cmd.Context(), resolveSnapshotKey(), snap)
 			if err != nil {
 				return err
 			}
@@ -380,7 +380,7 @@ func snapshotCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			summaries, err := store.List(cmd.Context(), resolveSnapshotKey(), history.TimeRange{})
+			summaries, err := store.ListSchema(cmd.Context(), resolveSnapshotKey(), history.TimeRange{})
 			if err != nil {
 				return err
 			}
@@ -422,7 +422,7 @@ func snapshotCmd() *cobra.Command {
 
 			key := resolveSnapshotKey()
 			loadByHash := func(h string) (*schema.SchemaSnapshot, error) {
-				return store.Get(cmd.Context(), key, history.NewRefHash(h))
+				return store.GetSchema(cmd.Context(), key, history.NewRefHash(h))
 			}
 
 			var fromSnap *schema.SchemaSnapshot
@@ -430,7 +430,7 @@ func snapshotCmd() *cobra.Command {
 			case fromHash != "":
 				fromSnap, err = loadByHash(fromHash)
 			case latest:
-				fromSnap, err = store.Get(cmd.Context(), key, history.NewRefLatest())
+				fromSnap, err = store.GetSchema(cmd.Context(), key, history.NewRefLatest())
 			default:
 				return fmt.Errorf("specify --from <hash> or --latest")
 			}
