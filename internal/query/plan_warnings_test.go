@@ -43,7 +43,7 @@ func TestPartitionPruningNoPruning(t *testing.T) {
 		},
 	}
 
-	warnings := detectPlanWarnings(plan, snap)
+	warnings := DetectPlanWarnings(plan, snap)
 	found := false
 	for _, w := range warnings {
 		if w.Severity == "warning" && strings.Contains(w.Message, "no partition pruning") {
@@ -66,7 +66,7 @@ func TestPartitionPruningGoodPruning(t *testing.T) {
 		},
 	}
 
-	warnings := detectPlanWarnings(plan, snap)
+	warnings := DetectPlanWarnings(plan, snap)
 	for _, w := range warnings {
 		if strings.Contains(w.Message, "partition pruning") || strings.Contains(w.Message, "partial pruning") {
 			t.Errorf("unexpected partition warning when pruning is effective: %s", w.Message)
@@ -87,7 +87,7 @@ func TestPartitionPruningPartial(t *testing.T) {
 		},
 	}
 
-	warnings := detectPlanWarnings(plan, snap)
+	warnings := DetectPlanWarnings(plan, snap)
 	found := false
 	for _, w := range warnings {
 		if w.Severity == "info" && strings.Contains(w.Message, "partial pruning") {
@@ -110,7 +110,7 @@ func TestPartitionPruningNonPartitionedAppend(t *testing.T) {
 		},
 	}
 
-	warnings := detectPlanWarnings(plan, snap)
+	warnings := DetectPlanWarnings(plan, snap)
 	for _, w := range warnings {
 		if strings.Contains(w.Message, "partition") {
 			t.Errorf("unexpected partition warning for non-partitioned Append: %s", w.Message)
@@ -130,7 +130,7 @@ func TestPartitionPruningMergeAppend(t *testing.T) {
 		},
 	}
 
-	warnings := detectPlanWarnings(plan, snap)
+	warnings := DetectPlanWarnings(plan, snap)
 	found := false
 	for _, w := range warnings {
 		if strings.Contains(w.Message, "no partition pruning") {

@@ -43,8 +43,13 @@ func TestToolsRegistration_EveryListedToolHasHandler(t *testing.T) {
 				req.Params.Arguments = map[string]any{"sql": "SELECT 1"}
 			case "check_migration":
 				req.Params.Arguments = map[string]any{"ddl": "ALTER TABLE users ADD COLUMN x INT"}
-			case "suggest_index":
+			case "advise":
 				req.Params.Arguments = map[string]any{"sql": "SELECT * FROM users"}
+			case "analyze_plan":
+				req.Params.Arguments = map[string]any{
+					"sql":       "SELECT * FROM users",
+					"plan_json": map[string]any{"Plan": map[string]any{"Node Type": "Seq Scan", "Relation Name": "users", "Plan Rows": 1.0}},
+				}
 			}
 
 			result, err := c.CallTool(context.Background(), req)
@@ -84,8 +89,9 @@ func TestToolsRegistration_InputSchemaShape(t *testing.T) {
 		"find_related":    {"table"},
 		"validate_query":  {"sql"},
 		"check_migration": {"ddl"},
-		"suggest_index":   {"sql"},
 		"compare_nodes":   {"table"},
+		"advise":          {"sql"},
+		"analyze_plan":    {"sql", "plan_json"},
 	}
 
 	for _, tool := range list.Tools {
@@ -128,12 +134,14 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 		"find_related":    true,
 		"validate_query":  true,
 		"check_migration": true,
-		"suggest_index":   true,
 		"lint_schema":     true,
 		"compare_nodes":   true,
 		"detect":          true,
 		"vacuum_health":   true,
 		"reload_schema":   true,
+		"advise":          true,
+		"analyze_plan":    true,
+		"schema_diff":     true,
 	}
 	got := map[string]bool{}
 	for _, tool := range list.Tools {
