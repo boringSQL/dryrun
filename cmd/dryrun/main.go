@@ -52,7 +52,7 @@ func main() {
 	}
 
 	pf := root.PersistentFlags()
-	pf.StringVar(&flagDB, "db", os.Getenv("DATABASE_URL"), "PostgreSQL connection URL")
+	pf.StringVar(&flagDB, "db", os.Getenv("DATABASE_URL"), "PostgreSQL connection URL [env: DATABASE_URL]")
 	pf.StringVar(&flagProfile, "profile", "", "config profile name")
 	pf.StringVar(&flagConfig, "config", "", "path to dryrun.toml")
 	pf.StringVar(&flagSchemaFile, "schema-file", os.Getenv("SCHEMA_FILE"), "path to schema JSON file")
@@ -145,13 +145,18 @@ func importCmd() *cobra.Command {
 
 func dumpSchemaCmd() *cobra.Command {
 	var pretty bool
-	var output, name string
+	var output, name, source string
 
 	cmd := &cobra.Command{
 		Use:   "dump-schema",
 		Short: "Export DDL schema from live database to JSON",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, conn, err := connectDB()
+			// --source wins over --db; env fallback is SOURCE_DATABASE_URL.
+			url := source
+			if url == "" {
+				url = os.Getenv("SOURCE_DATABASE_URL")
+			}
+			ctx, conn, err := connectDBFor(url)
 			if err != nil {
 				return err
 			}
@@ -180,6 +185,7 @@ func dumpSchemaCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&pretty, "pretty", false, "pretty-print JSON")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "output file path")
 	cmd.Flags().StringVar(&name, "name", "", "source name (sets snapshot.Source)")
+	cmd.Flags().StringVar(&source, "source", "", "connection URL override [env: SOURCE_DATABASE_URL]")
 	return cmd
 }
 
@@ -244,6 +250,9 @@ func lintCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&schemaFilter, "schema", "", "filter by schema name")
+	// hidden deprecated alias retained for upstream parity
+	cmd.Flags().StringVar(&schemaFilter, "schema-name", "", "deprecated alias for --schema")
+	_ = cmd.Flags().MarkHidden("schema-name")
 	cmd.Flags().BoolVar(&pretty, "pretty", false, "pretty-print JSON")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output as JSON")
 	return cmd
@@ -251,12 +260,20 @@ func lintCmd() *cobra.Command {
 
 func driftCmd() *cobra.Command {
 	var pretty, jsonOutput bool
+	var against string
 
 	cmd := &cobra.Command{
 		Use:   "drift",
 		Short: "Compare live database schema against saved snapshot",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			saved, err := loadSchemaForLint()
+			// --against is the explicit snapshot path; wins over global --schema-file and auto-discovery.
+			var saved *schema.SchemaSnapshot
+			var err error
+			if against != "" {
+				saved, err = loadSchemaFile(against)
+			} else {
+				saved, err = loadSchemaForLint()
+			}
 			if err != nil {
 				return fmt.Errorf("cannot load saved schema: %w", err)
 			}
@@ -305,6 +322,7 @@ func driftCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&pretty, "pretty", false, "pretty-print JSON")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output as JSON")
+	cmd.Flags().StringVar(&against, "against", "", "explicit snapshot file path (wins over --schema-file)")
 	return cmd
 }
 
@@ -583,9 +601,18 @@ func dbURLFromProfile() (string, bool) {
 
 // connectDB calls requireDB then opens a schema connection.
 func connectDB() (context.Context, *schema.DryRun, error) {
-	dbURL, err := requireDB()
-	if err != nil {
-		return nil, nil, err
+	return connectDBFor("")
+}
+
+// override wins; empty falls back to --db / profile / DATABASE_URL.
+func connectDBFor(override string) (context.Context, *schema.DryRun, error) {
+	dbURL := override
+	if dbURL == "" {
+		u, err := requireDB()
+		if err != nil {
+			return nil, nil, err
+		}
+		dbURL = u
 	}
 	ctx := context.Background()
 	conn, err := schema.Connect(ctx, dbURL)
