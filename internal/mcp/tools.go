@@ -69,13 +69,6 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		s.handleCheckMigration,
 	)
 	srv.AddTool(
-		mcp.NewTool("suggest_index",
-			mcp.WithDescription("Suggest indexes for a SQL query."),
-			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
-		),
-		s.handleSuggestIndex,
-	)
-	srv.AddTool(
 		mcp.NewTool("analyze_plan",
 			mcp.WithDescription("Analyze a pre-captured EXPLAIN-JSON plan. Offline. Accepts both {\"Plan\":...} and [{\"Plan\":...}] shapes."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("The original SQL query text.")),
