@@ -124,6 +124,77 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 	return jsonResult(wrapper), nil
 }
 
+func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	annotated, err := s.getAnnotated()
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	snap := annotated.Schema
+
+	sql := getArg(req, "sql")
+	includeIdx := getBoolArgDefault(req, "include_index_suggestions", true)
+	analyze := getBoolArg(req, "analyze")
+	pgVersion, _ := dryrun.ParsePgVersion(snap.PgVersion)
+
+	validation, vErr := query.ValidateQuery(sql, snap)
+	if vErr != nil {
+		return errResult(fmt.Sprintf("SQL parse error: %v", vErr)), nil
+	}
+
+	var (
+		plan         *query.PlanNode
+		planWarnings []query.PlanWarning
+		advice       []query.Advice
+		explainErr   string
+	)
+	if s.pool != nil {
+		result, err := query.ExplainQuery(ctx, s.pool, sql, analyze, snap)
+		if err != nil {
+			explainErr = err.Error()
+		} else {
+			plan = &result.Plan
+			planWarnings = result.Warnings
+			advice = query.Advise(plan, annotated, &pgVersion)
+		}
+	}
+
+	wrapper := map[string]any{
+		"valid":    validation.Valid,
+		"errors":   validation.Errors,
+		"warnings": validation.Warnings,
+	}
+	if len(planWarnings) > 0 {
+		wrapper["plan_warnings"] = planWarnings
+	}
+	if len(advice) > 0 {
+		wrapper["advice"] = advice
+	}
+	var indexSuggestions []query.IndexSuggestion
+	if includeIdx {
+		if suggestions, err := query.SuggestIndex(sql, snap, plan, &pgVersion); err == nil {
+			indexSuggestions = suggestions
+		}
+	}
+	if len(indexSuggestions) > 0 {
+		wrapper["index_suggestions"] = indexSuggestions
+	}
+	if explainErr != "" {
+		wrapper["explain_error"] = explainErr
+	}
+
+	hint := ""
+	switch {
+	case !validation.Valid:
+		hint = "Query has validation errors. Fix referenced tables/columns before running advise again."
+	case len(advice) > 0 || len(indexSuggestions) > 0:
+		hint = "Review advice and index suggestions. Run any DDL through check_migration before applying."
+	case s.pool == nil:
+		hint = "Offline mode: only static analysis available. Connect with --db for plan-based advice."
+	}
+	s.injectMeta(wrapper, hint)
+	return jsonResult(wrapper), nil
+}
+
 func (s *Server) handleSuggestIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	snap, err := s.getSchema()
 	if err != nil {
