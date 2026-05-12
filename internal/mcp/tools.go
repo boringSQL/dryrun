@@ -140,6 +140,14 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		s.handleVacuumHealth,
 	)
 	srv.AddTool(
+		mcp.NewTool("schema_diff",
+			mcp.WithDescription("Diff two snapshots, or the latest snapshot against the live schema. Omit `from` for the latest saved snapshot; omit `to` to compare against the live schema (requires --db)."),
+			mcp.WithString("from", mcp.Description("Content hash of the base snapshot. Omit to use the latest saved snapshot.")),
+			mcp.WithString("to", mcp.Description("Content hash of the target snapshot. Omit to compare against current live schema.")),
+		),
+		s.handleSchemaDiff,
+	)
+	srv.AddTool(
 		mcp.NewTool("reload_schema",
 			mcp.WithDescription("Reload the on-disk schema without restarting. Run after `dryrun dump-schema`."),
 		),
