@@ -9,6 +9,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/boringsql/dryrun/internal/diff"
+	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
@@ -81,6 +82,70 @@ func (s *Server) handleReloadSchema(ctx context.Context, _ mcp.CallToolRequest) 
 	}
 	msg += "\n\nRun `dryrun dump-schema --db <DATABASE_URL>` first."
 	return errResult(msg), nil
+}
+
+func (s *Server) handleSchemaDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	fromHash := getArg(req, "from")
+	toHash := getArg(req, "to")
+
+	from, err := s.resolveSnapshotForDiff(ctx, fromHash, "from")
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	to, err := s.resolveSnapshotForDiff(ctx, toHash, "to")
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+
+	changeset := diff.DiffSchemas(from, to)
+	if changeset.IsEmpty() {
+		return textResult(s.wrapText(fmt.Sprintf("No changes between %s and %s.", short(changeset.FromHash), short(changeset.ToHash)), "")), nil
+	}
+	return s.metaJSONResult(changeset, "", ""), nil
+}
+
+// from-side resolves empty → latest snapshot in history.db; to-side resolves
+// empty → introspected live schema (requires --db). A non-empty hash always
+// resolves through history.db regardless of side.
+func (s *Server) resolveSnapshotForDiff(ctx context.Context, hash, side string) (*schema.SchemaSnapshot, error) {
+	if hash != "" {
+		s.mu.RLock()
+		hist, key := s.history, s.snapshotKey
+		s.mu.RUnlock()
+		if hist == nil || key.ProjectID == "" {
+			return nil, fmt.Errorf("no history store available; cannot resolve %s=%s", side, hash)
+		}
+		snap, err := hist.Get(ctx, key, history.NewRefHash(hash))
+		if err != nil {
+			return nil, fmt.Errorf("history lookup for %s=%s failed: %v", side, hash, err)
+		}
+		return snap, nil
+	}
+	if side == "to" {
+		pool, err := s.requirePool()
+		if err != nil {
+			return nil, fmt.Errorf("to omitted but no live DB: %v", err)
+		}
+		return schema.IntrospectSchema(ctx, pool)
+	}
+	s.mu.RLock()
+	hist, key := s.history, s.snapshotKey
+	s.mu.RUnlock()
+	if hist == nil || key.ProjectID == "" {
+		return nil, fmt.Errorf("from omitted but no history store available")
+	}
+	snap, err := hist.Get(ctx, key, history.NewRefLatest())
+	if err != nil {
+		return nil, fmt.Errorf("history lookup for latest snapshot failed: %v", err)
+	}
+	return snap, nil
+}
+
+func short(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }
 
 func (s *Server) handleCheckDrift(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
