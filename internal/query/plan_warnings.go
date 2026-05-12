@@ -9,7 +9,7 @@ import (
 
 const seqScanRowThreshold = 5_000.0
 
-func detectPlanWarnings(plan *PlanNode, snap *schema.SchemaSnapshot) []PlanWarning {
+func DetectPlanWarnings(plan *PlanNode, snap *schema.SchemaSnapshot) []PlanWarning {
 	var warnings []PlanWarning
 	walkPlanWarnings(plan, snap, &warnings)
 	return warnings

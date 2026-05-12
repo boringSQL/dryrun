@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -193,6 +194,97 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}
 	s.injectMeta(wrapper, hint)
 	return jsonResult(wrapper), nil
+}
+
+func (s *Server) handleAnalyzePlan(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	annotated, err := s.getAnnotated()
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	snap := annotated.Schema
+
+	sql := getArg(req, "sql")
+	includeIdx := getBoolArgDefault(req, "include_index_suggestions", true)
+	pgVersion, _ := dryrun.ParsePgVersion(snap.PgVersion)
+
+	args := req.GetArguments()
+	rawPlan, ok := args["plan_json"]
+	if !ok || rawPlan == nil {
+		return errResult("plan_json is required"), nil
+	}
+	planRaw, err := extractPlanNode(rawPlan)
+	if err != nil {
+		return errResult(fmt.Sprintf("plan_json parse error: %v", err)), nil
+	}
+	plan, err := query.ParsePlanJSON(planRaw)
+	if err != nil {
+		return errResult(fmt.Sprintf("plan_json parse error: %v", err)), nil
+	}
+
+	planWarnings := query.DetectPlanWarnings(plan, snap)
+	advice := query.Advise(plan, annotated, &pgVersion)
+
+	wrapper := map[string]any{
+		"plan_warnings": planWarnings,
+	}
+	if len(advice) > 0 {
+		wrapper["advice"] = advice
+	}
+	if sql != "" {
+		if validation, vErr := query.ValidateQuery(sql, snap); vErr == nil {
+			wrapper["valid"] = validation.Valid
+			if len(validation.Warnings) > 0 {
+				wrapper["warnings"] = validation.Warnings
+			}
+			if len(validation.Errors) > 0 {
+				wrapper["errors"] = validation.Errors
+			}
+		}
+	}
+	if includeIdx {
+		if suggestions, err := query.SuggestIndex(sql, snap, plan, &pgVersion); err == nil && len(suggestions) > 0 {
+			wrapper["index_suggestions"] = suggestions
+		}
+	}
+
+	hint := ""
+	switch {
+	case len(advice) > 0:
+		hint = "Review advice and index suggestions. Run any DDL through check_migration before applying."
+	case len(planWarnings) > 0:
+		hint = "Plan warnings detected. Inspect plan_warnings for problem nodes."
+	}
+	s.injectMeta(wrapper, hint)
+	return jsonResult(wrapper), nil
+}
+
+// Accepts both shapes Postgres emits: {"Plan": {...}} and [{"Plan": {...}, ...}].
+func extractPlanNode(v any) (json.RawMessage, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > 0 && raw[0] == '[' {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			return nil, err
+		}
+		if len(arr) == 0 {
+			return nil, fmt.Errorf("empty plan_json array")
+		}
+		raw = arr[0]
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	if planRaw, ok := obj["Plan"]; ok {
+		return planRaw, nil
+	}
+	if _, ok := obj["Node Type"]; ok {
+		return raw, nil
+	}
+	return nil, fmt.Errorf("no Plan key and no Node Type at root")
 }
 
 func (s *Server) handleSuggestIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
