@@ -54,14 +54,14 @@ type stubWriter struct {
 	LastActivityRef              string
 }
 
-func (s *stubWriter) Get(_ context.Context, _ history.SnapshotKey, _ history.SnapshotRef) (*schema.SchemaSnapshot, error) {
+func (s *stubWriter) GetSchema(_ context.Context, _ history.SnapshotKey, _ history.SnapshotRef) (*schema.SchemaSnapshot, error) {
 	if s.Stored == nil {
 		return nil, history.ErrSnapshotNotFound
 	}
 	return s.Stored, nil
 }
 
-func (s *stubWriter) Put(_ context.Context, _ history.SnapshotKey, _ *schema.SchemaSnapshot) (history.PutOutcome, error) {
+func (s *stubWriter) PutSchema(_ context.Context, _ history.SnapshotKey, _ *schema.SchemaSnapshot) (history.PutOutcome, error) {
 	s.SchemaN++
 	return history.PutInserted, nil
 }

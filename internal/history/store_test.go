@@ -47,7 +47,7 @@ func TestListKeysReturnsDistinctKeyedRows(t *testing.T) {
 		for i, h := range hashes {
 			s := testSnapshot(h, string(k.DatabaseID))
 			s.Timestamp = now.Add(time.Duration(i) * time.Minute)
-			if _, err := store.Put(ctx, k, s); err != nil {
+			if _, err := store.PutSchema(ctx, k, s); err != nil {
 				t.Fatal(err)
 			}
 		}

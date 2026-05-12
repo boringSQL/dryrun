@@ -87,7 +87,7 @@ func TestReloadSchema_HistoryBeatsSchemaFile(t *testing.T) {
 		ContentHash: "hist-1",
 		Tables:      []schema.Table{{Schema: "public", Name: "t_from_history"}},
 	}
-	if _, err := store.Put(context.Background(), key, histSnap); err != nil {
+	if _, err := store.PutSchema(context.Background(), key, histSnap); err != nil {
 		t.Fatal(err)
 	}
 

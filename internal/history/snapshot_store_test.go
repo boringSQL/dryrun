@@ -18,7 +18,7 @@ func TestPutInserts(t *testing.T) {
 	ctx := context.Background()
 	k := key("acme", "primary")
 
-	outcome, err := store.Put(ctx, k, testSnapshot("hash-1", "acme"))
+	outcome, err := store.PutSchema(ctx, k, testSnapshot("hash-1", "acme"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func TestPutInserts(t *testing.T) {
 		t.Errorf("first put: got %v, want PutInserted", outcome)
 	}
 
-	latest, err := store.Latest(ctx, k)
+	latest, err := store.LatestSchema(ctx, k)
 	if err != nil || latest == nil {
 		t.Fatalf("Latest after Put: got (%v, %v), want non-nil summary", latest, err)
 	}
@@ -44,14 +44,14 @@ func TestPutDedupesSameHash(t *testing.T) {
 	k := key("acme", "primary")
 	snap := testSnapshot("dup-hash", "acme")
 
-	if o, err := store.Put(ctx, k, snap); err != nil || o != PutInserted {
+	if o, err := store.PutSchema(ctx, k, snap); err != nil || o != PutInserted {
 		t.Fatalf("first put: got (%v, %v)", o, err)
 	}
-	if o, err := store.Put(ctx, k, snap); err != nil || o != PutDeduped {
+	if o, err := store.PutSchema(ctx, k, snap); err != nil || o != PutDeduped {
 		t.Fatalf("second put: got (%v, %v), want PutDeduped", o, err)
 	}
 
-	list, err := store.List(ctx, k, TimeRange{})
+	list, err := store.ListSchema(ctx, k, TimeRange{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,15 +70,15 @@ func TestPutIsKeyScoped(t *testing.T) {
 
 	k1 := key("acme", "primary")
 	k2 := key("acme", "replica")
-	if _, err := store.Put(ctx, k1, snap); err != nil {
+	if _, err := store.PutSchema(ctx, k1, snap); err != nil {
 		t.Fatal(err)
 	}
-	if o, err := store.Put(ctx, k2, snap); err != nil || o != PutInserted {
+	if o, err := store.PutSchema(ctx, k2, snap); err != nil || o != PutInserted {
 		t.Fatalf("put under second key: got (%v, %v), want PutInserted", o, err)
 	}
 
 	for _, k := range []SnapshotKey{k1, k2} {
-		got, err := store.List(ctx, k, TimeRange{})
+		got, err := store.ListSchema(ctx, k, TimeRange{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,7 +100,7 @@ func TestGetByLatestAtHash(t *testing.T) {
 	mk := func(hash string, offset time.Duration) {
 		s := testSnapshot(hash, "acme")
 		s.Timestamp = now.Add(offset)
-		if _, err := store.Put(ctx, k, s); err != nil {
+		if _, err := store.PutSchema(ctx, k, s); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -109,7 +109,7 @@ func TestGetByLatestAtHash(t *testing.T) {
 	mk("h-new", 0)
 
 	t.Run("Latest", func(t *testing.T) {
-		s, err := store.Get(ctx, k, NewRefLatest())
+		s, err := store.GetSchema(ctx, k, NewRefLatest())
 		if err != nil || s == nil {
 			t.Fatalf("got (%v, %v)", s, err)
 		}
@@ -120,7 +120,7 @@ func TestGetByLatestAtHash(t *testing.T) {
 
 	t.Run("At", func(t *testing.T) {
 		// asking for "30 minutes ago" should resolve to the mid row (latest <= cutoff)
-		s, err := store.Get(ctx, k, NewRefAt(now.Add(-30*time.Minute)))
+		s, err := store.GetSchema(ctx, k, NewRefAt(now.Add(-30*time.Minute)))
 		if err != nil || s == nil {
 			t.Fatalf("got (%v, %v)", s, err)
 		}
@@ -130,7 +130,7 @@ func TestGetByLatestAtHash(t *testing.T) {
 	})
 
 	t.Run("Hash", func(t *testing.T) {
-		s, err := store.Get(ctx, k, NewRefHash("h-old"))
+		s, err := store.GetSchema(ctx, k, NewRefHash("h-old"))
 		if err != nil || s == nil {
 			t.Fatalf("got (%v, %v)", s, err)
 		}
@@ -158,7 +158,7 @@ func TestGetNotFound(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := store.Get(ctx, k, c.ref)
+			_, err := store.GetSchema(ctx, k, c.ref)
 			if !errors.Is(err, ErrSnapshotNotFound) {
 				t.Errorf("got %v, want ErrSnapshotNotFound", err)
 			}
@@ -181,14 +181,14 @@ func TestListWithTimeRange(t *testing.T) {
 	} {
 		s := testSnapshot(hash, "acme")
 		s.Timestamp = now.Add(offset)
-		if _, err := store.Put(ctx, k, s); err != nil {
+		if _, err := store.PutSchema(ctx, k, s); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	from := now.Add(-2*time.Hour - time.Minute) // just before h-2h
 	to := now.Add(-30 * time.Minute)            // just after h-1h
-	list, err := store.List(ctx, k, TimeRange{From: &from, To: &to})
+	list, err := store.ListSchema(ctx, k, TimeRange{From: &from, To: &to})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,14 +215,14 @@ func TestDeleteBeforeCutoff(t *testing.T) {
 	oldSnap.Timestamp = now.Add(-24 * time.Hour)
 	newSnap := testSnapshot("h-new", "acme")
 	newSnap.Timestamp = now
-	if _, err := store.Put(ctx, k, oldSnap); err != nil {
+	if _, err := store.PutSchema(ctx, k, oldSnap); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Put(ctx, k, newSnap); err != nil {
+	if _, err := store.PutSchema(ctx, k, newSnap); err != nil {
 		t.Fatal(err)
 	}
 
-	deleted, err := store.DeleteBefore(ctx, k, now.Add(-time.Hour))
+	deleted, err := store.DeleteSchemaBefore(ctx, k, now.Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestDeleteBeforeCutoff(t *testing.T) {
 		t.Errorf("got %d deleted, want 1", deleted)
 	}
 
-	list, err := store.List(ctx, k, TimeRange{})
+	list, err := store.ListSchema(ctx, k, TimeRange{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestLatestEmpty(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
 
-	got, err := store.Latest(ctx, key("acme", "primary"))
+	got, err := store.LatestSchema(ctx, key("acme", "primary"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
