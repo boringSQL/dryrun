@@ -31,6 +31,22 @@ func getFloatArg(req mcp.CallToolRequest, key string, fallback float64) float64 
 	return f
 }
 
+func getBoolArgDefault(req mcp.CallToolRequest, key string, fallback bool) bool {
+	args := req.GetArguments()
+	if args == nil {
+		return fallback
+	}
+	v, ok := args[key]
+	if !ok || v == nil {
+		return fallback
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return fallback
+	}
+	return b
+}
+
 func getBoolArg(req mcp.CallToolRequest, key string) bool {
 	args := req.GetArguments()
 	if args == nil {

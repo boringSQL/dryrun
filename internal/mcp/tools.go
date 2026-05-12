@@ -76,6 +76,15 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		s.handleSuggestIndex,
 	)
 	srv.AddTool(
+		mcp.NewTool("advise",
+			mcp.WithDescription("Analyze a SQL query: validation, anti-patterns, plan-based advice (online), and index suggestions. Offline-capable."),
+			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
+			mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
+			mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query; live DB only).")),
+		),
+		s.handleAdvise,
+	)
+	srv.AddTool(
 		mcp.NewTool("lint_schema",
 			mcp.WithDescription("Schema quality checks. scope=conventions, audit, or all (default). Offline."),
 			mcp.WithString("scope",
