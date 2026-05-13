@@ -627,7 +627,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dry_run_cli"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "cargo-husky",
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "dry_run_core"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1751,9 +1751,9 @@ dependencies = [
 
 [[package]]
 name = "pg_introspect"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f7c26d6c97143ecd713d32e06aaadc9aa37b0df5be8cadcb64241a33a824dfb"
+checksum = "48e512ff4d4347fcf2e4f9da8e62058e462cd85e3697e2609750d32aaa14d085"
 dependencies = [
  "indexmap 2.14.0",
  "serde",
