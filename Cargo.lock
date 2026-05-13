@@ -1751,9 +1751,9 @@ dependencies = [
 
 [[package]]
 name = "pg_introspect"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48e512ff4d4347fcf2e4f9da8e62058e462cd85e3697e2609750d32aaa14d085"
+checksum = "f24ce65d5c6852bb246bf3cbb9fad3d8eadaa64b28c28013636b4e265c1b82ff"
 dependencies = [
  "indexmap 2.14.0",
  "serde",
