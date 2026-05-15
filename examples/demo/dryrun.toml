@@ -6,9 +6,11 @@ profile = "offline"
 
 [profiles.offline]
 schema_file = ".dryrun/schema.json"
+database_id = "demo-offline"
 
 [profiles.dev]
 db_url = "${DATABASE_URL}"
+database_id = "demo-dev"
 
 [conventions]
 min_severity = "warning"
