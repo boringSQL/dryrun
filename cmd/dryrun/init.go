@@ -200,18 +200,22 @@ func scaffoldConfig(configPath string) error {
 		return err
 	}
 	profileName := filepath.Base(cwd)
-	content := fmt.Sprintf(`[default]
+	content := fmt.Sprintf(`[project]
+id = %q
+
+[default]
 profile = %q
 
 [profiles.%s]
 schema_file = ".dryrun/schema.json"
+# database_id = %q   # defaults to profile name; override to e.g. "auth", "billing"
 
 # [profiles.dev]
 # db_url = "${DATABASE_URL}"
 
 # [conventions]
 # See: https://boringsql.com/dryrun/docs/dryrun-toml
-`, profileName, profileName)
+`, profileName, profileName, profileName, profileName)
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 		return err
 	}
