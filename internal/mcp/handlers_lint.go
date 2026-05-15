@@ -96,7 +96,7 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 	case !fullMode && hasAuditFindings:
 		hint = "Summary view. Re-run with verbosity=\"full\" for findings, recommendations, and ddl_fix."
 	}
-	s.injectMeta(result, hint)
+	s.injectMeta(result, hint, nil)
 
 	data, err := json.Marshal(result)
 	if err != nil {
