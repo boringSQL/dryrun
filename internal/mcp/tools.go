@@ -34,6 +34,10 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 				mcp.DefaultString("summary"),
 				mcp.Description("Detail level: 'summary' (default), 'full' (raw stats), 'stats' (profiles and stats only)."),
 			),
+			mcp.WithArray("fields",
+				mcp.Items(map[string]any{"type": "string"}),
+				mcp.Description("Whitelist of sections: columns, indexes, constraints, stats, partition_info, column_profiles, comment, policies, triggers, reloptions, rls_enabled."),
+			),
 		),
 		s.handleDescribeTable,
 	)

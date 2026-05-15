@@ -71,6 +71,31 @@ func argOr(req mcp.CallToolRequest, key, fallback string) string {
 	return fallback
 }
 
+// nil when absent; empty slice when present but empty.
+func getStringSliceArg(req mcp.CallToolRequest, key string) []string {
+	args := req.GetArguments()
+	if args == nil {
+		return nil
+	}
+	v, ok := args[key]
+	if !ok || v == nil {
+		return nil
+	}
+	switch raw := v.(type) {
+	case []string:
+		return raw
+	case []any:
+		out := make([]string, 0, len(raw))
+		for _, e := range raw {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 func pageEnd(offset, limit, total int) int {
 	if limit > 0 && offset+limit < total {
 		return offset + limit
