@@ -141,7 +141,7 @@ type (
 		Indexes       []compactIndex      `json:"indexes"`
 		RLSEnabled    bool                `json:"rls_enabled"`
 		Comment       *string             `json:"comment,omitempty"`
-		Sizing        *schema.TableSizing `json:"sizing,omitempty"`
+		Sizing        *schema.TableSizing `json:"stats,omitempty"`
 		Policies      []schema.RlsPolicy  `json:"policies,omitempty"`
 		Triggers      []schema.Trigger    `json:"triggers,omitempty"`
 		Reloptions    []string            `json:"reloptions,omitempty"`
