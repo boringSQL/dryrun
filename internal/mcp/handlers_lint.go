@@ -71,6 +71,7 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 	}
 
 	var hasDDLFixes, hasAuditFindings bool
+	var auditFindingsCount int
 	if wantAudit {
 		auditCfg := audit.DefaultConfig()
 		findings := audit.RunRules(target, &auditCfg)
@@ -80,7 +81,8 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 				break
 			}
 		}
-		hasAuditFindings = len(findings) > 0
+		auditFindingsCount = len(findings)
+		hasAuditFindings = auditFindingsCount > 0
 
 		if fullMode {
 			result["audit"] = lint.NewReport(findings, len(target.Tables), "audit")
@@ -89,14 +91,37 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 		}
 	}
 
+	const fullNextThreshold = 50
+	manyFindings := auditFindingsCount > fullNextThreshold
+
 	hint := ""
 	switch {
 	case fullMode && hasDDLFixes:
 		hint = "Some findings include ddl_fix fields. Run those through check_migration before applying to verify lock safety."
+	case !fullMode && hasAuditFindings && manyFindings:
+		hint = "Summary view; many findings. Narrow with schema=, table=, or scope= before re-running with verbosity=\"full\"."
 	case !fullMode && hasAuditFindings:
 		hint = "Summary view. Re-run with verbosity=\"full\" for findings, recommendations, and ddl_fix."
 	}
-	s.injectMeta(result, hint, nil)
+
+	var next []NextCall
+	if !fullMode && hasAuditFindings && !manyFindings {
+		args := map[string]any{"verbosity": "full"}
+		if v := getArg(req, "schema"); v != "" {
+			args["schema"] = v
+		}
+		if v := getArg(req, "table"); v != "" {
+			args["table"] = v
+		}
+		if v := getArg(req, "scope"); v != "" {
+			args["scope"] = v
+		}
+		if fields := getStringSliceArg(req, "fields"); fields != nil {
+			args["fields"] = fields
+		}
+		next = []NextCall{{Tool: "lint_schema", Args: args}}
+	}
+	s.injectMeta(result, hint, next)
 
 	data, err := json.Marshal(result)
 	if err != nil {
