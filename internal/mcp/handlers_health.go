@@ -99,7 +99,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	case len(unusedEntries) > 0:
 		hint = "Unused indexes add write overhead. Use compare_nodes to verify across all replicas before dropping."
 	}
-	s.injectMeta(wrapper, hint)
+	s.injectMeta(wrapper, hint, nil)
 	return jsonResult(wrapper), nil
 }
 
@@ -190,6 +190,6 @@ func (s *Server) handleVacuumHealth(_ context.Context, _ mcp.CallToolRequest) (*
 		"vacuum_health": results,
 		"count":         len(results),
 	}
-	s.injectMeta(wrapper, "")
+	s.injectMeta(wrapper, "", nil)
 	return jsonResult(wrapper), nil
 }

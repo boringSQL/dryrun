@@ -253,7 +253,7 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 					break
 				}
 			}
-			s.injectMeta(result, hint)
+			s.injectMeta(result, hint, nil)
 			return jsonResult(result), nil
 		}
 	}
