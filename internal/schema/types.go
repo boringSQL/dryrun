@@ -1,0 +1,394 @@
+package schema
+
+import "time"
+
+// DDL-only schema snapshot; sizing/activity live in AnnotatedSchema
+type SchemaSnapshot struct {
+	PgVersion   string          `json:"pg_version"`
+	Database    string          `json:"database"`
+	Timestamp   time.Time       `json:"timestamp"`
+	ContentHash string          `json:"content_hash"`
+	Source      *string         `json:"source,omitempty"`
+	Tables      []Table         `json:"tables"`
+	Enums       []EnumType      `json:"enums"`
+	Domains     []DomainType    `json:"domains"`
+	Composites  []CompositeType `json:"composites"`
+	Views       []View          `json:"views"`
+	Functions   []Function      `json:"functions"`
+	Extensions  []Extension     `json:"extensions"`
+	GUCs        []GucSetting    `json:"gucs"`
+}
+
+type Table struct {
+	OID           uint32         `json:"oid"`
+	Schema        string         `json:"schema"`
+	Name          string         `json:"name"`
+	Columns       []Column       `json:"columns"`
+	Constraints   []Constraint   `json:"constraints"`
+	Indexes       []Index        `json:"indexes"`
+	Comment       *string        `json:"comment,omitempty"`
+	PartitionInfo *PartitionInfo `json:"partition_info,omitempty"`
+	Policies      []RlsPolicy    `json:"policies"`
+	Triggers      []Trigger      `json:"triggers"`
+	RLSEnabled    bool           `json:"rls_enabled"`
+	Reloptions    []string       `json:"reloptions,omitempty"`
+}
+
+func (t *Table) Qual() QualifiedName {
+	return QualifiedName{Schema: t.Schema, Name: t.Name}
+}
+
+type Column struct {
+	Name             string  `json:"name"`
+	Ordinal          int16   `json:"ordinal"`
+	TypeName         string  `json:"type_name"`
+	Nullable         bool    `json:"nullable"`
+	Default          *string `json:"default,omitempty"`
+	Identity         *string `json:"identity,omitempty"`
+	Comment          *string `json:"comment,omitempty"`
+	StatisticsTarget *int16  `json:"statistics_target,omitempty"`
+	Generated        *string `json:"generated,omitempty"`
+}
+
+type Constraint struct {
+	Name         string         `json:"name"`
+	Kind         ConstraintKind `json:"kind"`
+	Columns      []string       `json:"columns"`
+	Definition   *string        `json:"definition,omitempty"`
+	FKTable      *string        `json:"fk_table,omitempty"`
+	FKColumns    []string       `json:"fk_columns"`
+	BackingIndex *string        `json:"backing_index,omitempty"`
+	Comment      *string        `json:"comment,omitempty"`
+}
+
+type ConstraintKind string
+
+const (
+	ConstraintPrimaryKey ConstraintKind = "primary_key"
+	ConstraintForeignKey ConstraintKind = "foreign_key"
+	ConstraintUnique     ConstraintKind = "unique"
+	ConstraintCheck      ConstraintKind = "check"
+	ConstraintExclusion  ConstraintKind = "exclusion"
+)
+
+func ConstraintKindFromPg(contype string) (ConstraintKind, bool) {
+	switch contype {
+	case "p":
+		return ConstraintPrimaryKey, true
+	case "f":
+		return ConstraintForeignKey, true
+	case "u":
+		return ConstraintUnique, true
+	case "c":
+		return ConstraintCheck, true
+	case "x":
+		return ConstraintExclusion, true
+	default:
+		return "", false
+	}
+}
+
+type Index struct {
+	Name            string   `json:"name"`
+	Columns         []string `json:"columns"`
+	IncludeColumns  []string `json:"include_columns"`
+	IndexType       string   `json:"index_type"`
+	IsUnique        bool     `json:"is_unique"`
+	IsPrimary       bool     `json:"is_primary"`
+	Predicate       *string  `json:"predicate,omitempty"`
+	Definition      string   `json:"definition"`
+	IsValid         bool     `json:"is_valid"`
+	BacksConstraint bool     `json:"backs_constraint,omitempty"`
+}
+
+// Column-level stats from pg_stats
+type ColumnStats struct {
+	NullFrac        *float64 `json:"null_frac,omitempty"`
+	NDistinct       *float64 `json:"n_distinct,omitempty"`
+	MostCommonVals  *string  `json:"most_common_vals,omitempty"`
+	MostCommonFreqs *string  `json:"most_common_freqs,omitempty"`
+	HistogramBounds *string  `json:"histogram_bounds,omitempty"`
+	Correlation     *float64 `json:"correlation,omitempty"`
+}
+
+type PartitionInfo struct {
+	Strategy PartitionStrategy `json:"strategy"`
+	Key      string            `json:"key"`
+	Children []PartitionChild  `json:"children"`
+}
+
+type PartitionStrategy string
+
+const (
+	PartitionRange PartitionStrategy = "range"
+	PartitionList  PartitionStrategy = "list"
+	PartitionHash  PartitionStrategy = "hash"
+)
+
+func PartitionStrategyFromPg(partstrat string) (PartitionStrategy, bool) {
+	switch partstrat {
+	case "r":
+		return PartitionRange, true
+	case "l":
+		return PartitionList, true
+	case "h":
+		return PartitionHash, true
+	default:
+		return "", false
+	}
+}
+
+type PartitionChild struct {
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+	Bound  string `json:"bound"`
+}
+
+type RlsPolicy struct {
+	Name          string   `json:"name"`
+	Command       string   `json:"command"`
+	Permissive    bool     `json:"permissive"`
+	Roles         []string `json:"roles"`
+	UsingExpr     *string  `json:"using_expr,omitempty"`
+	WithCheckExpr *string  `json:"with_check_expr,omitempty"`
+}
+
+type Trigger struct {
+	Name       string `json:"name"`
+	Definition string `json:"definition"`
+}
+
+type EnumType struct {
+	Schema string   `json:"schema"`
+	Name   string   `json:"name"`
+	Labels []string `json:"labels"`
+}
+
+type DomainType struct {
+	Schema           string   `json:"schema"`
+	Name             string   `json:"name"`
+	BaseType         string   `json:"base_type"`
+	Nullable         bool     `json:"nullable"`
+	Default          *string  `json:"default,omitempty"`
+	CheckConstraints []string `json:"check_constraints"`
+}
+
+type CompositeType struct {
+	Schema string           `json:"schema"`
+	Name   string           `json:"name"`
+	Fields []CompositeField `json:"fields"`
+}
+
+type CompositeField struct {
+	Name     string `json:"name"`
+	TypeName string `json:"type_name"`
+}
+
+type View struct {
+	Schema         string  `json:"schema"`
+	Name           string  `json:"name"`
+	Definition     string  `json:"definition"`
+	IsMaterialized bool    `json:"is_materialized"`
+	Comment        *string `json:"comment,omitempty"`
+}
+
+type Function struct {
+	Schema          string     `json:"schema"`
+	Name            string     `json:"name"`
+	IdentityArgs    string     `json:"identity_args"`
+	ReturnType      string     `json:"return_type"`
+	Language        string     `json:"language"`
+	Volatility      Volatility `json:"volatility"`
+	SecurityDefiner bool       `json:"security_definer"`
+	Comment         *string    `json:"comment,omitempty"`
+}
+
+type Volatility string
+
+const (
+	VolatilityImmutable Volatility = "immutable"
+	VolatilityStable    Volatility = "stable"
+	VolatilityVolatile  Volatility = "volatile"
+)
+
+func VolatilityFromPg(provolatile string) (Volatility, bool) {
+	switch provolatile {
+	case "i":
+		return VolatilityImmutable, true
+	case "s":
+		return VolatilityStable, true
+	case "v":
+		return VolatilityVolatile, true
+	default:
+		return "", false
+	}
+}
+
+type Extension struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Schema  string `json:"schema"`
+}
+
+type GucSetting struct {
+	Name    string  `json:"name"`
+	Setting string  `json:"setting"`
+	Unit    *string `json:"unit,omitempty"`
+}
+
+type StaleStatsEntry struct {
+	Node                string `json:"node"`
+	Schema              string `json:"schema"`
+	Table               string `json:"table"`
+	LastAnalyzedDaysAgo *int64 `json:"last_analyzed_days_ago,omitempty"`
+}
+
+// Walks MergedActivity per-node looking for tables without a recent (auto)analyze
+func DetectStaleStats(a *AnnotatedSchema, staleDays int64) []StaleStatsEntry {
+	if a == nil || a.Merged == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	threshold := time.Duration(staleDays) * 24 * time.Hour
+	var entries []StaleStatsEntry
+
+	for _, n := range a.Merged.Nodes {
+		for _, ts := range n.Tables {
+			var lastAnalyzed *time.Time
+			if ts.Activity.LastAnalyze != nil {
+				lastAnalyzed = ts.Activity.LastAnalyze
+			}
+			if ts.Activity.LastAutoanalyze != nil {
+				if lastAnalyzed == nil || ts.Activity.LastAutoanalyze.After(*lastAnalyzed) {
+					lastAnalyzed = ts.Activity.LastAutoanalyze
+				}
+			}
+			if lastAnalyzed == nil {
+				entries = append(entries, StaleStatsEntry{
+					Node: n.Node.Source, Schema: ts.Table.Schema, Table: ts.Table.Name,
+				})
+			} else if now.Sub(*lastAnalyzed) > threshold {
+				days := int64(now.Sub(*lastAnalyzed).Hours() / 24)
+				entries = append(entries, StaleStatsEntry{
+					Node: n.Node.Source, Schema: ts.Table.Schema, Table: ts.Table.Name,
+					LastAnalyzedDaysAgo: &days,
+				})
+			}
+		}
+	}
+	return entries
+}
+
+// JSON map keys must be strings, so (schema, name) keying uses entry slices
+type QualifiedName struct {
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+}
+
+func (q QualifiedName) String() string {
+	if q.Schema == "" {
+		return q.Name
+	}
+	return q.Schema + "." + q.Name
+}
+
+// Sizing inputs the planner uses: row estimate, on-disk footprint
+type TableSizing struct {
+	Reltuples         float64 `json:"reltuples"`
+	Relpages          int64   `json:"relpages"`
+	TableSize         int64   `json:"table_size"`
+	TotalRelationSize int64   `json:"total_relation_size"`
+	IndexesSize       int64   `json:"indexes_size"`
+	ToastSize         int64   `json:"toast_size,omitempty"`
+}
+
+// Counters and vacuum/analyze timestamps from pg_stat_user_tables
+type TableActivity struct {
+	SeqScan          int64      `json:"seq_scan"`
+	SeqTupRead       int64      `json:"seq_tup_read"`
+	IdxScan          int64      `json:"idx_scan"`
+	IdxTupFetch      int64      `json:"idx_tup_fetch"`
+	NTupIns          int64      `json:"n_tup_ins"`
+	NTupUpd          int64      `json:"n_tup_upd"`
+	NTupDel          int64      `json:"n_tup_del"`
+	NTupHotUpd       int64      `json:"n_tup_hot_upd"`
+	NLiveTup         int64      `json:"n_live_tup"`
+	NDeadTup         int64      `json:"n_dead_tup"`
+	LastVacuum       *time.Time `json:"last_vacuum,omitempty"`
+	LastAutovacuum   *time.Time `json:"last_autovacuum,omitempty"`
+	LastAnalyze      *time.Time `json:"last_analyze,omitempty"`
+	LastAutoanalyze  *time.Time `json:"last_autoanalyze,omitempty"`
+	VacuumCount      int64      `json:"vacuum_count"`
+	AutovacuumCount  int64      `json:"autovacuum_count"`
+	AnalyzeCount     int64      `json:"analyze_count"`
+	AutoanalyzeCount int64      `json:"autoanalyze_count"`
+}
+
+type IndexSizing struct {
+	Relpages  int64   `json:"relpages"`
+	Reltuples float64 `json:"reltuples"`
+	Size      int64   `json:"size"`
+}
+
+type IndexActivity struct {
+	IdxScan     int64 `json:"idx_scan"`
+	IdxTupRead  int64 `json:"idx_tup_read"`
+	IdxTupFetch int64 `json:"idx_tup_fetch"`
+}
+
+// Identifies the node that produced an ActivityStatsSnapshot
+type NodeIdentity struct {
+	Source    string    `json:"source"`
+	Label     *string   `json:"label,omitempty"`
+	IsStandby bool      `json:"is_standby"`
+	PgVersion string    `json:"pg_version"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+type TableSizingEntry struct {
+	Table  QualifiedName `json:"table"`
+	Sizing TableSizing   `json:"sizing"`
+}
+
+type IndexSizingEntry struct {
+	Table  QualifiedName `json:"table"`
+	Index  string        `json:"index"`
+	Sizing IndexSizing   `json:"sizing"`
+}
+
+type ColumnStatsEntry struct {
+	Table  QualifiedName `json:"table"`
+	Column string        `json:"column"`
+	Stats  ColumnStats   `json:"stats"`
+}
+
+type TableActivityEntry struct {
+	Table    QualifiedName `json:"table"`
+	Activity TableActivity `json:"activity"`
+}
+
+type IndexActivityEntry struct {
+	Table    QualifiedName `json:"table"`
+	Index    string        `json:"index"`
+	Activity IndexActivity `json:"activity"`
+}
+
+// Persisted planner inputs; schema_ref_hash binds rows to a SchemaSnapshot
+type PlannerStatsSnapshot struct {
+	SchemaRefHash string             `json:"schema_ref_hash"`
+	ContentHash   string             `json:"content_hash"`
+	Database      string             `json:"database"`
+	Timestamp     time.Time          `json:"timestamp"`
+	Tables        []TableSizingEntry `json:"tables"`
+	Indexes       []IndexSizingEntry `json:"indexes"`
+	Columns       []ColumnStatsEntry `json:"columns"`
+}
+
+// Persisted per-node activity counters
+type ActivityStatsSnapshot struct {
+	SchemaRefHash string               `json:"schema_ref_hash"`
+	ContentHash   string               `json:"content_hash"`
+	Node          NodeIdentity         `json:"node"`
+	Tables        []TableActivityEntry `json:"tables"`
+	Indexes       []IndexActivityEntry `json:"indexes"`
+}
