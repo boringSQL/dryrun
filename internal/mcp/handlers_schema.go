@@ -247,13 +247,21 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 			}
 
 			hint := ""
+			var next []NextCall
 			for _, c := range t.Constraints {
 				if c.Kind == schema.ConstraintForeignKey {
 					hint = "This table has foreign keys — use find_related for JOIN patterns with related tables."
+					next = []NextCall{{
+						Tool: "find_related",
+						Args: map[string]any{
+							"table":  tableName,
+							"schema": schemaName,
+						},
+					}}
 					break
 				}
 			}
-			s.injectMeta(result, hint, nil)
+			s.injectMeta(result, hint, next)
 			return jsonResult(result), nil
 		}
 	}
