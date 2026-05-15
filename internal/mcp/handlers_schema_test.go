@@ -108,6 +108,46 @@ func TestDescribeTable_DefaultShape(t *testing.T) {
 	}
 }
 
+// Tables with FKs surface a _meta.next pointing at find_related so chaining
+// clients can follow up without parsing the prose hint. Tables without FKs
+// must not surface _meta.next.
+func TestDescribeTable_FKSuggestsFindRelated(t *testing.T) {
+	c := setupOfflineTest(t)
+
+	t.Run("with_fk", func(t *testing.T) {
+		out := callTool(t, c, "describe_table", map[string]any{"table": "users"})
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(out), &payload); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, out)
+		}
+		meta, _ := payload["_meta"].(map[string]any)
+		next, ok := meta["next"].([]any)
+		if !ok || len(next) == 0 {
+			t.Fatalf("expected _meta.next with one entry, got: %v", meta)
+		}
+		first, _ := next[0].(map[string]any)
+		if first["tool"] != "find_related" {
+			t.Errorf("expected tool=find_related, got %v", first["tool"])
+		}
+		args, _ := first["args"].(map[string]any)
+		if args["table"] != "users" || args["schema"] != "public" {
+			t.Errorf("expected args{table:users, schema:public}, got %v", args)
+		}
+	})
+
+	t.Run("without_fk", func(t *testing.T) {
+		out := callTool(t, c, "describe_table", map[string]any{"table": "organizations"})
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(out), &payload); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, out)
+		}
+		meta, _ := payload["_meta"].(map[string]any)
+		if _, present := meta["next"]; present {
+			t.Errorf("expected no _meta.next for table without FKs, got: %v", meta)
+		}
+	})
+}
+
 func keys(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
