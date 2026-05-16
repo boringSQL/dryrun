@@ -86,21 +86,15 @@ brew install boringsql/boringsql/dryrun
 
 **From source:**
 
-Requires Rust. If you don't have it, install via [rustup](https://rustup.rs/):
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-Then:
+Requires Go 1.26+. If you don't have it, install via [go.dev/dl](https://go.dev/dl/).
 
 ```sh
 git clone https://github.com/boringsql/dryrun.git
 cd dryrun
-cargo build --release
+go build -o bin/dryrun ./cmd/dryrun
 ```
 
-The binary is at `target/release/dryrun`.
+The binary is at `bin/dryrun`.
 
 ## Quickstart
 

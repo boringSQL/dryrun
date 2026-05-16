@@ -5,10 +5,10 @@ dryrun gives your AI assistant (or CLI) full visibility into your PostgreSQL sch
 ## Build
 
 ```sh
-cargo build --release
+go build -o bin/dryrun ./cmd/dryrun
 ```
 
-Binary: `target/release/dryrun`
+Binary: `bin/dryrun`
 
 ---
 
