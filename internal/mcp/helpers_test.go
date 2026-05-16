@@ -89,7 +89,7 @@ func TestInjectMeta_OfflineMode(t *testing.T) {
 
 	t.Run("with_hint", func(t *testing.T) {
 		out := map[string]any{"foo": "bar"}
-		srv.injectMeta(out, "do the thing")
+		srv.injectMeta(out, "do the thing", nil)
 		meta, ok := out["_meta"].(map[string]any)
 		if !ok {
 			t.Fatalf("expected _meta map, got %T", out["_meta"])
@@ -110,7 +110,7 @@ func TestInjectMeta_OfflineMode(t *testing.T) {
 
 	t.Run("empty_hint_omitted", func(t *testing.T) {
 		out := map[string]any{}
-		srv.injectMeta(out, "")
+		srv.injectMeta(out, "", nil)
 		meta, _ := out["_meta"].(map[string]any)
 		if _, has := meta["hint"]; has {
 			t.Error("expected no hint key when empty")
@@ -128,7 +128,7 @@ func TestMetaJSONResult_ProducesValidJSON(t *testing.T) {
 	srv := NewOfflineServer(snap, lint.DefaultConfig())
 
 	payload := map[string]any{"valid": true, "warnings": []string{"w1"}}
-	res := srv.metaJSONResult(payload, "", "use advise")
+	res := srv.metaJSONResult(payload, "", "use advise", nil)
 	if res == nil || len(res.Content) == 0 {
 		t.Fatal("expected non-empty result")
 	}

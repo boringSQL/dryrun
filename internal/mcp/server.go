@@ -137,15 +137,17 @@ func (s *Server) requirePool() (*pgxpool.Pool, error) {
 }
 
 func (s *Server) Instructions() string {
+	const metaNote = "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint."
+
 	snap, err := s.getSchema()
 	if err != nil || snap.PgVersion == "" {
-		return "dryrun PostgreSQL schema advisor. No schema loaded yet."
+		return "dryrun PostgreSQL schema advisor. No schema loaded yet.\n\n" + metaNote
 	}
 
 	ver, err := dryrun.ParsePgVersion(snap.PgVersion)
 	if err != nil {
-		return fmt.Sprintf("dryrun PostgreSQL schema advisor. Database: %s", snap.Database)
+		return fmt.Sprintf("dryrun PostgreSQL schema advisor. Database: %s\n\n%s", snap.Database, metaNote)
 	}
 
-	return fmt.Sprintf("dryrun PostgreSQL schema advisor. PostgreSQL %s; database: %s", ver, snap.Database)
+	return fmt.Sprintf("dryrun PostgreSQL schema advisor. PostgreSQL %s; database: %s\n\n%s", ver, snap.Database, metaNote)
 }

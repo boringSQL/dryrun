@@ -30,7 +30,14 @@ func (s *Server) wrapText(body, hint string) string {
 	return header + body
 }
 
-func (s *Server) injectMeta(val map[string]any, hint string) {
+// NextCall is a pre-validated follow-up tool call surfaced as _meta.next.
+// Hint stays as prose; next is for clients that can chain mechanically.
+type NextCall struct {
+	Tool string         `json:"tool"`
+	Args map[string]any `json:"args"`
+}
+
+func (s *Server) injectMeta(val map[string]any, hint string, next []NextCall) {
 	meta := map[string]any{
 		"pg_version": s.pgDisplay(),
 		"database":   s.databaseName(),
@@ -39,11 +46,14 @@ func (s *Server) injectMeta(val map[string]any, hint string) {
 	if hint != "" {
 		meta["hint"] = hint
 	}
+	if len(next) > 0 {
+		meta["next"] = next
+	}
 	val["_meta"] = meta
 }
 
 // Round-trips payload through map so we can attach _meta without struct churn.
-func (s *Server) metaJSONResult(payload any, key, hint string) *mcp.CallToolResult {
+func (s *Server) metaJSONResult(payload any, key, hint string, next []NextCall) *mcp.CallToolResult {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return errResult(fmt.Sprintf("serialization error: %v", err))
@@ -57,7 +67,7 @@ func (s *Server) metaJSONResult(payload any, key, hint string) *mcp.CallToolResu
 		_ = json.Unmarshal(data, &raw)
 		wrapper[key] = raw
 	}
-	s.injectMeta(wrapper, hint)
+	s.injectMeta(wrapper, hint, next)
 	out, err := json.MarshalIndent(wrapper, "", "  ")
 	if err != nil {
 		return errResult(fmt.Sprintf("serialization error: %v", err))
@@ -141,7 +151,7 @@ type (
 		Indexes       []compactIndex      `json:"indexes"`
 		RLSEnabled    bool                `json:"rls_enabled"`
 		Comment       *string             `json:"comment,omitempty"`
-		Sizing        *schema.TableSizing `json:"sizing,omitempty"`
+		Sizing        *schema.TableSizing `json:"stats,omitempty"`
 		Policies      []schema.RlsPolicy  `json:"policies,omitempty"`
 		Triggers      []schema.Trigger    `json:"triggers,omitempty"`
 		Reloptions    []string            `json:"reloptions,omitempty"`
