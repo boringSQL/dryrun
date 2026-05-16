@@ -101,7 +101,7 @@ func (s *Server) handleSchemaDiff(ctx context.Context, req mcp.CallToolRequest) 
 	if changeset.IsEmpty() {
 		return textResult(s.wrapText(fmt.Sprintf("No changes between %s and %s.", short(changeset.FromHash), short(changeset.ToHash)), "")), nil
 	}
-	return s.metaJSONResult(changeset, "", ""), nil
+	return s.metaJSONResult(changeset, "", "", nil), nil
 }
 
 // from-side resolves empty → latest snapshot in history.db; to-side resolves
@@ -169,5 +169,5 @@ func (s *Server) handleCheckDrift(ctx context.Context, _ mcp.CallToolRequest) (*
 		return textResult(s.wrapText(fmt.Sprintf("No drift detected. Schema hash: %s", report.LiveHash), "")), nil
 	}
 
-	return s.metaJSONResult(report, "", ""), nil
+	return s.metaJSONResult(report, "", "", nil), nil
 }

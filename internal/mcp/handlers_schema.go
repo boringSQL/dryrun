@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,6 +11,12 @@ import (
 
 	"github.com/boringsql/dryrun/internal/schema"
 )
+
+var describeTableFields = []string{
+	"columns", "indexes", "constraints", "stats", "partition_info",
+	"column_profiles", "comment", "policies", "triggers", "reloptions",
+	"rls_enabled",
+}
 
 type (
 	// Formatted line plus sortable values for list_tables
@@ -103,6 +110,27 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 	schemaName := schemaArg(req)
 	detail := argOr(req, "detail", "summary")
 
+	fields := getStringSliceArg(req, "fields")
+	if fields != nil {
+		known := map[string]bool{}
+		for _, k := range describeTableFields {
+			known[k] = true
+		}
+		for _, f := range fields {
+			if !known[f] {
+				return errResult(fmt.Sprintf("unknown field '%s'; valid: %s",
+					f, strings.Join(describeTableFields, ", "))), nil
+			}
+		}
+		// these sections live on the raw Table; bump to full so the merge picks them up
+		for _, f := range fields {
+			if f == "policies" || f == "triggers" || f == "reloptions" || f == "rls_enabled" {
+				detail = "full"
+				break
+			}
+		}
+	}
+
 	for i := range snap.Tables {
 		t := &snap.Tables[i]
 		if t.Name == tableName && t.Schema == schemaName {
@@ -128,23 +156,45 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 
 			switch detail {
 			case "full":
-				result["table"] = t
-			case "stats":
+				raw, err := json.Marshal(t)
+				if err != nil {
+					return errResult(fmt.Sprintf("serialization error: %v", err)), nil
+				}
+				_ = json.Unmarshal(raw, &result)
 				if sizing != nil {
-					result["sizing"] = sizing
+					result["stats"] = sizing
+				}
+			case "stats":
+				result["schema"] = t.Schema
+				result["name"] = t.Name
+				if sizing != nil {
+					result["stats"] = sizing
 				}
 				if act := a.PrimaryActivity(qual); act != nil {
 					result["activity"] = act
 				}
 			default:
-				result["table"] = toCompactTable(t, sizing)
+				raw, err := json.Marshal(toCompactTable(t, sizing))
+				if err != nil {
+					return errResult(fmt.Sprintf("serialization error: %v", err)), nil
+				}
+				_ = json.Unmarshal(raw, &result)
 			}
 
 			if len(profiles) > 0 {
 				result["column_profiles"] = profiles
 			}
 
-			if a.Merged != nil {
+			wantNodeBreakdown := fields == nil
+			if !wantNodeBreakdown {
+				for _, f := range fields {
+					if f == "indexes" || f == "stats" {
+						wantNodeBreakdown = true
+						break
+					}
+				}
+			}
+			if wantNodeBreakdown && a.Merged != nil {
 				var nodeBreakdown []map[string]any
 				for _, n := range a.Merged.Nodes {
 					for _, ts := range n.Tables {
@@ -184,14 +234,34 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 				}
 			}
 
+			if fields != nil {
+				allowed := map[string]bool{"schema": true, "name": true}
+				for _, f := range fields {
+					allowed[f] = true
+				}
+				for k := range result {
+					if !allowed[k] {
+						delete(result, k)
+					}
+				}
+			}
+
 			hint := ""
+			var next []NextCall
 			for _, c := range t.Constraints {
 				if c.Kind == schema.ConstraintForeignKey {
 					hint = "This table has foreign keys — use find_related for JOIN patterns with related tables."
+					next = []NextCall{{
+						Tool: "find_related",
+						Args: map[string]any{
+							"table":  tableName,
+							"schema": schemaName,
+						},
+					}}
 					break
 				}
 			}
-			s.injectMeta(result, hint)
+			s.injectMeta(result, hint, next)
 			return jsonResult(result), nil
 		}
 	}

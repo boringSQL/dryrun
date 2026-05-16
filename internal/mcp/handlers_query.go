@@ -29,7 +29,7 @@ func (s *Server) handleValidateQuery(_ context.Context, req mcp.CallToolRequest)
 	} else if result.Valid {
 		hint = "Query is valid. Use advise if you need optimization suggestions."
 	}
-	return s.metaJSONResult(result, "", hint), nil
+	return s.metaJSONResult(result, "", hint, nil), nil
 }
 
 func (s *Server) handleExplainQuery(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -95,7 +95,7 @@ func (s *Server) handleExplainQuery(ctx context.Context, req mcp.CallToolRequest
 	if len(result.Warnings) > 0 {
 		hint = "Warnings detected. Use advise for index suggestions and actionable recommendations."
 	}
-	return s.metaJSONResult(result, "", hint), nil
+	return s.metaJSONResult(result, "", hint, nil), nil
 }
 
 func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -121,7 +121,7 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 		}
 	}
 	wrapper := map[string]any{"checks": checks}
-	s.injectMeta(wrapper, hint)
+	s.injectMeta(wrapper, hint, nil)
 	return jsonResult(wrapper), nil
 }
 
@@ -192,7 +192,7 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 	case s.pool == nil:
 		hint = "Offline mode: only static analysis available. Connect with --db for plan-based advice."
 	}
-	s.injectMeta(wrapper, hint)
+	s.injectMeta(wrapper, hint, nil)
 	return jsonResult(wrapper), nil
 }
 
@@ -254,7 +254,7 @@ func (s *Server) handleAnalyzePlan(_ context.Context, req mcp.CallToolRequest) (
 	case len(planWarnings) > 0:
 		hint = "Plan warnings detected. Inspect plan_warnings for problem nodes."
 	}
-	s.injectMeta(wrapper, hint)
+	s.injectMeta(wrapper, hint, nil)
 	return jsonResult(wrapper), nil
 }
 
