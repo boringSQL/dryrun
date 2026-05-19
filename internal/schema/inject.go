@@ -207,12 +207,11 @@ func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaNa
 		args = append(args, float32(*s.NDistinct))
 		idx++
 	}
-	if s.MostCommonVals != nil {
+	// MCV vals + freqs are one slot — emit both or neither
+	if s.MostCommonVals != nil && s.MostCommonFreqs != nil {
 		parts = append(parts, fmt.Sprintf("'most_common_vals', $%d::text", idx))
 		args = append(args, *s.MostCommonVals)
 		idx++
-	}
-	if s.MostCommonFreqs != nil {
 		parts = append(parts, fmt.Sprintf("'most_common_freqs', $%d::text", idx))
 		args = append(args, *s.MostCommonFreqs)
 		idx++
