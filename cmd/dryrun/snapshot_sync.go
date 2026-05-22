@@ -10,6 +10,7 @@ import (
 
 	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/history"
+	"github.com/boringsql/dryrun/internal/schema"
 )
 
 // maskResolver loads the masking policy for a key; nil means no masking
@@ -93,8 +94,7 @@ func snapshotPullCmd() *cobra.Command {
 }
 
 // runSync resolves the key set and drives syncKeys; --all takes src.ListKeys,
-// otherwise scope is the resolved profile key (the single-project case).
-// resolveMask is nil for an unmasked copy (pull); push passes a real resolver.
+// otherwise scope is the resolved profile key. resolveMask nil means no masking
 func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, resolveMask maskResolver, w io.Writer) error {
 	var keys []history.SnapshotKey
 	if all {
@@ -115,16 +115,12 @@ func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, reso
 	return nil
 }
 
-// syncKeys diffs src vs dst by content_hash per kind and copies the gap.
-// Iteration order is schema -> planner -> activity so the FilesystemStore
-// orphan rule (planner/activity require an existing schema bundle) holds
-// regardless of which side is dst. With a non-nil resolveMask the per-key
-// policy is resolved once and threaded into each kind's copy.
+// syncKeys diffs src vs dst by content_hash per kind and copies the gap
+// goes from schema, planner, activity to FilesystemStore
 func syncKeys(ctx context.Context, src, dst history.SnapshotStore, keys []history.SnapshotKey, resolveMask maskResolver) ([]SyncOutcome, error) {
 	out := make([]SyncOutcome, 0, len(keys))
 	for _, key := range keys {
-		// per-key policy so a multi-database sync picks the right masks block;
-		// a broken masks file fails fast before any bytes are written
+		// per-key so multi-database picks the right masks block; broken file fails fast
 		var policy *datamask.Policy
 		if resolveMask != nil {
 			p, err := resolveMask(key)
@@ -164,8 +160,7 @@ func kindOrder() []history.SnapshotKind {
 	}
 }
 
-// syncKind copies one stream; with a non-nil policy, planner snapshots are
-// masked in place before they reach dst (the only value-bearing stream).
+// syncKind copies one stream; non-nil policy masks planner snapshots in place
 func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.SnapshotKey, kind history.SnapshotKind, policy *datamask.Policy) (KindCounts, error) {
 	var counts KindCounts
 
@@ -188,10 +183,14 @@ func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.S
 		have[s.ContentHash] = struct{}{}
 	}
 
+	maskingPlanner := kind.Tag == history.KindPlanner && policy != nil
+
 	for _, s := range srcList {
-		if _, ok := have[s.ContentHash]; ok {
-			counts.UpToDate++
-			continue
+		if !maskingPlanner {
+			if _, ok := have[s.ContentHash]; ok {
+				counts.UpToDate++
+				continue
+			}
 		}
 		// summary carries the resolved kind (with NodeLabel for activity)
 		// so Get works the same for all three streams.
@@ -199,9 +198,17 @@ func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.S
 		if err != nil {
 			return counts, err
 		}
-		// mask planner stats before they reach dst; nil policy is a no-op
-		if pl := stored.AsPlanner(); pl != nil && policy != nil {
-			datamask.ApplyPlanner(policy, pl)
+		if maskingPlanner {
+			if pl := stored.AsPlanner(); pl != nil {
+				// recompute on real change so a masked bundle doesn't share an identity with its raw original
+				if n := datamask.ApplyPlanner(policy, pl); n > 0 {
+					pl.ContentHash = schema.ComputePlannerContentHash(pl)
+				}
+				if _, ok := have[pl.ContentHash]; ok {
+					counts.UpToDate++
+					continue
+				}
+			}
 		}
 		if _, err := dst.Put(ctx, key, stored); err != nil {
 			return counts, err
