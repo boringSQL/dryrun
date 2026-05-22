@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/boringsql/dryrun/internal/history"
 )
 
 // withCWD chdirs into dir for the duration of the test and restores cwd on
@@ -27,12 +29,28 @@ func withCWD(t *testing.T, dir string) {
 func resetFlags(t *testing.T) {
 	t.Helper()
 	prevDB, prevProfile, prevConfig, prevSchema := flagDB, flagProfile, flagConfig, flagSchemaFile
+	prevMasksFile, prevMaskPolicy, prevNoMasks := flagMasksFile, flagMaskPolicy, flagNoMasks
 	flagDB, flagProfile, flagConfig, flagSchemaFile = "", "", "", ""
+	flagMasksFile, flagMaskPolicy, flagNoMasks = "", nil, false
 	t.Cleanup(func() {
 		flagDB, flagProfile, flagConfig, flagSchemaFile = prevDB, prevProfile, prevConfig, prevSchema
+		flagMasksFile, flagMaskPolicy, flagNoMasks = prevMasksFile, prevMaskPolicy, prevNoMasks
 	})
 	os.Unsetenv("PROFILE")
 	os.Unsetenv("DATABASE_URL")
+}
+
+// writeMasks drops a masks YAML file at dir/name and returns its path. It is
+// the data-masking counterpart of writeTOML — the resolveMaskPolicy tests need
+// a real file on disk because masking.LoadSharedMasks reads from the
+// filesystem rather than from an in-memory string.
+func writeMasks(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // writeTOML drops a dryrun.toml + .git marker into dir so config.Discover
@@ -132,5 +150,173 @@ database_id = "staging-shard-a"
 	key := resolveSnapshotKey()
 	if string(key.ProjectID) != "demo" || string(key.DatabaseID) != "staging-shard-a" {
 		t.Errorf("got %+v, want demo/staging-shard-a", key)
+	}
+}
+
+// TestResolveMaskPolicyNoMasks: the --no-masks flag is a hard opt-out and must
+// short-circuit before any file is read. Even with a perfectly good
+// data-masking-policy.yml sitting right there in the working directory,
+// resolveMaskPolicy must return a nil Policy — nil is the contract for
+// "masking disabled", and ApplyPlanner treats a nil Policy as a no-op.
+func TestResolveMaskPolicyNoMasks(t *testing.T) {
+	resetFlags(t)
+	dir := t.TempDir()
+	writeMasks(t, dir, "data-masking-policy.yml", `version: 1
+databases:
+  dev:
+    columns:
+      users.email: { expr: "x", tags: [pii] }
+`)
+	writeTOML(t, dir, `
+[profiles.dev]
+db_url = "postgres://dev/x"
+`)
+	withCWD(t, dir)
+
+	flagProfile = "dev"
+	flagNoMasks = true
+	pol, err := resolveMaskPolicy()
+	if err != nil {
+		t.Fatalf("--no-masks should not error: %v", err)
+	}
+	if pol != nil {
+		t.Error("--no-masks must short-circuit to a nil Policy, even when a masks file exists")
+	}
+}
+
+// TestResolveMaskPolicyDiscovers: with no --masks-file flag and no masks_file
+// key in the profile, resolveMaskPolicy falls through to auto-discovery and
+// picks up a data-masking-policy.yml found in the working directory. The
+// profile here has no explicit database_id, so it defaults to the profile
+// name ("dev") — which is exactly the block the fixture defines.
+func TestResolveMaskPolicyDiscovers(t *testing.T) {
+	resetFlags(t)
+	dir := t.TempDir()
+	writeMasks(t, dir, "data-masking-policy.yml", `version: 1
+databases:
+  dev:
+    columns:
+      users.email: { expr: "x", tags: [pii] }
+`)
+	writeTOML(t, dir, `
+[profiles.dev]
+db_url = "postgres://dev/x"
+`)
+	withCWD(t, dir)
+
+	flagProfile = "dev"
+	pol, err := resolveMaskPolicy()
+	if err != nil {
+		t.Fatalf("resolveMaskPolicy: %v", err)
+	}
+	if pol == nil {
+		t.Fatal("expected discovery to find data-masking-policy.yml")
+	}
+	if !pol.IsSensitive("public", "users", "email") {
+		t.Error("discovered masks file should mark users.email sensitive")
+	}
+}
+
+// TestResolveMaskPolicyCLIOverridesProfile: when both an explicit --masks-file
+// flag and a profile masks_file are present, the CLI flag wins. The two files
+// list different columns (cli_col vs profile_col), so the resolved Policy's
+// IsSensitive answers reveal unambiguously which file was actually loaded.
+func TestResolveMaskPolicyCLIOverridesProfile(t *testing.T) {
+	resetFlags(t)
+	dir := t.TempDir()
+
+	// the file the profile points at — masks users.profile_col
+	writeMasks(t, dir, "profile-masks.yml", `version: 1
+databases:
+  dev:
+    columns:
+      users.profile_col: { expr: "x", tags: [pii] }
+`)
+	// the file the CLI flag points at — masks users.cli_col
+	cliPath := writeMasks(t, dir, "cli-masks.yml", `version: 1
+databases:
+  dev:
+    columns:
+      users.cli_col: { expr: "x", tags: [pii] }
+`)
+	writeTOML(t, dir, `
+[profiles.dev]
+db_url = "postgres://dev/x"
+masks_file = "profile-masks.yml"
+`)
+	withCWD(t, dir)
+
+	flagProfile = "dev"
+	flagMasksFile = cliPath
+	pol, err := resolveMaskPolicy()
+	if err != nil {
+		t.Fatalf("resolveMaskPolicy: %v", err)
+	}
+	if pol == nil {
+		t.Fatal("expected a Policy")
+	}
+	if !pol.IsSensitive("public", "users", "cli_col") {
+		t.Error("--masks-file should win: cli_col is not masked")
+	}
+	if pol.IsSensitive("public", "users", "profile_col") {
+		t.Error("profile masks_file should have been overridden by --masks-file")
+	}
+}
+
+// TestResolveMaskPolicyForKeyPerDatabase: the per-key resolver is what the
+// snapshot-export loop calls once per database it is exporting. Two keys that
+// share one masks file but carry different database_ids must each select their
+// own block — db_a's policy masks accounts.ssn and nothing else, db_b's masks
+// leads.email and nothing else. This guards against a multi-database export
+// cross-contaminating one database's stats with another's masking rules.
+func TestResolveMaskPolicyForKeyPerDatabase(t *testing.T) {
+	resetFlags(t)
+	dir := t.TempDir()
+	writeMasks(t, dir, "data-masking-policy.yml", `version: 1
+databases:
+  db_a:
+    columns:
+      accounts.ssn: { expr: "x", tags: [pii] }
+  db_b:
+    columns:
+      leads.email: { expr: "x", tags: [pii] }
+`)
+	writeTOML(t, dir, `
+[project]
+id = "demo"
+
+[profiles.a]
+db_url = "postgres://a/x"
+database_id = "db_a"
+
+[profiles.b]
+db_url = "postgres://b/x"
+database_id = "db_b"
+`)
+	withCWD(t, dir)
+
+	keyA := history.SnapshotKey{ProjectID: "demo", DatabaseID: "db_a"}
+	keyB := history.SnapshotKey{ProjectID: "demo", DatabaseID: "db_b"}
+
+	polA, err := resolveMaskPolicyForKey(keyA)
+	if err != nil {
+		t.Fatalf("resolveMaskPolicyForKey(db_a): %v", err)
+	}
+	if polA == nil || !polA.IsSensitive("public", "accounts", "ssn") {
+		t.Error("db_a key should resolve the db_a block (accounts.ssn)")
+	}
+	if polA != nil && polA.IsSensitive("public", "leads", "email") {
+		t.Error("db_a key must not see db_b's columns")
+	}
+
+	polB, err := resolveMaskPolicyForKey(keyB)
+	if err != nil {
+		t.Fatalf("resolveMaskPolicyForKey(db_b): %v", err)
+	}
+	if polB == nil || !polB.IsSensitive("public", "leads", "email") {
+		t.Error("db_b key should resolve the db_b block (leads.email)")
+	}
+	if polB != nil && polB.IsSensitive("public", "accounts", "ssn") {
+		t.Error("db_b key must not see db_a's columns")
 	}
 }
