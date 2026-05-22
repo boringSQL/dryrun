@@ -370,7 +370,7 @@ func snapshotCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			snap, planner, activity, err := runPrimaryCapture(cmd.Context(), cap, store, resolveSnapshotKey(), "primary")
+			snap, planner, activity, _, err := runPrimaryCapture(cmd.Context(), cap, store, resolveSnapshotKey(), "primary", nil)
 			if err != nil {
 				return err
 			}
