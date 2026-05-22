@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
 )
@@ -99,7 +100,7 @@ func TestSyncKeysCopiesEverythingToEmptyDst(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k})
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, nil)
 	if err != nil {
 		t.Fatalf("syncKeys: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestSyncKeysReportsUpToDateForMatchingHashes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k})
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, nil)
 	if err != nil {
 		t.Fatalf("syncKeys: %v", err)
 	}
@@ -200,7 +201,7 @@ func TestSyncCopiesActivityPerNodeLabel(t *testing.T) {
 		}
 	}
 
-	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k})
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, nil)
 	if err != nil {
 		t.Fatalf("syncKeys: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestSyncKindOrderIsSchemaPlannerActivity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}); err != nil {
+	if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, nil); err != nil {
 		t.Fatalf("syncKeys against FilesystemStore dst: %v", err)
 	}
 }
@@ -273,7 +274,7 @@ func TestSyncAllUsesListKeys(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := runSync(ctx, src, dst, true, &buf); err != nil {
+	if err := runSync(ctx, src, dst, true, nil, &buf); err != nil {
 		t.Fatalf("runSync(all=true): %v", err)
 	}
 	out := buf.String()
@@ -312,10 +313,10 @@ func TestRoundTripSQLiteToFsToSQLite(t *testing.T) {
 		}
 	}
 
-	if _, err := syncKeys(ctx, srcA, fsMid, []history.SnapshotKey{k}); err != nil {
+	if _, err := syncKeys(ctx, srcA, fsMid, []history.SnapshotKey{k}, nil); err != nil {
 		t.Fatalf("push A -> FS: %v", err)
 	}
-	if _, err := syncKeys(ctx, fsMid, dstB, []history.SnapshotKey{k}); err != nil {
+	if _, err := syncKeys(ctx, fsMid, dstB, []history.SnapshotKey{k}, nil); err != nil {
 		t.Fatalf("pull FS -> B: %v", err)
 	}
 
@@ -346,6 +347,310 @@ func TestRoundTripSQLiteToFsToSQLite(t *testing.T) {
 			t.Fatal(err)
 		}
 		cmp(kind.String(), a, b)
+	}
+}
+
+// plannerWithSensitiveColumn builds a planner snapshot carrying one sensitive
+// column (users.email, with all three value-bearing stat fields populated)
+// and one non-sensitive column (users.id). It is the fixture both masking
+// sub-tests below run against.
+func plannerWithSensitiveColumn(schemaRef, hash, db string, ts time.Time) *schema.PlannerStatsSnapshot {
+	return &schema.PlannerStatsSnapshot{
+		SchemaRefHash: schemaRef,
+		ContentHash:   hash,
+		Database:      db,
+		Timestamp:     ts,
+		Columns: []schema.ColumnStatsEntry{
+			{
+				Table:  schema.QualifiedName{Schema: "public", Name: "users"},
+				Column: "email",
+				Stats: schema.ColumnStats{
+					MostCommonVals:  strPtr("{alice@example.com,bob@example.com}"),
+					MostCommonFreqs: strPtr("{0.5,0.5}"),
+					HistogramBounds: strPtr("{a@example.com,z@example.com}"),
+				},
+			},
+			{
+				Table:  schema.QualifiedName{Schema: "public", Name: "users"},
+				Column: "id",
+				Stats: schema.ColumnStats{
+					MostCommonVals:  strPtr("{1,2,3}"),
+					MostCommonFreqs: strPtr("{0.4,0.3,0.3}"),
+					HistogramBounds: strPtr("{0,100}"),
+				},
+			},
+		},
+	}
+}
+
+// plannerColumn pulls table.column's stats out of a planner snapshot, failing
+// the test if it is missing.
+func plannerColumn(t *testing.T, p *schema.PlannerStatsSnapshot, table, column string) schema.ColumnStats {
+	t.Helper()
+	for _, c := range p.Columns {
+		if c.Table.Name == table && c.Column == column {
+			return c.Stats
+		}
+	}
+	t.Fatalf("column %s.%s not found in planner snapshot", table, column)
+	return schema.ColumnStats{}
+}
+
+// TestSyncMasksPlannerStats is the masking guard for the merged push/export
+// path. A planner snapshot with a sensitive column is synced into a
+// FilesystemStore twice, and the snapshot is read back through the FS store:
+//
+//   - with a resolver that returns a real policy listing users.email, the
+//     bundle on disk must have email's three value-bearing stat fields NULLed
+//     and users.id left completely intact;
+//   - with a nil resolver (the pull case), every column must survive verbatim.
+//
+// This is the regression guard for the C7 wiring: if syncKind ever stops
+// calling ApplyPlanner, the masked sub-test fails loudly. It also pins the
+// invariant that masking is strictly opt-in — a nil resolver never masks.
+func TestSyncMasksPlannerStats(t *testing.T) {
+	seed := func(t *testing.T) (*history.Store, *history.FilesystemStore, history.SnapshotKey) {
+		t.Helper()
+		ctx := context.Background()
+		src := openSQLite(t)
+		dst := openFS(t)
+		k := syncKey("acme", "testdb")
+		now := time.Now().UTC().Truncate(time.Second)
+
+		if _, err := src.PutSchema(ctx, k, syncTestSchema("sh-1", "appdb", now.Add(-time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := src.PutPlanner(ctx, k, plannerWithSensitiveColumn("sh-1", "pl-1", "appdb", now)); err != nil {
+			t.Fatal(err)
+		}
+		return src, dst, k
+	}
+
+	// readBackPlanner pulls the (single) planner snapshot off dst after a
+	// sync. We list first because masking now recomputes the content hash,
+	// so the on-disk hash can differ from whatever the source carried; the
+	// list lets the test observe the bytes that actually landed on disk.
+	readBackPlanner := func(t *testing.T, dst *history.FilesystemStore, k history.SnapshotKey) *schema.PlannerStatsSnapshot {
+		t.Helper()
+		list, err := dst.List(context.Background(), k, history.PlannerKind(), history.TimeRange{})
+		if err != nil {
+			t.Fatalf("list planner: %v", err)
+		}
+		if len(list) != 1 {
+			t.Fatalf("expected 1 planner bundle on dst, got %d", len(list))
+		}
+		stored, err := dst.Get(context.Background(), k, history.PlannerKind(), history.NewRefHash(list[0].ContentHash))
+		if err != nil {
+			t.Fatalf("read back planner: %v", err)
+		}
+		p := stored.AsPlanner()
+		if p == nil {
+			t.Fatal("FilesystemStore returned a non-planner snapshot")
+		}
+		return p
+	}
+
+	t.Run("policy masks the sensitive column only", func(t *testing.T) {
+		ctx := context.Background()
+		src, dst, k := seed(t)
+
+		// loadTestPolicy lists users.email under the "testdb" block; the
+		// resolver hands that same policy back for every key.
+		pol := loadTestPolicy(t, "users.email")
+		resolve := func(history.SnapshotKey) (*datamask.Policy, error) { return pol, nil }
+
+		if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, resolve); err != nil {
+			t.Fatalf("syncKeys: %v", err)
+		}
+		p := readBackPlanner(t, dst, k)
+
+		email := plannerColumn(t, p, "users", "email")
+		if email.MostCommonVals != nil || email.MostCommonFreqs != nil || email.HistogramBounds != nil {
+			t.Errorf("users.email stats not masked: mcv=%v freqs=%v hist=%v",
+				email.MostCommonVals, email.MostCommonFreqs, email.HistogramBounds)
+		}
+
+		id := plannerColumn(t, p, "users", "id")
+		if id.MostCommonVals == nil || id.MostCommonFreqs == nil || id.HistogramBounds == nil {
+			t.Errorf("users.id stats were masked but should be untouched: mcv=%v freqs=%v hist=%v",
+				id.MostCommonVals, id.MostCommonFreqs, id.HistogramBounds)
+		}
+	})
+
+	t.Run("nil resolver leaves every column untouched", func(t *testing.T) {
+		ctx := context.Background()
+		src, dst, k := seed(t)
+
+		if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, nil); err != nil {
+			t.Fatalf("syncKeys: %v", err)
+		}
+		p := readBackPlanner(t, dst, k)
+
+		email := plannerColumn(t, p, "users", "email")
+		if email.MostCommonVals == nil || email.MostCommonFreqs == nil || email.HistogramBounds == nil {
+			t.Errorf("users.email stats masked under a nil resolver: mcv=%v freqs=%v hist=%v",
+				email.MostCommonVals, email.MostCommonFreqs, email.HistogramBounds)
+		}
+	})
+}
+
+// TestSyncMaskingRecomputesPlannerHash proves the content-address invariant:
+// when ApplyPlanner actually changes bytes, syncKind recomputes ContentHash
+// so the masked bundle does not share an identity with its raw original.
+// Without this recompute, the dedup gates conflate "pre-mask raw" and
+// "post-mask masked" as the same object — see the next test for the
+// user-visible leak that asymmetry would otherwise cause.
+func TestSyncMaskingRecomputesPlannerHash(t *testing.T) {
+	ctx := context.Background()
+	src := openSQLite(t)
+	dst := openFS(t)
+	k := syncKey("acme", "testdb")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, err := src.PutSchema(ctx, k, syncTestSchema("sh-1", "appdb", now.Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	// hand-set hash is fine: nothing in the storage path verifies it, and
+	// we use the hash purely as a label to assert "this is the stored one"
+	// vs "this is the recomputed one" below.
+	if _, err := src.PutPlanner(ctx, k, plannerWithSensitiveColumn("sh-1", "pl-raw", "appdb", now)); err != nil {
+		t.Fatal(err)
+	}
+
+	pol := loadTestPolicy(t, "users.email")
+	resolve := func(history.SnapshotKey) (*datamask.Policy, error) { return pol, nil }
+	if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, resolve); err != nil {
+		t.Fatalf("syncKeys: %v", err)
+	}
+
+	list, err := dst.List(ctx, k, history.PlannerKind(), history.TimeRange{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 planner bundle on dst, got %d", len(list))
+	}
+	if list[0].ContentHash == "pl-raw" {
+		t.Errorf("masked bundle kept the raw hash %q; recompute did not fire", list[0].ContentHash)
+	}
+}
+
+// TestSyncMaskedPushAfterRawPushReplacesRaw is the headline regression guard
+// for the back-catalog leak. The same planner is synced twice from the same
+// source: first WITHOUT masking (raw bundle lands on dst with the source's
+// stored hash), then again WITH masking. The naive front-gate dedup would
+// see the stored hash already present on dst and skip the masked push as
+// "up-to-date", silently leaving the raw planner in place. syncKind detects
+// the planner+policy case, bypasses the front gate, applies masking, and the
+// post-mask hash check decides what to do. End state: dst no longer holds
+// the raw bundle, the email column is masked.
+func TestSyncMaskedPushAfterRawPushReplacesRaw(t *testing.T) {
+	ctx := context.Background()
+	src := openSQLite(t)
+	dst := openFS(t)
+	k := syncKey("acme", "testdb")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, err := src.PutSchema(ctx, k, syncTestSchema("sh-1", "appdb", now.Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.PutPlanner(ctx, k, plannerWithSensitiveColumn("sh-1", "pl-raw", "appdb", now)); err != nil {
+		t.Fatal(err)
+	}
+
+	// step 1: raw push with a nil resolver. dst now holds the raw planner
+	// under the stored hash "pl-raw" — exactly the back-catalog precondition
+	// for the leak.
+	if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, nil); err != nil {
+		t.Fatalf("raw syncKeys: %v", err)
+	}
+	list, err := dst.List(ctx, k, history.PlannerKind(), history.TimeRange{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ContentHash != "pl-raw" {
+		t.Fatalf("after raw push, dst should hold one bundle with hash %q, got %+v", "pl-raw", list)
+	}
+
+	// step 2: masked push of the same source. With the front-gate bypass,
+	// syncKind reads the planner, masks it, recomputes, and only then
+	// decides whether dst already has the post-mask bundle.
+	pol := loadTestPolicy(t, "users.email")
+	resolve := func(history.SnapshotKey) (*datamask.Policy, error) { return pol, nil }
+	if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, resolve); err != nil {
+		t.Fatalf("masked syncKeys: %v", err)
+	}
+
+	list, err = dst.List(ctx, k, history.PlannerKind(), history.TimeRange{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 planner bundle after masked re-push, got %d", len(list))
+	}
+	if list[0].ContentHash == "pl-raw" {
+		t.Fatalf("masked push silently skipped: dst still holds the raw bundle")
+	}
+
+	stored, err := dst.Get(ctx, k, history.PlannerKind(), history.NewRefHash(list[0].ContentHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := stored.AsPlanner()
+	if p == nil {
+		t.Fatal("FilesystemStore returned a non-planner snapshot")
+	}
+	email := plannerColumn(t, p, "users", "email")
+	if email.MostCommonVals != nil || email.MostCommonFreqs != nil || email.HistogramBounds != nil {
+		t.Errorf("users.email still carries raw stats after masked re-push: mcv=%v freqs=%v hist=%v",
+			email.MostCommonVals, email.MostCommonFreqs, email.HistogramBounds)
+	}
+}
+
+// TestSyncNoMasksFlagDisablesMasking proves the push wiring end to end: when
+// the global --no-masks flag is set, resolveMaskPolicyForKey (the resolver
+// snapshotPushCmd actually hands to syncKeys) short-circuits to a nil policy,
+// so a sensitive planner column survives the sync unmasked. This is the
+// flag-level companion to TestSyncMasksPlannerStats, which only exercised
+// hand-built/injected resolvers and never touched the real opt-out path.
+func TestSyncNoMasksFlagDisablesMasking(t *testing.T) {
+	ctx := context.Background()
+	src := openSQLite(t)
+	dst := openFS(t)
+	k := syncKey("acme", "testdb")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, err := src.PutSchema(ctx, k, syncTestSchema("sh-1", "appdb", now.Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.PutPlanner(ctx, k, plannerWithSensitiveColumn("sh-1", "pl-1", "appdb", now)); err != nil {
+		t.Fatal(err)
+	}
+
+	// flip the global flag for the duration of the test, then restore it so
+	// the rest of the package keeps the default (masking-on) behaviour.
+	prev := flagNoMasks
+	flagNoMasks = true
+	t.Cleanup(func() { flagNoMasks = prev })
+
+	// resolveMaskPolicyForKey is exactly what snapshotPushCmd passes; with
+	// flagNoMasks set it must return a nil policy before any file discovery.
+	if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, resolveMaskPolicyForKey); err != nil {
+		t.Fatalf("syncKeys: %v", err)
+	}
+
+	stored, err := dst.Get(ctx, k, history.PlannerKind(), history.NewRefHash("pl-1"))
+	if err != nil {
+		t.Fatalf("read back planner: %v", err)
+	}
+	p := stored.AsPlanner()
+	if p == nil {
+		t.Fatal("FilesystemStore returned a non-planner snapshot")
+	}
+	email := plannerColumn(t, p, "users", "email")
+	if email.MostCommonVals == nil || email.MostCommonFreqs == nil || email.HistogramBounds == nil {
+		t.Errorf("users.email stats masked despite --no-masks: mcv=%v freqs=%v hist=%v",
+			email.MostCommonVals, email.MostCommonFreqs, email.HistogramBounds)
 	}
 }
 
