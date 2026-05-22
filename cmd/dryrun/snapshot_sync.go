@@ -8,8 +8,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/history"
 )
+
+// maskResolver loads the masking policy for a key; nil means no masking
+type maskResolver func(history.SnapshotKey) (*datamask.Policy, error)
 
 // KindCounts splits a per-kind sync result into work done vs work skipped.
 type KindCounts struct {
@@ -46,7 +50,8 @@ func snapshotPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runSync(cmd.Context(), src, dst, all, os.Stdout)
+			// push masks planner stats on the way out; --no-masks opts out
+			return runSync(cmd.Context(), src, dst, all, resolveMaskPolicyForKey, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&toPath, "to-path", "", "destination directory (required)")
@@ -77,7 +82,8 @@ func snapshotPullCmd() *cobra.Command {
 				return err
 			}
 			defer dst.Close()
-			return runSync(cmd.Context(), src, dst, all, os.Stdout)
+			// pull imports into the trusted history.db; no masking on the way in
+			return runSync(cmd.Context(), src, dst, all, nil, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&fromPath, "from-path", "", "source directory (required)")
@@ -88,7 +94,8 @@ func snapshotPullCmd() *cobra.Command {
 
 // runSync resolves the key set and drives syncKeys; --all takes src.ListKeys,
 // otherwise scope is the resolved profile key (the single-project case).
-func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, w io.Writer) error {
+// resolveMask is nil for an unmasked copy (pull); push passes a real resolver.
+func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, resolveMask maskResolver, w io.Writer) error {
 	var keys []history.SnapshotKey
 	if all {
 		ks, err := src.ListKeys(ctx)
@@ -100,7 +107,7 @@ func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, w io
 		keys = []history.SnapshotKey{resolveSnapshotKey()}
 	}
 
-	outs, err := syncKeys(ctx, src, dst, keys)
+	outs, err := syncKeys(ctx, src, dst, keys, resolveMask)
 	if err != nil {
 		return err
 	}
@@ -111,13 +118,24 @@ func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, w io
 // syncKeys diffs src vs dst by content_hash per kind and copies the gap.
 // Iteration order is schema -> planner -> activity so the FilesystemStore
 // orphan rule (planner/activity require an existing schema bundle) holds
-// regardless of which side is dst.
-func syncKeys(ctx context.Context, src, dst history.SnapshotStore, keys []history.SnapshotKey) ([]SyncOutcome, error) {
+// regardless of which side is dst. With a non-nil resolveMask the per-key
+// policy is resolved once and threaded into each kind's copy.
+func syncKeys(ctx context.Context, src, dst history.SnapshotStore, keys []history.SnapshotKey, resolveMask maskResolver) ([]SyncOutcome, error) {
 	out := make([]SyncOutcome, 0, len(keys))
 	for _, key := range keys {
+		// per-key policy so a multi-database sync picks the right masks block;
+		// a broken masks file fails fast before any bytes are written
+		var policy *datamask.Policy
+		if resolveMask != nil {
+			p, err := resolveMask(key)
+			if err != nil {
+				return out, fmt.Errorf("load masks for %s/%s: %w", key.ProjectID, key.DatabaseID, err)
+			}
+			policy = p
+		}
 		o := SyncOutcome{Key: key}
 		for _, kind := range kindOrder() {
-			c, err := syncKind(ctx, src, dst, key, kind)
+			c, err := syncKind(ctx, src, dst, key, kind, policy)
 			if err != nil {
 				return out, fmt.Errorf("sync %s/%s %s: %w",
 					key.ProjectID, key.DatabaseID, kind, err)
@@ -146,7 +164,9 @@ func kindOrder() []history.SnapshotKind {
 	}
 }
 
-func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.SnapshotKey, kind history.SnapshotKind) (KindCounts, error) {
+// syncKind copies one stream; with a non-nil policy, planner snapshots are
+// masked in place before they reach dst (the only value-bearing stream).
+func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.SnapshotKey, kind history.SnapshotKind, policy *datamask.Policy) (KindCounts, error) {
 	var counts KindCounts
 
 	srcList, err := src.List(ctx, key, kind, history.TimeRange{})
@@ -178,6 +198,10 @@ func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.S
 		stored, err := src.Get(ctx, key, s.Kind, history.NewRefHash(s.ContentHash))
 		if err != nil {
 			return counts, err
+		}
+		// mask planner stats before they reach dst; nil policy is a no-op
+		if pl := stored.AsPlanner(); pl != nil && policy != nil {
+			datamask.ApplyPlanner(policy, pl)
 		}
 		if _, err := dst.Put(ctx, key, stored); err != nil {
 			return counts, err
