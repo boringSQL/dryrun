@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// On-disk layout for bundle files; shared by `snapshot export` (today) and
-// `FilesystemStore` (V2). Layout: <root>/<project>/<database>/<ts>-<hash>.json.zst
+// layout <root>/<project>/<database>/<ts>-<hash>.json.zst for FIleSystemStore
 const (
 	bundleTimeLayout = "20060102T150405Z"
 	bundleExtension  = ".json.zst"
