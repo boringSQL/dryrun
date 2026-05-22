@@ -223,7 +223,11 @@ No server, no credentials. Same promise as before.
 Add `dryrun` to your AI assistant. If you installed via Homebrew, `dryrun` is already on your PATH:
 
 ```sh
+# for claude code
 claude mcp add dryrun -- dryrun mcp-serve
+
+# for codex
+codex mcp add dryrun -- dryrun mcp-serve
 ```
 
 If you built from source, use the full path to the binary:
