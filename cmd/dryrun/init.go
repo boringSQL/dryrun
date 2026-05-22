@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 
+	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
@@ -93,9 +94,16 @@ func initCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			return runInitCapture(ctx, pgxCapturer{pool: conn.Pool()}, store, resolveSnapshotKey(), dataDir, initOptions{
+			key := resolveSnapshotKey()
+			policy, err := resolveMaskPolicyForKey(key)
+			if err != nil {
+				return fmt.Errorf("load masks: %w", err)
+			}
+
+			return runInitCapture(ctx, pgxCapturer{pool: conn.Pool()}, store, key, dataDir, initOptions{
 				AllowReplica: allowReplica,
 				Source:       source,
+				MaskPolicy:   policy,
 			})
 		},
 	}
@@ -107,6 +115,7 @@ func initCmd() *cobra.Command {
 type initOptions struct {
 	AllowReplica bool
 	Source       string
+	MaskPolicy   *datamask.Policy // nil = no masking
 }
 
 // init flow: refuse standbys by default; primary writes all three streams,
@@ -148,7 +157,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		return nil
 	}
 
-	snap, planner, activity, err := runPrimaryCapture(ctx, cap, store, key, source)
+	snap, planner, activity, masked, err := runPrimaryCapture(ctx, cap, store, key, source, opts.MaskPolicy)
 	if err != nil {
 		return err
 	}
@@ -163,16 +172,19 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 	fmt.Fprintf(os.Stderr, "  Schema:   %s\n", schemaPath)
 	fmt.Fprintf(os.Stderr, "  Planner:  %d tables, %d indexes, %d columns\n",
 		len(planner.Tables), len(planner.Indexes), len(planner.Columns))
+	if opts.MaskPolicy != nil {
+		fmt.Fprintf(os.Stderr, "  Masked:   %d planner-stats columns\n", masked)
+	}
 	fmt.Fprintf(os.Stderr, "  Activity: node=%s, %d tables, %d indexes\n",
 		source, len(activity.Tables), len(activity.Indexes))
 	return nil
 }
 
 // schema + planner + activity in one shot; caller is responsible for the standby gate
-func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, error) {
+func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string, maskPolicy *datamask.Policy) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
 	snap, err := cap.Introspect(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, 0, err
 	}
 	if _, err := store.PutSchema(ctx, key, snap); err != nil {
 		slog.Warn("could not save snapshot", "error", err)
@@ -180,7 +192,13 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 
 	planner, err := cap.CapturePlanner(ctx, snap.ContentHash)
 	if err != nil {
-		return snap, nil, nil, fmt.Errorf("capture planner stats: %w", err)
+		return snap, nil, nil, 0, fmt.Errorf("capture planner stats: %w", err)
+	}
+	masked := 0
+	if maskPolicy != nil {
+		masked = datamask.ApplyPlanner(maskPolicy, planner)
+		// payload changed, so content_hash must reflect the masked form
+		planner.ContentHash = schema.ComputePlannerContentHash(planner)
 	}
 	if _, err := store.PutPlanner(ctx, key, planner); err != nil {
 		slog.Warn("could not save planner stats", "error", err)
@@ -188,12 +206,12 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 
 	activity, err := cap.CaptureActivity(ctx, snap.ContentHash, source)
 	if err != nil {
-		return snap, planner, nil, fmt.Errorf("capture activity stats: %w", err)
+		return snap, planner, nil, masked, fmt.Errorf("capture activity stats: %w", err)
 	}
 	if _, err := store.PutActivity(ctx, key, activity); err != nil {
 		slog.Warn("could not save activity stats", "error", err)
 	}
-	return snap, planner, activity, nil
+	return snap, planner, activity, masked, nil
 }
 
 func scaffoldConfig(configPath string) error {
