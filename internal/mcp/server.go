@@ -86,6 +86,26 @@ func (s *Server) loadAnnotatedFromHistory(ctx context.Context) (*schema.Annotate
 	return a, true
 }
 
+// describes a history.db compat problem for the user, or nil if fine
+func (s *Server) historyNote() *string {
+	s.mu.RLock()
+	hist := s.history
+	s.mu.RUnlock()
+	if hist == nil {
+		return nil
+	}
+	var note string
+	switch hist.Compat() {
+	case history.CompatLegacy:
+		note = "the history database is from an older dryrun and cannot be read; re-run `dryrun init` to recapture its snapshots"
+	case history.CompatNewer:
+		note = "the history database was written by a newer dryrun; upgrade dryrun"
+	default:
+		return nil
+	}
+	return &note
+}
+
 func (s *Server) getAnnotated() (*schema.AnnotatedSchema, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -137,7 +157,12 @@ func (s *Server) requirePool() (*pgxpool.Pool, error) {
 }
 
 func (s *Server) Instructions() string {
-	const metaNote = "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint."
+	metaNote := "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint."
+
+	// surface a history.db compat problem here so MCP-only users see it
+	if note := s.historyNote(); note != nil {
+		metaNote += "\n\nWarning: " + *note + "."
+	}
 
 	snap, err := s.getSchema()
 	if err != nil || snap.PgVersion == "" {
