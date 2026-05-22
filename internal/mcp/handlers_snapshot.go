@@ -68,8 +68,13 @@ func (s *Server) handleReloadSchema(ctx context.Context, _ mcp.CallToolRequest) 
 		s.annotated = &schema.AnnotatedSchema{Schema: snap}
 		s.uninitialized = false
 		s.mu.Unlock()
-		return textResult(fmt.Sprintf("Schema loaded from %s: %d tables, %d views, %d functions",
-			path, len(snap.Tables), len(snap.Views), len(snap.Functions))), nil
+		msg := fmt.Sprintf("Schema loaded from %s: %d tables, %d views, %d functions",
+			path, len(snap.Tables), len(snap.Views), len(snap.Functions))
+		// history.db would carry planner/activity stats but was skipped
+		if note := s.historyNote(); note != nil {
+			msg += "\n\nNote: " + *note + "."
+		}
+		return textResult(msg), nil
 	}
 
 	var lines []string
@@ -115,6 +120,9 @@ func (s *Server) resolveSnapshotForDiff(ctx context.Context, hash, side string) 
 		if hist == nil || key.ProjectID == "" {
 			return nil, fmt.Errorf("no history store available; cannot resolve %s=%s", side, hash)
 		}
+		if note := s.historyNote(); note != nil {
+			return nil, fmt.Errorf("cannot resolve %s=%s: %s", side, hash, *note)
+		}
 		snap, err := hist.GetSchema(ctx, key, history.NewRefHash(hash))
 		if err != nil {
 			return nil, fmt.Errorf("history lookup for %s=%s failed: %v", side, hash, err)
@@ -133,6 +141,9 @@ func (s *Server) resolveSnapshotForDiff(ctx context.Context, hash, side string) 
 	s.mu.RUnlock()
 	if hist == nil || key.ProjectID == "" {
 		return nil, fmt.Errorf("from omitted but no history store available")
+	}
+	if note := s.historyNote(); note != nil {
+		return nil, fmt.Errorf("from omitted: %s", *note)
 	}
 	snap, err := hist.GetSchema(ctx, key, history.NewRefLatest())
 	if err != nil {
