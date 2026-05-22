@@ -320,3 +320,92 @@ database_id = "db_b"
 		t.Error("db_b key must not see db_a's columns")
 	}
 }
+
+// TestResolveMaskPolicyProfileMasksFileSurvivesDBOverride is the regression
+// guard for the bug where a profile's masks_file was silently ignored whenever
+// --db was also supplied. This combination is not a corner case: `dryrun init`
+// only captures when --db (or DATABASE_URL) is set, so for the init command it
+// is the *normal* case. Under the bug, config.ResolveProfile sees a non-nil
+// cliDB, short-circuits to a bare "<cli>" profile, and the named profile's
+// masks_file/mask_policies never reach resolveMaskPolicyForKey.
+//
+// The fixture deliberately names the masks file "profile-masks.yml" rather
+// than the canonical "data-masking-policy.yml" — that keeps it OUT of reach of
+// auto-discovery, so the profile's masks_file key is the *only* path that can
+// produce a non-nil policy. Without that precaution, discovery would mask the
+// bug: the test would pass via the discovery fallback even with the profile
+// path broken.
+func TestResolveMaskPolicyProfileMasksFileSurvivesDBOverride(t *testing.T) {
+	resetFlags(t)
+	dir := t.TempDir()
+	writeMasks(t, dir, "profile-masks.yml", `version: 1
+databases:
+  prod:
+    columns:
+      users.email: { expr: "x", tags: [pii] }
+`)
+	writeTOML(t, dir, `
+[project]
+id = "demo"
+
+[profiles.prod]
+db_url = "postgres://prod/x"
+database_id = "prod"
+masks_file = "profile-masks.yml"
+`)
+	withCWD(t, dir)
+
+	// --db set, exactly as `dryrun init` always runs it, plus the profile.
+	flagDB = "postgres://override/x"
+	flagProfile = "prod"
+
+	pol, err := resolveMaskPolicyForKey(history.SnapshotKey{ProjectID: "demo", DatabaseID: "prod"})
+	if err != nil {
+		t.Fatalf("resolveMaskPolicyForKey: %v", err)
+	}
+	if pol == nil {
+		t.Fatal("profile masks_file must still resolve when --db is supplied")
+	}
+	if !pol.IsSensitive("public", "users", "email") {
+		t.Error("expected the profile's masks_file (users.email) to apply")
+	}
+}
+
+// TestResolveSnapshotKeyDBOverrideKeepsProfileDatabaseID is the regression
+// guard for the second facet of the --db-override bug: a profile's explicit
+// database_id was discarded whenever --db was also supplied, so snapshots
+// landed under (project, project) instead of (project, database_id). For
+// `dryrun init` that is the normal case, since init always runs with --db.
+// Under the bug, config.ResolveProfile saw a non-nil cliDB, returned a bare
+// "<cli>" profile with no database_id, and SnapshotKey() fell back to the
+// project id — silently routing reads and writes to the wrong history bucket.
+//
+// resolveSnapshotKey feeds every history-touching command (init, snapshot
+// take/list/diff, stats apply, mcp-serve), so a divergent key here means a
+// command run with --db cannot see snapshots a command run without it stored,
+// and vice versa.
+func TestResolveSnapshotKeyDBOverrideKeepsProfileDatabaseID(t *testing.T) {
+	resetFlags(t)
+	dir := writeTOML(t, t.TempDir(), `
+[project]
+id = "demo"
+
+[profiles.staging]
+db_url = "postgres://stg/x"
+database_id = "staging-shard-a"
+`)
+	withCWD(t, dir)
+
+	// --db set, exactly as `dryrun init` always runs it, plus the profile.
+	flagDB = "postgres://override/x"
+	flagProfile = "staging"
+
+	key := resolveSnapshotKey()
+	if string(key.ProjectID) != "demo" {
+		t.Errorf("project id: got %q, want demo", key.ProjectID)
+	}
+	if string(key.DatabaseID) != "staging-shard-a" {
+		t.Errorf("database id: got %q, want staging-shard-a "+
+			"(--db override must not collapse it to the project id)", key.DatabaseID)
+	}
+}
