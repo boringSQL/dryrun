@@ -18,22 +18,49 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
-type Store struct {
-	db *sql.DB
+// database version that goes into PRAGMA
+const HistorySchemaVersion = 1
+
+type (
+	Compat int
+
+	Store struct {
+		db     *sql.DB
+		compat Compat
+	}
+
+	SnapshotSummary struct {
+		ID            int64        `json:"id"`
+		Kind          SnapshotKind `json:"-"`
+		DBURLHash     string       `json:"db_url_hash,omitempty"`
+		Timestamp     time.Time    `json:"timestamp"`
+		ContentHash   string       `json:"content_hash"`
+		Database      string       `json:"database,omitempty"`
+		SchemaRefHash string       `json:"schema_ref_hash,omitempty"`
+		NodeLabel     string       `json:"node_label,omitempty"`
+		ProjectID     *string      `json:"project_id,omitempty"`
+		DatabaseID    *string      `json:"database_id,omitempty"`
+	}
+)
+
+const (
+	CompatOK     Compat = iota // this build's format
+	CompatLegacy               // old rust history.db
+	CompatNewer                // written by a newer dryrun
+)
+
+func (c Compat) String() string {
+	switch c {
+	case CompatLegacy:
+		return "legacy"
+	case CompatNewer:
+		return "newer"
+	default:
+		return "ok"
+	}
 }
 
-type SnapshotSummary struct {
-	ID            int64     `json:"id"`
-	Kind          SnapshotKind `json:"-"`
-	DBURLHash     string    `json:"db_url_hash,omitempty"`
-	Timestamp     time.Time `json:"timestamp"`
-	ContentHash   string    `json:"content_hash"`
-	Database      string    `json:"database,omitempty"`
-	SchemaRefHash string    `json:"schema_ref_hash,omitempty"`
-	NodeLabel     string    `json:"node_label,omitempty"`
-	ProjectID     *string   `json:"project_id,omitempty"`
-	DatabaseID    *string   `json:"database_id,omitempty"`
-}
+func (s *Store) Compat() Compat { return s.compat }
 
 // Opens (or creates) sqlite history db at path
 func Open(path string) (*Store, error) {
@@ -48,13 +75,78 @@ func Open(path string) (*Store, error) {
 	}
 
 	s := &Store{db: db}
+
+	// old rust db, don't migrate it
+	foreign, err := isForeignStore(db)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if foreign {
+		s.compat = CompatLegacy
+		slog.Debug("history store: incompatible format", "path", path)
+		return s, nil
+	}
+
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
 	}
+	s.compat = stampVersion(db)
 
-	slog.Debug("history store opened", "path", path)
+	slog.Debug("history store opened", "path", path, "compat", s.compat)
 	return s, nil
+}
+
+// true if this looks like an old rust history.db, not ours
+func isForeignStore(db *sql.DB) (bool, error) {
+	var name string
+	err := db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='snapshots'`).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect history db: %w", err)
+	}
+
+	rows, err := db.Query(`PRAGMA table_info(snapshots)`)
+	if err != nil {
+		return false, fmt.Errorf("inspect snapshots table: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid     int
+			cname   string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &cname, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if cname == "db_url_hash" {
+			return false, nil
+		}
+	}
+	return true, rows.Err()
+}
+
+// save our schema version into the db
+func stampVersion(db *sql.DB) Compat {
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return CompatOK
+	}
+	if v > HistorySchemaVersion {
+		return CompatNewer
+	}
+	if v != HistorySchemaVersion {
+		_, _ = db.Exec(fmt.Sprintf("PRAGMA user_version = %d", HistorySchemaVersion))
+	}
+	return CompatOK
 }
 
 // Opens .dryrun/history.db in cwd
