@@ -575,7 +575,7 @@ func statsCmd() *cobra.Command {
 				return fmt.Errorf("probe: %w", err)
 			}
 
-			store, err := history.OpenDefault()
+			store, err := openHistoryStore("")
 			if err != nil {
 				return fmt.Errorf("open history store: %w", err)
 			}
@@ -744,10 +744,30 @@ func loadSchemaFile(path string) (*schema.SchemaSnapshot, error) {
 }
 
 func openHistoryStore(path string) (*history.Store, error) {
+	var (
+		s   *history.Store
+		err error
+	)
 	if path != "" {
-		return history.Open(path)
+		s, err = history.Open(path)
+	} else {
+		s, err = history.OpenDefault()
 	}
-	return history.OpenDefault()
+	if err == nil {
+		warnIfIncompatible(s)
+	}
+	return s, err
+}
+
+// warn if history.db was written by a different dryrun
+func warnIfIncompatible(s *history.Store) {
+	switch s.Compat() {
+	case history.CompatLegacy:
+		fmt.Fprintln(os.Stderr, "warning: the history database was created by an older dryrun and cannot be read.")
+		fmt.Fprintln(os.Stderr, "         Re-run 'dryrun init', or 'dryrun snapshot pull' to re-import its snapshots.")
+	case history.CompatNewer:
+		fmt.Fprintln(os.Stderr, "warning: the history database was written by a newer dryrun; some data may be unreadable. Please, upgrade dryrun.")
+	}
 }
 
 func resolveSnapshotKey() history.SnapshotKey {
