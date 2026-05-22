@@ -760,7 +760,8 @@ func openHistoryStore(path string) (*history.Store, error) {
 func resolveSnapshotKey() history.SnapshotKey {
 	cwd, _ := os.Getwd()
 	if _, cfg, err := loadProjectConfig(); err == nil {
-		if resolved, rerr := cfg.ResolveProfile(nilIfEmpty(flagDB), nilIfEmpty(flagSchemaFile), nilIfEmpty(flagProfile), cwd); rerr == nil {
+		// resolve the profile by name only: a --db override must not drop its database_id
+		if resolved, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
 			return resolved.SnapshotKey()
 		}
 	}
