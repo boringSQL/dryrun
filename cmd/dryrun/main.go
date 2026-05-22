@@ -785,7 +785,8 @@ func resolveMaskPolicyForKey(key history.SnapshotKey) (*datamask.Policy, error) 
 	if path == "" || len(policies) == 0 {
 		cwd, _ := os.Getwd()
 		if _, cfg, err := loadProjectConfig(); err == nil {
-			if rp, rerr := cfg.ResolveProfile(nilIfEmpty(flagDB), nilIfEmpty(flagSchemaFile), nilIfEmpty(flagProfile), cwd); rerr == nil {
+			// resolve the profile by name only: a --db override must not drop its masks_file
+			if rp, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
 				if path == "" && rp.MasksFile != nil {
 					path = *rp.MasksFile
 				}
