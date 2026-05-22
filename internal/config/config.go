@@ -34,9 +34,11 @@ type (
 	}
 
 	ProfileConfig struct {
-		DBURL      *string `toml:"db_url"`
-		SchemaFile *string `toml:"schema_file"`
-		DatabaseID *string `toml:"database_id"`
+		DBURL        *string  `toml:"db_url"`
+		SchemaFile   *string  `toml:"schema_file"`
+		DatabaseID   *string  `toml:"database_id"`
+		MasksFile    *string  `toml:"masks_file"`
+		MaskPolicies []string `toml:"mask_policies"`
 	}
 
 	ConventionsConfig struct {
@@ -62,11 +64,13 @@ type (
 	}
 
 	ResolvedProfile struct {
-		Name       string
-		DBURL      *string
-		SchemaFile *string
-		ProjectID  history.ProjectId
-		DatabaseID *history.DatabaseId
+		Name         string
+		DBURL        *string
+		SchemaFile   *string
+		ProjectID    history.ProjectId
+		DatabaseID   *history.DatabaseId
+		MasksFile    *string
+		MaskPolicies []string
 	}
 )
 
@@ -238,6 +242,14 @@ func resolveProfileConfig(name string, profile *ProfileConfig, projectRoot strin
 	}
 	d := history.DatabaseId(did)
 	rp.DatabaseID = &d
+	if profile.MasksFile != nil {
+		p := *profile.MasksFile
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(projectRoot, p)
+		}
+		rp.MasksFile = &p
+	}
+	rp.MaskPolicies = profile.MaskPolicies
 	return rp
 }
 

@@ -218,6 +218,8 @@ profile = %q
 [profiles.%s]
 schema_file = ".dryrun/schema.json"
 # database_id = %q   # defaults to profile name; override to e.g. "auth", "billing"
+# masks_file = "data-masking-policy.yml"   # PII policy shared with fixturize; auto-discovered if omitted
+# mask_policies = ["pii"]                  # optional; default masks every column listed for this database
 
 # [profiles.dev]
 # db_url = "${DATABASE_URL}"
