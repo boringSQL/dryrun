@@ -10,10 +10,9 @@ import (
 
 // Flags is the CLI-side masking surface; populated from cobra in main.
 type Flags struct {
-	MasksFile      string
-	MaskPolicies   []string
-	NoMasks        bool
-	AllowMissingDB bool
+	MasksFile    string
+	MaskPolicies []string
+	NoMasks      bool
 }
 
 // ProfileMasks is the masking slice of a resolved profile. Kept here so
@@ -25,19 +24,17 @@ type ProfileMasks struct {
 
 // MaskConfig is the pure overlay of flags onto profile. No filesystem reads.
 type MaskConfig struct {
-	Path           string
-	Policies       []string
-	Disabled       bool
-	AllowMissingDB bool
+	Path     string
+	Policies []string
+	Disabled bool
 }
 
 // BuildConfig: CLI beats profile. Pure.
 func BuildConfig(flags Flags, profile ProfileMasks) MaskConfig {
 	cfg := MaskConfig{
-		Path:           flags.MasksFile,
-		Policies:       flags.MaskPolicies,
-		Disabled:       flags.NoMasks,
-		AllowMissingDB: flags.AllowMissingDB,
+		Path:     flags.MasksFile,
+		Policies: flags.MaskPolicies,
+		Disabled: flags.NoMasks,
 	}
 	if cfg.Path == "" {
 		cfg.Path = profile.File
@@ -62,5 +59,5 @@ func (c MaskConfig) BuildMasker(dbID history.DatabaseId, cwd string) (*masking.P
 	if path == "" {
 		return nil, fmt.Errorf("no data-masking-policy.yml found; pass --masks-file=PATH, set masks_file in the profile, or --no-masks to capture without masking")
 	}
-	return Load(path, dbID, c.Policies, LoadOptions{AllowMissingDatabase: c.AllowMissingDB})
+	return Load(path, dbID, c.Policies)
 }
