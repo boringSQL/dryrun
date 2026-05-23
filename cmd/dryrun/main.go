@@ -45,9 +45,6 @@ var (
 	flagProfile    string
 	flagConfig     string
 	flagSchemaFile string
-	flagMasksFile  string
-	flagMaskPolicy []string
-	flagNoMasks    bool
 )
 
 func main() {
@@ -62,9 +59,6 @@ func main() {
 	pf.StringVar(&flagProfile, "profile", "", "config profile name")
 	pf.StringVar(&flagConfig, "config", "", "path to dryrun.toml")
 	pf.StringVar(&flagSchemaFile, "schema-file", os.Getenv("SCHEMA_FILE"), "path to schema JSON file")
-	pf.StringVar(&flagMasksFile, "masks-file", "", "path to data-masking-policy.yml")
-	pf.StringSliceVar(&flagMaskPolicy, "mask-policy", nil, "masking policy name (repeatable, comma-separated)")
-	pf.BoolVar(&flagNoMasks, "no-masks", false, "disable planner-stats masking")
 
 	root.AddCommand(
 		probeCmd(), initCmd(), importCmd(), dumpSchemaCmd(),
@@ -370,7 +364,7 @@ func snapshotCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			snap, planner, activity, _, err := runPrimaryCapture(cmd.Context(), cap, store, resolveSnapshotKey(), "primary", nil)
+			snap, planner, activity, _, err := runPrimaryCapture(cmd.Context(), cap, store, resolveSnapshotKey(), "primary", datamask.NullMasker{})
 			if err != nil {
 				return err
 			}
@@ -769,45 +763,6 @@ func resolveSnapshotKey() history.SnapshotKey {
 	empty := &config.ProjectConfig{}
 	pid := empty.ProjectID(cwd)
 	return history.SnapshotKey{ProjectID: pid, DatabaseID: history.DatabaseId(pid)}
-}
-
-func resolveMaskPolicy() (*datamask.Policy, error) {
-	return resolveMaskPolicyForKey(resolveSnapshotKey())
-}
-
-// precedence: --masks-file > profile masks_file > discovery; --no-masks opts out
-func resolveMaskPolicyForKey(key history.SnapshotKey) (*datamask.Policy, error) {
-	if flagNoMasks {
-		return nil, nil
-	}
-
-	path := flagMasksFile
-	policies := flagMaskPolicy
-	if path == "" || len(policies) == 0 {
-		cwd, _ := os.Getwd()
-		if _, cfg, err := loadProjectConfig(); err == nil {
-			// resolve the profile by name only: a --db override must not drop its masks_file
-			if rp, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
-				if path == "" && rp.MasksFile != nil {
-					path = *rp.MasksFile
-				}
-				if len(policies) == 0 {
-					policies = rp.MaskPolicies
-				}
-			}
-		}
-	}
-
-	if path == "" {
-		cwd, _ := os.Getwd()
-		if discovered, err := datamask.Discover(cwd); err == nil {
-			path = discovered
-		}
-	}
-	if path == "" {
-		return nil, nil
-	}
-	return datamask.Load(path, key.DatabaseID, policies, datamask.LoadOptions{})
 }
 
 func nilIfEmpty(s string) *string {
