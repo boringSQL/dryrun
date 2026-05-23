@@ -28,6 +28,14 @@ type (
 		schemaCandidates []string
 		uninitialized    bool
 	}
+
+	StartupStats struct {
+		SchemaLoaded  bool
+		LiveDB        bool
+		TableCount    int
+		PlannerLoaded bool
+		ActivityNodes int
+	}
 )
 
 func NewServer(pool *pgxpool.Pool, dbURL string, snap *schema.SchemaSnapshot, hist *history.Store, lintCfg lint.Config, pgMustardAPIKey string) *Server {
@@ -173,6 +181,21 @@ func (s *Server) requirePool() (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("this tool requires a live database connection (--db)")
 	}
 	return s.pool, nil
+}
+
+func (s *Server) StartupStats() StartupStats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st := StartupStats{LiveDB: s.pool != nil}
+	if s.annotated != nil && s.annotated.Schema != nil && !s.uninitialized {
+		st.SchemaLoaded = true
+		st.TableCount = len(s.annotated.Schema.Tables)
+		st.PlannerLoaded = s.annotated.Planner != nil
+		if s.annotated.Merged != nil {
+			st.ActivityNodes = len(s.annotated.Merged.Nodes)
+		}
+	}
+	return st
 }
 
 func (s *Server) Instructions() string {

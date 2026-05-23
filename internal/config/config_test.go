@@ -70,6 +70,32 @@ func TestParseInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestParseTelemetryEnabled(t *testing.T) {
+	cfg, err := Parse("telemetry_enabled = true\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TelemetryEnabled == nil || *cfg.TelemetryEnabled != true {
+		t.Errorf("got %v, want true", cfg.TelemetryEnabled)
+	}
+
+	cfg, err = Parse("telemetry_enabled = false\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TelemetryEnabled == nil || *cfg.TelemetryEnabled != false {
+		t.Errorf("got %v, want false", cfg.TelemetryEnabled)
+	}
+
+	cfg, err = Parse("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TelemetryEnabled != nil {
+		t.Errorf("got %v, want nil", cfg.TelemetryEnabled)
+	}
+}
+
 func TestExpandEnvVars(t *testing.T) {
 	os.Setenv("DRYRUN_TEST_VAR", "hello")
 	defer os.Unsetenv("DRYRUN_TEST_VAR")

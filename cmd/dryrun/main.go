@@ -10,9 +10,12 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/boringsql/dryrun/internal/config"
@@ -21,6 +24,7 @@ import (
 	"github.com/boringsql/dryrun/internal/lint"
 	drmcp "github.com/boringsql/dryrun/internal/mcp"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/internal/telemetry"
 )
 
 // version is set via ldflags: -X main.version=v0.1.0
@@ -835,10 +839,21 @@ func mcpServeCmd() *cobra.Command {
 				}
 			}
 
-			var pgMustardAPIKey string
-			if _, cfg, err := loadProjectConfig(); err == nil && cfg.Services != nil && cfg.Services.PgMustardAPIKey != nil {
-				pgMustardAPIKey = *cfg.Services.PgMustardAPIKey
+			var (
+				pgMustardAPIKey  string
+				telemetryEnabled bool
+			)
+			if _, cfg, err := loadProjectConfig(); err == nil {
+				if cfg.Services != nil && cfg.Services.PgMustardAPIKey != nil {
+					pgMustardAPIKey = *cfg.Services.PgMustardAPIKey
+				}
+				if cfg.TelemetryEnabled != nil {
+					telemetryEnabled = *cfg.TelemetryEnabled
+				}
 			}
+
+			tclient := telemetry.NewClient(telemetryEnabled, uuid.New(), getVersion())
+			tracker := telemetry.NewTracker()
 
 			var server *drmcp.Server
 			switch {
@@ -887,15 +902,28 @@ func mcpServeCmd() *cobra.Command {
 				server.SetUninitialized(candidates)
 			}
 
+			hooks := &mcpserver.Hooks{}
+			hooks.AddBeforeCallTool(func(_ context.Context, _ any, req *mcp.CallToolRequest) {
+				tracker.Record(req.Params.Name)
+			})
+
 			mcpSrv := mcpserver.NewMCPServer("dryrun", getVersion(),
 				mcpserver.WithInstructions(server.Instructions()),
+				mcpserver.WithHooks(hooks),
 			)
 			server.Register(mcpSrv)
+
+			st := server.StartupStats()
+			tclient.Fire(telemetry.NewStartEvent(tclient, transport, st.SchemaLoaded, st.LiveDB, st.TableCount, st.PlannerLoaded, st.ActivityNodes))
+			started := time.Now()
 
 			switch transport {
 			case "stdio":
 				fmt.Fprintln(os.Stderr, "dryrun: starting MCP server on stdio")
-				return mcpserver.NewStdioServer(mcpSrv).Listen(context.Background(), os.Stdin, os.Stdout)
+				err := mcpserver.NewStdioServer(mcpSrv).Listen(context.Background(), os.Stdin, os.Stdout)
+				tclient.FireWait(telemetry.NewSummaryEvent(tclient, time.Since(started), tracker.Snapshot()))
+				tclient.Wait()
+				return err
 			default:
 				return fmt.Errorf("unknown transport '%s' (expected: stdio)", transport)
 			}

@@ -14,12 +14,13 @@ import (
 
 type (
 	ProjectConfig struct {
-		Project      *ProjectMeta             `toml:"project"`
-		Default      *DefaultConfig           `toml:"default"`
-		Profiles     map[string]ProfileConfig `toml:"profiles"`
-		Conventions  *ConventionsConfig       `toml:"conventions"`
-		Services     *ServicesConfig          `toml:"services"`
-		RequireMasks *bool                    `toml:"require_masks"`
+		Project          *ProjectMeta             `toml:"project"`
+		Default          *DefaultConfig           `toml:"default"`
+		Profiles         map[string]ProfileConfig `toml:"profiles"`
+		Conventions      *ConventionsConfig       `toml:"conventions"`
+		Services         *ServicesConfig          `toml:"services"`
+		RequireMasks     *bool                    `toml:"require_masks"`
+		TelemetryEnabled *bool                    `toml:"telemetry_enabled"`
 	}
 
 	ProjectMeta struct {

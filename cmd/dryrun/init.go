@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
@@ -280,6 +283,17 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 	return snap, planner, activity, masked, nil
 }
 
+func promptYesNo(in io.Reader, out io.Writer, question, detail string) bool {
+	fmt.Fprintf(out, "%s\n  %s\n  [y/N]: ", question, detail)
+	r := bufio.NewReader(in)
+	line, _ := r.ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	}
+	return false
+}
+
 func scaffoldConfig(configPath string) error {
 	if _, err := os.Stat(configPath); err == nil {
 		fmt.Fprintf(os.Stderr, "%s already exists, skipping\n", configPath)
@@ -293,7 +307,12 @@ func scaffoldConfig(configPath string) error {
 		return err
 	}
 	profileName := filepath.Base(cwd)
-	content := fmt.Sprintf(`[project]
+	telemetry := promptYesNo(os.Stdin, os.Stderr,
+		"Enable anonymous usage telemetry? (aggregated tool names, execution count, and rough sizes; no schema data)",
+		"Helps improve dryrun. See: boringsql.com/dryrun/privacy")
+	content := fmt.Sprintf(`telemetry_enabled = %t
+
+[project]
 id = %q
 
 # require_masks = true   # fail init unless data-masking-policy.yml resolves; refuses --no-masks
@@ -312,7 +331,7 @@ schema_file = ".dryrun/schema.json"
 
 # [conventions]
 # See: https://boringsql.com/dryrun/docs/dryrun-toml
-`, profileName, profileName, profileName, profileName)
+`, telemetry, profileName, profileName, profileName, profileName)
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 		return err
 	}
