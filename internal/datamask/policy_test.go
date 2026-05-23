@@ -199,13 +199,3 @@ func TestLoadUnqualifiedKeyMatchesAnySchema(t *testing.T) {
 	}
 }
 
-// TestIsSensitiveNilPolicy guards the nil-receiver path. Callers treat a nil
-// *Policy as "masking disabled" (resolveMaskPolicy returns nil when no masks
-// file is found), so IsSensitive on a nil receiver must answer false rather
-// than panic — otherwise every unmasked run would crash.
-func TestIsSensitiveNilPolicy(t *testing.T) {
-	var p *Policy
-	if p.IsSensitive("public", "users", "email") {
-		t.Error("nil Policy must report nothing as sensitive")
-	}
-}

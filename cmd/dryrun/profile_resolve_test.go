@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/history"
 )
 
@@ -154,21 +153,9 @@ database_id = "staging-shard-a"
 	}
 }
 
-// mustPolicy unwraps a Masker into the concrete *datamask.Policy that the
-// production loader returns. Tests want IsSensitive, which is a method on
-// *Policy rather than the Masker interface.
-func mustPolicy(t *testing.T, m datamask.Masker) *datamask.Policy {
-	t.Helper()
-	p, ok := m.(*datamask.Policy)
-	if !ok {
-		t.Fatalf("expected *datamask.Policy, got %T", m)
-	}
-	return p
-}
-
 // TestBuildMaskerNoMasks: --no-masks is the hard opt-out. buildMasker must
-// short-circuit to NullMasker before touching the filesystem, even when a
-// perfectly good data-masking-policy.yml is sitting right there.
+// short-circuit to nil before touching the filesystem, even when a perfectly
+// good data-masking-policy.yml is sitting right there.
 func TestBuildMaskerNoMasks(t *testing.T) {
 	resetFlags(t)
 	dir := t.TempDir()
@@ -186,12 +173,12 @@ db_url = "postgres://dev/x"
 
 	flagProfile = "dev"
 	flagNoMasks = true
-	m, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "dev"})
+	p, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "dev"})
 	if err != nil {
 		t.Fatalf("--no-masks should not error: %v", err)
 	}
-	if _, ok := m.(datamask.NullMasker); !ok {
-		t.Errorf("--no-masks must short-circuit to NullMasker, got %T", m)
+	if p != nil {
+		t.Errorf("--no-masks must short-circuit to nil, got %v", p)
 	}
 }
 
@@ -218,7 +205,7 @@ db_url = "postgres://dev/x"
 	if err != nil {
 		t.Fatalf("buildMasker: %v", err)
 	}
-	if !mustPolicy(t, m).IsSensitive("public", "users", "email") {
+	if !m.IsSensitive("public", "users", "email") {
 		t.Error("discovered masks file should mark users.email sensitive")
 	}
 }
@@ -273,7 +260,7 @@ masks_file = "profile-masks.yml"
 	if err != nil {
 		t.Fatalf("buildMasker: %v", err)
 	}
-	pol := mustPolicy(t, m)
+	pol := m
 	if !pol.IsSensitive("public", "users", "cli_col") {
 		t.Error("--masks-file should win: cli_col is not masked")
 	}
@@ -316,7 +303,7 @@ database_id = "db_b"
 	if err != nil {
 		t.Fatalf("buildMasker(db_a): %v", err)
 	}
-	polA := mustPolicy(t, mA)
+	polA := mA
 	if !polA.IsSensitive("public", "accounts", "ssn") {
 		t.Error("db_a key should resolve the db_a block (accounts.ssn)")
 	}
@@ -328,7 +315,7 @@ database_id = "db_b"
 	if err != nil {
 		t.Fatalf("buildMasker(db_b): %v", err)
 	}
-	polB := mustPolicy(t, mB)
+	polB := mB
 	if !polB.IsSensitive("public", "leads", "email") {
 		t.Error("db_b key should resolve the db_b block (leads.email)")
 	}
@@ -374,7 +361,7 @@ masks_file = "profile-masks.yml"
 	if err != nil {
 		t.Fatalf("buildMasker: %v", err)
 	}
-	if !mustPolicy(t, m).IsSensitive("public", "users", "email") {
+	if !m.IsSensitive("public", "users", "email") {
 		t.Error("expected the profile's masks_file (users.email) to apply")
 	}
 }

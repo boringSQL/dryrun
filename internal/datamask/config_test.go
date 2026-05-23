@@ -54,15 +54,15 @@ func TestBuildConfigFlagsPropagate(t *testing.T) {
 	}
 }
 
-// TestBuildMaskerDisabledReturnsNull: Disabled is the hard opt-out. No
-// filesystem touch, no Load call — straight to NullMasker.
-func TestBuildMaskerDisabledReturnsNull(t *testing.T) {
+// TestBuildMaskerDisabledReturnsNil: Disabled is the hard opt-out. No
+// filesystem touch, no Load call — straight to nil (MaskPlanner nil-guards).
+func TestBuildMaskerDisabledReturnsNil(t *testing.T) {
 	m, err := MaskConfig{Disabled: true}.BuildMasker("dev", t.TempDir())
 	if err != nil {
 		t.Fatalf("Disabled BuildMasker should not error: %v", err)
 	}
-	if _, ok := m.(NullMasker); !ok {
-		t.Errorf("want NullMasker, got %T", m)
+	if m != nil {
+		t.Errorf("want nil Policy, got %v", m)
 	}
 }
 
@@ -97,13 +97,12 @@ databases:
 		t.Fatal(err)
 	}
 
-	m, err := MaskConfig{Path: path}.BuildMasker("dev", dir)
+	p, err := MaskConfig{Path: path}.BuildMasker("dev", dir)
 	if err != nil {
 		t.Fatalf("BuildMasker: %v", err)
 	}
-	p, ok := m.(*Policy)
-	if !ok {
-		t.Fatalf("want *Policy, got %T", m)
+	if p == nil {
+		t.Fatal("want loaded Policy, got nil")
 	}
 	if !p.IsSensitive("public", "users", "email") {
 		t.Error("loaded policy should mark users.email sensitive")
@@ -131,13 +130,12 @@ databases:
 		t.Error("strict mode must error on missing database_id")
 	}
 	// permissive: same call with AllowMissingDB returns an empty Policy.
-	m, err := MaskConfig{Path: path, AllowMissingDB: true}.BuildMasker("ghost", dir)
+	p, err := MaskConfig{Path: path, AllowMissingDB: true}.BuildMasker("ghost", dir)
 	if err != nil {
 		t.Fatalf("AllowMissingDB BuildMasker: %v", err)
 	}
-	p, ok := m.(*Policy)
-	if !ok {
-		t.Fatalf("want *Policy, got %T", m)
+	if p == nil {
+		t.Fatal("permissive mode must return empty Policy, not nil")
 	}
 	if p.IsSensitive("public", "users", "email") {
 		t.Error("permissive Policy for missing dbID must match nothing")
