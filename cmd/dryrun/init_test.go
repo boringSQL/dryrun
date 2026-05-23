@@ -233,7 +233,7 @@ func loadTestPolicy(t *testing.T, columns ...string) *masking.Policy {
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		t.Fatalf("write test masks file: %v", err)
 	}
-	pol, err := datamask.Load(path, "testdb", nil, datamask.LoadOptions{})
+	pol, err := datamask.Load(path, "testdb", nil)
 	if err != nil {
 		t.Fatalf("load test policy: %v", err)
 	}

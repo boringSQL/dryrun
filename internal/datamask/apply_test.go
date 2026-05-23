@@ -76,7 +76,7 @@ databases:
     columns:
       users.email: { expr: "x", tags: [pii] }
 `)
-	p, err := Load(path, "dev", nil, LoadOptions{})
+	p, err := Load(path, "dev", nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -110,7 +110,7 @@ databases:
     columns:
       users.email: { expr: "x", tags: [pii] }
 `)
-	p, err := Load(path, "dev", nil, LoadOptions{})
+	p, err := Load(path, "dev", nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -155,11 +155,11 @@ databases:
       leads.email: { expr: "x", tags: [pii] }
 `)
 
-	polA, err := Load(path, "db_a", nil, LoadOptions{})
+	polA, err := Load(path, "db_a", nil)
 	if err != nil {
 		t.Fatalf("Load(db_a): %v", err)
 	}
-	polB, err := Load(path, "db_b", nil, LoadOptions{})
+	polB, err := Load(path, "db_b", nil)
 	if err != nil {
 		t.Fatalf("Load(db_b): %v", err)
 	}
@@ -206,7 +206,7 @@ databases:
   dev:
     columns: {}
 `)
-	p, err := Load(path, "dev", nil, LoadOptions{})
+	p, err := Load(path, "dev", nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
