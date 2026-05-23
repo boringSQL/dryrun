@@ -130,7 +130,10 @@ func initCmd() *cobra.Command {
 
 // Profile resolved by name only; flagDB must not displace masks_file
 func buildMasker(key history.SnapshotKey) (*masking.Policy, error) {
-	cwd, _ := os.Getwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		slog.Warn("masker: getwd failed, profile auto-discovery disabled", "error", err)
+	}
 	res := masking.Resolution{
 		FlagFile:     flagMasksFile,
 		FlagPolicies: flagMaskPolicy,
