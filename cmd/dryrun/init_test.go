@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/boringsql/fixturize/masking"
+
 	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
@@ -215,7 +217,7 @@ func colWithStats(table, column string) schema.ColumnStatsEntry {
 // and the real loader is actually the better choice here anyway: it exercises
 // the genuine parsing path rather than a hand-mocked policy, so these tests
 // would catch a regression in Load just as readily as one in runInitCapture.
-func loadTestPolicy(t *testing.T, columns ...string) *datamask.Policy {
+func loadTestPolicy(t *testing.T, columns ...string) *masking.Policy {
 	t.Helper()
 
 	var b strings.Builder
@@ -260,7 +262,7 @@ func TestRunInitCapture_Masking(t *testing.T) {
 	cases := []struct {
 		name string
 		// policy is the masking policy fed in via initOptions.MaskPolicy.
-		policy *datamask.Policy
+		policy *masking.Policy
 		// wantMasked maps a captured column name to whether its stats should
 		// have been NULLed by the time PutPlanner saw the snapshot.
 		wantMasked map[string]bool
@@ -307,7 +309,7 @@ func TestRunInitCapture_Masking(t *testing.T) {
 				context.Background(), cap, w,
 				history.SnapshotKey{ProjectID: "p", DatabaseID: "testdb"},
 				t.TempDir(),
-				initOptions{Source: "test-node", Masker: tc.policy},
+				initOptions{Source: "test-node", Policy: tc.policy},
 			)
 			if err != nil {
 				t.Fatalf("runInitCapture: %v", err)
