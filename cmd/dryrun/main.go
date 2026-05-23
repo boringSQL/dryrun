@@ -807,7 +807,7 @@ func resolveMaskPolicyForKey(key history.SnapshotKey) (*datamask.Policy, error) 
 	if path == "" {
 		return nil, nil
 	}
-	return datamask.Load(path, key.DatabaseID, policies)
+	return datamask.Load(path, key.DatabaseID, policies, datamask.LoadOptions{})
 }
 
 func nilIfEmpty(s string) *string {
