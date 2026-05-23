@@ -17,7 +17,13 @@ type Policy struct {
 	unqualified map[string]struct{} // "table.column", matches any schema
 }
 
-func Load(path string, dbID history.DatabaseId, policyNames []string) (*Policy, error) {
+type LoadOptions struct {
+	// AllowMissingDatabase downgrades a missing database_id from an error to
+	// an empty Policy. For multi-DB projects where only some DBs have policies.
+	AllowMissingDatabase bool
+}
+
+func Load(path string, dbID history.DatabaseId, policyNames []string, opts LoadOptions) (*Policy, error) {
 	f, err := masking.LoadSharedMasks(path)
 	if err != nil {
 		return nil, fmt.Errorf("load masks file %s: %w", path, err)
@@ -30,11 +36,11 @@ func Load(path string, dbID history.DatabaseId, policyNames []string) (*Policy, 
 		unqualified: map[string]struct{}{},
 	}
 
-	// missing dbID is config drift, not fatal: warn and return an empty Policy
 	db, ok := f.Databases[string(dbID)]
 	if !ok {
-		slog.Warn("masks file has no entry for database_id",
-			"database_id", string(dbID), "path", path)
+		if !opts.AllowMissingDatabase {
+			return nil, fmt.Errorf("masks file %s has no entry for database_id %q", path, dbID)
+		}
 		return p, nil
 	}
 
