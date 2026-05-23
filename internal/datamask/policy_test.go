@@ -60,7 +60,7 @@ databases:
 func TestLoadTagFilterNarrows(t *testing.T) {
 	path := writeMasks(t, twoTagMasks)
 
-	pii, err := Load(path, "dev", []string{"pii"}, LoadOptions{})
+	pii, err := Load(path, "dev", []string{"pii"})
 	if err != nil {
 		t.Fatalf("Load(pii): %v", err)
 	}
@@ -74,7 +74,7 @@ func TestLoadTagFilterNarrows(t *testing.T) {
 		t.Error("policy pii must NOT cover events.payload (internal-tagged only)")
 	}
 
-	internal, err := Load(path, "dev", []string{"internal"}, LoadOptions{})
+	internal, err := Load(path, "dev", []string{"internal"})
 	if err != nil {
 		t.Fatalf("Load(internal): %v", err)
 	}
@@ -93,7 +93,7 @@ func TestLoadTagFilterNarrows(t *testing.T) {
 func TestLoadEmptyPolicySelectsAll(t *testing.T) {
 	path := writeMasks(t, twoTagMasks)
 
-	all, err := Load(path, "dev", nil, LoadOptions{})
+	all, err := Load(path, "dev", nil)
 	if err != nil {
 		t.Fatalf("Load(nil policies): %v", err)
 	}
@@ -115,30 +115,12 @@ func TestLoadEmptyPolicySelectsAll(t *testing.T) {
 func TestLoadMissingDatabaseErrors(t *testing.T) {
 	path := writeMasks(t, twoTagMasks)
 
-	_, err := Load(path, "prod", nil, LoadOptions{})
+	_, err := Load(path, "prod", nil)
 	if err == nil {
 		t.Fatal("expected error for missing database_id")
 	}
 	if !strings.Contains(err.Error(), "prod") {
 		t.Errorf("error should name the offending database_id, got: %v", err)
-	}
-}
-
-// TestLoadMissingDatabaseAllowed: the opt-in escape hatch for multi-DB
-// projects where only some databases have policies. AllowMissingDatabase=true
-// downgrades the missing block to an empty (matches-nothing) Policy.
-func TestLoadMissingDatabaseAllowed(t *testing.T) {
-	path := writeMasks(t, twoTagMasks)
-
-	pol, err := Load(path, "prod", nil, LoadOptions{AllowMissingDatabase: true})
-	if err != nil {
-		t.Fatalf("AllowMissingDatabase should downgrade missing dbID: %v", err)
-	}
-	if pol == nil {
-		t.Fatal("Load must return a non-nil Policy in permissive mode")
-	}
-	if pol.IsSensitive("public", "users", "email") {
-		t.Error("permissive empty Policy must match nothing")
 	}
 }
 
@@ -151,7 +133,7 @@ func TestLoadMissingDatabaseAllowed(t *testing.T) {
 func TestLoadUnknownPolicyErrors(t *testing.T) {
 	path := writeMasks(t, twoTagMasks)
 
-	_, err := Load(path, "dev", []string{"ghost"}, LoadOptions{})
+	_, err := Load(path, "dev", []string{"ghost"})
 	if err == nil {
 		t.Fatal("expected an error for an unknown policy name")
 	}
@@ -168,7 +150,7 @@ func TestLoadUnknownPolicyErrors(t *testing.T) {
 func TestLoadQualifiedKeyScopedToSchema(t *testing.T) {
 	path := writeMasks(t, mixedKeyMasks)
 
-	pol, err := Load(path, "dev", nil, LoadOptions{})
+	pol, err := Load(path, "dev", nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -187,7 +169,7 @@ func TestLoadQualifiedKeyScopedToSchema(t *testing.T) {
 func TestLoadUnqualifiedKeyMatchesAnySchema(t *testing.T) {
 	path := writeMasks(t, mixedKeyMasks)
 
-	pol, err := Load(path, "dev", nil, LoadOptions{})
+	pol, err := Load(path, "dev", nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

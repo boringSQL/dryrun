@@ -38,19 +38,12 @@ func TestBuildConfigProfileFallback(t *testing.T) {
 	}
 }
 
-// TestBuildConfigFlagsPropagate: the two flag-only knobs (Disabled,
-// AllowMissingDB) have no profile-level equivalents and must round-trip
-// from Flags into MaskConfig untouched.
+// TestBuildConfigFlagsPropagate: NoMasks has no profile-level equivalent
+// and must round-trip from Flags into MaskConfig.Disabled untouched.
 func TestBuildConfigFlagsPropagate(t *testing.T) {
-	cfg := BuildConfig(
-		Flags{NoMasks: true, AllowMissingDB: true},
-		ProfileMasks{},
-	)
+	cfg := BuildConfig(Flags{NoMasks: true}, ProfileMasks{})
 	if !cfg.Disabled {
 		t.Error("NoMasks must propagate to Disabled")
-	}
-	if !cfg.AllowMissingDB {
-		t.Error("AllowMissingDB must propagate")
 	}
 }
 
@@ -109,10 +102,11 @@ databases:
 	}
 }
 
-// TestBuildMaskerAllowMissingDB: AllowMissingDB threads through to Load so a
-// missing database_id downgrades to an empty Policy instead of erroring.
-// Without this, multi-DB projects with partial YAML coverage break at init.
-func TestBuildMaskerAllowMissingDB(t *testing.T) {
+// TestBuildMaskerMissingDBErrors: a masks file without an entry for the
+// requested database_id is a hard error. Multi-DB projects must either
+// complete the YAML or pass --no-masks; silent under-masking is the leak
+// this feature exists to prevent.
+func TestBuildMaskerMissingDBErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.yml")
 	body := `version: 1
@@ -125,19 +119,7 @@ databases:
 		t.Fatal(err)
 	}
 
-	// strict default: a missing dbID is an error.
 	if _, err := (MaskConfig{Path: path}).BuildMasker("ghost", dir); err == nil {
-		t.Error("strict mode must error on missing database_id")
-	}
-	// permissive: same call with AllowMissingDB returns an empty Policy.
-	p, err := MaskConfig{Path: path, AllowMissingDB: true}.BuildMasker("ghost", dir)
-	if err != nil {
-		t.Fatalf("AllowMissingDB BuildMasker: %v", err)
-	}
-	if p == nil {
-		t.Fatal("permissive mode must return empty Policy, not nil")
-	}
-	if p.IsSensitive("public", "users", "email") {
-		t.Error("permissive Policy for missing dbID must match nothing")
+		t.Error("missing database_id must error")
 	}
 }

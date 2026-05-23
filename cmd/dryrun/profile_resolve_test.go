@@ -29,12 +29,12 @@ func withCWD(t *testing.T, dir string) {
 func resetFlags(t *testing.T) {
 	t.Helper()
 	prevDB, prevProfile, prevConfig, prevSchema := flagDB, flagProfile, flagConfig, flagSchemaFile
-	prevMasksFile, prevMaskPolicy, prevNoMasks, prevAllowMissingDB := flagMasksFile, flagMaskPolicy, flagNoMasks, flagAllowMissingDB
+	prevMasksFile, prevMaskPolicy, prevNoMasks := flagMasksFile, flagMaskPolicy, flagNoMasks
 	flagDB, flagProfile, flagConfig, flagSchemaFile = "", "", "", ""
-	flagMasksFile, flagMaskPolicy, flagNoMasks, flagAllowMissingDB = "", nil, false, false
+	flagMasksFile, flagMaskPolicy, flagNoMasks = "", nil, false
 	t.Cleanup(func() {
 		flagDB, flagProfile, flagConfig, flagSchemaFile = prevDB, prevProfile, prevConfig, prevSchema
-		flagMasksFile, flagMaskPolicy, flagNoMasks, flagAllowMissingDB = prevMasksFile, prevMaskPolicy, prevNoMasks, prevAllowMissingDB
+		flagMasksFile, flagMaskPolicy, flagNoMasks = prevMasksFile, prevMaskPolicy, prevNoMasks
 	})
 	os.Unsetenv("PROFILE")
 	os.Unsetenv("DATABASE_URL")
