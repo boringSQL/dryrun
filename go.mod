@@ -14,6 +14,9 @@ require (
 	modernc.org/sqlite v1.47.0
 )
 
+// TODO: drop once fixturize tags the masking.Policy surface.
+replace github.com/boringsql/fixturize => ../fixturize
+
 require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect

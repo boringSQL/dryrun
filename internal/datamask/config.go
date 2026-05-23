@@ -3,6 +3,8 @@ package datamask
 import (
 	"fmt"
 
+	"github.com/boringsql/fixturize/masking"
+
 	"github.com/boringsql/dryrun/internal/history"
 )
 
@@ -46,14 +48,14 @@ func BuildConfig(flags Flags, profile ProfileMasks) MaskConfig {
 	return cfg
 }
 
-// Refuses NullMasker silently: unmasked init permanently writes raw stats to history.db
-func (c MaskConfig) BuildMasker(dbID history.DatabaseId, cwd string) (Masker, error) {
+// nil return = masking disabled; unmasked init permanently writes raw stats to history.db
+func (c MaskConfig) BuildMasker(dbID history.DatabaseId, cwd string) (*masking.Policy, error) {
 	if c.Disabled {
-		return NullMasker{}, nil
+		return nil, nil
 	}
 	path := c.Path
 	if path == "" {
-		if d, err := Discover(cwd); err == nil {
+		if d, err := masking.DiscoverMasksFile(cwd); err == nil {
 			path = d
 		}
 	}
