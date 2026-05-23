@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/history"
 )
 
@@ -29,12 +30,12 @@ func withCWD(t *testing.T, dir string) {
 func resetFlags(t *testing.T) {
 	t.Helper()
 	prevDB, prevProfile, prevConfig, prevSchema := flagDB, flagProfile, flagConfig, flagSchemaFile
-	prevMasksFile, prevMaskPolicy, prevNoMasks := flagMasksFile, flagMaskPolicy, flagNoMasks
+	prevMasksFile, prevMaskPolicy, prevNoMasks, prevAllowMissingDB := flagMasksFile, flagMaskPolicy, flagNoMasks, flagAllowMissingDB
 	flagDB, flagProfile, flagConfig, flagSchemaFile = "", "", "", ""
-	flagMasksFile, flagMaskPolicy, flagNoMasks = "", nil, false
+	flagMasksFile, flagMaskPolicy, flagNoMasks, flagAllowMissingDB = "", nil, false, false
 	t.Cleanup(func() {
 		flagDB, flagProfile, flagConfig, flagSchemaFile = prevDB, prevProfile, prevConfig, prevSchema
-		flagMasksFile, flagMaskPolicy, flagNoMasks = prevMasksFile, prevMaskPolicy, prevNoMasks
+		flagMasksFile, flagMaskPolicy, flagNoMasks, flagAllowMissingDB = prevMasksFile, prevMaskPolicy, prevNoMasks, prevAllowMissingDB
 	})
 	os.Unsetenv("PROFILE")
 	os.Unsetenv("DATABASE_URL")
@@ -153,12 +154,22 @@ database_id = "staging-shard-a"
 	}
 }
 
-// TestResolveMaskPolicyNoMasks: the --no-masks flag is a hard opt-out and must
-// short-circuit before any file is read. Even with a perfectly good
-// data-masking-policy.yml sitting right there in the working directory,
-// resolveMaskPolicy must return a nil Policy — nil is the contract for
-// "masking disabled", and ApplyPlanner treats a nil Policy as a no-op.
-func TestResolveMaskPolicyNoMasks(t *testing.T) {
+// mustPolicy unwraps a Masker into the concrete *datamask.Policy that the
+// production loader returns. Tests want IsSensitive, which is a method on
+// *Policy rather than the Masker interface.
+func mustPolicy(t *testing.T, m datamask.Masker) *datamask.Policy {
+	t.Helper()
+	p, ok := m.(*datamask.Policy)
+	if !ok {
+		t.Fatalf("expected *datamask.Policy, got %T", m)
+	}
+	return p
+}
+
+// TestBuildMaskerNoMasks: --no-masks is the hard opt-out. buildMasker must
+// short-circuit to NullMasker before touching the filesystem, even when a
+// perfectly good data-masking-policy.yml is sitting right there.
+func TestBuildMaskerNoMasks(t *testing.T) {
 	resetFlags(t)
 	dir := t.TempDir()
 	writeMasks(t, dir, "data-masking-policy.yml", `version: 1
@@ -175,21 +186,19 @@ db_url = "postgres://dev/x"
 
 	flagProfile = "dev"
 	flagNoMasks = true
-	pol, err := resolveMaskPolicy()
+	m, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "dev"})
 	if err != nil {
 		t.Fatalf("--no-masks should not error: %v", err)
 	}
-	if pol != nil {
-		t.Error("--no-masks must short-circuit to a nil Policy, even when a masks file exists")
+	if _, ok := m.(datamask.NullMasker); !ok {
+		t.Errorf("--no-masks must short-circuit to NullMasker, got %T", m)
 	}
 }
 
-// TestResolveMaskPolicyDiscovers: with no --masks-file flag and no masks_file
-// key in the profile, resolveMaskPolicy falls through to auto-discovery and
-// picks up a data-masking-policy.yml found in the working directory. The
-// profile here has no explicit database_id, so it defaults to the profile
-// name ("dev") — which is exactly the block the fixture defines.
-func TestResolveMaskPolicyDiscovers(t *testing.T) {
+// TestBuildMaskerDiscovers: with no --masks-file flag and no masks_file in the
+// profile, buildMasker falls through to auto-discovery and picks up a
+// data-masking-policy.yml in the working directory.
+func TestBuildMaskerDiscovers(t *testing.T) {
 	resetFlags(t)
 	dir := t.TempDir()
 	writeMasks(t, dir, "data-masking-policy.yml", `version: 1
@@ -205,34 +214,46 @@ db_url = "postgres://dev/x"
 	withCWD(t, dir)
 
 	flagProfile = "dev"
-	pol, err := resolveMaskPolicy()
+	m, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "dev"})
 	if err != nil {
-		t.Fatalf("resolveMaskPolicy: %v", err)
+		t.Fatalf("buildMasker: %v", err)
 	}
-	if pol == nil {
-		t.Fatal("expected discovery to find data-masking-policy.yml")
-	}
-	if !pol.IsSensitive("public", "users", "email") {
+	if !mustPolicy(t, m).IsSensitive("public", "users", "email") {
 		t.Error("discovered masks file should mark users.email sensitive")
 	}
 }
 
-// TestResolveMaskPolicyCLIOverridesProfile: when both an explicit --masks-file
-// flag and a profile masks_file are present, the CLI flag wins. The two files
-// list different columns (cli_col vs profile_col), so the resolved Policy's
-// IsSensitive answers reveal unambiguously which file was actually loaded.
-func TestResolveMaskPolicyCLIOverridesProfile(t *testing.T) {
+// TestBuildMaskerRefusesWithoutFile: the refuse-to-capture-unmasked guard.
+// With no masks file resolvable from flag, profile, or discovery, and no
+// --no-masks opt-out, buildMasker must fail loudly before any DB connection
+// happens. An unmasked init writes raw planner stats to history.db forever.
+func TestBuildMaskerRefusesWithoutFile(t *testing.T) {
+	resetFlags(t)
+	dir := writeTOML(t, t.TempDir(), `
+[profiles.dev]
+db_url = "postgres://dev/x"
+`)
+	withCWD(t, dir)
+
+	flagProfile = "dev"
+	_, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "dev"})
+	if err == nil {
+		t.Fatal("expected refuse-to-capture-unmasked error")
+	}
+}
+
+// TestBuildMaskerCLIOverridesProfile: when both --masks-file and the profile's
+// masks_file are set, the flag wins. The two files list different columns so
+// IsSensitive on the resolved Policy reveals which file actually loaded.
+func TestBuildMaskerCLIOverridesProfile(t *testing.T) {
 	resetFlags(t)
 	dir := t.TempDir()
-
-	// the file the profile points at — masks users.profile_col
 	writeMasks(t, dir, "profile-masks.yml", `version: 1
 databases:
   dev:
     columns:
       users.profile_col: { expr: "x", tags: [pii] }
 `)
-	// the file the CLI flag points at — masks users.cli_col
 	cliPath := writeMasks(t, dir, "cli-masks.yml", `version: 1
 databases:
   dev:
@@ -248,13 +269,11 @@ masks_file = "profile-masks.yml"
 
 	flagProfile = "dev"
 	flagMasksFile = cliPath
-	pol, err := resolveMaskPolicy()
+	m, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "dev"})
 	if err != nil {
-		t.Fatalf("resolveMaskPolicy: %v", err)
+		t.Fatalf("buildMasker: %v", err)
 	}
-	if pol == nil {
-		t.Fatal("expected a Policy")
-	}
+	pol := mustPolicy(t, m)
 	if !pol.IsSensitive("public", "users", "cli_col") {
 		t.Error("--masks-file should win: cli_col is not masked")
 	}
@@ -263,13 +282,11 @@ masks_file = "profile-masks.yml"
 	}
 }
 
-// TestResolveMaskPolicyForKeyPerDatabase: the per-key resolver is what the
-// snapshot-export loop calls once per database it is exporting. Two keys that
-// share one masks file but carry different database_ids must each select their
-// own block — db_a's policy masks accounts.ssn and nothing else, db_b's masks
-// leads.email and nothing else. This guards against a multi-database export
-// cross-contaminating one database's stats with another's masking rules.
-func TestResolveMaskPolicyForKeyPerDatabase(t *testing.T) {
+// TestBuildMaskerPerDatabase: two keys sharing one masks file but carrying
+// different database_ids must each select their own block. Guards against a
+// multi-database setup cross-contaminating one database's stats with
+// another's masking rules.
+func TestBuildMaskerPerDatabase(t *testing.T) {
 	resetFlags(t)
 	dir := t.TempDir()
 	writeMasks(t, dir, "data-masking-policy.yml", `version: 1
@@ -295,47 +312,42 @@ database_id = "db_b"
 `)
 	withCWD(t, dir)
 
-	keyA := history.SnapshotKey{ProjectID: "demo", DatabaseID: "db_a"}
-	keyB := history.SnapshotKey{ProjectID: "demo", DatabaseID: "db_b"}
-
-	polA, err := resolveMaskPolicyForKey(keyA)
+	mA, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "db_a"})
 	if err != nil {
-		t.Fatalf("resolveMaskPolicyForKey(db_a): %v", err)
+		t.Fatalf("buildMasker(db_a): %v", err)
 	}
-	if polA == nil || !polA.IsSensitive("public", "accounts", "ssn") {
+	polA := mustPolicy(t, mA)
+	if !polA.IsSensitive("public", "accounts", "ssn") {
 		t.Error("db_a key should resolve the db_a block (accounts.ssn)")
 	}
-	if polA != nil && polA.IsSensitive("public", "leads", "email") {
+	if polA.IsSensitive("public", "leads", "email") {
 		t.Error("db_a key must not see db_b's columns")
 	}
 
-	polB, err := resolveMaskPolicyForKey(keyB)
+	mB, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "db_b"})
 	if err != nil {
-		t.Fatalf("resolveMaskPolicyForKey(db_b): %v", err)
+		t.Fatalf("buildMasker(db_b): %v", err)
 	}
-	if polB == nil || !polB.IsSensitive("public", "leads", "email") {
+	polB := mustPolicy(t, mB)
+	if !polB.IsSensitive("public", "leads", "email") {
 		t.Error("db_b key should resolve the db_b block (leads.email)")
 	}
-	if polB != nil && polB.IsSensitive("public", "accounts", "ssn") {
+	if polB.IsSensitive("public", "accounts", "ssn") {
 		t.Error("db_b key must not see db_a's columns")
 	}
 }
 
-// TestResolveMaskPolicyProfileMasksFileSurvivesDBOverride is the regression
-// guard for the bug where a profile's masks_file was silently ignored whenever
-// --db was also supplied. This combination is not a corner case: `dryrun init`
-// only captures when --db (or DATABASE_URL) is set, so for the init command it
-// is the *normal* case. Under the bug, config.ResolveProfile sees a non-nil
-// cliDB, short-circuits to a bare "<cli>" profile, and the named profile's
-// masks_file/mask_policies never reach resolveMaskPolicyForKey.
+// TestBuildMaskerProfileMasksFileSurvivesDBOverride: integration regression
+// for the bug where a profile's masks_file was silently ignored whenever --db
+// was supplied. `dryrun init` always runs with --db, so this is the normal
+// case. The refactor made the bug structurally impossible (buildMasker
+// resolves the profile by name only, never threading flagDB), but the
+// end-to-end coverage stays as a guardrail against future shortcuts.
 //
-// The fixture deliberately names the masks file "profile-masks.yml" rather
-// than the canonical "data-masking-policy.yml" — that keeps it OUT of reach of
-// auto-discovery, so the profile's masks_file key is the *only* path that can
-// produce a non-nil policy. Without that precaution, discovery would mask the
-// bug: the test would pass via the discovery fallback even with the profile
-// path broken.
-func TestResolveMaskPolicyProfileMasksFileSurvivesDBOverride(t *testing.T) {
+// Fixture names the masks file "profile-masks.yml" so auto-discovery cannot
+// mask the bug — the profile's masks_file is the only path that can produce
+// a real Policy.
+func TestBuildMaskerProfileMasksFileSurvivesDBOverride(t *testing.T) {
 	resetFlags(t)
 	dir := t.TempDir()
 	writeMasks(t, dir, "profile-masks.yml", `version: 1
@@ -355,18 +367,14 @@ masks_file = "profile-masks.yml"
 `)
 	withCWD(t, dir)
 
-	// --db set, exactly as `dryrun init` always runs it, plus the profile.
 	flagDB = "postgres://override/x"
 	flagProfile = "prod"
 
-	pol, err := resolveMaskPolicyForKey(history.SnapshotKey{ProjectID: "demo", DatabaseID: "prod"})
+	m, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "prod"})
 	if err != nil {
-		t.Fatalf("resolveMaskPolicyForKey: %v", err)
+		t.Fatalf("buildMasker: %v", err)
 	}
-	if pol == nil {
-		t.Fatal("profile masks_file must still resolve when --db is supplied")
-	}
-	if !pol.IsSensitive("public", "users", "email") {
+	if !mustPolicy(t, m).IsSensitive("public", "users", "email") {
 		t.Error("expected the profile's masks_file (users.email) to apply")
 	}
 }
