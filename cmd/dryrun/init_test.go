@@ -307,7 +307,7 @@ func TestRunInitCapture_Masking(t *testing.T) {
 				context.Background(), cap, w,
 				history.SnapshotKey{ProjectID: "p", DatabaseID: "testdb"},
 				t.TempDir(),
-				initOptions{Source: "test-node", MaskPolicy: tc.policy},
+				initOptions{Source: "test-node", Masker: tc.policy},
 			)
 			if err != nil {
 				t.Fatalf("runInitCapture: %v", err)
