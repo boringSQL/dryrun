@@ -143,11 +143,11 @@ databases:
       leads.email: { expr: "x", tags: [pii] }
 `)
 
-	polA, err := Load(path, "db_a", nil)
+	polA, err := Load(path, "db_a", nil, LoadOptions{})
 	if err != nil {
 		t.Fatalf("Load(db_a): %v", err)
 	}
-	polB, err := Load(path, "db_b", nil)
+	polB, err := Load(path, "db_b", nil, LoadOptions{})
 	if err != nil {
 		t.Fatalf("Load(db_b): %v", err)
 	}

@@ -1,8 +1,6 @@
 package datamask
 
 import (
-	"bytes"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,22 +20,6 @@ func writeMasks(t *testing.T, body string) string {
 		t.Fatalf("write masks fixture: %v", err)
 	}
 	return path
-}
-
-// captureWarnings redirects the process-wide slog default into a buffer for
-// the duration of one test, then restores the previous logger on cleanup.
-// Load surfaces config drift (an unknown database_id) through slog.Warn rather
-// than an error, so the only way to assert "it warned" is to intercept the
-// global logger. IMPORTANT: any test using this helper must run serially —
-// slog.SetDefault mutates global state, and a parallel test would both scribble
-// into a foreign buffer and lose its own warnings.
-func captureWarnings(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
 }
 
 // twoTagMasks is the workhorse fixture: one database ("dev"), three columns
@@ -78,7 +60,7 @@ databases:
 func TestLoadTagFilterNarrows(t *testing.T) {
 	path := writeMasks(t, twoTagMasks)
 
-	pii, err := Load(path, "dev", []string{"pii"})
+	pii, err := Load(path, "dev", []string{"pii"}, LoadOptions{})
 	if err != nil {
 		t.Fatalf("Load(pii): %v", err)
 	}
@@ -92,7 +74,7 @@ func TestLoadTagFilterNarrows(t *testing.T) {
 		t.Error("policy pii must NOT cover events.payload (internal-tagged only)")
 	}
 
-	internal, err := Load(path, "dev", []string{"internal"})
+	internal, err := Load(path, "dev", []string{"internal"}, LoadOptions{})
 	if err != nil {
 		t.Fatalf("Load(internal): %v", err)
 	}
@@ -111,7 +93,7 @@ func TestLoadTagFilterNarrows(t *testing.T) {
 func TestLoadEmptyPolicySelectsAll(t *testing.T) {
 	path := writeMasks(t, twoTagMasks)
 
-	all, err := Load(path, "dev", nil)
+	all, err := Load(path, "dev", nil, LoadOptions{})
 	if err != nil {
 		t.Fatalf("Load(nil policies): %v", err)
 	}
@@ -126,33 +108,37 @@ func TestLoadEmptyPolicySelectsAll(t *testing.T) {
 	}
 }
 
-// TestLoadMissingDatabaseWarns covers the deliberate "config drift is not
-// fatal" decision. A masks file that has no block for the requested
-// database_id (typo, renamed profile, stale file) must NOT abort init — it
-// must warn and hand back a usable, empty Policy so capture proceeds unmasked.
-// We assert three things at once: no error, an empty (matches-nothing) Policy,
-// and an observable slog.Warn carrying the offending database_id so an
-// operator can actually find the drift.
-func TestLoadMissingDatabaseWarns(t *testing.T) {
-	buf := captureWarnings(t)
+// TestLoadMissingDatabaseErrors locks the strict default: a masks file with no
+// block for the requested database_id (typo, renamed profile, stale file) is a
+// hard error. With capture-time masking as the single line of defense, a
+// missed dbID would mean raw stats land in history.db permanently.
+func TestLoadMissingDatabaseErrors(t *testing.T) {
 	path := writeMasks(t, twoTagMasks)
 
-	pol, err := Load(path, "prod", nil) // "prod" has no block in twoTagMasks
+	_, err := Load(path, "prod", nil, LoadOptions{})
+	if err == nil {
+		t.Fatal("expected error for missing database_id")
+	}
+	if !strings.Contains(err.Error(), "prod") {
+		t.Errorf("error should name the offending database_id, got: %v", err)
+	}
+}
+
+// TestLoadMissingDatabaseAllowed: the opt-in escape hatch for multi-DB
+// projects where only some databases have policies. AllowMissingDatabase=true
+// downgrades the missing block to an empty (matches-nothing) Policy.
+func TestLoadMissingDatabaseAllowed(t *testing.T) {
+	path := writeMasks(t, twoTagMasks)
+
+	pol, err := Load(path, "prod", nil, LoadOptions{AllowMissingDatabase: true})
 	if err != nil {
-		t.Fatalf("missing database_id should not be a hard error: %v", err)
+		t.Fatalf("AllowMissingDatabase should downgrade missing dbID: %v", err)
 	}
 	if pol == nil {
-		t.Fatal("Load must return a non-nil Policy even on drift")
+		t.Fatal("Load must return a non-nil Policy in permissive mode")
 	}
 	if pol.IsSensitive("public", "users", "email") {
-		t.Error("a drifted Policy must match nothing")
-	}
-	logged := buf.String()
-	if !strings.Contains(logged, "no entry for database_id") {
-		t.Errorf("expected a drift warning, got: %q", logged)
-	}
-	if !strings.Contains(logged, "prod") {
-		t.Errorf("warning should name the offending database_id, got: %q", logged)
+		t.Error("permissive empty Policy must match nothing")
 	}
 }
 
@@ -165,7 +151,7 @@ func TestLoadMissingDatabaseWarns(t *testing.T) {
 func TestLoadUnknownPolicyErrors(t *testing.T) {
 	path := writeMasks(t, twoTagMasks)
 
-	_, err := Load(path, "dev", []string{"ghost"})
+	_, err := Load(path, "dev", []string{"ghost"}, LoadOptions{})
 	if err == nil {
 		t.Fatal("expected an error for an unknown policy name")
 	}
@@ -182,7 +168,7 @@ func TestLoadUnknownPolicyErrors(t *testing.T) {
 func TestLoadQualifiedKeyScopedToSchema(t *testing.T) {
 	path := writeMasks(t, mixedKeyMasks)
 
-	pol, err := Load(path, "dev", nil)
+	pol, err := Load(path, "dev", nil, LoadOptions{})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -201,7 +187,7 @@ func TestLoadQualifiedKeyScopedToSchema(t *testing.T) {
 func TestLoadUnqualifiedKeyMatchesAnySchema(t *testing.T) {
 	path := writeMasks(t, mixedKeyMasks)
 
-	pol, err := Load(path, "dev", nil)
+	pol, err := Load(path, "dev", nil, LoadOptions{})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
