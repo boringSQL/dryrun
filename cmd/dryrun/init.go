@@ -194,12 +194,7 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 	if err != nil {
 		return snap, nil, nil, 0, fmt.Errorf("capture planner stats: %w", err)
 	}
-	masked := 0
-	if maskPolicy != nil {
-		masked = datamask.ApplyPlanner(maskPolicy, planner)
-		// payload changed, so content_hash must reflect the masked form
-		planner.ContentHash = schema.ComputePlannerContentHash(planner)
-	}
+	masked := maskPolicy.MaskPlanner(planner)
 	if _, err := store.PutPlanner(ctx, key, planner); err != nil {
 		slog.Warn("could not save planner stats", "error", err)
 	}

@@ -4,11 +4,12 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
-// returns matched count; caller must recompute snap.ContentHash since payload changed
-func ApplyPlanner(p *Policy, snap *schema.PlannerStatsSnapshot) (masked int) {
+// nil receiver and nil snap are no-ops.
+func (p *Policy) MaskPlanner(snap *schema.PlannerStatsSnapshot) int {
 	if p == nil || snap == nil {
 		return 0
 	}
+	n := 0
 	for i := range snap.Columns {
 		c := &snap.Columns[i]
 		if !p.IsSensitive(c.Table.Schema, c.Table.Name, c.Column) {
@@ -17,7 +18,10 @@ func ApplyPlanner(p *Policy, snap *schema.PlannerStatsSnapshot) (masked int) {
 		c.Stats.MostCommonVals = nil
 		c.Stats.MostCommonFreqs = nil
 		c.Stats.HistogramBounds = nil
-		masked++
+		n++
 	}
-	return masked
+	if n > 0 {
+		snap.ContentHash = schema.ComputePlannerContentHash(snap)
+	}
+	return n
 }

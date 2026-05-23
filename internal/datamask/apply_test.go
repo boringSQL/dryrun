@@ -82,7 +82,7 @@ func TestApplyPlannerMasksOnlySensitiveColumns(t *testing.T) {
 		},
 	}
 
-	masked := ApplyPlanner(p, snap)
+	masked := p.MaskPlanner(snap)
 	if masked != 1 {
 		t.Errorf("matched count: got %d, want 1", masked)
 	}
@@ -109,13 +109,13 @@ func TestApplyPlannerIdempotent(t *testing.T) {
 		},
 	}
 
-	ApplyPlanner(p, snap) // first pass: does the actual masking
+	p.MaskPlanner(snap) // first pass: does the actual masking
 	before, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatalf("marshal before: %v", err)
 	}
 
-	ApplyPlanner(p, snap) // second pass: must change nothing
+	p.MaskPlanner(snap) // second pass: must change nothing
 	after, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatalf("marshal after: %v", err)
@@ -162,14 +162,14 @@ databases:
 	}
 
 	snapA := newSnap()
-	if n := ApplyPlanner(polA, snapA); n != 1 {
+	if n := polA.MaskPlanner(snapA); n != 1 {
 		t.Errorf("db_a matched count: got %d, want 1", n)
 	}
 	assertMasked(t, statsOf(t, snapA, "accounts", "ssn"), "db_a accounts.ssn")
 	assertPreserved(t, statsOf(t, snapA, "leads", "email"), "db_a leads.email (foreign block)")
 
 	snapB := newSnap()
-	if n := ApplyPlanner(polB, snapB); n != 1 {
+	if n := polB.MaskPlanner(snapB); n != 1 {
 		t.Errorf("db_b matched count: got %d, want 1", n)
 	}
 	assertMasked(t, statsOf(t, snapB, "leads", "email"), "db_b leads.email")
@@ -184,12 +184,12 @@ func TestApplyPlannerNilInputs(t *testing.T) {
 	snap := &schema.PlannerStatsSnapshot{
 		Columns: []schema.ColumnStatsEntry{colEntry("public", "users", "email")},
 	}
-	if n := ApplyPlanner(nil, snap); n != 0 {
+	if n := (*Policy)(nil).MaskPlanner(snap); n != 0 {
 		t.Errorf("nil Policy: got count %d, want 0", n)
 	}
 	assertPreserved(t, statsOf(t, snap, "users", "email"), "nil-policy passthrough")
 
-	if n := ApplyPlanner(&Policy{}, nil); n != 0 {
+	if n := (&Policy{}).MaskPlanner(nil); n != 0 {
 		t.Errorf("nil snapshot: got count %d, want 0", n)
 	}
 }

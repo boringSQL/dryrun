@@ -10,7 +10,6 @@ import (
 
 	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/history"
-	"github.com/boringsql/dryrun/internal/schema"
 )
 
 // maskResolver loads the masking policy for a key; nil means no masking
@@ -200,10 +199,7 @@ func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.S
 		}
 		if maskingPlanner {
 			if pl := stored.AsPlanner(); pl != nil {
-				// recompute on real change so a masked bundle doesn't share an identity with its raw original
-				if n := datamask.ApplyPlanner(policy, pl); n > 0 {
-					pl.ContentHash = schema.ComputePlannerContentHash(pl)
-				}
+				policy.MaskPlanner(pl)
 				if _, ok := have[pl.ContentHash]; ok {
 					counts.UpToDate++
 					continue
