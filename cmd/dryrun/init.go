@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -127,24 +128,29 @@ func initCmd() *cobra.Command {
 	return cmd
 }
 
-// Profile resolved by name only; flagDB must not avoid  masks_file
+// Profile resolved by name only; flagDB must not displace masks_file
 func buildMasker(key history.SnapshotKey) (*masking.Policy, error) {
 	cwd, _ := os.Getwd()
-	var pm datamask.ProfileMasks
+	res := masking.Resolution{
+		FlagFile:     flagMasksFile,
+		FlagPolicies: flagMaskPolicy,
+		DatabaseID:   string(key.DatabaseID),
+		Cwd:          cwd,
+		Disabled:     flagNoMasks,
+	}
 	if _, cfg, err := loadProjectConfig(); err == nil {
 		if rp, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
 			if rp.MasksFile != nil {
-				pm.File = *rp.MasksFile
+				res.ProfileFile = *rp.MasksFile
 			}
-			pm.Policies = rp.MaskPolicies
+			res.ProfilePolicies = rp.MaskPolicies
 		}
 	}
-	mc := datamask.BuildConfig(datamask.Flags{
-		MasksFile:    flagMasksFile,
-		MaskPolicies: flagMaskPolicy,
-		NoMasks:      flagNoMasks,
-	}, pm)
-	return mc.BuildMasker(key.DatabaseID, cwd)
+	p, err := res.Load()
+	if errors.Is(err, masking.ErrNoMasksFile) {
+		return nil, fmt.Errorf("no data-masking-policy.yml found; pass --masks-file=PATH, set masks_file in the profile, or --no-masks to capture without masking")
+	}
+	return p, err
 }
 
 type initOptions struct {
