@@ -53,10 +53,9 @@ func (c pgxCapturer) CaptureActivity(ctx context.Context, schemaRefHash, source 
 
 // init owns the masking flag surface; other subcommands don't mask anything.
 var (
-	flagMasksFile      string
-	flagMaskPolicy     []string
-	flagNoMasks        bool
-	flagAllowMissingDB bool
+	flagMasksFile  string
+	flagMaskPolicy []string
+	flagNoMasks    bool
 )
 
 func initCmd() *cobra.Command {
@@ -125,7 +124,6 @@ func initCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flagMasksFile, "masks-file", "", "path to data-masking-policy.yml")
 	cmd.Flags().StringSliceVar(&flagMaskPolicy, "mask-policy", nil, "masking policy name (repeatable, comma-separated)")
 	cmd.Flags().BoolVar(&flagNoMasks, "no-masks", false, "disable planner-stats masking (raw stats land in history.db)")
-	cmd.Flags().BoolVar(&flagAllowMissingDB, "masks-allow-missing-db", false, "if the masks file has no entry for this database_id, capture unmasked instead of failing")
 	return cmd
 }
 
@@ -142,10 +140,9 @@ func buildMasker(key history.SnapshotKey) (*masking.Policy, error) {
 		}
 	}
 	mc := datamask.BuildConfig(datamask.Flags{
-		MasksFile:      flagMasksFile,
-		MaskPolicies:   flagMaskPolicy,
-		NoMasks:        flagNoMasks,
-		AllowMissingDB: flagAllowMissingDB,
+		MasksFile:    flagMasksFile,
+		MaskPolicies: flagMaskPolicy,
+		NoMasks:      flagNoMasks,
 	}, pm)
 	return mc.BuildMasker(key.DatabaseID, cwd)
 }
