@@ -210,11 +210,12 @@ db_url = "postgres://dev/x"
 	}
 }
 
-// TestBuildMaskerRefusesWithoutFile: the refuse-to-capture-unmasked guard.
-// With no masks file resolvable from flag, profile, or discovery, and no
-// --no-masks opt-out, buildMasker must fail loudly before any DB connection
-// happens. An unmasked init writes raw planner stats to history.db forever.
-func TestBuildMaskerRefusesWithoutFile(t *testing.T) {
+// TestBuildMaskerNoFileNoRequire: when no masks file resolves and
+// require_masks is unset, buildMasker must succeed with a nil Policy so
+// `dryrun init` keeps working out of the box. Operators who want the
+// refuse-to-capture-unmasked guard opt in via require_masks=true (covered by
+// TestBuildMaskerRequireMasksRefusesMissingFile).
+func TestBuildMaskerNoFileNoRequire(t *testing.T) {
 	resetFlags(t)
 	dir := writeTOML(t, t.TempDir(), `
 [profiles.dev]
@@ -223,9 +224,12 @@ db_url = "postgres://dev/x"
 	withCWD(t, dir)
 
 	flagProfile = "dev"
-	_, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "dev"})
-	if err == nil {
-		t.Fatal("expected refuse-to-capture-unmasked error")
+	p, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "dev"})
+	if err != nil {
+		t.Fatalf("no-file + no-require should not error: %v", err)
+	}
+	if p != nil {
+		t.Errorf("no resolved masks file must yield a nil Policy, got %v", p)
 	}
 }
 

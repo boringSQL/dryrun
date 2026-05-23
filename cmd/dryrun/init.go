@@ -138,7 +138,11 @@ func buildMasker(key history.SnapshotKey) (*masking.Policy, error) {
 		Cwd:          cwd,
 		Disabled:     flagNoMasks,
 	}
+	var requireMasks bool
 	if _, cfg, err := loadProjectConfig(); err == nil {
+		if cfg.RequireMasks != nil {
+			requireMasks = *cfg.RequireMasks
+		}
 		if rp, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
 			if rp.MasksFile != nil {
 				res.ProfileFile = *rp.MasksFile
@@ -146,9 +150,16 @@ func buildMasker(key history.SnapshotKey) (*masking.Policy, error) {
 			res.ProfilePolicies = rp.MaskPolicies
 		}
 	}
+	if requireMasks && flagNoMasks {
+		return nil, fmt.Errorf("require_masks=true in dryrun.toml; --no-masks is not allowed")
+	}
 	p, err := res.Load()
 	if errors.Is(err, masking.ErrNoMasksFile) {
-		return nil, fmt.Errorf("no data-masking-policy.yml found; pass --masks-file=PATH, set masks_file in the profile, or --no-masks to capture without masking")
+		if requireMasks {
+			return nil, fmt.Errorf("require_masks=true in dryrun.toml; data-masking-policy.yml must exist (pass --masks-file=PATH or set masks_file in the profile)")
+		}
+		slog.Warn("no data-masking-policy.yml resolved; capturing without masking (set masks_file in the profile, pass --masks-file=PATH, or set require_masks=true to enforce)")
+		return nil, nil
 	}
 	return p, err
 }
@@ -265,6 +276,8 @@ func scaffoldConfig(configPath string) error {
 	profileName := filepath.Base(cwd)
 	content := fmt.Sprintf(`[project]
 id = %q
+
+# require_masks = true   # fail init unless data-masking-policy.yml resolves; refuses --no-masks
 
 [default]
 profile = %q
