@@ -408,3 +408,68 @@ database_id = "staging-shard-a"
 			"(--db override must not collapse it to the project id)", key.DatabaseID)
 	}
 }
+
+// TestBuildMaskerRequireMasksRefusesNoMasks: require_masks=true in dryrun.toml
+// is a project-level safety assertion that init must mask. --no-masks would
+// silently bypass the assertion, so buildMasker rejects it loudly. The check
+// fires before any resolution / discovery work and even when a perfectly valid
+// masks file is sitting next to dryrun.toml — the toggle is what's contested,
+// not the file's existence.
+func TestBuildMaskerRequireMasksRefusesNoMasks(t *testing.T) {
+	resetFlags(t)
+	dir := t.TempDir()
+	writeMasks(t, dir, "data-masking-policy.yml", `version: 1
+databases:
+  dev:
+    columns:
+      users.email: { expr: "x", tags: [pii] }
+`)
+	writeTOML(t, dir, `
+require_masks = true
+
+[profiles.dev]
+db_url = "postgres://dev/x"
+`)
+	withCWD(t, dir)
+
+	flagProfile = "dev"
+	flagNoMasks = true
+	_, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "dev"})
+	if err == nil {
+		t.Fatal("require_masks=true must refuse --no-masks")
+	}
+}
+
+// TestBuildMaskerRequireMasksRefusesMissingFile: with require_masks=true and
+// no masks file resolvable from flag / profile / discovery, init must fail
+// with the stricter message that names the project-level setting. The default
+// (require_masks unset) already fails in this case, but the wording is
+// different — this test pins the stricter branch.
+func TestBuildMaskerRequireMasksRefusesMissingFile(t *testing.T) {
+	resetFlags(t)
+	dir := writeTOML(t, t.TempDir(), `
+require_masks = true
+
+[profiles.dev]
+db_url = "postgres://dev/x"
+`)
+	withCWD(t, dir)
+
+	flagProfile = "dev"
+	_, err := buildMasker(history.SnapshotKey{ProjectID: "demo", DatabaseID: "dev"})
+	if err == nil {
+		t.Fatal("require_masks=true must refuse missing masks file")
+	}
+	if !contains(err.Error(), "require_masks") {
+		t.Errorf("error should name require_masks: %v", err)
+	}
+}
+
+func contains(haystack, needle string) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}
