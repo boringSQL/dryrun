@@ -8,12 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/history"
 )
-
-// maskResolver loads the masking policy for a key; nil means no masking
-type maskResolver func(history.SnapshotKey) (*datamask.Policy, error)
 
 // KindCounts splits a per-kind sync result into work done vs work skipped.
 type KindCounts struct {
@@ -50,8 +46,7 @@ func snapshotPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// push masks planner stats on the way out; --no-masks opts out
-			return runSync(cmd.Context(), src, dst, all, resolveMaskPolicyForKey, os.Stdout)
+			return runSync(cmd.Context(), src, dst, all, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&toPath, "to-path", "", "destination directory (required)")
@@ -82,8 +77,7 @@ func snapshotPullCmd() *cobra.Command {
 				return err
 			}
 			defer dst.Close()
-			// pull imports into the trusted history.db; no masking on the way in
-			return runSync(cmd.Context(), src, dst, all, nil, os.Stdout)
+			return runSync(cmd.Context(), src, dst, all, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&fromPath, "from-path", "", "source directory (required)")
@@ -92,9 +86,8 @@ func snapshotPullCmd() *cobra.Command {
 	return cmd
 }
 
-// runSync resolves the key set and drives syncKeys; --all takes src.ListKeys,
-// otherwise scope is the resolved profile key. resolveMask nil means no masking
-func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, resolveMask maskResolver, w io.Writer) error {
+// --all takes src.ListKeys, otherwise scope is the resolved profile key.
+func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, w io.Writer) error {
 	var keys []history.SnapshotKey
 	if all {
 		ks, err := src.ListKeys(ctx)
@@ -106,7 +99,7 @@ func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, reso
 		keys = []history.SnapshotKey{resolveSnapshotKey()}
 	}
 
-	outs, err := syncKeys(ctx, src, dst, keys, resolveMask)
+	outs, err := syncKeys(ctx, src, dst, keys)
 	if err != nil {
 		return err
 	}
@@ -115,22 +108,13 @@ func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, reso
 }
 
 // syncKeys diffs src vs dst by content_hash per kind and copies the gap
-// goes from schema, planner, activity to FilesystemStore
-func syncKeys(ctx context.Context, src, dst history.SnapshotStore, keys []history.SnapshotKey, resolveMask maskResolver) ([]SyncOutcome, error) {
+// in schema -> planner -> activity order.
+func syncKeys(ctx context.Context, src, dst history.SnapshotStore, keys []history.SnapshotKey) ([]SyncOutcome, error) {
 	out := make([]SyncOutcome, 0, len(keys))
 	for _, key := range keys {
-		// per-key so multi-database picks the right masks block; broken file fails fast
-		var policy *datamask.Policy
-		if resolveMask != nil {
-			p, err := resolveMask(key)
-			if err != nil {
-				return out, fmt.Errorf("load masks for %s/%s: %w", key.ProjectID, key.DatabaseID, err)
-			}
-			policy = p
-		}
 		o := SyncOutcome{Key: key}
 		for _, kind := range kindOrder() {
-			c, err := syncKind(ctx, src, dst, key, kind, policy)
+			c, err := syncKind(ctx, src, dst, key, kind)
 			if err != nil {
 				return out, fmt.Errorf("sync %s/%s %s: %w",
 					key.ProjectID, key.DatabaseID, kind, err)
@@ -149,8 +133,7 @@ func syncKeys(ctx context.Context, src, dst history.SnapshotStore, keys []histor
 	return out, nil
 }
 
-// kindOrder pins the schema -> planner -> activity sequence; activity uses
-// an empty NodeLabel so List returns every node's row in one pass.
+// activity uses an empty NodeLabel so List returns every node's row in one pass.
 func kindOrder() []history.SnapshotKind {
 	return []history.SnapshotKind{
 		history.SchemaKind(),
@@ -159,8 +142,7 @@ func kindOrder() []history.SnapshotKind {
 	}
 }
 
-// syncKind copies one stream; non-nil policy masks planner snapshots in place
-func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.SnapshotKey, kind history.SnapshotKind, policy *datamask.Policy) (KindCounts, error) {
+func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.SnapshotKey, kind history.SnapshotKind) (KindCounts, error) {
 	var counts KindCounts
 
 	srcList, err := src.List(ctx, key, kind, history.TimeRange{})
@@ -175,36 +157,22 @@ func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.S
 	if err != nil {
 		return counts, err
 	}
-	// dedup gate; content_hash is stable across stores, so set membership
-	// is enough to decide whether to copy.
+	// content_hash is stable across stores; set membership decides copy vs skip.
 	have := make(map[string]struct{}, len(dstList))
 	for _, s := range dstList {
 		have[s.ContentHash] = struct{}{}
 	}
 
-	maskingPlanner := kind.Tag == history.KindPlanner && policy != nil
-
 	for _, s := range srcList {
-		if !maskingPlanner {
-			if _, ok := have[s.ContentHash]; ok {
-				counts.UpToDate++
-				continue
-			}
+		if _, ok := have[s.ContentHash]; ok {
+			counts.UpToDate++
+			continue
 		}
 		// summary carries the resolved kind (with NodeLabel for activity)
 		// so Get works the same for all three streams.
 		stored, err := src.Get(ctx, key, s.Kind, history.NewRefHash(s.ContentHash))
 		if err != nil {
 			return counts, err
-		}
-		if maskingPlanner {
-			if pl := stored.AsPlanner(); pl != nil {
-				policy.MaskPlanner(pl)
-				if _, ok := have[pl.ContentHash]; ok {
-					counts.UpToDate++
-					continue
-				}
-			}
 		}
 		if _, err := dst.Put(ctx, key, stored); err != nil {
 			return counts, err
