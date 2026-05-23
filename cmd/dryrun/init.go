@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 
+	"github.com/boringsql/fixturize/masking"
+
 	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
@@ -103,7 +105,7 @@ func initCmd() *cobra.Command {
 			defer store.Close()
 
 			key := resolveSnapshotKey()
-			masker, err := buildMasker(key)
+			policy, err := buildMasker(key)
 			if err != nil {
 				return err
 			}
@@ -114,7 +116,7 @@ func initCmd() *cobra.Command {
 			return runInitCapture(ctx, pgxCapturer{pool: conn.Pool()}, store, key, dataDir, initOptions{
 				AllowReplica: allowReplica,
 				Source:       source,
-				Masker:       masker,
+				Policy:       policy,
 			})
 		},
 	}
@@ -128,7 +130,7 @@ func initCmd() *cobra.Command {
 }
 
 // Profile resolved by name only; flagDB must not avoid  masks_file
-func buildMasker(key history.SnapshotKey) (datamask.Masker, error) {
+func buildMasker(key history.SnapshotKey) (*masking.Policy, error) {
 	cwd, _ := os.Getwd()
 	var pm datamask.ProfileMasks
 	if _, cfg, err := loadProjectConfig(); err == nil {
@@ -151,15 +153,12 @@ func buildMasker(key history.SnapshotKey) (datamask.Masker, error) {
 type initOptions struct {
 	AllowReplica bool
 	Source       string
-	Masker       datamask.Masker
+	Policy       *masking.Policy
 }
 
 // init flow: refuse standbys by default; primary writes all three streams,
 // replica with --allow-replica writes activity only.
 func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, dataDir string, opts initOptions) error {
-	if opts.Masker == nil {
-		opts.Masker = datamask.NullMasker{}
-	}
 	standby, err := cap.IsStandby(ctx)
 	if err != nil {
 		return fmt.Errorf("check standby status: %w", err)
@@ -196,7 +195,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		return nil
 	}
 
-	snap, planner, activity, masked, err := runPrimaryCapture(ctx, cap, store, key, source, opts.Masker)
+	snap, planner, activity, masked, err := runPrimaryCapture(ctx, cap, store, key, source, opts.Policy)
 	if err != nil {
 		return err
 	}
@@ -220,7 +219,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 }
 
 // schema + planner + activity in one shot; caller is responsible for the standby gate
-func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string, masker datamask.Masker) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
+func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string, policy *masking.Policy) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
 	snap, err := cap.Introspect(ctx)
 	if err != nil {
 		return nil, nil, nil, 0, err
@@ -233,7 +232,7 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 	if err != nil {
 		return snap, nil, nil, 0, fmt.Errorf("capture planner stats: %w", err)
 	}
-	masked := masker.MaskPlanner(planner)
+	masked := datamask.MaskPlanner(policy, planner)
 	if _, err := store.PutPlanner(ctx, key, planner); err != nil {
 		slog.Warn("could not save planner stats", "error", err)
 	}

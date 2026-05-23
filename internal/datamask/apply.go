@@ -1,11 +1,13 @@
 package datamask
 
 import (
+	"github.com/boringsql/fixturize/masking"
+
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
-// nil receiver and nil snap are no-ops.
-func (p *Policy) MaskPlanner(snap *schema.PlannerStatsSnapshot) int {
+// nil policy or nil snap are no-ops; rehash on any mutation
+func MaskPlanner(p *masking.Policy, snap *schema.PlannerStatsSnapshot) int {
 	if p == nil || snap == nil {
 		return 0
 	}

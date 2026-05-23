@@ -15,7 +15,6 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/boringsql/dryrun/internal/config"
-	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/diff"
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
@@ -364,7 +363,7 @@ func snapshotCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			snap, planner, activity, _, err := runPrimaryCapture(cmd.Context(), cap, store, resolveSnapshotKey(), "primary", datamask.NullMasker{})
+			snap, planner, activity, _, err := runPrimaryCapture(cmd.Context(), cap, store, resolveSnapshotKey(), "primary", nil)
 			if err != nil {
 				return err
 			}
