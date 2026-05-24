@@ -181,17 +181,3 @@ func (a *AnnotatedSchema) ColumnStats(table QualifiedName, column string) *Colum
 	return nil
 }
 
-// Preserves prior planner/merged only when schema_ref still matches the new DDL
-func RebuildAfterRefresh(prev *AnnotatedSchema, refreshed *SchemaSnapshot) *AnnotatedSchema {
-	out := &AnnotatedSchema{Schema: refreshed}
-	if prev == nil || refreshed == nil {
-		return out
-	}
-	if prev.Planner != nil && prev.Planner.SchemaRefHash == refreshed.ContentHash {
-		out.Planner = prev.Planner
-	}
-	if prev.Merged != nil && prev.Schema != nil && prev.Schema.ContentHash == refreshed.ContentHash {
-		out.Merged = prev.Merged
-	}
-	return out
-}

@@ -7,7 +7,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-// Online-only tools (explain_query, refresh_schema, check_drift) are
+// Online-only tools (explain_query, check_drift) are
 // registered only with a live db connection.
 func (s *Server) Register(srv *mcpserver.MCPServer) {
 	srv.AddTool(
@@ -161,7 +161,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 	)
 
 	if s.pool != nil {
-		slog.Debug("registering online-only tools", "tools", "explain_query,refresh_schema,check_drift")
+		slog.Debug("registering online-only tools", "tools", "explain_query,check_drift")
 		srv.AddTool(
 			mcp.NewTool("explain_query",
 				mcp.WithDescription("EXPLAIN a query (analyze=true runs EXPLAIN ANALYZE)"),
@@ -174,18 +174,12 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			s.handleExplainQuery,
 		)
 		srv.AddTool(
-			mcp.NewTool("refresh_schema",
-				mcp.WithDescription("Force schema re-introspection"),
-			),
-			s.handleRefreshSchema,
-		)
-		srv.AddTool(
 			mcp.NewTool("check_drift",
 				mcp.WithDescription("Diff live DB against loaded snapshot (ahead/behind/diverged)"),
 			),
 			s.handleCheckDrift,
 		)
 	} else {
-		slog.Info("offline mode: explain_query, refresh_schema, check_drift not available")
+		slog.Info("offline mode: explain_query, check_drift not available")
 	}
 }

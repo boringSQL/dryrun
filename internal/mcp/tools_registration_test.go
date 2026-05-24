@@ -153,7 +153,7 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 		}
 	}
 	// online-only tools must NOT be registered offline
-	for _, online := range []string{"explain_query", "refresh_schema", "check_drift"} {
+	for _, online := range []string{"explain_query", "check_drift"} {
 		if got[online] {
 			t.Errorf("online-only tool %q should not be registered offline", online)
 		}
