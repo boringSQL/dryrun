@@ -408,12 +408,6 @@ func snapshotCmd() *cobra.Command {
 		Use:   "diff",
 		Short: "Diff two snapshots",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, conn, err := connectDB()
-			if err != nil {
-				return err
-			}
-			defer conn.Close()
-
 			store, err := openHistoryStore(historyDB)
 			if err != nil {
 				return err
@@ -442,6 +436,11 @@ func snapshotCmd() *cobra.Command {
 			if toHash != "" {
 				toSnap, err = loadByHash(toHash)
 			} else {
+				ctx, conn, cerr := connectDB()
+				if cerr != nil {
+					return cerr
+				}
+				defer conn.Close()
 				toSnap, err = conn.Introspect(ctx)
 			}
 			if err != nil {
