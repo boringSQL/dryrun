@@ -11,7 +11,6 @@ import (
 
 	"github.com/boringsql/fixturize/masking"
 
-	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
@@ -211,12 +210,10 @@ func colWithStats(table, column string) schema.ColumnStatsEntry {
 
 // loadTestPolicy writes a throwaway data-masking-policy.yml that lists the
 // given table.column keys under a single database block ("testdb"), then loads
-// it into a real *datamask.Policy via datamask.Load. The init test lives in
-// package main and therefore cannot construct a datamask.Policy by hand — its
-// internal column sets are unexported. Round-tripping through a real YAML file
-// and the real loader is actually the better choice here anyway: it exercises
-// the genuine parsing path rather than a hand-mocked policy, so these tests
-// would catch a regression in Load just as readily as one in runInitCapture.
+// it into a real *masking.Policy via masking.Load. Round-tripping through a
+// real YAML file and the real loader exercises the genuine parsing path
+// rather than a hand-mocked policy, so these tests would catch a regression
+// in Load just as readily as one in runInitCapture.
 func loadTestPolicy(t *testing.T, columns ...string) *masking.Policy {
 	t.Helper()
 
@@ -233,7 +230,7 @@ func loadTestPolicy(t *testing.T, columns ...string) *masking.Policy {
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		t.Fatalf("write test masks file: %v", err)
 	}
-	pol, err := datamask.Load(path, "testdb", nil)
+	pol, err := masking.Load(path, "testdb", nil)
 	if err != nil {
 		t.Fatalf("load test policy: %v", err)
 	}
