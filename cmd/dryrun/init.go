@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 
+	"github.com/boringsql/fixturize/masking"
+
+	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
@@ -47,6 +51,13 @@ func (c pgxCapturer) CapturePlanner(ctx context.Context, schemaRefHash string) (
 func (c pgxCapturer) CaptureActivity(ctx context.Context, schemaRefHash, source string) (*schema.ActivityStatsSnapshot, error) {
 	return schema.CaptureActivityStats(ctx, c.pool, schemaRefHash, source)
 }
+
+// init owns the masking flag surface; other subcommands don't mask anything.
+var (
+	flagMasksFile  string
+	flagMaskPolicy []string
+	flagNoMasks    bool
+)
 
 func initCmd() *cobra.Command {
 	var (
@@ -93,20 +104,73 @@ func initCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			return runInitCapture(ctx, pgxCapturer{pool: conn.Pool()}, store, resolveSnapshotKey(), dataDir, initOptions{
+			key := resolveSnapshotKey()
+			policy, err := buildMasker(key)
+			if err != nil {
+				return err
+			}
+			if flagNoMasks {
+				slog.Warn("masking disabled by --no-masks; raw planner stats will be written to history.db")
+			}
+
+			return runInitCapture(ctx, pgxCapturer{pool: conn.Pool()}, store, key, dataDir, initOptions{
 				AllowReplica: allowReplica,
 				Source:       source,
+				Policy:       policy,
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&allowReplica, "allow-replica", false, "permit capture on a standby (activity stats only)")
 	cmd.Flags().StringVar(&source, "source", "", "node label for activity stats (default: hostname)")
+	cmd.Flags().StringVar(&flagMasksFile, "masks-file", "", "path to data-masking-policy.yml")
+	cmd.Flags().StringSliceVar(&flagMaskPolicy, "mask-policy", nil, "masking policy name (repeatable, comma-separated)")
+	cmd.Flags().BoolVar(&flagNoMasks, "no-masks", false, "disable planner-stats masking (raw stats land in history.db)")
 	return cmd
+}
+
+// Profile resolved by name only; flagDB must not displace masks_file
+func buildMasker(key history.SnapshotKey) (*masking.Policy, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		slog.Warn("masker: getwd failed, profile auto-discovery disabled", "error", err)
+	}
+	res := masking.Resolution{
+		FlagFile:     flagMasksFile,
+		FlagPolicies: flagMaskPolicy,
+		DatabaseID:   string(key.DatabaseID),
+		Cwd:          cwd,
+		Disabled:     flagNoMasks,
+	}
+	var requireMasks bool
+	if _, cfg, err := loadProjectConfig(); err == nil {
+		if cfg.RequireMasks != nil {
+			requireMasks = *cfg.RequireMasks
+		}
+		if rp, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
+			if rp.MasksFile != nil {
+				res.ProfileFile = *rp.MasksFile
+			}
+			res.ProfilePolicies = rp.MaskPolicies
+		}
+	}
+	if requireMasks && flagNoMasks {
+		return nil, fmt.Errorf("require_masks=true in dryrun.toml; --no-masks is not allowed")
+	}
+	p, err := res.Load()
+	if errors.Is(err, masking.ErrNoMasksFile) {
+		if requireMasks {
+			return nil, fmt.Errorf("require_masks=true in dryrun.toml; data-masking-policy.yml must exist (pass --masks-file=PATH or set masks_file in the profile)")
+		}
+		slog.Warn("no data-masking-policy.yml resolved; capturing without masking (set masks_file in the profile, pass --masks-file=PATH, or set require_masks=true to enforce)")
+		return nil, nil
+	}
+	return p, err
 }
 
 type initOptions struct {
 	AllowReplica bool
 	Source       string
+	Policy       *masking.Policy
 }
 
 // init flow: refuse standbys by default; primary writes all three streams,
@@ -148,7 +212,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		return nil
 	}
 
-	snap, planner, activity, err := runPrimaryCapture(ctx, cap, store, key, source)
+	snap, planner, activity, masked, err := runPrimaryCapture(ctx, cap, store, key, source, opts.Policy)
 	if err != nil {
 		return err
 	}
@@ -163,16 +227,19 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 	fmt.Fprintf(os.Stderr, "  Schema:   %s\n", schemaPath)
 	fmt.Fprintf(os.Stderr, "  Planner:  %d tables, %d indexes, %d columns\n",
 		len(planner.Tables), len(planner.Indexes), len(planner.Columns))
+	if masked > 0 {
+		fmt.Fprintf(os.Stderr, "  Masked:   %d planner-stats columns\n", masked)
+	}
 	fmt.Fprintf(os.Stderr, "  Activity: node=%s, %d tables, %d indexes\n",
 		source, len(activity.Tables), len(activity.Indexes))
 	return nil
 }
 
 // schema + planner + activity in one shot; caller is responsible for the standby gate
-func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, error) {
+func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string, policy *masking.Policy) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
 	snap, err := cap.Introspect(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, 0, err
 	}
 	if _, err := store.PutSchema(ctx, key, snap); err != nil {
 		slog.Warn("could not save snapshot", "error", err)
@@ -180,20 +247,21 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 
 	planner, err := cap.CapturePlanner(ctx, snap.ContentHash)
 	if err != nil {
-		return snap, nil, nil, fmt.Errorf("capture planner stats: %w", err)
+		return snap, nil, nil, 0, fmt.Errorf("capture planner stats: %w", err)
 	}
+	masked := datamask.MaskPlanner(policy, planner)
 	if _, err := store.PutPlanner(ctx, key, planner); err != nil {
 		slog.Warn("could not save planner stats", "error", err)
 	}
 
 	activity, err := cap.CaptureActivity(ctx, snap.ContentHash, source)
 	if err != nil {
-		return snap, planner, nil, fmt.Errorf("capture activity stats: %w", err)
+		return snap, planner, nil, masked, fmt.Errorf("capture activity stats: %w", err)
 	}
 	if _, err := store.PutActivity(ctx, key, activity); err != nil {
 		slog.Warn("could not save activity stats", "error", err)
 	}
-	return snap, planner, activity, nil
+	return snap, planner, activity, masked, nil
 }
 
 func scaffoldConfig(configPath string) error {
@@ -212,12 +280,16 @@ func scaffoldConfig(configPath string) error {
 	content := fmt.Sprintf(`[project]
 id = %q
 
+# require_masks = true   # fail init unless data-masking-policy.yml resolves; refuses --no-masks
+
 [default]
 profile = %q
 
 [profiles.%s]
 schema_file = ".dryrun/schema.json"
 # database_id = %q   # defaults to profile name; override to e.g. "auth", "billing"
+# masks_file = "data-masking-policy.yml"   # PII policy shared with fixturize; auto-discovered if omitted
+# mask_policies = ["pii"]                  # optional; default masks every column listed for this database
 
 # [profiles.dev]
 # db_url = "${DATABASE_URL}"

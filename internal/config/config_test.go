@@ -404,6 +404,102 @@ func contains(haystack, needle string) bool {
 	return false
 }
 
+// TestProfileMasksRoundTrip exercises the C3 config plumbing for data masking.
+// The masks_file and mask_policies keys must survive TOML decoding onto
+// ProfileConfig, and then flow through ResolveProfile onto ResolvedProfile.
+// masks_file additionally inherits the same relative-path treatment as
+// schema_file: a bare filename in the config is resolved against project_root,
+// so `dryrun init` works the same whether it is invoked from the project root
+// or a nested subdirectory.
+func TestProfileMasksRoundTrip(t *testing.T) {
+	toml := `
+[project]
+id = "demo"
+
+[profiles.dev]
+db_url = "postgres://dev/x"
+masks_file = "data-masking-policy.yml"
+mask_policies = ["pii", "internal"]
+`
+	cfg, err := Parse(toml)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// raw decode: both keys land on ProfileConfig verbatim, untransformed.
+	dev := cfg.Profiles["dev"]
+	if dev.MasksFile == nil || *dev.MasksFile != "data-masking-policy.yml" {
+		t.Errorf("ProfileConfig.MasksFile: got %v, want data-masking-policy.yml", dev.MasksFile)
+	}
+	if len(dev.MaskPolicies) != 2 || dev.MaskPolicies[0] != "pii" || dev.MaskPolicies[1] != "internal" {
+		t.Errorf("ProfileConfig.MaskPolicies: got %v, want [pii internal]", dev.MaskPolicies)
+	}
+
+	// resolved: the relative masks_file is rebased onto project_root, while
+	// the policy list passes through unchanged.
+	name := "dev"
+	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join("/tmp/demo-root", "data-masking-policy.yml")
+	if rp.MasksFile == nil || *rp.MasksFile != want {
+		t.Errorf("ResolvedProfile.MasksFile: got %v, want %s", rp.MasksFile, want)
+	}
+	if len(rp.MaskPolicies) != 2 || rp.MaskPolicies[0] != "pii" {
+		t.Errorf("ResolvedProfile.MaskPolicies: got %v, want [pii internal]", rp.MaskPolicies)
+	}
+}
+
+// TestProfileMasksAbsolutePathPreserved: an absolute masks_file must be passed
+// through verbatim. filepath.Join-ing an already-absolute path under
+// project_root would silently corrupt it, so the resolver explicitly skips the
+// rebase when the path is absolute — this test pins that branch.
+func TestProfileMasksAbsolutePathPreserved(t *testing.T) {
+	cfg, err := Parse(`
+[profiles.dev]
+db_url = "postgres://dev/x"
+masks_file = "/etc/dryrun/masks.yml"
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "dev"
+	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.MasksFile == nil || *rp.MasksFile != "/etc/dryrun/masks.yml" {
+		t.Errorf("absolute masks_file should be untouched: got %v", rp.MasksFile)
+	}
+}
+
+// TestProfileMasksOmitted: a profile that declares neither key must leave both
+// ResolvedProfile fields at their zero values — a nil *string and a nil slice.
+// resolveMaskPolicy treats nil as the signal to "fall through to discovery",
+// so fabricating an empty-but-non-nil default here would quietly break the
+// auto-discovery path.
+func TestProfileMasksOmitted(t *testing.T) {
+	cfg, err := Parse(`
+[profiles.dev]
+db_url = "postgres://dev/x"
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "dev"
+	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.MasksFile != nil {
+		t.Errorf("expected nil MasksFile when omitted, got %q", *rp.MasksFile)
+	}
+	if rp.MaskPolicies != nil {
+		t.Errorf("expected nil MaskPolicies when omitted, got %v", rp.MaskPolicies)
+	}
+}
+
 func TestLintConfigFromConventions(t *testing.T) {
 	toml := `
 [conventions]
