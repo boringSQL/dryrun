@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -363,7 +364,16 @@ func snapshotCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			snap, planner, activity, _, err := runPrimaryCapture(cmd.Context(), cap, store, resolveSnapshotKey(), "primary", nil)
+			key := resolveSnapshotKey()
+			policy, err := buildMasker(key)
+			if err != nil {
+				return err
+			}
+			if flagNoMasks {
+				slog.Warn("masking disabled by --no-masks; raw planner stats will be written to history.db")
+			}
+
+			snap, planner, activity, masked, err := runPrimaryCapture(cmd.Context(), cap, store, key, "primary", policy)
 			if err != nil {
 				return err
 			}
@@ -371,12 +381,18 @@ func snapshotCmd() *cobra.Command {
 			fmt.Printf("  %d tables, %d views, %d functions\n", len(snap.Tables), len(snap.Views), len(snap.Functions))
 			fmt.Printf("Planner stats saved: %s (%d tables, %d columns, %d indexes)\n",
 				planner.ContentHash, len(planner.Tables), len(planner.Columns), len(planner.Indexes))
+			if masked > 0 {
+				fmt.Printf("  Masked: %d planner-stats columns\n", masked)
+			}
 			fmt.Printf("Activity stats saved: %s (label=primary, %d tables, %d indexes)\n",
 				activity.ContentHash, len(activity.Tables), len(activity.Indexes))
 			return nil
 		},
 	}
 	addHistFlag(takeCmd)
+	takeCmd.Flags().StringVar(&flagMasksFile, "masks-file", "", "path to data-masking-policy.yml")
+	takeCmd.Flags().StringSliceVar(&flagMaskPolicy, "mask-policy", nil, "masking policy name (repeatable, comma-separated)")
+	takeCmd.Flags().BoolVar(&flagNoMasks, "no-masks", false, "disable planner-stats masking (raw stats land in history.db)")
 
 	listCmd := &cobra.Command{
 		Use:   "list",
