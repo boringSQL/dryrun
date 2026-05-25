@@ -363,7 +363,7 @@ func snapshotCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			snap, planner, activity, err := runPrimaryCapture(cmd.Context(), cap, store, resolveSnapshotKey(), "primary")
+			snap, planner, activity, _, err := runPrimaryCapture(cmd.Context(), cap, store, resolveSnapshotKey(), "primary", nil)
 			if err != nil {
 				return err
 			}
@@ -490,7 +490,7 @@ func snapshotCmd() *cobra.Command {
 	addHistFlag(diffCmd)
 	diffCmd.Flags().BoolVar(&prettyDiff, "pretty", false, "pretty-print JSON")
 
-	cmd.AddCommand(takeCmd, listCmd, diffCmd, snapshotExportCmd(), snapshotActivityCmd(),
+	cmd.AddCommand(takeCmd, listCmd, diffCmd, snapshotActivityCmd(),
 		snapshotPushCmd(), snapshotPullCmd())
 	return cmd
 }
@@ -753,7 +753,8 @@ func openHistoryStore(path string) (*history.Store, error) {
 func resolveSnapshotKey() history.SnapshotKey {
 	cwd, _ := os.Getwd()
 	if _, cfg, err := loadProjectConfig(); err == nil {
-		if resolved, rerr := cfg.ResolveProfile(nilIfEmpty(flagDB), nilIfEmpty(flagSchemaFile), nilIfEmpty(flagProfile), cwd); rerr == nil {
+		// resolve the profile by name only: a --db override must not drop its database_id
+		if resolved, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
 			return resolved.SnapshotKey()
 		}
 	}

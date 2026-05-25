@@ -86,8 +86,7 @@ func snapshotPullCmd() *cobra.Command {
 	return cmd
 }
 
-// runSync resolves the key set and drives syncKeys; --all takes src.ListKeys,
-// otherwise scope is the resolved profile key (the single-project case).
+// --all takes src.ListKeys, otherwise scope is the resolved profile key.
 func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, w io.Writer) error {
 	var keys []history.SnapshotKey
 	if all {
@@ -108,10 +107,8 @@ func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, w io
 	return nil
 }
 
-// syncKeys diffs src vs dst by content_hash per kind and copies the gap.
-// Iteration order is schema -> planner -> activity so the FilesystemStore
-// orphan rule (planner/activity require an existing schema bundle) holds
-// regardless of which side is dst.
+// syncKeys diffs src vs dst by content_hash per kind and copies the gap
+// in schema -> planner -> activity order.
 func syncKeys(ctx context.Context, src, dst history.SnapshotStore, keys []history.SnapshotKey) ([]SyncOutcome, error) {
 	out := make([]SyncOutcome, 0, len(keys))
 	for _, key := range keys {
@@ -136,8 +133,7 @@ func syncKeys(ctx context.Context, src, dst history.SnapshotStore, keys []histor
 	return out, nil
 }
 
-// kindOrder pins the schema -> planner -> activity sequence; activity uses
-// an empty NodeLabel so List returns every node's row in one pass.
+// activity uses an empty NodeLabel so List returns every node's row in one pass.
 func kindOrder() []history.SnapshotKind {
 	return []history.SnapshotKind{
 		history.SchemaKind(),
@@ -161,8 +157,7 @@ func syncKind(ctx context.Context, src, dst history.SnapshotStore, key history.S
 	if err != nil {
 		return counts, err
 	}
-	// dedup gate; content_hash is stable across stores, so set membership
-	// is enough to decide whether to copy.
+	// content_hash is stable across stores; set membership decides copy vs skip.
 	have := make(map[string]struct{}, len(dstList))
 	for _, s := range dstList {
 		have[s.ContentHash] = struct{}{}
