@@ -2,12 +2,28 @@ package datamask
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/boringsql/fixturize/masking"
 
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
 func strptr(s string) *string { return &s }
+
+// writeMasks drops body into a temp data-masking-policy.yml and returns its
+// path. Tests then feed it to masking.Load — round-tripping through the real
+// loader catches regressions in the loader too.
+func writeMasks(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "data-masking-policy.yml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write masks file: %v", err)
+	}
+	return path
+}
 
 // colEntry builds a ColumnStatsEntry whose MostCommonVals, MostCommonFreqs and
 // HistogramBounds are all non-nil. Starting from fully-populated stats is what
@@ -76,7 +92,7 @@ databases:
     columns:
       users.email: { expr: "x", tags: [pii] }
 `)
-	p, err := Load(path, "dev", nil)
+	p, err := masking.Load(path, "dev", nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -110,7 +126,7 @@ databases:
     columns:
       users.email: { expr: "x", tags: [pii] }
 `)
-	p, err := Load(path, "dev", nil)
+	p, err := masking.Load(path, "dev", nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -155,11 +171,11 @@ databases:
       leads.email: { expr: "x", tags: [pii] }
 `)
 
-	polA, err := Load(path, "db_a", nil)
+	polA, err := masking.Load(path, "db_a", nil)
 	if err != nil {
 		t.Fatalf("Load(db_a): %v", err)
 	}
-	polB, err := Load(path, "db_b", nil)
+	polB, err := masking.Load(path, "db_b", nil)
 	if err != nil {
 		t.Fatalf("Load(db_b): %v", err)
 	}
@@ -206,7 +222,7 @@ databases:
   dev:
     columns: {}
 `)
-	p, err := Load(path, "dev", nil)
+	p, err := masking.Load(path, "dev", nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
