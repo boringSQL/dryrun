@@ -235,6 +235,22 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 	return nil
 }
 
+// snapshot take wrapper: gate on standby (refuse, no replica fallback), then
+// delegate to runPrimaryCapture. Kept here so the masking + standby contract
+// lives next to init's; the snapshot take command only handles flag plumbing.
+func runSnapshotTake(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, policy *masking.Policy) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
+	standby, err := cap.IsStandby(ctx)
+	if err != nil {
+		return nil, nil, nil, 0, fmt.Errorf("check standby status: %w", err)
+	}
+	if standby {
+		return nil, nil, nil, 0, dryrun.NewError(dryrun.ErrReplicaCapture,
+			"`dryrun snapshot take` must run against the primary; "+
+				"use `dryrun snapshot activity --from <url> --label <name>` to capture activity from a replica")
+	}
+	return runPrimaryCapture(ctx, cap, store, key, "primary", policy)
+}
+
 // schema + planner + activity in one shot; caller is responsible for the standby gate
 func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string, policy *masking.Policy) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
 	snap, err := cap.Introspect(ctx)

@@ -17,7 +17,6 @@ import (
 
 	"github.com/boringsql/dryrun/internal/config"
 	"github.com/boringsql/dryrun/internal/diff"
-	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/lint"
 	drmcp "github.com/boringsql/dryrun/internal/mcp"
@@ -341,22 +340,11 @@ func snapshotCmd() *cobra.Command {
 		Use:   "take",
 		Short: "Take a new snapshot (schema + planner + activity; primary only)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, conn, err := connectDB()
+			_, conn, err := connectDB()
 			if err != nil {
 				return err
 			}
 			defer conn.Close()
-
-			cap := pgxCapturer{pool: conn.Pool()}
-			standby, err := cap.IsStandby(ctx)
-			if err != nil {
-				return fmt.Errorf("check standby status: %w", err)
-			}
-			if standby {
-				return dryrun.NewError(dryrun.ErrReplicaCapture,
-					"`dryrun snapshot take` must run against the primary; "+
-						"use `dryrun snapshot activity --from <url> --label <name>` to capture activity from a replica")
-			}
 
 			store, err := openHistoryStore(historyDB)
 			if err != nil {
@@ -373,7 +361,7 @@ func snapshotCmd() *cobra.Command {
 				slog.Warn("masking disabled by --no-masks; raw planner stats will be written to history.db")
 			}
 
-			snap, planner, activity, masked, err := runPrimaryCapture(cmd.Context(), cap, store, key, "primary", policy)
+			snap, planner, activity, masked, err := runSnapshotTake(cmd.Context(), pgxCapturer{pool: conn.Pool()}, store, key, policy)
 			if err != nil {
 				return err
 			}
