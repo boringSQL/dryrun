@@ -148,28 +148,9 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		return nil
 	}
 
-	snap, err := cap.Introspect(ctx)
+	snap, planner, activity, err := runPrimaryCapture(ctx, cap, store, key, source)
 	if err != nil {
 		return err
-	}
-	if _, err := store.PutSchema(ctx, key, snap); err != nil {
-		slog.Warn("could not save snapshot", "error", err)
-	}
-
-	planner, err := cap.CapturePlanner(ctx, snap.ContentHash)
-	if err != nil {
-		return fmt.Errorf("capture planner stats: %w", err)
-	}
-	if _, err := store.PutPlanner(ctx, key, planner); err != nil {
-		slog.Warn("could not save planner stats", "error", err)
-	}
-
-	activity, err := cap.CaptureActivity(ctx, snap.ContentHash, source)
-	if err != nil {
-		return fmt.Errorf("capture activity stats: %w", err)
-	}
-	if _, err := store.PutActivity(ctx, key, activity); err != nil {
-		slog.Warn("could not save activity stats", "error", err)
 	}
 
 	schemaPath := filepath.Join(dataDir, "schema.json")
@@ -185,6 +166,34 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 	fmt.Fprintf(os.Stderr, "  Activity: node=%s, %d tables, %d indexes\n",
 		source, len(activity.Tables), len(activity.Indexes))
 	return nil
+}
+
+// schema + planner + activity in one shot; caller is responsible for the standby gate
+func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, error) {
+	snap, err := cap.Introspect(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if _, err := store.PutSchema(ctx, key, snap); err != nil {
+		slog.Warn("could not save snapshot", "error", err)
+	}
+
+	planner, err := cap.CapturePlanner(ctx, snap.ContentHash)
+	if err != nil {
+		return snap, nil, nil, fmt.Errorf("capture planner stats: %w", err)
+	}
+	if _, err := store.PutPlanner(ctx, key, planner); err != nil {
+		slog.Warn("could not save planner stats", "error", err)
+	}
+
+	activity, err := cap.CaptureActivity(ctx, snap.ContentHash, source)
+	if err != nil {
+		return snap, planner, nil, fmt.Errorf("capture activity stats: %w", err)
+	}
+	if _, err := store.PutActivity(ctx, key, activity); err != nil {
+		slog.Warn("could not save activity stats", "error", err)
+	}
+	return snap, planner, activity, nil
 }
 
 func scaffoldConfig(configPath string) error {
