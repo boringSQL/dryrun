@@ -98,7 +98,7 @@ func initCmd() *cobra.Command {
 			}
 			defer conn.Close()
 
-			store, err := history.OpenDefault()
+			store, err := openHistoryStore("")
 			if err != nil {
 				return fmt.Errorf("open history store: %w", err)
 			}
