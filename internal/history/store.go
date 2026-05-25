@@ -106,8 +106,6 @@ func (s *Store) migrate() error {
 			project_id    TEXT,
 			database_id   TEXT
 		);
-		CREATE INDEX IF NOT EXISTS idx_snapshots_db_url_hash
-			ON snapshots(db_url_hash, timestamp DESC);
 		CREATE INDEX IF NOT EXISTS idx_snapshots_content_hash
 			ON snapshots(content_hash);
 		CREATE INDEX IF NOT EXISTS snapshots_by_key_taken_at
@@ -154,6 +152,16 @@ func (s *Store) migrate() error {
 				return fmt.Errorf("migration failed (%s): %w", col, err)
 			}
 		}
+	}
+	// db_url_hash predates project_id/database_id but legacy DBs from the very first cut lack it
+	if _, err := s.db.Exec("ALTER TABLE snapshots ADD COLUMN db_url_hash TEXT NOT NULL DEFAULT ''"); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("migration failed (db_url_hash): %w", err)
+		}
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_snapshots_db_url_hash
+		ON snapshots(db_url_hash, timestamp DESC)`); err != nil {
+		return fmt.Errorf("migration failed (idx_snapshots_db_url_hash): %w", err)
 	}
 	return nil
 }
@@ -232,12 +240,31 @@ func (s *Store) GetSchema(ctx context.Context, key SnapshotKey, at SnapshotRef) 
 		).Scan(&jsonStr)
 	case RefHash:
 		detail = "hash " + at.Hash
-		err = s.db.QueryRowContext(ctx,
+		// git-style prefix match; ambiguous prefixes are rejected
+		rows, qerr := s.db.QueryContext(ctx,
 			`SELECT snapshot_json FROM snapshots
-			  WHERE project_id = ? AND database_id = ? AND content_hash = ?
-			  LIMIT 1`,
-			pid, did, at.Hash,
-		).Scan(&jsonStr)
+			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
+			  LIMIT 2`,
+			pid, did, at.Hash+"%",
+		)
+		if qerr != nil {
+			return nil, qerr
+		}
+		defer rows.Close()
+		matches := 0
+		for rows.Next() {
+			matches++
+			if matches == 1 {
+				if scanErr := rows.Scan(&jsonStr); scanErr != nil {
+					return nil, scanErr
+				}
+			}
+		}
+		if matches == 0 {
+			err = sql.ErrNoRows
+		} else if matches > 1 {
+			return nil, fmt.Errorf("ambiguous snapshot hash prefix %q (matches multiple)", at.Hash)
+		}
 	default:
 		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 	}
