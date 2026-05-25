@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -380,20 +381,44 @@ func snapshotCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			summaries, err := store.ListSchema(cmd.Context(), resolveSnapshotKey(), history.TimeRange{})
+			key := resolveSnapshotKey()
+			kinds, err := store.ListKinds(cmd.Context(), key)
 			if err != nil {
 				return err
+			}
+			var summaries []history.SnapshotSummary
+			for _, k := range kinds {
+				list, err := store.List(cmd.Context(), key, k, history.TimeRange{})
+				if err != nil {
+					return err
+				}
+				for i := range list {
+					list[i].Kind = k
+				}
+				summaries = append(summaries, list...)
 			}
 			if len(summaries) == 0 {
 				fmt.Println("No snapshots found for this database.")
 				return nil
+			}
+			sort.Slice(summaries, func(i, j int) bool {
+				return summaries[i].Timestamp.After(summaries[j].Timestamp)
+			})
+			typeW := len("TYPE")
+			for _, s := range summaries {
+				if n := len(s.Kind.String()); n > typeW {
+					typeW = n
+				}
 			}
 			for _, s := range summaries {
 				hash := s.ContentHash
 				if len(hash) > 16 {
 					hash = hash[:16]
 				}
-				fmt.Printf("%s  %s  %s\n", s.Timestamp.Format("2006-01-02 15:04:05"), hash, s.Database)
+				fmt.Printf("%s  %-*s  %s  %s\n",
+					s.Timestamp.Format("2006-01-02 15:04:05"),
+					typeW, s.Kind.String(),
+					hash, s.Database)
 			}
 			fmt.Printf("\n%d snapshot(s) total\n", len(summaries))
 			return nil
