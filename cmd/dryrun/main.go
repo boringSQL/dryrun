@@ -16,6 +16,7 @@ import (
 
 	"github.com/boringsql/dryrun/internal/config"
 	"github.com/boringsql/dryrun/internal/diff"
+	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/lint"
 	drmcp "github.com/boringsql/dryrun/internal/mcp"
@@ -337,7 +338,7 @@ func snapshotCmd() *cobra.Command {
 
 	takeCmd := &cobra.Command{
 		Use:   "take",
-		Short: "Take a new snapshot",
+		Short: "Take a new snapshot (schema + planner + activity; primary only)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, conn, err := connectDB()
 			if err != nil {
@@ -345,27 +346,33 @@ func snapshotCmd() *cobra.Command {
 			}
 			defer conn.Close()
 
+			cap := pgxCapturer{pool: conn.Pool()}
+			standby, err := cap.IsStandby(ctx)
+			if err != nil {
+				return fmt.Errorf("check standby status: %w", err)
+			}
+			if standby {
+				return dryrun.NewError(dryrun.ErrReplicaCapture,
+					"`dryrun snapshot take` must run against the primary; "+
+						"use `dryrun snapshot activity --from <url> --label <name>` to capture activity from a replica")
+			}
+
 			store, err := openHistoryStore(historyDB)
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			snap, err := conn.Introspect(ctx)
+			snap, planner, activity, err := runPrimaryCapture(cmd.Context(), cap, store, resolveSnapshotKey(), "primary")
 			if err != nil {
 				return err
 			}
-
-			outcome, err := store.PutSchema(cmd.Context(), resolveSnapshotKey(), snap)
-			if err != nil {
-				return err
-			}
-			if outcome == history.PutInserted {
-				fmt.Printf("Snapshot saved: %s\n", snap.ContentHash)
-				fmt.Printf("  %d tables, %d views, %d functions\n", len(snap.Tables), len(snap.Views), len(snap.Functions))
-			} else {
-				fmt.Printf("Schema unchanged (hash: %s)\n", snap.ContentHash)
-			}
+			fmt.Printf("Snapshot saved: %s\n", snap.ContentHash)
+			fmt.Printf("  %d tables, %d views, %d functions\n", len(snap.Tables), len(snap.Views), len(snap.Functions))
+			fmt.Printf("Planner stats saved: %s (%d tables, %d columns, %d indexes)\n",
+				planner.ContentHash, len(planner.Tables), len(planner.Columns), len(planner.Indexes))
+			fmt.Printf("Activity stats saved: %s (label=primary, %d tables, %d indexes)\n",
+				activity.ContentHash, len(activity.Tables), len(activity.Indexes))
 			return nil
 		},
 	}
