@@ -13,34 +13,6 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
-func (s *Server) handleRefreshSchema(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	pool, err := s.requirePool()
-	if err != nil {
-		return errResult(err.Error()), nil
-	}
-
-	refreshed, err := schema.IntrospectSchema(ctx, pool)
-	if err != nil {
-		return errResult(fmt.Sprintf("introspection failed: %v", err)), nil
-	}
-
-	s.mu.Lock()
-	rebuilt := schema.RebuildAfterRefresh(s.annotated, refreshed)
-	s.annotated = rebuilt
-	s.mu.Unlock()
-
-	hash := refreshed.ContentHash
-	if len(hash) > 16 {
-		hash = hash[:16]
-	}
-	preserved := ""
-	if rebuilt.Planner != nil {
-		preserved = " (planner preserved)"
-	}
-	return textResult(fmt.Sprintf("Schema refreshed: %d tables, %d views, %d functions (hash: %s)%s",
-		len(refreshed.Tables), len(refreshed.Views), len(refreshed.Functions), hash, preserved)), nil
-}
-
 func (s *Server) handleReloadSchema(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// history.db wins — it carries planner/activity
 	if a, ok := s.loadAnnotatedFromHistory(ctx); ok && a.Schema != nil {

@@ -71,7 +71,7 @@ claude mcp add dryrun -- dryrun mcp-serve
 
 No DB credentials needed. Available tools: `list_tables`, `describe_table`, `search_schema`, `find_related`, `validate_query`, `check_migration`, `lint_schema`.
 
-Not available without a live DB: `explain_query`, `advise`, `refresh_schema`.
+Not available without a live DB: `explain_query`, `advise`, `check_drift`.
 
 ---
 
@@ -271,7 +271,6 @@ Connect your MCP client to `http://host:3000/sse`.
 | `advise` | Hybrid | Comprehensive query analysis: EXPLAIN + anti-patterns + index suggestions |
 | `explain_query` | **Yes** | EXPLAIN with structured plan and warnings |
 | `check_drift` | **Yes** | Compare live database schema against saved snapshot |
-| `refresh_schema` | **Yes** | Re-introspect the live database |
 
 \* `schema_diff` needs snapshot history; without live DB it compares saved snapshots only.
 
