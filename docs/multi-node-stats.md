@@ -6,13 +6,13 @@ dryrun merges statistics from every node in your cluster into one snapshot, then
 
 ## Collecting stats
 
-A snapshot in v0.6.0 is split into three rows in `~/.dryrun/history.db`:
+A snapshot is split into three rows in `~/.dryrun/history.db`:
 
 - **`schema`**: DDL (tables, columns, constraints, indexes, partitions, functions, enums, extensions, GUCs).
-- **`planner_stats`**: what the planner uses (`reltuples`, `relpages`, `pg_statistic`).
+- **`planner_stats`**: what the planner uses (`reltuples`, `relpages`, `pg_statistic`). Masked per `data-masking-policy.yml` at capture time; see [SECURITY.md](../SECURITY.md).
 - **`activity_stats`**: runtime counters (`seq_scan`, `idx_scan`, `n_dead_tup`, `last_vacuum`).
 
-`snapshot take` writes `schema` + `planner_stats` from the primary. `snapshot activity` writes one `activity_stats` row per replica, tagged with a `--label`. Activity rows attach to the most recent matching schema by `schema_ref_hash`.
+`snapshot take` writes all three rows from the primary, with the activity row labeled `primary`. `snapshot activity` writes one `activity_stats` row per replica, tagged with a `--label`. Activity rows attach to the most recent matching schema by `schema_ref_hash`.
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
@@ -22,7 +22,9 @@ A snapshot in v0.6.0 is split into three rows in `~/.dryrun/history.db`:
 └─────┬───────┘     └──────┬──────┘     └──────┬──────┘
       │                    │                    │
       │ schema +           │ activity_stats     │ activity_stats
-      │ planner_stats      │ (label=replica1)   │ (label=replica2)
+      │ planner_stats +    │ (label=replica1)   │ (label=replica2)
+      │ activity_stats     │                    │
+      │ (label=primary)    │                    │
       ▼                    ▼                    ▼
             ~/.dryrun/history.db
        (joined by schema_ref_hash)
@@ -34,7 +36,7 @@ A snapshot in v0.6.0 is split into three rows in `~/.dryrun/history.db`:
 dryrun --profile primary snapshot take
 ```
 
-Refuses to run on a standby (`pg_is_in_recovery() = false` required). Writes one `schema` row and one `planner_stats` row.
+Refuses to run on a standby (`pg_is_in_recovery() = false` required). Writes one `schema` row, one `planner_stats` row (masked per policy), and one `activity_stats` row labeled `primary`.
 
 ### Activity stats from replicas
 
@@ -152,7 +154,7 @@ A connection pooler is supposed to round-robin across three replicas, but `compa
 
 ## Automating collection
 
-Activity captures are lightweight and safe for cron. Take the primary snapshot first so activity rows have a `schema_ref_hash` to attach to:
+Activity captures are lightweight and safe for cron. Take the primary snapshot first so replica activity rows have a `schema_ref_hash` to attach to:
 
 ```sh
 # /etc/cron.d/dryrun-stats
@@ -162,16 +164,10 @@ Activity captures are lightweight and safe for cron. Take the primary snapshot f
 15 2 * * * app dryrun --profile replica3 snapshot activity --from "$REPLICA3_DB" --label replica3
 ```
 
-`snapshot take` is idempotent on a quiet schema; repeated runs produce the same `schema_ref_hash`, so re-attaching activity rows is automatic. Run it nightly alongside activity captures, or only after migrations if you want fewer rows in history.
+`snapshot take` already captures the primary's own activity row (labeled `primary`), so there is no separate `snapshot activity` line for the primary, and the command itself refuses to run on the primary. `snapshot take` is idempotent on a quiet schema: repeated runs produce the same `schema_ref_hash`, so re-attaching activity rows is automatic. Run it nightly alongside activity captures, or only after migrations if you want fewer rows in history.
 
 ## Snapshot storage
 
-Snapshots live in `~/.dryrun/history.db`, keyed by `(project_id, database_id, kind, schema_ref_hash, node_label)`. Activity rows from `snapshot activity` carry their `--label` in `node_label`; rows from `snapshot take` use an empty label. `is_standby` is auto-detected from `pg_is_in_recovery()` and enforced by the CLI: `take` requires false, `activity` requires true.
+Snapshots live in `~/.dryrun/history.db`, keyed by `(project_id, database_id, kind, schema_ref_hash, node_label)`. Activity rows from `snapshot activity` carry their `--label` in `node_label`; the activity row from `snapshot take` uses `primary`. `is_standby` is auto-detected from `pg_is_in_recovery()` and enforced by the CLI: `take` requires false, `activity` requires true.
 
-To export a snapshot for sharing or archiving:
-
-```sh
-dryrun snapshot export
-```
-
-Writes `{project_id}/{database_id}/{timestamp}-{hash}.json.zst`. The zstd-compressed JSON contains the schema row plus all attached planner and activity rows.
+To share a snapshot across machines, use `snapshot push` / `snapshot pull`. They move `history.db` byte-for-byte between stores without re-masking or re-transforming. See [SECURITY.md](../SECURITY.md) for the sharing trust model.

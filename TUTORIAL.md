@@ -103,7 +103,7 @@ Privileges:
 dryrun init --db "$DATABASE_URL"
 ```
 
-Creates `dryrun.toml`, the `.dryrun/` directory, and `.dryrun/schema.json`. Snapshot history lives in `~/.dryrun/history.db` (shared across projects, keyed by `(project_id, database_id)`).
+Creates `dryrun.toml`, the `.dryrun/` directory, and `.dryrun/schema.json`. Snapshot history lives in `~/.dryrun/history.db` (shared across projects, keyed by `(project_id, database_id)`). If a `data-masking-policy.yml` resolves, `init` masks planner stats in-process before writing; for projects with PII, set `require_masks = true` in `dryrun.toml` to fail closed when the policy is missing. See [SECURITY.md](SECURITY.md).
 
 ### 3. Snapshots and diffing
 
@@ -151,15 +151,15 @@ All tools available including EXPLAIN ANALYZE (runs in rolled-back transactions,
 
 For setups with one primary and N replicas serving different query patterns. Activity counters (`seq_scan`, `idx_scan`, `n_dead_tup`) differ per node and only live where the queries actually run, on the replicas. dryrun captures schema + planner stats from the primary and activity stats from each replica, then aggregates them.
 
-In v0.6.0 a snapshot is split into three rows in `~/.dryrun/history.db`: `schema`, `planner_stats`, `activity_stats`. `snapshot take` writes the first two from the primary; `snapshot activity` writes one `activity_stats` row per replica, tagged with `--label`.
+A snapshot is split into three rows in `~/.dryrun/history.db`: `schema`, `planner_stats`, `activity_stats`. `snapshot take` writes all three from the primary, with the activity row labeled `primary`. `snapshot activity` writes one additional `activity_stats` row per replica, tagged with `--label`. Planner stats are masked per `data-masking-policy.yml` at capture time; see [SECURITY.md](SECURITY.md).
 
-### 1. Schema + planner stats from the primary
+### 1. Schema + planner + activity from the primary
 
 ```sh
 dryrun --profile primary snapshot take
 ```
 
-Refuses to run on a standby. Writes `schema` (DDL) + `planner_stats` (`reltuples`, `relpages`, `pg_statistic`) to history.
+Refuses to run on a standby. Writes `schema` (DDL), `planner_stats` (`reltuples`, `relpages`, `pg_statistic`; masked per policy), and one `activity_stats` row labeled `primary`.
 
 ### 2. Activity stats from each replica
 
@@ -293,6 +293,6 @@ GRANT pg_monitor TO your_readonly_user;
 
 **"invalid schema JSON"** - The file must be a valid SchemaSnapshot. If you renamed fields or edited by hand, re-dump from the database.
 
-**Multi-node stats not showing** - Run `dryrun snapshot list` and confirm you see both `schema` rows (from `snapshot take` on the primary) and `activity_stats` rows (from `snapshot activity --label ...` on each replica) sharing the same `schema_ref_hash`. Activity captured before any schema exists needs `--allow-orphan` and won't reattach automatically.
+**Multi-node stats not showing** - Run `dryrun snapshot list` and confirm you see a `schema` row plus `activity_stats` rows for each node sharing the same `schema_ref_hash`. The primary contributes its own `activity_stats` row (labeled `primary`) via `snapshot take`; each replica contributes one via `snapshot activity --label ...`. Activity captured before any schema exists needs `--allow-orphan` and won't reattach automatically.
 
 
