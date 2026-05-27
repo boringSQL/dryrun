@@ -70,6 +70,25 @@ func (s *Server) SetSnapshotKey(key history.SnapshotKey) {
 	s.snapshotKey = key
 }
 
+// Lets offline mode wire in history.db after construction
+func (s *Server) SetHistory(hist *history.Store) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.history = hist
+}
+
+func (s *Server) BootstrapFromHistory(ctx context.Context) bool {
+	a, ok := s.loadAnnotatedFromHistory(ctx)
+	if !ok || a == nil || a.Schema == nil {
+		return false
+	}
+	s.mu.Lock()
+	s.annotated = a
+	s.uninitialized = false
+	s.mu.Unlock()
+	return true
+}
+
 func (s *Server) loadAnnotatedFromHistory(ctx context.Context) (*schema.AnnotatedSchema, bool) {
 	s.mu.RLock()
 	hist := s.history

@@ -851,6 +851,14 @@ func mcpServeCmd() *cobra.Command {
 					effectiveSchemaFile, len(snap.Tables))
 				server = drmcp.NewOfflineServer(snap, lintCfg)
 				server.SetSchemaCandidates(candidates)
+				// history.db carries planner/activity stats; without it offline tools (vacuum_health, compare_nodes…) see nil sizing
+				if h, err := history.OpenDefault(); err == nil {
+					server.SetHistory(h)
+					server.SetSnapshotKey(resolveSnapshotKey())
+					if server.BootstrapFromHistory(context.Background()) {
+						fmt.Fprintln(os.Stderr, "dryrun: attached planner/activity stats from history.db")
+					}
+				}
 			case flagDB != "":
 				ctx := context.Background()
 				conn, err := schema.Connect(ctx, flagDB)

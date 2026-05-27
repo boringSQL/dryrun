@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type (
@@ -33,9 +34,17 @@ type (
 		EffectiveScale            float64  `json:"effective_scale_factor"`
 		EffectiveAnalyzeThreshold int64    `json:"effective_analyze_threshold"`
 		EffectiveAnalyzeScale     float64  `json:"effective_analyze_scale_factor"`
-		AnalyzeTriggerAt          float64  `json:"analyze_trigger_at"`
-		AutovacuumEnabled         bool     `json:"autovacuum_enabled"`
-		Recommendations           []string `json:"recommendations,omitempty"`
+		AnalyzeTriggerAt          float64    `json:"analyze_trigger_at"`
+		AutovacuumEnabled         bool       `json:"autovacuum_enabled"`
+		LastVacuum                *time.Time `json:"last_vacuum,omitempty"`
+		LastAutovacuum            *time.Time `json:"last_autovacuum,omitempty"`
+		LastAnalyze               *time.Time `json:"last_analyze,omitempty"`
+		LastAutoanalyze           *time.Time `json:"last_autoanalyze,omitempty"`
+		VacuumCount               int64      `json:"vacuum_count"`
+		AutovacuumCount           int64      `json:"autovacuum_count"`
+		AnalyzeCount              int64      `json:"analyze_count"`
+		AutoanalyzeCount          int64      `json:"autoanalyze_count"`
+		Recommendations           []string   `json:"recommendations,omitempty"`
 	}
 )
 
@@ -186,6 +195,16 @@ func AnalyzeVacuumHealth(a *AnnotatedSchema) []VacuumHealth {
 			EffectiveAnalyzeScale:     analyzeScaleFactor,
 			AnalyzeTriggerAt:          analyzeTrigger,
 			AutovacuumEnabled:         avEnabled,
+		}
+		if activity != nil {
+			vh.LastVacuum = activity.LastVacuum
+			vh.LastAutovacuum = activity.LastAutovacuum
+			vh.LastAnalyze = activity.LastAnalyze
+			vh.LastAutoanalyze = activity.LastAutoanalyze
+			vh.VacuumCount = activity.VacuumCount
+			vh.AutovacuumCount = activity.AutovacuumCount
+			vh.AnalyzeCount = activity.AnalyzeCount
+			vh.AutoanalyzeCount = activity.AutoanalyzeCount
 		}
 
 		if !avEnabled {
