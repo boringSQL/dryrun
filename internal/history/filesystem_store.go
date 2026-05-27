@@ -167,48 +167,55 @@ func (f *FilesystemStore) List(ctx context.Context, key SnapshotKey, kind Snapsh
 
 	var out []SnapshotSummary
 	for _, b := range bundles {
-		switch kind.Tag {
-		case KindSchema:
-			s := b.Schema
-			if !inRange(s.Timestamp, rng) {
-				continue
-			}
+		ss, err := bundleSummaries(b, kind, rng)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ss...)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.After(out[j].Timestamp) })
+	return out, nil
+}
+
+// per-bundle summaries for one kind; shared by FilesystemStore and OCIStore so
+// the two backends report identically
+func bundleSummaries(b *Bundle, kind SnapshotKind, rng TimeRange) ([]SnapshotSummary, error) {
+	var out []SnapshotSummary
+	switch kind.Tag {
+	case KindSchema:
+		s := b.Schema
+		if inRange(s.Timestamp, rng) {
 			out = append(out, SnapshotSummary{
 				Kind: SchemaKind(), Timestamp: s.Timestamp,
 				ContentHash: s.ContentHash, SchemaRefHash: s.ContentHash,
 				Database: s.Database,
 			})
-		case KindPlanner:
-			if b.Planner == nil {
-				continue
-			}
-			if !inRange(b.Planner.Timestamp, rng) {
-				continue
-			}
+		}
+	case KindPlanner:
+		if b.Planner != nil && inRange(b.Planner.Timestamp, rng) {
 			out = append(out, SnapshotSummary{
 				Kind: PlannerKind(), Timestamp: b.Planner.Timestamp,
 				ContentHash: b.Planner.ContentHash, SchemaRefHash: b.Planner.SchemaRefHash,
 				Database: b.Planner.Database,
 			})
-		case KindActivity:
-			for label, a := range b.Activity {
-				if kind.NodeLabel != "" && kind.NodeLabel != label {
-					continue
-				}
-				if !inRange(a.Node.Timestamp, rng) {
-					continue
-				}
-				out = append(out, SnapshotSummary{
-					Kind: ActivityKind(label), Timestamp: a.Node.Timestamp,
-					ContentHash: a.ContentHash, SchemaRefHash: a.SchemaRefHash,
-					NodeLabel: label,
-				})
-			}
-		default:
-			return nil, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
 		}
+	case KindActivity:
+		for label, a := range b.Activity {
+			if kind.NodeLabel != "" && kind.NodeLabel != label {
+				continue
+			}
+			if !inRange(a.Node.Timestamp, rng) {
+				continue
+			}
+			out = append(out, SnapshotSummary{
+				Kind: ActivityKind(label), Timestamp: a.Node.Timestamp,
+				ContentHash: a.ContentHash, SchemaRefHash: a.SchemaRefHash,
+				NodeLabel: label,
+			})
+		}
+	default:
+		return nil, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.After(out[j].Timestamp) })
 	return out, nil
 }
 
@@ -285,7 +292,10 @@ func (f *FilesystemStore) ListKinds(ctx context.Context, key SnapshotKey) ([]Sna
 	if err != nil {
 		return nil, err
 	}
+	return bundleKinds(bundles), nil
+}
 
+func bundleKinds(bundles []*Bundle) []SnapshotKind {
 	var hasSchema, hasPlanner bool
 	labels := map[string]struct{}{}
 	for _, b := range bundles {
@@ -315,7 +325,7 @@ func (f *FilesystemStore) ListKinds(ctx context.Context, key SnapshotKey) ([]Sna
 	for _, label := range sortedLabels {
 		out = append(out, ActivityKind(label))
 	}
-	return out, nil
+	return out
 }
 
 func (f *FilesystemStore) ListKeys(_ context.Context) ([]SnapshotKey, error) {
