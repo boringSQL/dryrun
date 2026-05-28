@@ -247,7 +247,7 @@ See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Clau
 - **[Tutorial](TUTORIAL.md)** for offline, online, and multi-node workflows with full tool reference
 - **[Multi-node statistics](docs/multi-node-stats.md)** for cluster-wide stats collection, aggregation rules, and replica imbalance detection
 - **[Configuration reference](docs/dryrun-toml.md)** for `dryrun.toml` profiles, conventions, and lint rules
-- **[Security overview](SECURITY.md)** for the CLI/MCP split, masking, and telemetry opt-out
+- **[Security overview](SECURITY.md)** for the CLI/MCP split and masking
 - **[boringSQL](https://boringsql.com)**, the blog and project home
 - **[RegreSQL](https://github.com/boringsql/regresql)**, SQL regression testing and **`dryrun`**'s companion tool
 

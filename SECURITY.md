@@ -77,55 +77,6 @@ in the policy explicitly.
 
 Full workflow and examples: see [`MASKING-TUTORIAL.md`](MASKING-TUTORIAL.md).
 
-## Telemetry
-
-DryRun sends telemetry from the **MCP server only**. The CLI, capture,
-and snapshot commands send nothing.
-
-The MCP server emits two events per session: a `dryrun_start` when an
-agent connects, and a `dryrun_summary` when the session ends. No
-snapshot contents, no DDLs, no SQL text, no database identifiers, no column or
-table names.
-
-Example `dryrun_start` payload:
-
-```json
-{
-  "event": "dryrun_start",
-  "session_id": "00000000-0000-0000-0000-000000000001",
-  "app_version": "0.8.0",
-  "timestamp": "2026-05-25T21:00:00Z",
-  "transport": "stdio",
-  "schema_loaded": true,
-  "table_count": 12,
-  "planner_loaded": true,
-  "activity_nodes": 4
-}
-```
-
-`dryrun_summary` adds session duration and a `{tool_name: count}` map
-of which MCP tools the agent invoked. Tool names are the built-in
-DryRun tool identifiers, not anything the agent typed.
-
-**Opt out** by setting either of these in the MCP server's
-environment:
-
-```sh
-export DO_NOT_TRACK=1            # industry-standard, also honored
-export DRYRUN_TELEMETRY=off      # dryrun-specific
-```
-
-Or persist it in `dryrun.toml`:
-
-```toml
-[telemetry]
-enabled = false
-```
-
-Any of these disables the endpoint entirely. No event leaves the
-process. The env var wins over the config file, so CI runs can stay
-silent without editing checked-in TOML.
-
 ## Related documents
 
 - [`MASKING-TUTORIAL.md`](MASKING-TUTORIAL.md): masking policy
