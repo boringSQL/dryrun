@@ -2,7 +2,6 @@ package history
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,8 +10,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/klauspost/compress/zstd"
 
 	"github.com/boringsql/dryrun/internal/schema"
 )
@@ -550,36 +547,18 @@ func readBundle(path string) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	dec, err := zstd.NewReader(nil)
+	b, err := DecodeBundle(raw)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	defer dec.Close()
-	plain, err := dec.DecodeAll(raw, nil)
-	if err != nil {
-		return nil, fmt.Errorf("decompress bundle %s: %w", path, err)
-	}
-	var b Bundle
-	if err := json.Unmarshal(plain, &b); err != nil {
-		return nil, fmt.Errorf("parse bundle %s: %w", path, err)
-	}
-	if b.Activity == nil {
-		b.Activity = map[string]*schema.ActivityStatsSnapshot{}
-	}
-	return &b, nil
+	return b, nil
 }
 
 func writeBundleAtomic(path string, b *Bundle) error {
-	raw, err := json.Marshal(b)
+	compressed, err := EncodeBundle(b)
 	if err != nil {
 		return err
 	}
-	enc, err := zstd.NewWriter(nil)
-	if err != nil {
-		return err
-	}
-	defer enc.Close()
-	compressed := enc.EncodeAll(raw, nil)
 
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".bundle-*.tmp")
