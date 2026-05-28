@@ -2,6 +2,7 @@ package history
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,8 +14,13 @@ const (
 	bundleExtension  = ".json.zst"
 )
 
+// shared by BundleDir and the default remote stream so the two can't drift
+func StreamSuffix(key SnapshotKey) string {
+	return path.Join(string(key.ProjectID), string(key.DatabaseID))
+}
+
 func BundleDir(root string, key SnapshotKey) string {
-	return filepath.Join(root, string(key.ProjectID), string(key.DatabaseID))
+	return filepath.Join(root, filepath.FromSlash(StreamSuffix(key)))
 }
 
 func BundleFilename(ts time.Time, contentHash string) string {

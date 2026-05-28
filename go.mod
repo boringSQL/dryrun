@@ -10,9 +10,12 @@ require (
 	github.com/klauspost/compress v1.18.6
 	github.com/mark3labs/mcp-go v0.45.0
 	github.com/mattn/go-isatty v0.0.20
+	github.com/opencontainers/go-digest v1.0.0
+	github.com/opencontainers/image-spec v1.1.1
 	github.com/pganalyze/pg_query_go/v6 v6.2.2
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.47.0
+	oras.land/oras-go/v2 v2.6.0
 )
 
 require (
