@@ -2,8 +2,8 @@ github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/bahlo/generic-list-go v0.2.0 h1:5sz/EEAK+ls5wF+NeqDpk5+iNdMDXrh3z3nPnH1Wvgk=
 github.com/bahlo/generic-list-go v0.2.0/go.mod h1:2KvAjgMlE5NNynlg/5iLrrCCZ2+5xWbdbCW3pNTGyYg=
-github.com/boringsql/fixturize v0.6.0 h1:t+2CiO+mmaVMaTmFRaodNMK4A7LW+xI+3TO0qo9RhX4=
-github.com/boringsql/fixturize v0.6.0/go.mod h1:ACmNFJBq7a9yar4GYkNBh8sRWDBew/85BYdZCFfS6Vs=
+github.com/boringsql/fixturize v0.7.0 h1:qvqYFKgKFsmG9U0OBzrqqBKmOT+eCOKpBO1qGfECoIs=
+github.com/boringsql/fixturize v0.7.0/go.mod h1:ACmNFJBq7a9yar4GYkNBh8sRWDBew/85BYdZCFfS6Vs=
 github.com/boringsql/queries v1.6.1 h1:J/vImXYdisC+tlQNYt45O6CG6RX/MiIDR8j5/k6rQGk=
 github.com/boringsql/queries v1.6.1/go.mod h1:zRQzwzZZ8e9o8PZWTKMxPqxTTg8hGvvinwitEBd0FCQ=
 github.com/buger/jsonparser v1.1.1 h1:2PnMjfWD7wBILjqQbt530v576A/cAbQvEW9gGIpYMUs=
