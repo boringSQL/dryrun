@@ -9,7 +9,6 @@ import (
 
 	"github.com/boringsql/queries"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // scanAll wraps the standard rows.Next loop. The scan callback receives the
@@ -27,7 +26,7 @@ func scanAll[T any](rows pgx.Rows, scan func(pgx.Rows) (T, error)) ([]T, error) 
 	return out, rows.Err()
 }
 
-func query(ctx context.Context, pool *pgxpool.Pool, name string) (pgx.Rows, error) {
+func query(ctx context.Context, pool Querier, name string) (pgx.Rows, error) {
 	return pool.Query(ctx, q(name))
 }
 
@@ -48,7 +47,7 @@ func q(name string) string {
 }
 
 // DDL-only introspection; planner/activity stats now flow through CapturePlannerStats / CaptureActivityStats
-func IntrospectSchema(ctx context.Context, pool *pgxpool.Pool) (*SchemaSnapshot, error) {
+func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error) {
 	var pgVersion string
 	if err := pool.QueryRow(ctx, "SELECT version()").Scan(&pgVersion); err != nil {
 		return nil, fmt.Errorf("query pg version: %w", err)
@@ -253,7 +252,7 @@ type (
 
 // Fetchers - each uses a named query from sql/introspect.sql
 
-func fetchTables(ctx context.Context, pool *pgxpool.Pool) ([]rawTable, error) {
+func fetchTables(ctx context.Context, pool Querier) ([]rawTable, error) {
 	rows, err := query(ctx, pool, "fetch-tables")
 	if err != nil {
 		return nil, err
@@ -267,7 +266,7 @@ func fetchTables(ctx context.Context, pool *pgxpool.Pool) ([]rawTable, error) {
 	})
 }
 
-func fetchColumns(ctx context.Context, pool *pgxpool.Pool) ([]rawColumn, error) {
+func fetchColumns(ctx context.Context, pool Querier) ([]rawColumn, error) {
 	rows, err := query(ctx, pool, "fetch-columns")
 	if err != nil {
 		return nil, err
@@ -281,7 +280,7 @@ func fetchColumns(ctx context.Context, pool *pgxpool.Pool) ([]rawColumn, error) 
 	})
 }
 
-func fetchConstraints(ctx context.Context, pool *pgxpool.Pool) ([]rawConstraint, error) {
+func fetchConstraints(ctx context.Context, pool Querier) ([]rawConstraint, error) {
 	rows, err := query(ctx, pool, "fetch-constraints")
 	if err != nil {
 		return nil, err
@@ -295,7 +294,7 @@ func fetchConstraints(ctx context.Context, pool *pgxpool.Pool) ([]rawConstraint,
 	})
 }
 
-func fetchTableComments(ctx context.Context, pool *pgxpool.Pool) ([]rawTableComment, error) {
+func fetchTableComments(ctx context.Context, pool Querier) ([]rawTableComment, error) {
 	rows, err := query(ctx, pool, "fetch-table-comments")
 	if err != nil {
 		return nil, err
@@ -309,7 +308,7 @@ func fetchTableComments(ctx context.Context, pool *pgxpool.Pool) ([]rawTableComm
 	})
 }
 
-func fetchColumnComments(ctx context.Context, pool *pgxpool.Pool) ([]rawColumnComment, error) {
+func fetchColumnComments(ctx context.Context, pool Querier) ([]rawColumnComment, error) {
 	rows, err := query(ctx, pool, "fetch-column-comments")
 	if err != nil {
 		return nil, err
@@ -323,7 +322,7 @@ func fetchColumnComments(ctx context.Context, pool *pgxpool.Pool) ([]rawColumnCo
 	})
 }
 
-func fetchEnums(ctx context.Context, pool *pgxpool.Pool) ([]EnumType, error) {
+func fetchEnums(ctx context.Context, pool Querier) ([]EnumType, error) {
 	rows, err := query(ctx, pool, "fetch-enums")
 	if err != nil {
 		return nil, err
@@ -335,7 +334,7 @@ func fetchEnums(ctx context.Context, pool *pgxpool.Pool) ([]EnumType, error) {
 	})
 }
 
-func fetchDomains(ctx context.Context, pool *pgxpool.Pool) ([]DomainType, error) {
+func fetchDomains(ctx context.Context, pool Querier) ([]DomainType, error) {
 	rows, err := query(ctx, pool, "fetch-domains")
 	if err != nil {
 		return nil, err
@@ -349,7 +348,7 @@ func fetchDomains(ctx context.Context, pool *pgxpool.Pool) ([]DomainType, error)
 	})
 }
 
-func fetchComposites(ctx context.Context, pool *pgxpool.Pool) ([]CompositeType, error) {
+func fetchComposites(ctx context.Context, pool Querier) ([]CompositeType, error) {
 	rows, err := pool.Query(ctx, q("fetch-composites"))
 	if err != nil {
 		return nil, err
@@ -400,7 +399,7 @@ func fetchComposites(ctx context.Context, pool *pgxpool.Pool) ([]CompositeType, 
 	return out, nil
 }
 
-func fetchIndexes(ctx context.Context, pool *pgxpool.Pool) ([]rawIndex, error) {
+func fetchIndexes(ctx context.Context, pool Querier) ([]rawIndex, error) {
 	rows, err := query(ctx, pool, "fetch-indexes")
 	if err != nil {
 		return nil, err
@@ -432,7 +431,7 @@ func fetchIndexes(ctx context.Context, pool *pgxpool.Pool) ([]rawIndex, error) {
 	})
 }
 
-func fetchPartitionInfo(ctx context.Context, pool *pgxpool.Pool) ([]rawPartitionInfo, error) {
+func fetchPartitionInfo(ctx context.Context, pool Querier) ([]rawPartitionInfo, error) {
 	rows, err := query(ctx, pool, "fetch-partition-info")
 	if err != nil {
 		return nil, err
@@ -446,7 +445,7 @@ func fetchPartitionInfo(ctx context.Context, pool *pgxpool.Pool) ([]rawPartition
 	})
 }
 
-func fetchPartitionChildren(ctx context.Context, pool *pgxpool.Pool) ([]rawPartitionChild, error) {
+func fetchPartitionChildren(ctx context.Context, pool Querier) ([]rawPartitionChild, error) {
 	rows, err := query(ctx, pool, "fetch-partition-children")
 	if err != nil {
 		return nil, err
@@ -466,7 +465,7 @@ func fetchPartitionChildren(ctx context.Context, pool *pgxpool.Pool) ([]rawParti
 	})
 }
 
-func fetchPolicies(ctx context.Context, pool *pgxpool.Pool) ([]rawPolicy, error) {
+func fetchPolicies(ctx context.Context, pool Querier) ([]rawPolicy, error) {
 	rows, err := query(ctx, pool, "fetch-policies")
 	if err != nil {
 		return nil, err
@@ -480,7 +479,7 @@ func fetchPolicies(ctx context.Context, pool *pgxpool.Pool) ([]rawPolicy, error)
 	})
 }
 
-func fetchTriggers(ctx context.Context, pool *pgxpool.Pool) ([]rawTrigger, error) {
+func fetchTriggers(ctx context.Context, pool Querier) ([]rawTrigger, error) {
 	rows, err := query(ctx, pool, "fetch-triggers")
 	if err != nil {
 		return nil, err
@@ -495,7 +494,7 @@ func fetchTriggers(ctx context.Context, pool *pgxpool.Pool) ([]rawTrigger, error
 }
 
 
-func fetchViews(ctx context.Context, pool *pgxpool.Pool) ([]View, error) {
+func fetchViews(ctx context.Context, pool Querier) ([]View, error) {
 	rows, err := query(ctx, pool, "fetch-views")
 	if err != nil {
 		return nil, err
@@ -513,7 +512,7 @@ func fetchViews(ctx context.Context, pool *pgxpool.Pool) ([]View, error) {
 	})
 }
 
-func fetchFunctions(ctx context.Context, pool *pgxpool.Pool) ([]Function, error) {
+func fetchFunctions(ctx context.Context, pool Querier) ([]Function, error) {
 	rows, err := query(ctx, pool, "fetch-functions")
 	if err != nil {
 		return nil, err
@@ -541,7 +540,7 @@ func fetchFunctions(ctx context.Context, pool *pgxpool.Pool) ([]Function, error)
 	})
 }
 
-func fetchExtensions(ctx context.Context, pool *pgxpool.Pool) ([]Extension, error) {
+func fetchExtensions(ctx context.Context, pool Querier) ([]Extension, error) {
 	rows, err := query(ctx, pool, "fetch-extensions")
 	if err != nil {
 		return nil, err
@@ -553,7 +552,7 @@ func fetchExtensions(ctx context.Context, pool *pgxpool.Pool) ([]Extension, erro
 	})
 }
 
-func fetchGUCs(ctx context.Context, pool *pgxpool.Pool) ([]GucSetting, error) {
+func fetchGUCs(ctx context.Context, pool Querier) ([]GucSetting, error) {
 	rows, err := query(ctx, pool, "fetch-gucs")
 	if err != nil {
 		return nil, err

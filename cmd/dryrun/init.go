@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 
@@ -34,22 +35,42 @@ type initWriter interface {
 	PutActivity(ctx context.Context, key history.SnapshotKey, a *schema.ActivityStatsSnapshot) (history.PutOutcome, error)
 }
 
-type pgxCapturer struct{ pool *pgxpool.Pool }
+// one REPEATABLE READ, READ ONLY tx (as pg_dump uses) for the whole capture:
+// consistent snapshot, no writes, one connection
+type pgxCapturer struct{ tx pgx.Tx }
+
+func newPgxCapturer(ctx context.Context, pool *pgxpool.Pool) (pgxCapturer, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return pgxCapturer{}, fmt.Errorf("begin read-only transaction: %w", err)
+	}
+	return pgxCapturer{tx: tx}, nil
+}
+
+// read-only, so there is nothing to commit; rollback releases the snapshot
+func (c pgxCapturer) Close(ctx context.Context) {
+	if err := c.tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		slog.Warn("rollback capture transaction", "error", err)
+	}
+}
 
 func (c pgxCapturer) IsStandby(ctx context.Context) (bool, error) {
-	return schema.FetchIsStandby(ctx, c.pool)
+	return schema.FetchIsStandby(ctx, c.tx)
 }
 
 func (c pgxCapturer) Introspect(ctx context.Context) (*schema.SchemaSnapshot, error) {
-	return schema.IntrospectSchema(ctx, c.pool)
+	return schema.IntrospectSchema(ctx, c.tx)
 }
 
 func (c pgxCapturer) CapturePlanner(ctx context.Context, schemaRefHash string) (*schema.PlannerStatsSnapshot, error) {
-	return schema.CapturePlannerStats(ctx, c.pool, schemaRefHash)
+	return schema.CapturePlannerStats(ctx, c.tx, schemaRefHash)
 }
 
 func (c pgxCapturer) CaptureActivity(ctx context.Context, schemaRefHash, source string) (*schema.ActivityStatsSnapshot, error) {
-	return schema.CaptureActivityStats(ctx, c.pool, schemaRefHash, source)
+	return schema.CaptureActivityStats(ctx, c.tx, schemaRefHash, source)
 }
 
 // init owns the masking flag surface; other subcommands don't mask anything.
@@ -98,6 +119,12 @@ func initCmd() *cobra.Command {
 			}
 			defer conn.Close()
 
+			cap, err := newPgxCapturer(ctx, conn.Pool())
+			if err != nil {
+				return err
+			}
+			defer cap.Close(ctx)
+
 			store, err := openHistoryStore("")
 			if err != nil {
 				return fmt.Errorf("open history store: %w", err)
@@ -113,7 +140,7 @@ func initCmd() *cobra.Command {
 				slog.Warn("masking disabled by --no-masks; raw planner stats will be written to history.db")
 			}
 
-			return runInitCapture(ctx, pgxCapturer{pool: conn.Pool()}, store, key, dataDir, initOptions{
+			return runInitCapture(ctx, cap, store, key, dataDir, initOptions{
 				AllowReplica: allowReplica,
 				Source:       source,
 				Policy:       policy,

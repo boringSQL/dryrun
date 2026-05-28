@@ -6,11 +6,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Sizing + per-column pg_stats; schema_ref ties it back to a DDL snapshot
-func CapturePlannerStats(ctx context.Context, pool *pgxpool.Pool, schemaRefHash string) (*PlannerStatsSnapshot, error) {
+func CapturePlannerStats(ctx context.Context, pool Querier, schemaRefHash string) (*PlannerStatsSnapshot, error) {
 	var database string
 	if err := pool.QueryRow(ctx, "SELECT current_database()").Scan(&database); err != nil {
 		return nil, fmt.Errorf("query current_database: %w", err)
@@ -42,7 +41,7 @@ func CapturePlannerStats(ctx context.Context, pool *pgxpool.Pool, schemaRefHash 
 }
 
 // Per-node activity counters; source identifies the producing node
-func CaptureActivityStats(ctx context.Context, pool *pgxpool.Pool, schemaRefHash, source string) (*ActivityStatsSnapshot, error) {
+func CaptureActivityStats(ctx context.Context, pool Querier, schemaRefHash, source string) (*ActivityStatsSnapshot, error) {
 	node, err := CaptureNodeIdentity(ctx, pool, source)
 	if err != nil {
 		return nil, err
@@ -66,7 +65,7 @@ func CaptureActivityStats(ctx context.Context, pool *pgxpool.Pool, schemaRefHash
 	return snap, nil
 }
 
-func CaptureNodeIdentity(ctx context.Context, pool *pgxpool.Pool, source string) (*NodeIdentity, error) {
+func CaptureNodeIdentity(ctx context.Context, pool Querier, source string) (*NodeIdentity, error) {
 	var (
 		isStandby bool
 		pgVersion string
@@ -82,7 +81,7 @@ func CaptureNodeIdentity(ctx context.Context, pool *pgxpool.Pool, source string)
 	}, nil
 }
 
-func fetchPlannerTableSizing(ctx context.Context, pool *pgxpool.Pool) ([]TableSizingEntry, error) {
+func fetchPlannerTableSizing(ctx context.Context, pool Querier) ([]TableSizingEntry, error) {
 	rows, err := pool.Query(ctx, q("fetch-planner-table-sizing"))
 	if err != nil {
 		return nil, err
@@ -99,7 +98,7 @@ func fetchPlannerTableSizing(ctx context.Context, pool *pgxpool.Pool) ([]TableSi
 	})
 }
 
-func fetchPlannerIndexSizing(ctx context.Context, pool *pgxpool.Pool) ([]IndexSizingEntry, error) {
+func fetchPlannerIndexSizing(ctx context.Context, pool Querier) ([]IndexSizingEntry, error) {
 	rows, err := pool.Query(ctx, q("fetch-planner-index-sizing"))
 	if err != nil {
 		return nil, err
@@ -114,7 +113,7 @@ func fetchPlannerIndexSizing(ctx context.Context, pool *pgxpool.Pool) ([]IndexSi
 	})
 }
 
-func fetchPlannerColumnStats(ctx context.Context, pool *pgxpool.Pool) ([]ColumnStatsEntry, error) {
+func fetchPlannerColumnStats(ctx context.Context, pool Querier) ([]ColumnStatsEntry, error) {
 	rows, err := pool.Query(ctx, q("fetch-planner-column-stats"))
 	if err != nil {
 		return nil, err
@@ -131,7 +130,7 @@ func fetchPlannerColumnStats(ctx context.Context, pool *pgxpool.Pool) ([]ColumnS
 	})
 }
 
-func fetchActivityTables(ctx context.Context, pool *pgxpool.Pool) ([]TableActivityEntry, error) {
+func fetchActivityTables(ctx context.Context, pool Querier) ([]TableActivityEntry, error) {
 	rows, err := pool.Query(ctx, q("fetch-activity-tables"))
 	if err != nil {
 		return nil, err
@@ -153,7 +152,7 @@ func fetchActivityTables(ctx context.Context, pool *pgxpool.Pool) ([]TableActivi
 	})
 }
 
-func fetchActivityIndexes(ctx context.Context, pool *pgxpool.Pool) ([]IndexActivityEntry, error) {
+func fetchActivityIndexes(ctx context.Context, pool Querier) ([]IndexActivityEntry, error) {
 	rows, err := pool.Query(ctx, q("fetch-activity-indexes"))
 	if err != nil {
 		return nil, err
@@ -168,7 +167,7 @@ func fetchActivityIndexes(ctx context.Context, pool *pgxpool.Pool) ([]IndexActiv
 	})
 }
 
-func FetchIsStandby(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
+func FetchIsStandby(ctx context.Context, pool Querier) (bool, error) {
 	var b bool
 	err := pool.QueryRow(ctx, "SELECT pg_catalog.pg_is_in_recovery()").Scan(&b)
 	return b, err

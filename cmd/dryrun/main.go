@@ -346,6 +346,12 @@ func snapshotCmd() *cobra.Command {
 			}
 			defer conn.Close()
 
+			cap, err := newPgxCapturer(cmd.Context(), conn.Pool())
+			if err != nil {
+				return err
+			}
+			defer cap.Close(cmd.Context())
+
 			store, err := openHistoryStore(historyDB)
 			if err != nil {
 				return err
@@ -361,7 +367,7 @@ func snapshotCmd() *cobra.Command {
 				slog.Warn("masking disabled by --no-masks; raw planner stats will be written to history.db")
 			}
 
-			snap, planner, activity, masked, err := runSnapshotTake(cmd.Context(), pgxCapturer{pool: conn.Pool()}, store, key, policy)
+			snap, planner, activity, masked, err := runSnapshotTake(cmd.Context(), cap, store, key, policy)
 			if err != nil {
 				return err
 			}

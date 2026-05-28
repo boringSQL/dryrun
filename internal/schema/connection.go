@@ -6,10 +6,18 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/boringsql/dryrun/internal/dryrun"
 )
+
+// satisfied by both *pgxpool.Pool and pgx.Tx, so capture can run straight on
+// the pool or inside a read-only tx
+type Querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
 
 type DryRun struct {
 	pool *pgxpool.Pool

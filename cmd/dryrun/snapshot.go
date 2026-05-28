@@ -42,13 +42,19 @@ func snapshotActivityCmd() *cobra.Command {
 			}
 			defer conn.Close()
 
+			cap, err := newPgxCapturer(ctx, conn.Pool())
+			if err != nil {
+				return err
+			}
+			defer cap.Close(ctx)
+
 			store, err := openHistoryStore(historyDB)
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			return runSnapshotActivity(ctx, pgxCapturer{pool: conn.Pool()}, store, resolveSnapshotKey(), activityOptions{
+			return runSnapshotActivity(ctx, cap, store, resolveSnapshotKey(), activityOptions{
 				Label:       label,
 				AllowOrphan: allowOrphan,
 			})
