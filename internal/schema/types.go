@@ -243,7 +243,7 @@ type StaleStatsEntry struct {
 	LastAnalyzedDaysAgo *int64 `json:"last_analyzed_days_ago,omitempty"`
 }
 
-// Walks MergedActivity per-node looking for tables without a recent (auto)analyze
+// Skip standbys: pg_statistic replicates via WAL but pg_stat_user_tables timestamps are per-node and autoanalyze never runs there.
 func DetectStaleStats(a *AnnotatedSchema, staleDays int64) []StaleStatsEntry {
 	if a == nil || a.Merged == nil {
 		return nil
@@ -253,6 +253,9 @@ func DetectStaleStats(a *AnnotatedSchema, staleDays int64) []StaleStatsEntry {
 	var entries []StaleStatsEntry
 
 	for _, n := range a.Merged.Nodes {
+		if n.Node.IsStandby {
+			continue
+		}
 		for _, ts := range n.Tables {
 			var lastAnalyzed *time.Time
 			if ts.Activity.LastAnalyze != nil {
