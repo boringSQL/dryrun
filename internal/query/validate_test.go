@@ -356,3 +356,67 @@ func TestNonPartitionedTableNoWarning(t *testing.T) {
 		}
 	}
 }
+
+// issue #32: pg_query treats DO/function bodies as opaque strings, so the
+// body escapes static validation. We can't catch the runtime error, but we
+// must at least warn that the body wasn't checked instead of claiming clean.
+func TestDoBlockBodyNotValidatedWarning(t *testing.T) {
+	snap := testSchema()
+	sql := `DO $$
+BEGIN
+  RAISE EXCEPTION 'bad format output: %', format('value %s %s', 'one');
+END
+$$;`
+	result, err := ValidateQuery(sql, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w.Message, "DO body") && strings.Contains(w.Message, "not statically validated") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected DO body not-validated warning, got %+v", result.Warnings)
+	}
+}
+
+func TestPlpgsqlFunctionBodyNotValidatedWarning(t *testing.T) {
+	snap := testSchema()
+	cases := []struct {
+		sql  string
+		kind string
+	}{
+		{`CREATE FUNCTION f() RETURNS void AS $$ BEGIN RETURN; END $$ LANGUAGE plpgsql;`, "CREATE FUNCTION body"},
+		{`CREATE PROCEDURE p() AS $$ BEGIN NULL; END $$ LANGUAGE plpgsql;`, "CREATE PROCEDURE body"},
+	}
+	for _, tc := range cases {
+		result, err := ValidateQuery(tc.sql, snap)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.kind, err)
+		}
+		found := false
+		for _, w := range result.Warnings {
+			if strings.Contains(w.Message, tc.kind) && strings.Contains(w.Message, "plpgsql") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected %q warning, got %+v", tc.kind, result.Warnings)
+		}
+	}
+}
+
+func TestPlainSelectNoBodyWarning(t *testing.T) {
+	snap := testSchema()
+	result, err := ValidateQuery("SELECT id FROM users", snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(w.Message, "not statically validated") {
+			t.Errorf("unexpected body warning on plain SELECT: %s", w.Message)
+		}
+	}
+}
