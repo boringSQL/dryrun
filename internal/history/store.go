@@ -18,8 +18,8 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
-// database version that goes into PRAGMA
-const HistorySchemaVersion = 1
+// PRAGMA user_version; 1-2 were the rust codebase, need to restart from 3
+const HistorySchemaVersion = 3
 
 type (
 	Compat int
