@@ -46,14 +46,54 @@ No database connection needed. The assistant never sees credentials.
 
 **The server should do analysis, not pass-through.** Returning raw `\d+` output is marginally better than pasting it into the chat yourself. The value is in *interpreting* that data: checking whether a migration is safe for your PostgreSQL version, flagging missing FK indexes, and validating column references against the actual schema.
 
-## 30-second demo
+## Install
 
-Point **`dryrun`** at any schema JSON file (see [examples/demo](examples/demo/) for a ready-made one):
+**Homebrew:**
 
 ```sh
-cd examples/demo
+brew install boringsql/boringsql/dryrun
+```
+
+**npm / npx:**
+
+If you already have Node, you can run `dryrun` without installing anything:
+
+```sh
+npx @boringsql/dryrun --version
+```
+
+That fetches the prebuilt binary for your platform (darwin-arm64, linux-x64, linux-arm64), caches it, and prints the version. To put `dryrun` permanently on your PATH:
+
+```sh
+npm install -g @boringsql/dryrun
+dryrun --version
+```
+
+The npm package wraps the same Go binary; every CLI command works identically. Commands like `lint` need a schema snapshot first — see [Quickstart](#quickstart). Prebuilt binaries cover macOS (Apple Silicon + Intel), Linux (x64 + arm64), and Windows x64. On other platforms (Alpine/musl, Windows arm64), use Homebrew or build from source.
+
+**From source:**
+
+Requires Go 1.26+. If you don't have it, install via [go.dev/dl](https://go.dev/dl/).
+
+```sh
+git clone https://github.com/boringsql/dryrun.git
+cd dryrun
+go build -o bin/dryrun ./cmd/dryrun
+```
+
+The binary is at `bin/dryrun`.
+
+## 30-second demo
+
+With `dryrun` installed, lint a ready-made schema snapshot from a clone of this repo, no database and no setup:
+
+```sh
+git clone https://github.com/boringsql/dryrun.git
+cd dryrun/examples/demo
 dryrun lint
 ```
+
+(Installed via npm or Homebrew but didn't clone the repo? You won't have `examples/demo` — jump to [Quickstart](#quickstart) to point `dryrun` at your own schema. The sample output below is what `lint` produces.)
 
 ```
 [ERROR] public.audit_log: table has no primary key
@@ -74,27 +114,7 @@ dryrun lint
 22 violation(s): 6 error, 16 warning, 0 info (13 tables checked)
 ```
 
-No database needed. Works entirely from the JSON file.
-
-## Install
-
-**Homebrew:**
-
-```sh
-brew install boringsql/boringsql/dryrun
-```
-
-**From source:**
-
-Requires Go 1.26+. If you don't have it, install via [go.dev/dl](https://go.dev/dl/).
-
-```sh
-git clone https://github.com/boringsql/dryrun.git
-cd dryrun
-go build -o bin/dryrun ./cmd/dryrun
-```
-
-The binary is at `bin/dryrun`.
+No database needed. Works entirely from the offline snapshot.
 
 ## Quickstart
 
@@ -234,6 +254,25 @@ If you built from source, use the full path to the binary:
 
 ```sh
 claude mcp add dryrun -- /path/to/dryrun mcp-serve
+```
+
+Or, with no install at all, point the client at `npx`:
+
+```sh
+claude mcp add dryrun -- npx -y @boringsql/dryrun mcp-serve
+```
+
+The raw client config for this form is:
+
+```json
+{
+  "mcpServers": {
+    "dryrun": {
+      "command": "npx",
+      "args": ["-y", "@boringsql/dryrun", "mcp-serve"]
+    }
+  }
+}
 ```
 
 That's it. The server auto-discovers `.dryrun/schema.json` in the current project. No database credentials needed, your AI assistant gets full schema intelligence from the offline snapshot.
