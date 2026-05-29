@@ -118,11 +118,11 @@ jobs:
       - name: Publish platform packages
         run: |
           for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
-            npm publish --access public npm/packages/$t
+            npm publish --access public ./npm/packages/$t
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish launcher package
-        run: npm publish --access public npm/dryrun
+        run: npm publish --access public ./npm/dryrun
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
