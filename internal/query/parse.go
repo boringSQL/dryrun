@@ -18,11 +18,18 @@ type (
 		FilterColumns      []FilterColumn      `json:"filter_columns"`
 		FuncWrappedColumns []FuncWrappedColumn `json:"func_wrapped_columns,omitempty"`
 		UpdateTargets      []string            `json:"update_targets,omitempty"`
+		ProceduralBodies   []ProceduralBody    `json:"procedural_bodies,omitempty"`
 		HasSelectStar      bool                `json:"has_select_star"`
 		HasLimit           bool                `json:"has_limit"`
 		HasWhere           bool                `json:"has_where"`
 		HasJoin            bool                `json:"has_join"`
 		StatementType      string              `json:"statement_type"`
+	}
+
+	// body content is opaque to pg_query, so it escapes static validation.
+	ProceduralBody struct {
+		Kind     string `json:"kind"`     // "DO", "CREATE FUNCTION", "CREATE PROCEDURE"
+		Language string `json:"language"` // e.g. "plpgsql"
 	}
 
 	ReferencedTable struct {
@@ -54,6 +61,7 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 		tables             []ReferencedTable
 		filterColumns      []FilterColumn
 		funcWrappedColumns []FuncWrappedColumn
+		proceduralBodies   []ProceduralBody
 		updateTargets      []string
 		hasSelectStar      bool
 		hasJoin            bool
@@ -101,6 +109,26 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 			if n.DeleteStmt.WhereClause != nil {
 				hasWhere = true
 			}
+		case *pg_query.Node_DoStmt:
+			if stmtType == "" {
+				stmtType = "DO"
+			}
+			proceduralBodies = append(proceduralBodies, ProceduralBody{
+				Kind:     "DO",
+				Language: doStmtLanguage(n.DoStmt),
+			})
+		case *pg_query.Node_CreateFunctionStmt:
+			kind := "CREATE FUNCTION"
+			if n.CreateFunctionStmt.IsProcedure {
+				kind = "CREATE PROCEDURE"
+			}
+			if stmtType == "" {
+				stmtType = kind
+			}
+			proceduralBodies = append(proceduralBodies, ProceduralBody{
+				Kind:     kind,
+				Language: createFunctionLanguage(n.CreateFunctionStmt),
+			})
 		}
 
 		// WHERE for func-wrapped columns (date_trunc(col), col::date, ...)
@@ -175,6 +203,7 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 			HasJoin:            hasJoin,
 			FuncWrappedColumns: funcWrappedColumns,
 			UpdateTargets:      updateTargets,
+			ProceduralBodies:   proceduralBodies,
 			StatementType:      stmtType,
 		},
 	}, nil
@@ -442,6 +471,37 @@ func extractTypeName(tn *pg_query.TypeName) string {
 	last := tn.Names[len(tn.Names)-1]
 	if s, ok := last.Node.(*pg_query.Node_String_); ok {
 		return s.String_.Sval
+	}
+	return ""
+}
+
+// DO defaults to plpgsql when no LANGUAGE is given.
+func doStmtLanguage(s *pg_query.DoStmt) string {
+	if s == nil {
+		return "plpgsql"
+	}
+	if lang := defElemLanguage(s.Args); lang != "" {
+		return lang
+	}
+	return "plpgsql"
+}
+
+func createFunctionLanguage(s *pg_query.CreateFunctionStmt) string {
+	if s == nil {
+		return ""
+	}
+	return defElemLanguage(s.Options)
+}
+
+func defElemLanguage(opts []*pg_query.Node) string {
+	for _, opt := range opts {
+		de, ok := opt.Node.(*pg_query.Node_DefElem)
+		if !ok || de.DefElem == nil || de.DefElem.Defname != "language" {
+			continue
+		}
+		if s, ok := de.DefElem.Arg.Node.(*pg_query.Node_String_); ok {
+			return strings.ToLower(s.String_.Sval)
+		}
 	}
 	return ""
 }

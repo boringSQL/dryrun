@@ -16,6 +16,23 @@ func detectAntipatterns(parsed *ParsedQuery, snap *schema.SchemaSnapshot, warnin
 	detectDMLWithoutWhere(parsed, warnings)
 	detectPartitionKeyAntipatterns(parsed, snap, warnings)
 	detectPartitionKeyUpdate(parsed, snap, warnings)
+	detectUnvalidatedProceduralBody(parsed, warnings)
+}
+
+// pg_query treats DO/function bodies as opaque strings; warn they're unchecked.
+func detectUnvalidatedProceduralBody(parsed *ParsedQuery, warnings *[]ValidationWarning) {
+	for _, b := range parsed.Info.ProceduralBodies {
+		lang := b.Language
+		if lang == "" {
+			lang = "unknown"
+		}
+		*warnings = append(*warnings, ValidationWarning{
+			Severity: SeverityWarning,
+			Message: fmt.Sprintf(
+				"%s body (language %s) is not statically validated - table/column references and runtime errors such as format() argument mismatches inside the body are not checked",
+				b.Kind, lang),
+		})
+	}
 }
 
 func detectSelectStar(parsed *ParsedQuery, warnings *[]ValidationWarning) {
