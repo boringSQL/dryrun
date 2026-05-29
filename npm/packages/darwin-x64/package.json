@@ -1,0 +1,19 @@
+{
+  "name": "@boringsql/dryrun-darwin-x64",
+  "version": "0.0.0",
+  "description": "darwin-x64 binary for dryrun",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/dryrun"
+  ],
+  "license": "BSD-2-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boringSQL/dryrun.git"
+  }
+}

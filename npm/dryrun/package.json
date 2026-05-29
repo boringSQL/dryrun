@@ -1,0 +1,39 @@
+{
+  "name": "@boringsql/dryrun",
+  "version": "0.0.0",
+  "description": "dryrun — PostgreSQL schema/query advisor and MCP server. npx launcher.",
+  "bin": {
+    "dryrun": "bin/dryrun.js"
+  },
+  "files": [
+    "bin/dryrun.js"
+  ],
+  "optionalDependencies": {
+    "@boringsql/dryrun-darwin-arm64": "0.0.0",
+    "@boringsql/dryrun-darwin-x64": "0.0.0",
+    "@boringsql/dryrun-linux-x64": "0.0.0",
+    "@boringsql/dryrun-linux-arm64": "0.0.0",
+    "@boringsql/dryrun-win32-x64": "0.0.0"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "BSD-2-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boringSQL/dryrun.git"
+  },
+  "homepage": "https://github.com/boringSQL/dryrun#readme",
+  "bugs": {
+    "url": "https://github.com/boringSQL/dryrun/issues"
+  },
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "mcp",
+    "model-context-protocol",
+    "sql",
+    "schema",
+    "dryrun"
+  ]
+}

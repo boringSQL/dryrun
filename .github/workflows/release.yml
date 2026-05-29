@@ -12,27 +12,60 @@ jobs:
         include:
           - runner: macos-latest
             target: aarch64-apple-darwin
+            node_target: darwin-arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            node_target: darwin-x64
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            node_target: linux-x64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            node_target: linux-arm64
+          - runner: windows-2022
+            target: x86_64-pc-windows-gnu
+            node_target: win32-x64
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # Windows cgo build needs a GCC toolchain (pg_query_go uses -std=gnu99)
+      - name: Set up MinGW (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+          path-type: inherit
       - name: Build
         run: |
+          ext=""
+          [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
           CGO_ENABLED=1 go build \
             -ldflags "-X main.version=${GITHUB_REF_NAME}" \
-            -o dryrun \
+            -o "dryrun${ext}" \
             ./cmd/dryrun
-          tar -cJf dry_run_cli-${{ matrix.target }}.tar.xz dryrun
+      - name: Archive (tar.xz)
+        if: runner.os != 'Windows'
+        run: tar -cJf dry_run_cli-${{ matrix.target }}.tar.xz dryrun
+      - name: Archive (zip)
+        if: runner.os == 'Windows'
+        run: 7z a dry_run_cli-${{ matrix.target }}.zip dryrun.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
-          path: dry_run_cli-${{ matrix.target }}.tar.xz
+          name: tar-${{ matrix.target }}
+          path: dry_run_cli-${{ matrix.target }}.*
+          retention-days: 1
+      # raw binary for the npm platform packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.node_target }}
+          path: dryrun${{ runner.os == 'Windows' && '.exe' || '' }}
           retention-days: 1
 
   release:
@@ -44,15 +77,52 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          pattern: tar-*
           merge-multiple: true
           path: dist/
       - name: Checksums
-        run: shasum -a 256 dist/*.tar.xz > dist/checksums.txt
+        run: cd dist && shasum -a 256 *.tar.xz *.zip > checksums.txt
       - name: Publish release
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            dist/*.tar.xz dist/checksums.txt
+            dist/*.tar.xz dist/*.zip dist/checksums.txt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  npm-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: bins/
+      - name: Stage binaries
+        run: |
+          for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            mkdir -p npm/packages/$t/bin
+            cp bins/bin-$t/dryrun npm/packages/$t/bin/dryrun
+            chmod +x npm/packages/$t/bin/dryrun
+          done
+          mkdir -p npm/packages/win32-x64/bin
+          cp bins/bin-win32-x64/dryrun.exe npm/packages/win32-x64/bin/dryrun.exe
+      - name: Set versions
+        run: node npm/scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
+      - name: Publish platform packages
+        run: |
+          for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
+            npm publish --access public npm/packages/$t
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish launcher package
+        run: npm publish --access public npm/dryrun
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

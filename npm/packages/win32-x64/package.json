@@ -1,0 +1,19 @@
+{
+  "name": "@boringsql/dryrun-win32-x64",
+  "version": "0.0.0",
+  "description": "win32-x64 binary for dryrun",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/dryrun.exe"
+  ],
+  "license": "BSD-2-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boringSQL/dryrun.git"
+  }
+}

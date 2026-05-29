@@ -1,0 +1,19 @@
+{
+  "name": "@boringsql/dryrun-linux-x64",
+  "version": "0.0.0",
+  "description": "linux-x64 binary for dryrun",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/dryrun"
+  ],
+  "license": "BSD-2-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boringSQL/dryrun.git"
+  }
+}
