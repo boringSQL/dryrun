@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -26,30 +27,29 @@ type SyncOutcome struct {
 
 func snapshotPushCmd() *cobra.Command {
 	var (
-		toPath    string
-		all       bool
-		historyDB string
+		toPath, ociRef, remoteName string
+		all                        bool
+		historyDB                  string
 	)
 	cmd := &cobra.Command{
 		Use:   "push",
-		Short: "Push snapshots from history.db to a filesystem store",
+		Short: "Push snapshots from history.db to a filesystem store or OCI registry",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if toPath == "" {
-				return fmt.Errorf("--to-path is required")
-			}
 			src, err := openHistoryStore(historyDB)
 			if err != nil {
 				return err
 			}
 			defer src.Close()
-			dst, err := history.NewFilesystemStore(toPath)
+			dst, err := resolveSyncStore(toPath, ociRef, remoteName)
 			if err != nil {
 				return err
 			}
 			return runSync(cmd.Context(), src, dst, all, os.Stdout)
 		},
 	}
-	cmd.Flags().StringVar(&toPath, "to-path", "", "destination directory (required)")
+	cmd.Flags().StringVar(&toPath, "to-path", "", "destination directory")
+	cmd.Flags().StringVar(&ociRef, "oci", "", "OCI registry base ref (e.g. ghcr.io/org/dryrun)")
+	cmd.Flags().StringVar(&remoteName, "remote", "", "configured [[remote]] name")
 	cmd.Flags().BoolVar(&all, "all", false, "sync all keys from the source")
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
 	return cmd
@@ -57,18 +57,15 @@ func snapshotPushCmd() *cobra.Command {
 
 func snapshotPullCmd() *cobra.Command {
 	var (
-		fromPath  string
-		all       bool
-		historyDB string
+		fromPath, ociRef, remoteName string
+		all                          bool
+		historyDB                    string
 	)
 	cmd := &cobra.Command{
 		Use:   "pull",
-		Short: "Pull snapshots from a filesystem store into history.db",
+		Short: "Pull snapshots from a filesystem store or OCI registry into history.db",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if fromPath == "" {
-				return fmt.Errorf("--from-path is required")
-			}
-			src, err := history.NewFilesystemStore(fromPath)
+			src, err := resolveSyncStore(fromPath, ociRef, remoteName)
 			if err != nil {
 				return err
 			}
@@ -80,10 +77,105 @@ func snapshotPullCmd() *cobra.Command {
 			return runSync(cmd.Context(), src, dst, all, os.Stdout)
 		},
 	}
-	cmd.Flags().StringVar(&fromPath, "from-path", "", "source directory (required)")
+	cmd.Flags().StringVar(&fromPath, "from-path", "", "source directory")
+	cmd.Flags().StringVar(&ociRef, "oci", "", "OCI registry base ref (e.g. ghcr.io/org/dryrun)")
+	cmd.Flags().StringVar(&remoteName, "remote", "", "configured [[remote]] name")
 	cmd.Flags().BoolVar(&all, "all", false, "sync all keys from the source")
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
 	return cmd
+}
+
+// explicit flags win; with none, fall back to the profile's configured remote.
+func resolveSyncStore(path, ociRef, remoteName string) (history.SnapshotStore, error) {
+	switch {
+	case ociRef != "" || remoteName != "":
+		return buildOCIStore(ociRef, remoteName)
+	case path != "":
+		return history.NewFilesystemStore(path)
+	default:
+		if r := profileRemote(); r != "" {
+			return buildOCIStore("", r)
+		}
+		return nil, fmt.Errorf("specify --to-path/--from-path, --oci, or --remote")
+	}
+}
+
+// --oci is a direct ref; --remote resolves base+token_env from [[remote]].
+func buildOCIStore(ociRef, remoteName string) (history.SnapshotStore, error) {
+	base := ociRef
+	var tokenEnv string
+	if base == "" {
+		_, cfg, err := loadProjectConfig()
+		if err != nil {
+			return nil, err
+		}
+		r, err := cfg.ResolveRemote(remoteName)
+		if err != nil {
+			return nil, err
+		}
+		if r.Type != "" && r.Type != "oci" {
+			return nil, fmt.Errorf("remote %q has unsupported type %q", r.Name, r.Type)
+		}
+		base, tokenEnv = r.Ref, r.TokenEnv
+	}
+	client, err := history.NewAuthClient(history.AuthConfig{TokenEnv: tokenEnv})
+	if err != nil {
+		return nil, err
+	}
+	return history.NewOCIStore(history.OCIConfig{
+		Base:      base,
+		Client:    client,
+		PlainHTTP: isLocalRegistry(base),
+		StreamFor: streamMapper(),
+	})
+}
+
+// profileRemote is the [[remote]] name a profile pins, "" if none/unresolvable.
+func profileRemote() string {
+	cwd, _ := os.Getwd()
+	_, cfg, err := loadProjectConfig()
+	if err != nil {
+		return ""
+	}
+	rp, err := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd)
+	if err != nil || rp.Remote == nil {
+		return ""
+	}
+	return *rp.Remote
+}
+
+// streamMapper maps each key to its profile's stream override, else StreamSuffix.
+func streamMapper() func(history.SnapshotKey) string {
+	cwd, _ := os.Getwd()
+	_, cfg, err := loadProjectConfig()
+	if err != nil {
+		return history.StreamSuffix
+	}
+	overrides := map[history.SnapshotKey]string{}
+	for name := range cfg.Profiles {
+		n := name
+		rp, err := cfg.ResolveProfile(nil, nil, &n, cwd)
+		if err != nil {
+			continue
+		}
+		key := rp.SnapshotKey()
+		if s := rp.Stream(); s != history.StreamSuffix(key) {
+			overrides[key] = s
+		}
+	}
+	return func(k history.SnapshotKey) string {
+		if s, ok := overrides[k]; ok {
+			return s
+		}
+		return history.StreamSuffix(k)
+	}
+}
+
+// local registries (registry:2/zot) speak http, not https
+func isLocalRegistry(ref string) bool {
+	return strings.HasPrefix(ref, "localhost") ||
+		strings.HasPrefix(ref, "127.0.0.1") ||
+		strings.HasPrefix(ref, "::1")
 }
 
 // --all takes src.ListKeys, otherwise scope is the resolved profile key.
