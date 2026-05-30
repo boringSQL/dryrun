@@ -155,6 +155,8 @@ SELECT i.indrelid::int4      AS table_oid,
        pg_catalog.pg_get_expr(i.indpred, i.indrelid) AS predicate,
        pg_catalog.pg_get_indexdef(i.indexrelid) AS definition,
        i.indnkeyatts          AS n_key_atts,
+       i.indisvalid           AS is_valid,
+       i.indisready           AS is_ready,
        -- check when index backs a UNIQUE/PK/EXCLUSION constraint
        EXISTS (
            SELECT 1 FROM pg_catalog.pg_constraint con
@@ -175,7 +177,6 @@ SELECT i.indrelid::int4      AS table_oid,
   JOIN pg_catalog.pg_am am ON am.oid = ci.relam
  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
    AND n.nspname NOT LIKE 'pg_temp_%'
-   AND NOT i.indisvalid = false
  ORDER BY i.indrelid, ci.relname
 
 -- name: fetch-table-stats
