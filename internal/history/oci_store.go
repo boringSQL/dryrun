@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	oras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/errcode"
 
 	"github.com/boringsql/dryrun/internal/schema"
 )
@@ -307,7 +309,7 @@ func (o *OCIStore) load(ctx context.Context, key SnapshotKey) (*remote.Repositor
 	})
 	if err != nil {
 		// an absent repo (never pushed to) reads as empty, not an error
-		if errors.Is(err, errdef.ErrNotFound) {
+		if isRepoAbsent(err) {
 			return repo, nil, nil
 		}
 		return nil, nil, err
@@ -316,6 +318,15 @@ func (o *OCIStore) load(ctx context.Context, key SnapshotKey) (*remote.Repositor
 		return items[i].bundle.Schema.Timestamp.After(items[j].bundle.Schema.Timestamp)
 	})
 	return repo, items, nil
+}
+
+// a never-pushed repo answers tags/list with 404 NAME_UNKNOWN, not ErrNotFound
+func isRepoAbsent(err error) bool {
+	if errors.Is(err, errdef.ErrNotFound) {
+		return true
+	}
+	var resp *errcode.ErrorResponse
+	return errors.As(err, &resp) && resp.StatusCode == http.StatusNotFound
 }
 
 func (o *OCIStore) loadBundles(ctx context.Context, key SnapshotKey) ([]*Bundle, error) {
