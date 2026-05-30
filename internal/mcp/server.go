@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/boringsql/dryrun/internal/buildinfo"
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/lint"
@@ -183,15 +184,17 @@ func (s *Server) Instructions() string {
 		metaNote += "\n\nWarning: " + *note + "."
 	}
 
+	dv := buildinfo.Get()
+
 	snap, err := s.getSchema()
 	if err != nil || snap.PgVersion == "" {
-		return "dryrun PostgreSQL schema advisor. No schema loaded yet.\n\n" + metaNote
+		return fmt.Sprintf("dryrun %s, PostgreSQL schema advisor. No schema loaded yet.\n\n%s", dv, metaNote)
 	}
 
 	ver, err := dryrun.ParsePgVersion(snap.PgVersion)
 	if err != nil {
-		return fmt.Sprintf("dryrun PostgreSQL schema advisor. Database: %s\n\n%s", snap.Database, metaNote)
+		return fmt.Sprintf("dryrun %s, PostgreSQL schema advisor. Database: %s\n\n%s", dv, snap.Database, metaNote)
 	}
 
-	return fmt.Sprintf("dryrun PostgreSQL schema advisor. PostgreSQL %s; database: %s\n\n%s", ver, snap.Database, metaNote)
+	return fmt.Sprintf("dryrun %s, PostgreSQL schema advisor. PostgreSQL %s; database: %s\n\n%s", dv, ver, snap.Database, metaNote)
 }

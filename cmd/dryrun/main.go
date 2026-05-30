@@ -7,14 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
+	"github.com/boringsql/dryrun/internal/buildinfo"
 	"github.com/boringsql/dryrun/internal/config"
 	"github.com/boringsql/dryrun/internal/diff"
 	"github.com/boringsql/dryrun/internal/history"
@@ -22,22 +21,6 @@ import (
 	drmcp "github.com/boringsql/dryrun/internal/mcp"
 	"github.com/boringsql/dryrun/internal/schema"
 )
-
-// version is set via ldflags: -X main.version=v0.1.0
-var version string
-
-func getVersion() string {
-	if version != "" {
-		return version
-	}
-	if info, ok := debug.ReadBuildInfo(); ok {
-		v := info.Main.Version
-		if v != "" && v != "(devel)" && !strings.Contains(v, "0.0.0-") {
-			return v
-		}
-	}
-	return "dev"
-}
 
 var (
 	flagDB         string
@@ -50,7 +33,7 @@ func main() {
 	root := &cobra.Command{
 		Use:     "dryrun",
 		Short:   "PostgreSQL schema intelligence",
-		Version: getVersion(),
+		Version: buildinfo.Get(),
 	}
 
 	pf := root.PersistentFlags()
@@ -62,11 +45,23 @@ func main() {
 	root.AddCommand(
 		probeCmd(), initCmd(), importCmd(), dumpSchemaCmd(),
 		lintCmd(), driftCmd(), snapshotCmd(), profileCmd(),
-		mcpServeCmd(), statsCmd(),
+		mcpServeCmd(), statsCmd(), versionCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
+	}
+}
+
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print dryrun and history schema versions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Printf("dryrun %s\n", buildinfo.Get())
+			fmt.Printf("history schema: v%d\n", history.HistorySchemaVersion)
+			return nil
+		},
 	}
 }
 
@@ -893,7 +888,7 @@ func mcpServeCmd() *cobra.Command {
 				server.SetUninitialized(candidates)
 			}
 
-			mcpSrv := mcpserver.NewMCPServer("dryrun", getVersion(),
+			mcpSrv := mcpserver.NewMCPServer("dryrun", buildinfo.Get(),
 				mcpserver.WithInstructions(server.Instructions()),
 			)
 			server.Register(mcpSrv)

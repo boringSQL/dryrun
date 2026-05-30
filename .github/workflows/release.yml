@@ -47,7 +47,7 @@ jobs:
           ext=""
           [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
           CGO_ENABLED=1 go build \
-            -ldflags "-X main.version=${GITHUB_REF_NAME}" \
+            -ldflags "-X github.com/boringsql/dryrun/internal/buildinfo.Version=${GITHUB_REF_NAME}" \
             -o "dryrun${ext}" \
             ./cmd/dryrun
       - name: Archive (tar.xz)
