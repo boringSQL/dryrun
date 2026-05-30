@@ -98,6 +98,7 @@ type Index struct {
 	Predicate       *string  `json:"predicate,omitempty"`
 	Definition      string   `json:"definition"`
 	IsValid         bool     `json:"is_valid"`
+	IsReady         bool     `json:"is_ready"`
 	BacksConstraint bool     `json:"backs_constraint,omitempty"`
 }
 

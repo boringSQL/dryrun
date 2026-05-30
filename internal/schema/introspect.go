@@ -216,6 +216,8 @@ type (
 		isPrimary       bool
 		predicate       *string
 		definition      string
+		isValid         bool
+		isReady         bool
 		backsConstraint bool
 	}
 
@@ -415,7 +417,8 @@ func fetchIndexes(ctx context.Context, pool Querier) ([]rawIndex, error) {
 		if err := r.Scan(
 			&oid, &ri.name, &ri.indexType,
 			&ri.isUnique, &ri.isPrimary, &ri.predicate,
-			&ri.definition, &nKeyAtts, &ri.backsConstraint, &allCols, &totalCols,
+			&ri.definition, &nKeyAtts, &ri.isValid, &ri.isReady,
+			&ri.backsConstraint, &allCols, &totalCols,
 		); err != nil {
 			return ri, err
 		}
@@ -648,6 +651,8 @@ func assembleTables(
 			IsPrimary:       ri.isPrimary,
 			Predicate:       ri.predicate,
 			Definition:      ri.definition,
+			IsValid:         ri.isValid,
+			IsReady:         ri.isReady,
 			BacksConstraint: ri.backsConstraint,
 		})
 	}

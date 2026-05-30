@@ -58,7 +58,8 @@ func checkDuplicateIndexes(snap *schema.SchemaSnapshot) []lint.Finding {
 		}
 		for i, a := range nonPrimary {
 			for _, b := range nonPrimary[i+1:] {
-				if !a.IsValid || !b.IsValid {
+				// invalid/not-ready (failed/in-flight CIC) isn't safe to drop
+				if !a.IsValid || !b.IsValid || !a.IsReady || !b.IsReady {
 					continue
 				}
 				if !sliceEqual(a.Columns, b.Columns) || a.IndexType != b.IndexType {

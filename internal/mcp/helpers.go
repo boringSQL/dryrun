@@ -139,7 +139,9 @@ type (
 		IsPrimary  bool     `json:"is_primary"`
 		Predicate  *string  `json:"predicate,omitempty"`
 		Definition string   `json:"definition"`
-		IsValid    bool     `json:"is_valid"`
+		// only surfaced when problematic; a healthy index omits these
+		IsValid *bool `json:"is_valid,omitempty"`
+		IsReady *bool `json:"is_ready,omitempty"`
 	}
 
 	compactTable struct {
@@ -180,7 +182,18 @@ func toCompactTable(t *schema.Table, sizing *schema.TableSizing) compactTable {
 	}
 	out.Indexes = make([]compactIndex, len(t.Indexes))
 	for i, idx := range t.Indexes {
-		out.Indexes[i] = compactIndex{idx.Name, idx.Columns, idx.IndexType, idx.IsUnique, idx.IsPrimary, idx.Predicate, idx.Definition, idx.IsValid}
+		ci := compactIndex{
+			Name: idx.Name, Columns: idx.Columns, IndexType: idx.IndexType,
+			IsUnique: idx.IsUnique, IsPrimary: idx.IsPrimary,
+			Predicate: idx.Predicate, Definition: idx.Definition,
+		}
+		if !idx.IsValid {
+			ci.IsValid = &idx.IsValid
+		}
+		if !idx.IsReady {
+			ci.IsReady = &idx.IsReady
+		}
+		out.Indexes[i] = ci
 	}
 	if pi := t.PartitionInfo; pi != nil {
 		if len(pi.Children) > 20 {

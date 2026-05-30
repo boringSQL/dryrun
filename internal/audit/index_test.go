@@ -11,7 +11,7 @@ func TestDuplicateIndexSkipsInvalid(t *testing.T) {
 	snap.Tables = []schema.Table{{
 		Schema: "public", Name: "orders",
 		Indexes: []schema.Index{
-			{Name: "idx_a", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true},
+			{Name: "idx_a", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true, IsReady: true},
 			{Name: "idx_b", Columns: []string{"user_id"}, IndexType: "btree", IsValid: false},
 		},
 	}}
@@ -26,8 +26,8 @@ func TestRedundantSkipsUniqueIndex(t *testing.T) {
 	snap.Tables = []schema.Table{{
 		Schema: "public", Name: "orders",
 		Indexes: []schema.Index{
-			{Name: "idx_unique_email", Columns: []string{"email"}, IndexType: "btree", IsUnique: true, IsValid: true},
-			{Name: "idx_email_created", Columns: []string{"email", "created_at"}, IndexType: "btree", IsValid: true},
+			{Name: "idx_unique_email", Columns: []string{"email"}, IndexType: "btree", IsUnique: true, IsValid: true, IsReady: true},
+			{Name: "idx_email_created", Columns: []string{"email", "created_at"}, IndexType: "btree", IsValid: true, IsReady: true},
 		},
 	}}
 	findings := checkRedundantIndexes(snap)
@@ -41,8 +41,8 @@ func TestNonUniqueRedundantWithUnique(t *testing.T) {
 	snap.Tables = []schema.Table{{
 		Schema: "public", Name: "orders",
 		Indexes: []schema.Index{
-			{Name: "idx_email", Columns: []string{"email"}, IndexType: "btree", IsValid: true},
-			{Name: "idx_email_unique", Columns: []string{"email"}, IndexType: "btree", IsUnique: true, IsValid: true},
+			{Name: "idx_email", Columns: []string{"email"}, IndexType: "btree", IsValid: true, IsReady: true},
+			{Name: "idx_email_unique", Columns: []string{"email"}, IndexType: "btree", IsUnique: true, IsValid: true, IsReady: true},
 		},
 	}}
 	findings := checkRedundantIndexes(snap)
@@ -59,8 +59,8 @@ func TestDuplicateIndexBothValid(t *testing.T) {
 	snap.Tables = []schema.Table{{
 		Schema: "public", Name: "orders",
 		Indexes: []schema.Index{
-			{Name: "idx_a", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true},
-			{Name: "idx_b", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true},
+			{Name: "idx_a", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true, IsReady: true},
+			{Name: "idx_b", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true, IsReady: true},
 		},
 	}}
 	findings := checkDuplicateIndexes(snap)

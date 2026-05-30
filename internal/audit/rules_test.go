@@ -21,8 +21,8 @@ func TestDuplicateIndexes(t *testing.T) {
 	snap.Tables = []schema.Table{{
 		Schema: "public", Name: "orders",
 		Indexes: []schema.Index{
-			{Name: "idx_a", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true},
-			{Name: "idx_b", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true},
+			{Name: "idx_a", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true, IsReady: true},
+			{Name: "idx_b", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true, IsReady: true},
 		},
 	}}
 	findings := checkDuplicateIndexes(snap)
@@ -147,7 +147,7 @@ func TestDuplicateIndexes_Branching(t *testing.T) {
 	}
 
 	idx := func(name string, cols []string, kind string, backs, valid bool) schema.Index {
-		return schema.Index{Name: name, Columns: cols, IndexType: kind, IsValid: valid, BacksConstraint: backs}
+		return schema.Index{Name: name, Columns: cols, IndexType: kind, IsValid: valid, IsReady: valid, BacksConstraint: backs}
 	}
 
 	t.Run("both_back_constraints_warning_no_ddl", func(t *testing.T) {
