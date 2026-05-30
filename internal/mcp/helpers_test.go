@@ -118,6 +118,70 @@ func TestInjectMeta_OfflineMode(t *testing.T) {
 	})
 }
 
+// The compact index serializer deliberately treats is_valid/is_ready as
+// "exception-only" signals. A healthy database has every index valid and
+// ready, so emitting `"is_valid": true` on all 200 indexes would be pure
+// noise that buries the one index that actually matters. Instead the compact
+// shape uses *bool pointers with omitempty and only writes the keys when the
+// underlying index is in a bad state. This test pins both halves of that
+// contract: the healthy index must omit the keys entirely, and the broken
+// index must surface them as explicit false so a diagnosing agent can see it.
+func TestToCompactTable_IndexValidityIsExceptionOnly(t *testing.T) {
+	tbl := &schema.Table{
+		Schema: "public", Name: "orders",
+		Indexes: []schema.Index{
+			// A perfectly normal, healthy index — valid and ready. We expect
+			// the serializer to stay completely silent about its flags.
+			{Name: "idx_healthy", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true, IsReady: true},
+			// A broken index — the kind of carcass a failed CREATE INDEX
+			// CONCURRENTLY leaves behind. Both flags are false and the
+			// serializer must explicitly surface them so it isn't silently
+			// mistaken for a healthy index.
+			{Name: "idx_broken", Columns: []string{"email"}, IndexType: "btree", IsValid: false, IsReady: false},
+		},
+	}
+
+	out := toCompactTable(tbl, nil)
+
+	// Round-trip through JSON because the omitempty behaviour we care about is
+	// a property of the wire encoding, not of the in-memory struct. Asserting
+	// on the decoded map is the most faithful representation of what an MCP
+	// client on the other end of the transport will actually observe.
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshalling compact table failed: %v", err)
+	}
+	var decoded struct {
+		Indexes []map[string]any `json:"indexes"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshalling compact table failed: %v\n%s", err, raw)
+	}
+	if len(decoded.Indexes) != 2 {
+		t.Fatalf("expected 2 indexes in compact output, got %d", len(decoded.Indexes))
+	}
+
+	healthy, broken := decoded.Indexes[0], decoded.Indexes[1]
+
+	// The healthy index must NOT carry either key. Their mere presence — even
+	// set to true — would defeat the entire point of the exception-only design.
+	if _, has := healthy["is_valid"]; has {
+		t.Errorf("healthy index should omit is_valid, but key was present: %v", healthy["is_valid"])
+	}
+	if _, has := healthy["is_ready"]; has {
+		t.Errorf("healthy index should omit is_ready, but key was present: %v", healthy["is_ready"])
+	}
+
+	// The broken index must carry both keys, and they must both be false so the
+	// downstream consumer can tell exactly what kind of broken it is dealing with.
+	if v, has := broken["is_valid"]; !has || v != false {
+		t.Errorf("broken index should surface is_valid=false, got present=%v value=%v", has, v)
+	}
+	if v, has := broken["is_ready"]; !has || v != false {
+		t.Errorf("broken index should surface is_ready=false, got present=%v value=%v", has, v)
+	}
+}
+
 // metaJSONResult merges the payload at the top level and injects _meta below
 // it; the body must remain valid JSON for downstream MCP transport.
 func TestMetaJSONResult_ProducesValidJSON(t *testing.T) {
