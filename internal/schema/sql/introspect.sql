@@ -168,8 +168,7 @@ SELECT i.indrelid::int4      AS table_oid,
           JOIN pg_catalog.pg_attribute a
             ON a.attrelid = i.indrelid AND a.attnum = ord.attnum
          WHERE ord.attnum > 0
-       ) AS all_col_names,
-       array_length(i.indkey, 1) AS total_cols
+       ) AS all_col_names
   FROM pg_catalog.pg_index i
   JOIN pg_catalog.pg_class ci ON ci.oid = i.indexrelid
   JOIN pg_catalog.pg_class ct ON ct.oid = i.indrelid
@@ -178,41 +177,6 @@ SELECT i.indrelid::int4      AS table_oid,
  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
    AND n.nspname NOT LIKE 'pg_temp_%'
  ORDER BY i.indrelid, ci.relname
-
--- name: fetch-table-stats
-SELECT c.oid::int4            AS table_oid,
-       c.reltuples::float8     AS reltuples,
-       COALESCE(s.n_dead_tup, 0)::int8 AS dead_tuples,
-       s.last_vacuum           AS last_vacuum,
-       s.last_autovacuum       AS last_autovacuum,
-       s.last_analyze          AS last_analyze,
-       s.last_autoanalyze      AS last_autoanalyze,
-       COALESCE(s.seq_scan, 0)::int8  AS seq_scan,
-       COALESCE(s.idx_scan, 0)::int8  AS idx_scan,
-       pg_catalog.pg_total_relation_size(c.oid)::int8 AS table_size
-  FROM pg_catalog.pg_class c
-  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-  LEFT JOIN pg_catalog.pg_stat_user_tables s
-    ON s.relid = c.oid
- WHERE c.relkind IN ('r', 'p')
-   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-   AND n.nspname NOT LIKE 'pg_temp_%'
-
--- name: fetch-column-stats
-SELECT c.oid::int4                    AS table_oid,
-       s.attname                       AS column_name,
-       s.null_frac::float8             AS null_frac,
-       s.n_distinct::float8            AS n_distinct,
-       s.most_common_vals::text        AS most_common_vals,
-       s.most_common_freqs::text       AS most_common_freqs,
-       s.histogram_bounds::text        AS histogram_bounds,
-       s.correlation::float8           AS correlation
-  FROM pg_catalog.pg_class c
-  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-  JOIN pg_catalog.pg_stats s
-    ON s.schemaname = n.nspname AND s.tablename = c.relname
- WHERE c.relkind IN ('r', 'p')
-   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
 
 -- name: fetch-partition-info
 SELECT pt.partrelid::int4       AS table_oid,
@@ -271,24 +235,6 @@ SELECT t.tgrelid::int4                AS table_oid,
    AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = t.oid AND d.deptype = 'i')
  ORDER BY t.tgrelid, t.tgname
-
--- name: fetch-index-stats
--- join via pg_class for reliable namespace resolution
-SELECT i.indrelid::int4         AS table_oid,
-       ci.relname                AS index_name,
-       COALESCE(s.idx_scan, 0)::int8  AS idx_scan,
-       COALESCE(s.idx_tup_read, 0)::int8 AS idx_tup_read,
-       COALESCE(s.idx_tup_fetch, 0)::int8 AS idx_tup_fetch,
-       pg_catalog.pg_relation_size(ci.oid)::int8 AS idx_size,
-       ci.relpages::int8         AS relpages,
-       ci.reltuples::float8      AS reltuples
-  FROM pg_catalog.pg_index i
-  JOIN pg_catalog.pg_class ci ON ci.oid = i.indexrelid
-  JOIN pg_catalog.pg_class ct ON ct.oid = i.indrelid
-  JOIN pg_catalog.pg_namespace n ON n.oid = ct.relnamespace
-  LEFT JOIN pg_catalog.pg_stat_user_indexes s ON s.indexrelid = i.indexrelid
- WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-   AND n.nspname NOT LIKE 'pg_temp_%'
 
 -- name: fetch-views
 SELECT n.nspname        AS schema_name,

@@ -408,17 +408,16 @@ func fetchIndexes(ctx context.Context, pool Querier) ([]rawIndex, error) {
 	}
 	return scanAll(rows, func(r pgx.Rows) (rawIndex, error) {
 		var (
-			oid       int32
-			ri        rawIndex
-			nKeyAtts  int16
-			allCols   []string
-			totalCols *int32
+			oid      int32
+			ri       rawIndex
+			nKeyAtts int16
+			allCols  []string
 		)
 		if err := r.Scan(
 			&oid, &ri.name, &ri.indexType,
 			&ri.isUnique, &ri.isPrimary, &ri.predicate,
 			&ri.definition, &nKeyAtts, &ri.isValid, &ri.isReady,
-			&ri.backsConstraint, &allCols, &totalCols,
+			&ri.backsConstraint, &allCols,
 		); err != nil {
 			return ri, err
 		}
