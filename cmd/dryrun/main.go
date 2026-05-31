@@ -45,7 +45,7 @@ func main() {
 	root.AddCommand(
 		probeCmd(), initCmd(), setupCmd(), importCmd(), dumpSchemaCmd(),
 		lintCmd(), driftCmd(), snapshotCmd(), profileCmd(),
-		mcpServeCmd(), statsCmd(), versionCmd(),
+		remoteCmd(), mcpServeCmd(), statsCmd(), versionCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
