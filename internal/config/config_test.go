@@ -500,6 +500,221 @@ db_url = "postgres://dev/x"
 	}
 }
 
+// TestParseRemotes: the [[remote]] array-of-tables must decode onto
+// ProjectConfig.Remotes with every field surfaced. A remote that omits
+// `type` leaves it empty (the OCI store treats "" as oci) and `default`
+// defaults to false — both are exercised here so a half-specified remote
+// can't silently acquire fields it didn't ask for.
+func TestParseRemotes(t *testing.T) {
+	toml := `
+[[remote]]
+name = "gar"
+type = "oci"
+ref = "us-docker.pkg.dev/proj/dryrun"
+token_env = "GAR_TOKEN"
+default = true
+
+[[remote]]
+name = "ghcr"
+ref = "ghcr.io/org/dryrun"
+`
+	cfg, err := Parse(toml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Remotes) != 2 {
+		t.Fatalf("expected 2 remotes, got %d", len(cfg.Remotes))
+	}
+	gar := cfg.Remotes[0]
+	if gar.Name != "gar" || gar.Type != "oci" || gar.Ref != "us-docker.pkg.dev/proj/dryrun" {
+		t.Errorf("gar fields: %+v", gar)
+	}
+	if gar.TokenEnv != "GAR_TOKEN" || !gar.Default {
+		t.Errorf("gar token_env/default: %+v", gar)
+	}
+	ghcr := cfg.Remotes[1]
+	if ghcr.Type != "" || ghcr.TokenEnv != "" || ghcr.Default {
+		t.Errorf("ghcr should leave optional fields zero: %+v", ghcr)
+	}
+}
+
+// TestProfileRemoteStreamBinding: the per-profile `remote` and `stream` keys
+// must decode onto ProfileConfig and then flow through ResolveProfile onto
+// ResolvedProfile. `stream` is a storage-location override only, so it must
+// not perturb the SnapshotKey — that stays keyed by (project, database).
+func TestProfileRemoteStreamBinding(t *testing.T) {
+	toml := `
+[project]
+id = "demo"
+
+[profiles.auth]
+db_url = "postgres://auth/x"
+database_id = "auth"
+remote = "gar"
+stream = "shared/auth"
+`
+	cfg, err := Parse(toml)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// raw decode lands verbatim on ProfileConfig
+	p := cfg.Profiles["auth"]
+	if p.Remote == nil || *p.Remote != "gar" {
+		t.Errorf("ProfileConfig.Remote: got %v, want gar", p.Remote)
+	}
+	if p.Stream == nil || *p.Stream != "shared/auth" {
+		t.Errorf("ProfileConfig.Stream: got %v, want shared/auth", p.Stream)
+	}
+
+	name := "auth"
+	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.Remote == nil || *rp.Remote != "gar" {
+		t.Errorf("ResolvedProfile.Remote: got %v, want gar", rp.Remote)
+	}
+	if rp.Stream() != "shared/auth" {
+		t.Errorf("Stream() override: got %q, want shared/auth", rp.Stream())
+	}
+	// the override must not leak into the local key
+	if k := rp.SnapshotKey(); k != (history.SnapshotKey{ProjectID: "demo", DatabaseID: "auth"}) {
+		t.Errorf("stream override perturbed SnapshotKey: %+v", k)
+	}
+}
+
+// TestStreamDefault: with no `stream` set, Stream() must reproduce
+// history.StreamSuffix(key) byte-for-byte — the default <project>/<database>
+// layout that BundleDir already uses, so anything already pushed keeps
+// resolving. An empty-string `stream` is treated as "unset", not as a literal
+// empty repo path.
+func TestStreamDefault(t *testing.T) {
+	cfg, err := Parse(`
+[project]
+id = "demo"
+
+[profiles.auth]
+db_url = "postgres://auth/x"
+database_id = "auth"
+
+[profiles.empty]
+db_url = "postgres://e/x"
+database_id = "e"
+stream = ""
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	name := "auth"
+	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := history.StreamSuffix(rp.SnapshotKey())
+	if want != "demo/auth" {
+		t.Fatalf("precondition: StreamSuffix got %q, want demo/auth", want)
+	}
+	if rp.Stream() != want {
+		t.Errorf("default Stream(): got %q, want %q", rp.Stream(), want)
+	}
+
+	empty := "empty"
+	rp, err = cfg.ResolveProfile(nil, nil, &empty, "/tmp/demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.Stream() != history.StreamSuffix(rp.SnapshotKey()) {
+		t.Errorf("empty stream should fall back to default, got %q", rp.Stream())
+	}
+}
+
+// TestResolveRemote walks the three-way selection rule:
+//   - explicit name → that remote (or a name-bearing error on a typo)
+//   - no name, single remote → the sole remote
+//   - no name, many remotes → the one marked default, else an error
+//   - no remotes at all → an error
+func TestResolveRemote(t *testing.T) {
+	many, _ := Parse(`
+[[remote]]
+name = "gar"
+ref = "us-docker.pkg.dev/p/dryrun"
+default = true
+
+[[remote]]
+name = "ghcr"
+ref = "ghcr.io/org/dryrun"
+`)
+	if r, err := many.ResolveRemote("ghcr"); err != nil || r.Name != "ghcr" {
+		t.Errorf("by name: got %v, %v", r, err)
+	}
+	if r, err := many.ResolveRemote(""); err != nil || r.Name != "gar" {
+		t.Errorf("sole default: got %v, %v", r, err)
+	}
+	if _, err := many.ResolveRemote("nope"); err == nil || !contains(err.Error(), "nope") {
+		t.Errorf("typo must name the remote: %v", err)
+	}
+
+	one, _ := Parse(`
+[[remote]]
+name = "only"
+ref = "ghcr.io/org/dryrun"
+`)
+	if r, err := one.ResolveRemote(""); err != nil || r.Name != "only" {
+		t.Errorf("single remote: got %v, %v", r, err)
+	}
+
+	ambiguous, _ := Parse(`
+[[remote]]
+name = "a"
+ref = "ghcr.io/a"
+
+[[remote]]
+name = "b"
+ref = "ghcr.io/b"
+`)
+	if _, err := ambiguous.ResolveRemote(""); err == nil {
+		t.Error("expected error for many remotes and no default")
+	}
+
+	none, _ := Parse(`[project]
+id = "x"`)
+	if _, err := none.ResolveRemote(""); err == nil {
+		t.Error("expected error when no remotes configured")
+	}
+}
+
+// TestRemoteStreamBackwardsCompat: a config with none of the new fields must
+// resolve exactly as before — no Remote pinned, Stream() at the default. This
+// pins the additive guarantee: existing dryrun.toml files keep their behavior.
+func TestRemoteStreamBackwardsCompat(t *testing.T) {
+	cfg, err := Parse(`
+[project]
+id = "demo"
+
+[profiles.dev]
+db_url = "postgres://dev/x"
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Remotes) != 0 {
+		t.Errorf("expected no remotes, got %d", len(cfg.Remotes))
+	}
+	name := "dev"
+	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.Remote != nil {
+		t.Errorf("expected nil Remote, got %q", *rp.Remote)
+	}
+	if rp.Stream() != history.StreamSuffix(rp.SnapshotKey()) {
+		t.Errorf("Stream() should equal the default, got %q", rp.Stream())
+	}
+}
+
 func TestLintConfigFromConventions(t *testing.T) {
 	toml := `
 [conventions]
