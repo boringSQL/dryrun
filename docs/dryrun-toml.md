@@ -78,6 +78,117 @@ Relative paths in `schema_file` are resolved from the project root (the director
 db_url = "postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:5432/myapp"
 ```
 
+## Remotes
+
+A remote is an OCI registry that holds snapshots for sharing. The point is to capture once and distribute: someone with database access takes a snapshot and pushes it; everyone else, and CI, pulls it and works offline. No one else needs credentials to the database.
+
+The lifecycle is three commands:
+
+```sh
+dryrun snapshot take --push      # capture from the database and publish
+dryrun snapshot pull             # fetch the latest snapshots into local history
+dryrun snapshot push             # publish snapshots already in local history
+```
+
+`push` and `pull` read the remote from the active profile, or take `--remote <name>` to pick one, or `--oci <ref>` to target a registry directly without configuring anything. The rest of this section is how you configure a remote so you don't repeat `--oci` every time.
+
+Any registry works: GitHub Container Registry, Google Artifact Registry, Amazon ECR, Docker Hub, Harbor, or a self-hosted `registry:2`/zot. A remote is one `[[remote]]` block:
+
+```toml
+[[remote]]
+name = "ghcr"
+type = "oci"
+ref = "ghcr.io/myorg/dryrun"
+default = true
+```
+
+| Key | Meaning |
+|-----|---------|
+| `name` | How you refer to it: `--remote ghcr`. |
+| `type` | `oci`. The only type today; defaults to `oci` when omitted. |
+| `ref` | Registry base path. The repository is `<ref>/<project_id>/<database_id>`. |
+| `token_env` | Name of an environment variable holding a bearer token. Optional. |
+| `default` | Use this remote when `--remote` is omitted. |
+
+`ref` names the registry and a base repository, not the final location. A snapshot belongs to a database, so dryrun appends `<project_id>/<database_id>`. With the remote above, `myapp`'s `auth` database lands at `ghcr.io/myorg/dryrun/myapp/auth`. One `ref` covers every project and database, each in its own repository. That trailing path is the `stream`, which a profile can [override](#per-profile-remote-and-stream).
+
+Declare more than one and mark one as the default:
+
+```toml
+[[remote]]
+name = "ghcr"
+ref = "ghcr.io/myorg/dryrun"
+default = true
+
+[[remote]]
+name = "gar"
+ref = "us-docker.pkg.dev/myproj/dryrun"
+```
+
+With a single remote, `--remote` is optional and resolves to it. With several, push and pull use the one marked `default`; pass `--remote` to pick another.
+
+Add and remove remotes from the command line instead of editing the file by hand:
+
+```sh
+dryrun remote add ghcr --ref ghcr.io/myorg/dryrun --default
+dryrun remote list
+dryrun remote rm ghcr
+```
+
+### Authentication
+
+By default dryrun reads `~/.docker/config.json` and any configured credential helpers, so whatever authenticates `docker push` authenticates dryrun:
+
+```sh
+docker login ghcr.io
+gcloud auth configure-docker us-docker.pkg.dev
+```
+
+For a static bearer token, set `token_env` to the name of the variable that holds it:
+
+```toml
+[[remote]]
+name = "ci"
+ref = "ghcr.io/myorg/dryrun"
+token_env = "GHCR_TOKEN"
+```
+
+dryrun reads the token from `$GHCR_TOKEN` at push and pull time, so it never appears in the config file. A `token_env` that names an unset variable is an error, not a silent fall back to anonymous access.
+
+### Per-profile remote and stream
+
+A profile can pin a remote and override where its snapshots are stored:
+
+```toml
+[profiles.prod-auth]
+db_url = "${PROD_AUTH_DATABASE_URL}"
+database_id = "auth"
+remote = "ghcr"
+stream = "shared/auth"
+```
+
+`remote` is the remote used when you run `snapshot push` or `pull` under this profile without `--remote`.
+
+`stream` is the repository path suffix under the remote's `ref`. It defaults to `<project_id>/<database_id>`, the same layout the filesystem store uses, so anything already pushed keeps resolving. It changes the storage location only: the local snapshot key stays `(project_id, database_id)`, so `lint`, `drift`, `take`, and `list` against local history are unaffected.
+
+### Sharing a database across projects
+
+A snapshot describes a database, not a project. When two projects point at the same physical database, give both the same `stream` so they read and write one shared history instead of two near-duplicates:
+
+```toml
+# project A                          # project B
+[profiles.auth]                      [profiles.auth]
+db_url = "postgres://.../auth"       db_url = "postgres://.../auth"
+database_id = "auth"                 database_id = "auth"
+remote = "gar"                       remote = "gar"
+stream = "shared/auth"               stream = "shared/auth"
+```
+
+Both profiles resolve to one repository, so the schema is stored once. Two rules come with a shared stream:
+
+- One owner takes and pushes; everyone else pulls. If both projects take snapshots on a schedule, the schema blob deduplicates but the differing timestamps and activity rows do not, leaving two near-duplicate observations per interval. Designate one CI job as the owner.
+- Retention and access live on the shared repository. Cleanup policies and IAM are per repository: grant the owner write and consumers read on `shared/auth`.
+
 ## Conventions
 
 These control what `dryrun lint` checks. Skip the whole section to use the defaults.
@@ -224,9 +335,15 @@ schema_file = ".dryrun/schema.json"
 
 [profiles.dev]
 db_url = "${DEV_DATABASE_URL}"
+remote = "ghcr"
 
 [profiles.staging]
 schema_file = ".dryrun/staging-schema.json"
+
+[[remote]]
+name = "ghcr"
+ref = "ghcr.io/myorg/dryrun"
+default = true
 
 [conventions]
 table_name = "snake_singular"
