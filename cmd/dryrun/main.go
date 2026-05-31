@@ -331,6 +331,10 @@ func snapshotCmd() *cobra.Command {
 		c.Flags().StringVar(&historyDB, "history-db", "", "history database path")
 	}
 
+	var (
+		pushAfter  bool
+		pushRemote string
+	)
 	takeCmd := &cobra.Command{
 		Use:   "take",
 		Short: "Take a new snapshot (schema + planner + activity; primary only)",
@@ -375,6 +379,14 @@ func snapshotCmd() *cobra.Command {
 			}
 			fmt.Printf("Activity stats saved: %s (label=primary, %d tables, %d indexes)\n",
 				activity.ContentHash, len(activity.Tables), len(activity.Indexes))
+
+			if pushAfter {
+				dst, err := resolveSyncStore("", "", pushRemote)
+				if err != nil {
+					return err
+				}
+				return runSync(cmd.Context(), store, dst, false, os.Stdout)
+			}
 			return nil
 		},
 	}
@@ -382,6 +394,8 @@ func snapshotCmd() *cobra.Command {
 	takeCmd.Flags().StringVar(&flagMasksFile, "masks-file", "", "path to data-masking-policy.yml")
 	takeCmd.Flags().StringSliceVar(&flagMaskPolicy, "mask-policy", nil, "masking policy name (repeatable, comma-separated)")
 	takeCmd.Flags().BoolVar(&flagNoMasks, "no-masks", false, "disable planner-stats masking (raw stats land in history.db)")
+	takeCmd.Flags().BoolVar(&pushAfter, "push", false, "push the snapshot to a remote after capture")
+	takeCmd.Flags().StringVar(&pushRemote, "remote", "", "configured [[remote]] name (with --push)")
 
 	listCmd := &cobra.Command{
 		Use:   "list",
