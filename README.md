@@ -311,7 +311,10 @@ See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Clau
 - **[CLI stability](docs/cli-stability.md)** for which commands are stable versus experimental
 - **[Security overview](SECURITY.md)** for the CLI/MCP split and masking
 - **[boringSQL](https://boringsql.com)**, the blog and project home
+- **[dryrun project page](https://boringsql.com/products/dryrun/)**, overview and docs
+- **[Don't let AI touch your production database](https://boringsql.com/posts/dont-let-ai-to-prod/)**, why most Postgres MCPs are unsafe and what `dryrun` does differently
 - **[RegreSQL](https://github.com/boringsql/regresql)**, SQL regression testing and **`dryrun`**'s companion tool
+- **[Fixturize](https://github.com/boringSQL/fixturize)**, subset and mask production data for dev/test
 
 
 ## Upgrading from 0.5.x
