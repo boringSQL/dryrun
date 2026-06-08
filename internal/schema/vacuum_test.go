@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -220,5 +221,137 @@ func TestAnalyzeVacuumHealth_HighTriggerThreshold(t *testing.T) {
 	}
 	if !hasRec {
 		t.Errorf("expected high-trigger-threshold recommendation, got %v", results[0].Recommendations)
+	}
+}
+
+// FrozenXidAge mirrors postgres' age(relfrozenxid): the forward distance in
+// transactions between the table's frozen xid and the snapshot's next-xid
+// reference. We exercise the simple case, the wraparound (modular) case, and
+// the two "not applicable" sentinels so callers can trust the bool.
+func TestFrozenXidAge(t *testing.T) {
+	const mod = int64(1) << 32
+
+	cases := []struct {
+		name        string
+		frozen      int64
+		databaseXid int64
+		wantAge     int64
+		wantOK      bool
+	}{
+		{name: "simple forward distance", frozen: 1_000, databaseXid: 201_000_000, wantAge: 200_999_000, wantOK: true},
+		{name: "freshly frozen, tiny age", frozen: 500_000, databaseXid: 500_050, wantAge: 50, wantOK: true},
+		// databaseXid wrapped past 2^32 (epoch bumped): current32 = 100, frozen at
+		// 4_000_000_000, so age = (100 - 4000000000) mod 2^32 = 294_967_396.
+		{name: "wraparound: current already past 2^32", frozen: 4_000_000_000, databaseXid: mod + 100, wantAge: 294_967_396, wantOK: true},
+		{name: "no frozen xid (partitioned parent)", frozen: 0, databaseXid: 12_345, wantAge: 0, wantOK: false},
+		{name: "no reference point", frozen: 999, databaseXid: 0, wantAge: 0, wantOK: false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := TableSizing{RelfrozenXid: c.frozen}
+			age, ok := s.FrozenXidAge(c.databaseXid)
+			if ok != c.wantOK {
+				t.Fatalf("ok=%v want %v", ok, c.wantOK)
+			}
+			if ok && age != c.wantAge {
+				t.Errorf("age=%d want %d", age, c.wantAge)
+			}
+		})
+	}
+}
+
+// A table whose relfrozenxid age has reached ~95% of autovacuum_freeze_max_age
+// must surface an anti-wraparound recommendation and populate the freeze fields.
+func TestAnalyzeVacuumHealth_WraparoundImminent(t *testing.T) {
+	a := vacuumFixture("aging", 1_000_000, 0, nil)
+	// default freeze_max_age is 200M; put the frozen xid ~190M behind the ref.
+	a.Planner.DatabaseXid = 200_000_000
+	a.Planner.Tables[0].Sizing.RelfrozenXid = 10_000_000 // age = 190M = 95%
+
+	results := AnalyzeVacuumHealth(a)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	vh := results[0]
+	if vh.XidAge != 190_000_000 {
+		t.Errorf("XidAge=%d want 190000000", vh.XidAge)
+	}
+	if vh.FreezeMaxAge != 200_000_000 {
+		t.Errorf("FreezeMaxAge=%d want 200000000", vh.FreezeMaxAge)
+	}
+	if vh.FreezeProgress < 0.94 || vh.FreezeProgress > 0.96 {
+		t.Errorf("FreezeProgress=%f want ~0.95", vh.FreezeProgress)
+	}
+	hasRec := false
+	for _, r := range vh.Recommendations {
+		if strings.Contains(r, "anti-wraparound") {
+			hasRec = true
+		}
+	}
+	if !hasRec {
+		t.Errorf("expected anti-wraparound recommendation, got %v", vh.Recommendations)
+	}
+}
+
+// Multixact wraparound mirrors the xid path: relminmxid age at ~95% of
+// autovacuum_multixact_freeze_max_age (default 400M) must surface a
+// recommendation naming relminmxid and populate the multixact freeze fields.
+func TestAnalyzeVacuumHealth_MultixactWraparoundImminent(t *testing.T) {
+	a := vacuumFixture("aging_mxid", 1_000_000, 0, nil)
+	a.Planner.DatabaseMxid = 400_000_000
+	a.Planner.Tables[0].Sizing.RelminMxid = 20_000_000 // age = 380M = 95%
+
+	vh := AnalyzeVacuumHealth(a)[0]
+	if vh.MxidAge != 380_000_000 {
+		t.Errorf("MxidAge=%d want 380000000", vh.MxidAge)
+	}
+	if vh.MultixactFreezeMaxAge != 400_000_000 {
+		t.Errorf("MultixactFreezeMaxAge=%d want 400000000", vh.MultixactFreezeMaxAge)
+	}
+	if vh.MultixactFreezeProgress < 0.94 || vh.MultixactFreezeProgress > 0.96 {
+		t.Errorf("MultixactFreezeProgress=%f want ~0.95", vh.MultixactFreezeProgress)
+	}
+	hasRec := false
+	for _, r := range vh.Recommendations {
+		if strings.Contains(r, "relminmxid") && strings.Contains(r, "anti-wraparound") {
+			hasRec = true
+		}
+	}
+	if !hasRec {
+		t.Errorf("expected multixact anti-wraparound recommendation, got %v", vh.Recommendations)
+	}
+}
+
+// Healthy frozen-xid age (well under freeze_max_age) and the partitioned-parent
+// case (relfrozenxid 0) must NOT raise a wraparound recommendation, and the
+// partitioned case must leave the freeze fields zeroed.
+func TestAnalyzeVacuumHealth_WraparoundQuiet(t *testing.T) {
+	a := vacuumFixture("young", 1_000_000, 0, nil)
+	a.Planner.DatabaseXid = 200_000_000
+	a.Planner.DatabaseMxid = 400_000_000
+	a.Planner.Tables[0].Sizing.RelfrozenXid = 190_000_000 // xid age = 10M = 5%
+	a.Planner.Tables[0].Sizing.RelminMxid = 380_000_000   // mxid age = 20M = 5%
+
+	vh := AnalyzeVacuumHealth(a)[0]
+	for _, r := range vh.Recommendations {
+		if strings.Contains(r, "anti-wraparound") {
+			t.Errorf("did not expect anti-wraparound rec at 5%%, got %v", vh.Recommendations)
+		}
+	}
+
+	// partitioned parent: relfrozenxid/relminmxid 0 means nothing to age.
+	p := vacuumFixture("parent", 1_000_000, 0, nil)
+	p.Planner.DatabaseXid = 200_000_000
+	p.Planner.DatabaseMxid = 400_000_000
+	p.Planner.Tables[0].Sizing.RelfrozenXid = 0
+	p.Planner.Tables[0].Sizing.RelminMxid = 0
+
+	pvh := AnalyzeVacuumHealth(p)[0]
+	if pvh.XidAge != 0 || pvh.FreezeMaxAge != 0 || pvh.FreezeProgress != 0 {
+		t.Errorf("expected zeroed freeze fields for partitioned parent, got %+v", pvh)
+	}
+	if pvh.MxidAge != 0 || pvh.MultixactFreezeMaxAge != 0 || pvh.MultixactFreezeProgress != 0 {
+		t.Errorf("expected zeroed multixact freeze fields for partitioned parent, got %+v", pvh)
 	}
 }
