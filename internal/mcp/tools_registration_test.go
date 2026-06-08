@@ -35,7 +35,7 @@ func TestToolsRegistration_EveryListedToolHasHandler(t *testing.T) {
 			// minimal valid args for tools that require them; everything else
 			// is fine with nil since we only care about handler resolution.
 			switch tool.Name {
-			case "describe_table", "find_related", "compare_nodes":
+			case "describe_table", "find_related":
 				req.Params.Arguments = map[string]any{"table": "users"}
 			case "search_schema":
 				req.Params.Arguments = map[string]any{"query": "users"}
@@ -89,7 +89,6 @@ func TestToolsRegistration_InputSchemaShape(t *testing.T) {
 		"find_related":    {"table"},
 		"validate_query":  {"sql"},
 		"check_migration": {"ddl"},
-		"compare_nodes":   {"table"},
 		"advise":          {"sql"},
 		"analyze_plan":    {"sql", "plan_json"},
 	}
@@ -135,7 +134,6 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 		"validate_query":  true,
 		"check_migration": true,
 		"lint_schema":     true,
-		"compare_nodes":   true,
 		"detect":          true,
 		"vacuum_health":   true,
 		"reload_schema":   true,

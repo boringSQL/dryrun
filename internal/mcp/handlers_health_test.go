@@ -6,18 +6,11 @@ import (
 	"testing"
 )
 
-// Smoke tests for health-family tools: compare_nodes, detect (all kinds),
-// vacuum_health. Each subtest exercises one kind or filter and asserts the
-// expected JSON keys or error text appear.
+// Smoke tests for health-family tools: detect (all kinds), vacuum_health.
+// Each subtest exercises one kind or filter and asserts the expected JSON
+// keys or error text appear.
 func TestHealthHandlers_OfflineSmoke(t *testing.T) {
 	c := setupOfflineTest(t)
-
-	t.Run("compare_nodes", func(t *testing.T) {
-		out := callTool(t, c, "compare_nodes", map[string]any{"table": "users"})
-		if out == "" {
-			t.Fatal("empty result")
-		}
-	})
 
 	t.Run("detect_default_all", func(t *testing.T) {
 		out := callTool(t, c, "detect", nil)
