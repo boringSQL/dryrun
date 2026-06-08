@@ -1,5 +1,6 @@
 -- name: fetch-planner-table-sizing
--- pg_class.reltuples + on-disk footprint (heap, total, indexes, toast)
+-- pg_class.reltuples + on-disk footprint + freeze xids (0 for partitioned parents);
+-- ages derived offline against database_xid/database_mxid to keep rows dedup-stable.
 SELECT n.nspname                                       AS schema_name,
        c.relname                                       AS table_name,
        c.reltuples::float8                             AS reltuples,
@@ -7,7 +8,9 @@ SELECT n.nspname                                       AS schema_name,
        pg_catalog.pg_relation_size(c.oid)::int8        AS table_size,
        pg_catalog.pg_total_relation_size(c.oid)::int8  AS total_relation_size,
        pg_catalog.pg_indexes_size(c.oid)::int8         AS indexes_size,
-       COALESCE(pg_catalog.pg_total_relation_size(c.reltoastrelid), 0)::int8 AS toast_size
+       COALESCE(pg_catalog.pg_total_relation_size(c.reltoastrelid), 0)::int8 AS toast_size,
+       c.relfrozenxid::text::int8                      AS relfrozenxid,
+       c.relminmxid::text::int8                        AS relminmxid
   FROM pg_catalog.pg_class c
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
  WHERE c.relkind IN ('r', 'p')
