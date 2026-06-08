@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -160,6 +161,12 @@ func buildAnomalies(a *schema.AnnotatedSchema) []map[string]any {
 			"total_seq_scan": sm.TotalSeqScan, "total_idx_scan": sm.TotalIdxScan,
 		})
 	}
+	// worst cases first (by seq-scan volume) for cap to be actually helpful
+	sort.SliceStable(anomalies, func(i, j int) bool {
+		si, _ := anomalies[i]["total_seq_scan"].(int64)
+		sj, _ := anomalies[j]["total_seq_scan"].(int64)
+		return si > sj
+	})
 	return anomalies
 }
 
