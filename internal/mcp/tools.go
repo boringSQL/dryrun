@@ -126,6 +126,10 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("table", mcp.Description("Table filter.")),
+			mcp.WithNumber("limit",
+				mcp.DefaultNumber(50),
+				mcp.Description("Max entries per category (default 50, 0=all)."),
+			),
 		),
 		s.handleDetect,
 	)
@@ -134,6 +138,10 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			mcp.WithDescription("Autovacuum status, dead tuples, tuning hints"),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("table", mcp.Description("Table filter.")),
+			mcp.WithNumber("limit",
+				mcp.DefaultNumber(50),
+				mcp.Description("Max entries (default 50, 0=all)."),
+			),
 		),
 		s.handleVacuumHealth,
 	)

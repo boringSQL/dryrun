@@ -75,6 +75,51 @@ func (s *Server) metaJSONResult(payload any, key, hint string, next []NextCall) 
 	return mcp.NewToolResultText(string(out))
 }
 
+const defaultMaxItems = 50
+
+// max <= 0 disables the cap.
+func capItems[T any](items []T, max int) (kept []T, omitted int) {
+	if max <= 0 || len(items) <= max {
+		return items, 0
+	}
+	return items[:max], len(items) - max
+}
+
+// count stays the full total even when entries is capped, so callers see more exists.
+func entryBlock[T any](entries []T, max int) map[string]any {
+	kept, omitted := capItems(entries, max)
+	block := map[string]any{"entries": kept, "count": len(entries)}
+	if omitted > 0 {
+		block["truncated"] = true
+		block["omitted"] = omitted
+	}
+	return block
+}
+
+// Filters result entries (not the schema) since detectors draw from mixed sources. Empty filter = no-op on that axis
+func filterByQual[T any](items []T, schemaFilter, tableFilter string, key func(T) (string, string)) []T {
+	if schemaFilter == "" && tableFilter == "" {
+		return items
+	}
+	out := make([]T, 0, len(items))
+	for _, it := range items {
+		s, t := key(it)
+		if schemaFilter != "" && s != schemaFilter {
+			continue
+		}
+		if tableFilter != "" && t != tableFilter {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+// missing -> defaultMaxItems; 0 -> uncapped.
+func limitArg(req mcp.CallToolRequest) int {
+	return int(getFloatArg(req, "limit", defaultMaxItems))
+}
+
 // Shallow-copy snap, retaining tables matching filters. Empty filter = no filtering on that axis.
 func filterSnap(snap *schema.SchemaSnapshot, schemaFilter, tableFilter string) *schema.SchemaSnapshot {
 	if schemaFilter == "" && tableFilter == "" {
