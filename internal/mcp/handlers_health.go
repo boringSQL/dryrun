@@ -40,6 +40,21 @@ func anomalyKey(m map[string]any) (string, string) {
 	return s, t
 }
 
+// caps never-analyzed and stale independently so it can provide more targetted advice
+func capStaleStats(entries []schema.StaleStatsEntry, max int) (kept []schema.StaleStatsEntry, omitted int) {
+	var never, stale []schema.StaleStatsEntry
+	for _, e := range entries {
+		if e.LastAnalyzedDaysAgo == nil {
+			never = append(never, e)
+		} else {
+			stale = append(stale, e)
+		}
+	}
+	neverKept, neverOmitted := capItems(never, max)
+	staleKept, staleOmitted := capItems(stale, max)
+	return append(neverKept, staleKept...), neverOmitted + staleOmitted
+}
+
 // Pre-validated re-run of one kind, uncapped, keeping any active filter.
 func narrowNext(kind, schemaF, tableF string) []NextCall {
 	args := map[string]any{"kind": kind, "limit": 0}
@@ -68,8 +83,9 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	bloatEntries := filterByQual(schema.DetectBloatedIndexes(a, threshold), schemaF, tableF, bloatKey)
 	anomalies := filterByQual(buildAnomalies(a), schemaF, tableF, anomalyKey)
 
+	staleKept, staleOmitted := capStaleStats(staleEntries, max)
 	wrapper := map[string]any{
-		"stale_stats":     entryBlock(staleEntries, max),
+		"stale_stats":     cappedBlock(staleKept, staleOmitted, len(staleEntries)),
 		"unused_indexes":  entryBlock(unusedEntries, max),
 		"anomalies":       entryBlock(anomalies, max),
 		"bloated_indexes": entryBlock(bloatEntries, max),
@@ -117,7 +133,7 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 	}
 
 	total := len(entries)
-	kept, omitted := capItems(entries, limitArg(req))
+	kept, omitted := capStaleStats(entries, limitArg(req))
 	var lines []string
 	for _, e := range kept {
 		if e.LastAnalyzedDaysAgo == nil {

@@ -86,15 +86,19 @@ func capItems[T any](items []T, max int) (kept []T, omitted int) {
 	return items[:max], len(items) - max
 }
 
-// count stays the full total even when entries is capped, so callers see more exists.
-func entryBlock[T any](entries []T, max int) map[string]any {
-	kept, omitted := capItems(entries, max)
-	block := map[string]any{"entries": kept, "count": len(entries)}
+// count is the full total even when entries is capped, so callers see more exists.
+func cappedBlock[T any](kept []T, omitted, total int) map[string]any {
+	block := map[string]any{"entries": kept, "count": total}
 	if omitted > 0 {
 		block["truncated"] = true
 		block["omitted"] = omitted
 	}
 	return block
+}
+
+func entryBlock[T any](entries []T, max int) map[string]any {
+	kept, omitted := capItems(entries, max)
+	return cappedBlock(kept, omitted, len(entries))
 }
 
 // Filters result entries (not the schema) since detectors draw from mixed sources. Empty filter = no-op on that axis
