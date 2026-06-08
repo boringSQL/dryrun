@@ -852,7 +852,7 @@ func mcpServeCmd() *cobra.Command {
 					effectiveSchemaFile, len(snap.Tables))
 				server = drmcp.NewOfflineServer(snap, lintCfg)
 				server.SetSchemaCandidates(candidates)
-				// history.db carries planner/activity stats; without it offline tools (vacuum_health, compare_nodes…) see nil sizing
+				// history.db carries planner/activity stats; without it offline tools (vacuum_health, detect…) see nil sizing
 				if h, err := history.OpenDefault(); err == nil {
 					server.SetHistory(h)
 					server.SetSnapshotKey(resolveSnapshotKey())

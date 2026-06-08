@@ -10,46 +10,6 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
-func (s *Server) handleCompareNodes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	a, err := s.getAnnotated()
-	if err != nil {
-		return errResult(err.Error()), nil
-	}
-
-	tableName := getArg(req, "table")
-	schemaName := schemaArg(req)
-	qual := schema.QualifiedName{Schema: schemaName, Name: tableName}
-
-	if a.Merged == nil {
-		return textResult("No node statistics available. Import stats from multiple nodes first."), nil
-	}
-
-	var lines []string
-	lines = append(lines, fmt.Sprintf("Node comparison for %s.%s:\n", schemaName, tableName))
-
-	sz := a.SizingFor(qual)
-	for _, n := range a.Merged.Nodes {
-		for _, ts := range n.Tables {
-			if ts.Table != qual {
-				continue
-			}
-			rt := 0.0
-			tableSize := int64(0)
-			if sz != nil {
-				rt = sz.Reltuples
-				tableSize = sz.TableSize
-			}
-			lines = append(lines, fmt.Sprintf("  %s: %.0f rows, seq_scan=%d, idx_scan=%d, size=%d",
-				n.Node.Source, rt, ts.Activity.SeqScan, ts.Activity.IdxScan, tableSize))
-		}
-	}
-
-	if len(lines) == 1 {
-		return textResult(s.wrapText(fmt.Sprintf("No stats found for %s.%s across nodes.", schemaName, tableName), "")), nil
-	}
-	return textResult(s.wrapText(strings.Join(lines, "\n"), "")), nil
-}
-
 func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	kind := argOr(req, "kind", "all")
 
@@ -93,11 +53,11 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	hint := ""
 	switch {
 	case len(staleEntries) > 0 && len(unusedEntries) > 0:
-		hint = "Stale stats may cause bad plans — run ANALYZE. Unused indexes add write overhead — verify with compare_nodes before dropping."
+		hint = "Stale stats may cause bad plans — run ANALYZE. Unused indexes add write overhead — verify per-node index scans before dropping."
 	case len(staleEntries) > 0:
 		hint = "Stale stats may cause bad query plans — consider running ANALYZE."
 	case len(unusedEntries) > 0:
-		hint = "Unused indexes add write overhead. Use compare_nodes to verify across all replicas before dropping."
+		hint = "Unused indexes add write overhead. Verify index scans across all replicas before dropping."
 	}
 	s.injectMeta(wrapper, hint, nil)
 	return jsonResult(wrapper), nil

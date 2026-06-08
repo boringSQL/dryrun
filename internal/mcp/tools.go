@@ -113,14 +113,6 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		s.handleLintSchema,
 	)
 	srv.AddTool(
-		mcp.NewTool("compare_nodes",
-			mcp.WithDescription("Per-node stats: reltuples, relpages, scans, size, indexes"),
-			mcp.WithString("table", mcp.Required(), mcp.Description("Table name.")),
-			mcp.WithString("schema", mcp.Description("Schema filter.")),
-		),
-		s.handleCompareNodes,
-	)
-	srv.AddTool(
 		mcp.NewTool("detect",
 			mcp.WithDescription("Health checks: stale stats, unused/bloated indexes, anomalies"),
 			mcp.WithString("kind",
