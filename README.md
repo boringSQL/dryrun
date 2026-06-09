@@ -256,6 +256,8 @@ dryrun snapshot take --push
 dryrun snapshot pull --remote ghcr
 ```
 
+`pull` fetches only the latest take by default, so cold pulls (fresh CI, empty `history.db`) stay cheap regardless of how much history the registry holds. Use `--full` to backfill the entire history, or `--since 7d` (also `2w`, `24h`, or a UTC date like `2026-01-01`) for a window. `push` always sends your full local history; since it is incremental by content hash, an owner that pushes on a cadence only uploads the new observations each run.
+
 `--ref` is the registry base. Each database gets its own repository under it, `<ref>/<project_id>/<database_id>`, so `myapp`'s `auth` database lands at `ghcr.io/myorg/dryrun/myapp/auth`. Snapshots map to OCI artifacts addressed by content hash, so pushing the same one twice changes nothing and shared blobs deduplicate on the registry. For Google Artifact Registry, run `gcloud auth configure-docker us-docker.pkg.dev` in place of `docker login`; the rest is identical.
 
 See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for per-profile remotes and sharing one stream across projects.
@@ -315,13 +317,6 @@ See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Clau
 - **[Don't let AI touch your production database](https://boringsql.com/posts/dont-let-ai-to-prod/)**, why most Postgres MCPs are unsafe and what `dryrun` does differently
 - **[RegreSQL](https://github.com/boringsql/regresql)**, SQL regression testing and **`dryrun`**'s companion tool
 - **[Fixturize](https://github.com/boringSQL/fixturize)**, subset and mask production data for dev/test
-
-
-## Upgrading from 0.5.x
-
-- `dump-schema --stats-only` is removed. Use `dryrun snapshot take` (primary) and `dryrun snapshot activity` (replicas).
-- Snapshot JSON no longer embeds `Table.stats`, `Column.stats`, `Index.stats`, or `node_stats`. Stats are read per-kind from the history db via `HistoryStore::get_annotated`.
-- `check_drift` is now schema-only. It no longer flaps when `reltuples` or `idx_scan` change.
 
 ## License
 
