@@ -99,7 +99,7 @@ func TestSyncKeysCopiesEverythingToEmptyDst(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k})
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, fullScope())
 	if err != nil {
 		t.Fatalf("syncKeys: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestSyncKeysReportsUpToDateForMatchingHashes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k})
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, fullScope())
 	if err != nil {
 		t.Fatalf("syncKeys: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestSyncCopiesActivityPerNodeLabel(t *testing.T) {
 		}
 	}
 
-	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k})
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, fullScope())
 	if err != nil {
 		t.Fatalf("syncKeys: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestSyncKindOrderIsSchemaPlannerActivity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}); err != nil {
+	if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, fullScope()); err != nil {
 		t.Fatalf("syncKeys against FilesystemStore dst: %v", err)
 	}
 }
@@ -273,7 +273,7 @@ func TestSyncAllUsesListKeys(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := runSync(ctx, src, dst, true, &buf); err != nil {
+	if err := runSync(ctx, src, dst, true, fullScope(), &buf); err != nil {
 		t.Fatalf("runSync(all=true): %v", err)
 	}
 	out := buf.String()
@@ -312,10 +312,10 @@ func TestRoundTripSQLiteToFsToSQLite(t *testing.T) {
 		}
 	}
 
-	if _, err := syncKeys(ctx, srcA, fsMid, []history.SnapshotKey{k}); err != nil {
+	if _, err := syncKeys(ctx, srcA, fsMid, []history.SnapshotKey{k}, fullScope()); err != nil {
 		t.Fatalf("push A -> FS: %v", err)
 	}
-	if _, err := syncKeys(ctx, fsMid, dstB, []history.SnapshotKey{k}); err != nil {
+	if _, err := syncKeys(ctx, fsMid, dstB, []history.SnapshotKey{k}, fullScope()); err != nil {
 		t.Fatalf("pull FS -> B: %v", err)
 	}
 
@@ -357,5 +357,222 @@ func TestPrintSyncOutcomesEmpty(t *testing.T) {
 	printSyncOutcomes(&buf, nil)
 	if !bytes.Contains(buf.Bytes(), []byte("No keys to sync")) {
 		t.Errorf("got %q, want a 'No keys to sync' notice", buf.String())
+	}
+}
+
+// seedTwoTakes lays down two distinct takes (older t0, newer t1) under key k,
+// each with its own schema + planner and one activity row per node (primary +
+// replica). Returns (t0, t1). Used by the latest/full/since selection tests.
+func seedTwoTakes(t *testing.T, ctx context.Context, src *history.Store, k history.SnapshotKey) (time.Time, time.Time) {
+	t.Helper()
+	t1 := time.Now().UTC().Truncate(time.Second)
+	t0 := t1.Add(-24 * time.Hour)
+
+	for _, take := range []struct {
+		ts          time.Time
+		sh, pl, suf string
+	}{
+		{t0, "sh-0", "pl-0", "0"},
+		{t1, "sh-1", "pl-1", "1"},
+	} {
+		if _, err := src.PutSchema(ctx, k, syncTestSchema(take.sh, "appdb", take.ts)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := src.PutPlanner(ctx, k, syncTestPlanner(take.sh, take.pl, "appdb", take.ts)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := src.PutActivity(ctx, k, syncTestActivity(take.sh, "ac-p"+take.suf, "primary", take.ts, false)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := src.PutActivity(ctx, k, syncTestActivity(take.sh, "ac-r"+take.suf, "replica", take.ts, true)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return t0, t1
+}
+
+// Latest scope (the pull default) must copy exactly the newest take: one
+// schema, one planner, and one activity row PER NODE — never the older take.
+// The per-node count (2, not 1) guards that newestPerNode groups by node label
+// rather than collapsing all activity to a single newest row.
+func TestSyncLatestSelectsNewestTakePerNode(t *testing.T) {
+	ctx := context.Background()
+	src := openSQLite(t)
+	dst := openSQLite(t)
+	k := syncKey("acme", "primary")
+	seedTwoTakes(t, ctx, src, k)
+
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, pullScope{latest: true})
+	if err != nil {
+		t.Fatalf("syncKeys latest: %v", err)
+	}
+	o := outs[0]
+	if o.Schema.Copied != 1 {
+		t.Errorf("schema copied = %d, want 1 (newest take only)", o.Schema.Copied)
+	}
+	if o.Planner.Copied != 1 {
+		t.Errorf("planner copied = %d, want 1 (newest take only)", o.Planner.Copied)
+	}
+	if o.Activity.Copied != 2 {
+		t.Errorf("activity copied = %d, want 2 (newest take, one row per node)", o.Activity.Copied)
+	}
+}
+
+// Full scope backfills both takes: 2 schema, 2 planner, 4 activity (2 nodes x 2 takes).
+func TestSyncFullScopeCopiesAllTakes(t *testing.T) {
+	ctx := context.Background()
+	src := openSQLite(t)
+	dst := openSQLite(t)
+	k := syncKey("acme", "primary")
+	seedTwoTakes(t, ctx, src, k)
+
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, fullScope())
+	if err != nil {
+		t.Fatalf("syncKeys full: %v", err)
+	}
+	o := outs[0]
+	if o.Schema.Copied != 2 || o.Planner.Copied != 2 || o.Activity.Copied != 4 {
+		t.Errorf("full copied = schema %d / planner %d / activity %d, want 2/2/4",
+			o.Schema.Copied, o.Planner.Copied, o.Activity.Copied)
+	}
+}
+
+// --since with a window between the two takes drops the older take even in
+// full mode (the range bounds the source list before selection).
+func TestSyncSinceWindowExcludesOlderTake(t *testing.T) {
+	ctx := context.Background()
+	src := openSQLite(t)
+	dst := openSQLite(t)
+	k := syncKey("acme", "primary")
+	_, t1 := seedTwoTakes(t, ctx, src, k)
+
+	cutoff := t1.Add(-time.Hour) // after t0, before t1
+	scope := pullScope{rng: history.TimeRange{From: &cutoff}}
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, scope)
+	if err != nil {
+		t.Fatalf("syncKeys since: %v", err)
+	}
+	o := outs[0]
+	if o.Schema.Copied != 1 || o.Planner.Copied != 1 || o.Activity.Copied != 2 {
+		t.Errorf("since copied = schema %d / planner %d / activity %d, want 1/1/2 (newest take only)",
+			o.Schema.Copied, o.Planner.Copied, o.Activity.Copied)
+	}
+}
+
+// Regression: a stable schema keeps its original (old) timestamp, so a take
+// captured today can reference a schema from 30 days ago. Pulling --since 7d
+// must still bring that old schema along, or the planner/activity land
+// orphaned (their schema_ref_hash resolves to nothing locally). Both latest
+// and full mode must resolve the referenced schema unwindowed.
+func TestSyncSincePullsReferencedSchemaOlderThanWindow(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		ctx := context.Background()
+		src := openSQLite(t)
+		dst := openSQLite(t)
+		k := syncKey("acme", "primary")
+
+		now := time.Now().UTC().Truncate(time.Second)
+		old := now.Add(-30 * 24 * time.Hour)
+		if _, err := src.PutSchema(ctx, k, syncTestSchema("sh-old", "appdb", old)); err != nil {
+			t.Fatal(err)
+		}
+		// today's take binds to the unchanged 30-day-old schema.
+		if _, err := src.PutPlanner(ctx, k, syncTestPlanner("sh-old", "pl-now", "appdb", now)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := src.PutActivity(ctx, k, syncTestActivity("sh-old", "ac-p", "primary", now, false)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := src.PutActivity(ctx, k, syncTestActivity("sh-old", "ac-r", "replica", now, true)); err != nil {
+			t.Fatal(err)
+		}
+
+		cutoff := now.Add(-7 * 24 * time.Hour) // excludes the 30-day-old schema row
+		scope := pullScope{latest: !full, rng: history.TimeRange{From: &cutoff}}
+		outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, scope)
+		if err != nil {
+			t.Fatalf("full=%v syncKeys: %v", full, err)
+		}
+		o := outs[0]
+		if o.Schema.Copied != 1 {
+			t.Errorf("full=%v: schema copied = %d, want 1 (referenced schema pulled despite being out of window)", full, o.Schema.Copied)
+		}
+		if o.Planner.Copied != 1 || o.Activity.Copied != 2 {
+			t.Errorf("full=%v: planner %d / activity %d, want 1/2", full, o.Planner.Copied, o.Activity.Copied)
+		}
+	}
+}
+
+// A schema-only stream (no planner/activity) still pulls its current schema in
+// latest mode even when --since predates it: latest always includes the most
+// recent known schema so local state is never left without one.
+func TestSyncLatestSchemaOnlyStreamPullsCurrentSchema(t *testing.T) {
+	ctx := context.Background()
+	src := openSQLite(t)
+	dst := openSQLite(t)
+	k := syncKey("acme", "primary")
+
+	old := time.Now().UTC().Truncate(time.Second).Add(-30 * 24 * time.Hour)
+	if _, err := src.PutSchema(ctx, k, syncTestSchema("sh-old", "appdb", old)); err != nil {
+		t.Fatal(err)
+	}
+
+	cutoff := old.Add(7 * 24 * time.Hour) // window starts after the schema
+	scope := pullScope{latest: true, rng: history.TimeRange{From: &cutoff}}
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, scope)
+	if err != nil {
+		t.Fatalf("syncKeys: %v", err)
+	}
+	if o := outs[0]; o.Schema.Copied != 1 || o.Planner.Copied != 0 || o.Activity.Copied != 0 {
+		t.Errorf("schema-only latest = schema %d / planner %d / activity %d, want 1/0/0",
+			o.Schema.Copied, o.Planner.Copied, o.Activity.Copied)
+	}
+}
+
+func TestParseSince(t *testing.T) {
+	ref := time.Now()
+	cases := []struct {
+		in      string
+		wantErr bool
+		// approxAgo is the expected age of the result for relative inputs.
+		approxAgo time.Duration
+		// absolute is the exact expected instant for date inputs.
+		absolute *time.Time
+	}{
+		{in: "7d", approxAgo: 7 * 24 * time.Hour},
+		{in: "2w", approxAgo: 14 * 24 * time.Hour},
+		{in: "24h", approxAgo: 24 * time.Hour},
+		{in: "90m", approxAgo: 90 * time.Minute},
+		{in: "1h30m", approxAgo: 90 * time.Minute},
+		{in: "1.5d", approxAgo: 36 * time.Hour},
+		{in: "-7d", wantErr: true},
+		{in: "garbage", wantErr: true},
+		{in: "", wantErr: true},
+	}
+	for _, c := range cases {
+		got, err := parseSince(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("parseSince(%q): want error, got %v", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseSince(%q): unexpected error %v", c.in, err)
+			continue
+		}
+		ago := ref.Sub(got)
+		if d := ago - c.approxAgo; d < -2*time.Second || d > 2*time.Second {
+			t.Errorf("parseSince(%q): age %v, want ~%v", c.in, ago, c.approxAgo)
+		}
+	}
+
+	// absolute date parses to that calendar day at UTC midnight.
+	got, err := parseSince("2026-01-02")
+	if err != nil {
+		t.Fatalf("parseSince(date): %v", err)
+	}
+	if got.Year() != 2026 || got.Month() != 1 || got.Day() != 2 {
+		t.Errorf("parseSince(date) = %v, want 2026-01-02", got)
 	}
 }
