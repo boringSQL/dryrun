@@ -43,7 +43,7 @@ func main() {
 	pf.StringVar(&flagSchemaFile, "schema-file", os.Getenv("SCHEMA_FILE"), "path to schema JSON file")
 
 	root.AddCommand(
-		probeCmd(), initCmd(), importCmd(), dumpSchemaCmd(),
+		probeCmd(), initCmd(), setupCmd(), importCmd(), dumpSchemaCmd(),
 		lintCmd(), driftCmd(), snapshotCmd(), profileCmd(),
 		mcpServeCmd(), statsCmd(), versionCmd(),
 	)
