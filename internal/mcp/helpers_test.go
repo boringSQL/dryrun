@@ -182,6 +182,143 @@ func TestToCompactTable_IndexValidityIsExceptionOnly(t *testing.T) {
 	}
 }
 
+// capItems is the primitive behind every §6 response cap. The contract has
+// four corners and each one matters for a different reason, so we pin all four:
+// the happy "everything fits" path (no omission, slice returned untouched), the
+// "spills over" path (exactly max kept, the rest counted as omitted so the
+// caller can advertise how much it hid), and the two opt-out encodings — max of
+// zero and a negative max — which both mean "the user disabled the cap, give me
+// everything" and must never drop a single element.
+func TestCapItems(t *testing.T) {
+	items := []int{1, 2, 3, 4, 5}
+
+	t.Run("under_cap_keeps_all", func(t *testing.T) {
+		kept, omitted := capItems(items, 10)
+		if len(kept) != 5 || omitted != 0 {
+			t.Fatalf("expected all 5 kept and 0 omitted, got kept=%d omitted=%d", len(kept), omitted)
+		}
+	})
+
+	t.Run("equal_to_cap_keeps_all", func(t *testing.T) {
+		kept, omitted := capItems(items, 5)
+		if len(kept) != 5 || omitted != 0 {
+			t.Fatalf("boundary: expected 5 kept and 0 omitted, got kept=%d omitted=%d", len(kept), omitted)
+		}
+	})
+
+	t.Run("over_cap_truncates_and_counts", func(t *testing.T) {
+		kept, omitted := capItems(items, 2)
+		if len(kept) != 2 || omitted != 3 {
+			t.Fatalf("expected 2 kept and 3 omitted, got kept=%d omitted=%d", len(kept), omitted)
+		}
+	})
+
+	t.Run("zero_max_disables_cap", func(t *testing.T) {
+		kept, omitted := capItems(items, 0)
+		if len(kept) != 5 || omitted != 0 {
+			t.Fatalf("max=0 means uncapped: expected 5 kept and 0 omitted, got kept=%d omitted=%d", len(kept), omitted)
+		}
+	})
+
+	t.Run("negative_max_disables_cap", func(t *testing.T) {
+		kept, omitted := capItems(items, -1)
+		if len(kept) != 5 || omitted != 0 {
+			t.Fatalf("negative max means uncapped: expected 5 kept and 0 omitted, got kept=%d omitted=%d", len(kept), omitted)
+		}
+	})
+}
+
+// entryBlock is the JSON shape the detect tool emits per category. The crucial
+// invariant is that `count` is ALWAYS the full pre-cap total — a model staring
+// at a capped `entries` array still needs to know the true size of the haystack
+// to decide whether to narrow or page. The truncated/omitted keys are the
+// inverse signal: present (and honest) only when something was actually hidden,
+// absent entirely when the whole set fit so the common case stays clean.
+func TestEntryBlock(t *testing.T) {
+	t.Run("within_cap_omits_truncation_keys", func(t *testing.T) {
+		block := entryBlock([]int{1, 2, 3}, 50)
+		if block["count"] != 3 {
+			t.Errorf("expected count=3 (the full total), got %v", block["count"])
+		}
+		if _, has := block["truncated"]; has {
+			t.Error("nothing was hidden, so truncated must be absent")
+		}
+		if _, has := block["omitted"]; has {
+			t.Error("nothing was hidden, so omitted must be absent")
+		}
+	})
+
+	t.Run("over_cap_reports_full_count_and_omission", func(t *testing.T) {
+		block := entryBlock([]int{1, 2, 3, 4, 5}, 2)
+		if block["count"] != 5 {
+			t.Errorf("count must stay the full total (5) even though entries is capped, got %v", block["count"])
+		}
+		entries, ok := block["entries"].([]int)
+		if !ok || len(entries) != 2 {
+			t.Fatalf("expected 2 capped entries, got %v", block["entries"])
+		}
+		if block["truncated"] != true {
+			t.Error("expected truncated=true when entries were dropped")
+		}
+		if block["omitted"] != 3 {
+			t.Errorf("expected omitted=3, got %v", block["omitted"])
+		}
+	})
+}
+
+// filterByQual is what finally makes detect/vacuum_health's long-declared
+// schema/table parameters real rather than decorative. It mirrors filterSnap's
+// AND-narrowing semantics but operates on already-computed result entries
+// (because the detectors draw from different sources and can't all be filtered
+// upstream). We reuse a tiny (schema, table) pair type and the same overlapping
+// names trick from filterTestSnap so the cross-axis behaviour is unambiguous.
+func TestFilterByQual(t *testing.T) {
+	type qual struct {
+		s string
+		n string
+	}
+	key := func(q qual) (string, string) { return q.s, q.n }
+	items := []qual{
+		{"public", "users"},
+		{"public", "orders"},
+		{"billing", "invoices"},
+		{"billing", "orders"},
+	}
+
+	t.Run("empty_filters_passthrough", func(t *testing.T) {
+		out := filterByQual(items, "", "", key)
+		if len(out) != 4 {
+			t.Fatalf("expected all 4 entries unfiltered, got %d", len(out))
+		}
+	})
+
+	t.Run("schema_only", func(t *testing.T) {
+		out := filterByQual(items, "public", "", key)
+		if len(out) != 2 {
+			t.Fatalf("expected 2 public entries, got %d", len(out))
+		}
+		for _, q := range out {
+			if q.s != "public" {
+				t.Errorf("leaked non-public entry %+v", q)
+			}
+		}
+	})
+
+	t.Run("table_only_crosses_schemas", func(t *testing.T) {
+		out := filterByQual(items, "", "orders", key)
+		if len(out) != 2 {
+			t.Fatalf("expected both orders entries across schemas, got %d", len(out))
+		}
+	})
+
+	t.Run("schema_and_table_and_narrow", func(t *testing.T) {
+		out := filterByQual(items, "billing", "orders", key)
+		if len(out) != 1 || out[0].s != "billing" || out[0].n != "orders" {
+			t.Fatalf("expected the unique billing.orders entry, got %+v", out)
+		}
+	})
+}
+
 // metaJSONResult merges the payload at the top level and injects _meta below
 // it; the body must remain valid JSON for downstream MCP transport.
 func TestMetaJSONResult_ProducesValidJSON(t *testing.T) {

@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -75,6 +76,55 @@ func (s *Server) metaJSONResult(payload any, key, hint string, next []NextCall) 
 	return mcp.NewToolResultText(string(out))
 }
 
+const defaultMaxItems = 50
+
+// max <= 0 disables the cap.
+func capItems[T any](items []T, max int) (kept []T, omitted int) {
+	if max <= 0 || len(items) <= max {
+		return items, 0
+	}
+	return items[:max], len(items) - max
+}
+
+// count is the full total even when entries is capped, so callers see more exists.
+func cappedBlock[T any](kept []T, omitted, total int) map[string]any {
+	block := map[string]any{"entries": kept, "count": total}
+	if omitted > 0 {
+		block["truncated"] = true
+		block["omitted"] = omitted
+	}
+	return block
+}
+
+func entryBlock[T any](entries []T, max int) map[string]any {
+	kept, omitted := capItems(entries, max)
+	return cappedBlock(kept, omitted, len(entries))
+}
+
+// Filters result entries (not the schema) since detectors draw from mixed sources. Empty filter = no-op on that axis
+func filterByQual[T any](items []T, schemaFilter, tableFilter string, key func(T) (string, string)) []T {
+	if schemaFilter == "" && tableFilter == "" {
+		return items
+	}
+	out := make([]T, 0, len(items))
+	for _, it := range items {
+		s, t := key(it)
+		if schemaFilter != "" && s != schemaFilter {
+			continue
+		}
+		if tableFilter != "" && t != tableFilter {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+// missing -> defaultMaxItems; 0 -> uncapped.
+func limitArg(req mcp.CallToolRequest) int {
+	return int(getFloatArg(req, "limit", defaultMaxItems))
+}
+
 // Shallow-copy snap, retaining tables matching filters. Empty filter = no filtering on that axis.
 func filterSnap(snap *schema.SchemaSnapshot, schemaFilter, tableFilter string) *schema.SchemaSnapshot {
 	if schemaFilter == "" && tableFilter == "" {
@@ -115,6 +165,12 @@ func buildAnomalies(a *schema.AnnotatedSchema) []map[string]any {
 			"total_seq_scan": sm.TotalSeqScan, "total_idx_scan": sm.TotalIdxScan,
 		})
 	}
+	// worst cases first (by seq-scan volume) for cap to be actually helpful
+	sort.SliceStable(anomalies, func(i, j int) bool {
+		si, _ := anomalies[i]["total_seq_scan"].(int64)
+		sj, _ := anomalies[j]["total_seq_scan"].(int64)
+		return si > sj
+	})
 	return anomalies
 }
 

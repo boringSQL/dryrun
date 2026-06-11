@@ -34,7 +34,7 @@ Once you have the snapshot, the CLI works offline:
 
 ### MCP server - give your AI assistant a schema brain
 
-The MCP server reads the same snapshot. It exposes 15 tools over stdio or SSE: schema exploration, query validation, migration checks, linting, vacuum health. Your AI assistant understands your database while it writes SQL.
+The MCP server reads the same snapshot. It exposes 14 tools over stdio or SSE: schema exploration, query validation, migration checks, linting, vacuum health. Your AI assistant understands your database while it writes SQL.
 
 No database connection needed. The assistant never sees credentials.
 
@@ -169,7 +169,7 @@ dryrun --profile replica1 snapshot activity --from "$REPLICA1_URL" --label repli
 dryrun --profile replica2 snapshot activity --from "$REPLICA2_URL" --label replica2
 ```
 
-The MCP `compare_nodes` tool then exposes per-node `idx_scan` so you can spot routing imbalances. See [docs/multi-node-stats.md](docs/multi-node-stats.md).
+The MCP `describe_table` (node breakdown) and `detect kind=anomalies` tools then expose per-node `idx_scan` so you can spot routing imbalances. See [docs/multi-node-stats.md](docs/multi-node-stats.md).
 
 ### Multiple databases per project
 

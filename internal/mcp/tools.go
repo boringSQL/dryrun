@@ -113,14 +113,6 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		s.handleLintSchema,
 	)
 	srv.AddTool(
-		mcp.NewTool("compare_nodes",
-			mcp.WithDescription("Per-node stats: reltuples, relpages, scans, size, indexes"),
-			mcp.WithString("table", mcp.Required(), mcp.Description("Table name.")),
-			mcp.WithString("schema", mcp.Description("Schema filter.")),
-		),
-		s.handleCompareNodes,
-	)
-	srv.AddTool(
 		mcp.NewTool("detect",
 			mcp.WithDescription("Health checks: stale stats, unused/bloated indexes, anomalies"),
 			mcp.WithString("kind",
@@ -134,6 +126,10 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("table", mcp.Description("Table filter.")),
+			mcp.WithNumber("limit",
+				mcp.DefaultNumber(50),
+				mcp.Description("Max entries per category (default 50, 0=all)."),
+			),
 		),
 		s.handleDetect,
 	)
@@ -142,6 +138,10 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			mcp.WithDescription("Autovacuum status, dead tuples, tuning hints"),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("table", mcp.Description("Table filter.")),
+			mcp.WithNumber("limit",
+				mcp.DefaultNumber(50),
+				mcp.Description("Max entries (default 50, 0=all)."),
+			),
 		),
 		s.handleVacuumHealth,
 	)

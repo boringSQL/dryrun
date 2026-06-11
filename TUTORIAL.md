@@ -169,7 +169,7 @@ dryrun --profile replica2 snapshot activity --from "$REPLICA2_URL" --label repli
 dryrun --profile replica3 snapshot activity --from "$REPLICA3_URL" --label replica3
 ```
 
-`--label` is required and identifies the node in `compare_nodes` and `detect`. `snapshot activity` refuses to run on the primary. Activity rows attach to the most recent `schema` row by `schema_ref_hash`; pass `--allow-orphan` to capture before a schema exists.
+`--label` is required and identifies the node in `describe_table` and `detect`. `snapshot activity` refuses to run on the primary. Activity rows attach to the most recent `schema` row by `schema_ref_hash`; pass `--allow-orphan` to capture before a schema exists.
 
 ### 3. Define profiles for repeatable runs
 
@@ -205,7 +205,7 @@ Schema changes rarely; activity counters shift daily. Capture each on its own sc
 dryrun snapshot list
 ```
 
-Each row prints its `kind` (`schema` / `planner_stats` / `activity_stats`), `node_label` for activity rows, and the `schema_ref_hash` linking activity to schema. The MCP `compare_nodes` tool then exposes per-node `idx_scan` for any table.
+Each row prints its `kind` (`schema` / `planner_stats` / `activity_stats`), `node_label` for activity rows, and the `schema_ref_hash` linking activity to schema. The MCP `describe_table` node breakdown then exposes per-node `idx_scan` for any table.
 
 ---
 
@@ -266,7 +266,6 @@ Connect your MCP client to `http://host:3000/sse`.
 | `schema_diff` | No\* | Compare snapshots for schema changes |
 | `vacuum_health` | No | Autovacuum analysis with effective settings and recommendations |
 | `detect` | No | Health checks: stale stats, unused indexes, seq-scan anomalies |
-| `compare_nodes` | No | Per-node breakdown for a specific table with anomaly detection |
 | `analyze_plan` | No | Analyze a pre-existing EXPLAIN JSON plan |
 | `advise` | Hybrid | Comprehensive query analysis: EXPLAIN + anti-patterns + index suggestions |
 | `explain_query` | **Yes** | EXPLAIN with structured plan and warnings |

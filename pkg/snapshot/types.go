@@ -2,7 +2,10 @@
 // Stdlib-only so consumers can recompute content_hash without introspection.
 package snapshot
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // DDL-only schema snapshot; sizing/activity live in AnnotatedSchema
 type SchemaSnapshot struct {
@@ -282,6 +285,20 @@ func DetectStaleStats(a *AnnotatedSchema, staleDays int64) []StaleStatsEntry {
 			}
 		}
 	}
+	// Worst-first so a downstream cap keeps the most stale; nil = never analyzed = most stale (might revisit later)
+	sort.SliceStable(entries, func(i, j int) bool {
+		di, dj := entries[i].LastAnalyzedDaysAgo, entries[j].LastAnalyzedDaysAgo
+		switch {
+		case di == nil && dj == nil:
+			return false
+		case di == nil:
+			return true
+		case dj == nil:
+			return false
+		default:
+			return *di > *dj
+		}
+	})
 	return entries
 }
 

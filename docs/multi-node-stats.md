@@ -51,7 +51,7 @@ dryrun --profile replica3 snapshot activity \
   --from "postgres://readonly@replica-3:5432/mydb" --label replica3
 ```
 
-`--label` is required and identifies the node in `compare_nodes` and `detect`. `snapshot activity` refuses to run on the primary. Each row captures `pg_stat_user_tables`, `pg_stat_user_indexes`, and `stats_reset` for the node, then joins to the latest schema by `schema_ref_hash`. Use `--allow-orphan` when activity arrives before any schema snapshot exists; orphan rows are stored but not reattached when a matching schema lands later.
+`--label` is required and identifies the node in `describe_table` and `detect`. `snapshot activity` refuses to run on the primary. Each row captures `pg_stat_user_tables`, `pg_stat_user_indexes`, and `stats_reset` for the node, then joins to the latest schema by `schema_ref_hash`. Use `--allow-orphan` when activity arrives before any schema snapshot exists; orphan rows are stored but not reattached when a matching schema lands later.
 
 Activity dumps are small (single-digit MB) and safe for cron. See [Automating collection](#automating-collection).
 
@@ -62,7 +62,7 @@ When activity rows from multiple nodes attach to the same schema, the `MergedAct
 | Field | Rule | Why |
 |---|---|---|
 | `idx_scan_sum` | sum across nodes | Total indexed reads hitting the cluster |
-| `idx_scan_per_node` | per-node breakdown | Powers `compare_nodes` and routing-imbalance detection |
+| `idx_scan_per_node` | per-node breakdown | Powers `describe_table`'s node breakdown and routing-imbalance detection |
 | `seq_scan_sum` | sum across nodes | Reveals which replicas are doing seq scans |
 | `n_dead_tup_sum` | sum across nodes | Worst-case dead-tuple pressure for vacuum decisions |
 | `last_vacuum_max` | max timestamp | Autovacuum runs on the primary only; replicas always report null |
@@ -75,23 +75,16 @@ When activity rows from multiple nodes attach to the same schema, the `MergedAct
 
 All multi-node analysis tools are MCP tools. They read from `~/.dryrun/history.db` via `HistoryStore::get_annotated`, which joins the latest schema with each node's most recent activity row by `schema_ref_hash`.
 
-### compare_nodes
+### describe_table (node breakdown)
 
-Side-by-side stats for a specific table across all nodes.
+`describe_table` includes a per-node activity breakdown for a table, surfacing the
+counters that genuinely differ between nodes — `seq_scan`, `idx_scan`, tuple
+ins/upd/del, dead tuples, and last vacuum/analyze. Sizing (`reltuples`, `relpages`,
+table size) is cluster-wide, captured once from the primary's `planner_stats` row,
+so it does not vary per node and is reported once rather than repeated per node.
 
-```
-Per-node breakdown (4 node(s)):
-
-                reltuples  relpages  seq_scan     idx_scan  table_size  collected
-primary         1,234,567     5,123     1,024       45,000     10 MB    2026-04-01 14:32
-replica-1       1,234,567     5,123        12       45,000     10 MB    2026-04-01 14:30
-replica-2       1,234,567     5,098   987,654       44,998     10 MB    2026-04-01 14:31
-replica-3       1,234,567     5,123       203       45,000     10 MB    2026-04-01 14:28
-```
-
-Here `replica-2` has 987k sequential scans while others sit under 1,100, pointing to a routing problem or a missing index on that replica's workload.
-
-The output also includes per-index scan counts and flags indexes with zero scans across all nodes.
+A node showing far more `seq_scan` than its peers points to a routing problem or a
+missing index on that node's workload — surfaced directly by `detect kind=anomalies`.
 
 ### detect
 
@@ -140,7 +133,7 @@ Autovacuum analysis using aggregated dead tuple counts but primary-only vacuum t
 
 ### Reporting replica with seq scans
 
-The primary uses indexed lookups on `orders`, but a BI tool connected through `replica-2` runs `SELECT ... WHERE created_at BETWEEN ...` without a covering index. Single-node monitoring on the primary shows nothing wrong. `compare_nodes` reveals `replica-2` with millions of sequential scans.
+The primary uses indexed lookups on `orders`, but a BI tool connected through `replica-2` runs `SELECT ... WHERE created_at BETWEEN ...` without a covering index. Single-node monitoring on the primary shows nothing wrong. `detect kind=anomalies` (or `describe_table`'s node breakdown) reveals `replica-2` with millions of sequential scans.
 
 Fix: add a covering index for the BI query pattern, or route analytics to a dedicated replica.
 
@@ -150,7 +143,7 @@ Fix: add a covering index for the BI query pattern, or route analytics to a dedi
 
 ### Load balancer misconfiguration
 
-A connection pooler is supposed to round-robin across three replicas, but `compare_nodes` shows `replica-1` handling 5x more traffic than the others. The imbalance detection flags it automatically.
+A connection pooler is supposed to round-robin across three replicas, but `replica-1` handles 5x more traffic than the others. `detect kind=anomalies` flags the imbalance automatically.
 
 ## Automating collection
 

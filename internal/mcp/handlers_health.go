@@ -10,46 +10,6 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
-func (s *Server) handleCompareNodes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	a, err := s.getAnnotated()
-	if err != nil {
-		return errResult(err.Error()), nil
-	}
-
-	tableName := getArg(req, "table")
-	schemaName := schemaArg(req)
-	qual := schema.QualifiedName{Schema: schemaName, Name: tableName}
-
-	if a.Merged == nil {
-		return textResult("No node statistics available. Import stats from multiple nodes first."), nil
-	}
-
-	var lines []string
-	lines = append(lines, fmt.Sprintf("Node comparison for %s.%s:\n", schemaName, tableName))
-
-	sz := a.SizingFor(qual)
-	for _, n := range a.Merged.Nodes {
-		for _, ts := range n.Tables {
-			if ts.Table != qual {
-				continue
-			}
-			rt := 0.0
-			tableSize := int64(0)
-			if sz != nil {
-				rt = sz.Reltuples
-				tableSize = sz.TableSize
-			}
-			lines = append(lines, fmt.Sprintf("  %s: %.0f rows, seq_scan=%d, idx_scan=%d, size=%d",
-				n.Node.Source, rt, ts.Activity.SeqScan, ts.Activity.IdxScan, tableSize))
-		}
-	}
-
-	if len(lines) == 1 {
-		return textResult(s.wrapText(fmt.Sprintf("No stats found for %s.%s across nodes.", schemaName, tableName), "")), nil
-	}
-	return textResult(s.wrapText(strings.Join(lines, "\n"), "")), nil
-}
-
 func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	kind := argOr(req, "kind", "all")
 
@@ -69,37 +29,93 @@ func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}
 }
 
+// schema/table extractors for filterByQual
+func staleKey(e schema.StaleStatsEntry) (string, string)   { return e.Schema, e.Table }
+func unusedKey(e schema.UnusedIndexEntry) (string, string) { return e.Schema, e.Table }
+func bloatKey(e schema.BloatedIndexEntry) (string, string) { return e.Schema, e.Table }
+func vacuumKey(e schema.VacuumHealth) (string, string)     { return e.Schema, e.Table }
+func anomalyKey(m map[string]any) (string, string) {
+	s, _ := m["schema"].(string)
+	t, _ := m["table"].(string)
+	return s, t
+}
+
+// caps never-analyzed and stale independently so it can provide more targetted advice
+func capStaleStats(entries []schema.StaleStatsEntry, max int) (kept []schema.StaleStatsEntry, omitted int) {
+	var never, stale []schema.StaleStatsEntry
+	for _, e := range entries {
+		if e.LastAnalyzedDaysAgo == nil {
+			never = append(never, e)
+		} else {
+			stale = append(stale, e)
+		}
+	}
+	neverKept, neverOmitted := capItems(never, max)
+	staleKept, staleOmitted := capItems(stale, max)
+	return append(neverKept, staleKept...), neverOmitted + staleOmitted
+}
+
+// Pre-validated re-run of one kind, uncapped, keeping any active filter.
+func narrowNext(kind, schemaF, tableF string) []NextCall {
+	args := map[string]any{"kind": kind, "limit": 0}
+	if schemaF != "" {
+		args["schema"] = schemaF
+	}
+	if tableF != "" {
+		args["table"] = tableF
+	}
+	return []NextCall{{Tool: "detect", Args: args}}
+}
+
 func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
 
-	staleDays := int64(7)
-	staleEntries := schema.DetectStaleStats(a, staleDays)
-	unusedEntries := schema.DetectUnusedIndexes(a)
-
+	schemaF := schemaArg(req)
+	tableF := getArg(req, "table")
+	max := limitArg(req)
 	threshold := getFloatArg(req, "threshold", 4.0)
-	bloatEntries := schema.DetectBloatedIndexes(a, threshold)
 
-	anomalies := buildAnomalies(a)
+	staleEntries := filterByQual(schema.DetectStaleStats(a, int64(7)), schemaF, tableF, staleKey)
+	unusedEntries := filterByQual(schema.DetectUnusedIndexes(a), schemaF, tableF, unusedKey)
+	bloatEntries := filterByQual(schema.DetectBloatedIndexes(a, threshold), schemaF, tableF, bloatKey)
+	anomalies := filterByQual(buildAnomalies(a), schemaF, tableF, anomalyKey)
 
+	staleKept, staleOmitted := capStaleStats(staleEntries, max)
 	wrapper := map[string]any{
-		"stale_stats":     map[string]any{"entries": staleEntries, "count": len(staleEntries)},
-		"unused_indexes":  map[string]any{"entries": unusedEntries, "count": len(unusedEntries)},
-		"anomalies":       map[string]any{"entries": anomalies, "count": len(anomalies)},
-		"bloated_indexes": map[string]any{"entries": bloatEntries, "count": len(bloatEntries)},
+		"stale_stats":     cappedBlock(staleKept, staleOmitted, len(staleEntries)),
+		"unused_indexes":  entryBlock(unusedEntries, max),
+		"anomalies":       entryBlock(anomalies, max),
+		"bloated_indexes": entryBlock(bloatEntries, max),
 	}
+
 	hint := ""
 	switch {
 	case len(staleEntries) > 0 && len(unusedEntries) > 0:
-		hint = "Stale stats may cause bad plans — run ANALYZE. Unused indexes add write overhead — verify with compare_nodes before dropping."
+		hint = "Stale stats may cause bad plans; run ANALYZE. Unused indexes add write overhead; verify per-node index scans before dropping."
 	case len(staleEntries) > 0:
-		hint = "Stale stats may cause bad query plans — consider running ANALYZE."
+		hint = "Stale stats may cause bad query plans; consider running ANALYZE."
 	case len(unusedEntries) > 0:
-		hint = "Unused indexes add write overhead. Use compare_nodes to verify across all replicas before dropping."
+		hint = "Unused indexes add write overhead. Verify index scans across all replicas before dropping."
 	}
-	s.injectMeta(wrapper, hint, nil)
+
+	// point next at the truncated categories while trancating
+	var next []NextCall
+	for _, k := range []string{"stale_stats", "unused_indexes", "anomalies", "bloated_indexes"} {
+		if block, ok := wrapper[k].(map[string]any); ok && block["truncated"] == true {
+			next = append(next, narrowNext(k, schemaF, tableF)...)
+		}
+	}
+	if len(next) > 0 {
+		if hint != "" {
+			hint += " "
+		}
+		hint += fmt.Sprintf("Some categories capped at %d; _meta.next re-runs them uncapped, or narrow with schema=/table=.", max)
+	}
+
+	s.injectMeta(wrapper, hint, next)
 	return jsonResult(wrapper), nil
 }
 
@@ -109,20 +125,28 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 		return errResult(err.Error()), nil
 	}
 
-	entries := schema.DetectStaleStats(a, int64(7))
+	schemaF := schemaArg(req)
+	tableF := getArg(req, "table")
+	entries := filterByQual(schema.DetectStaleStats(a, int64(7)), schemaF, tableF, staleKey)
 	if len(entries) == 0 {
 		return textResult("No stale statistics detected."), nil
 	}
 
+	total := len(entries)
+	kept, omitted := capStaleStats(entries, limitArg(req))
 	var lines []string
-	for _, e := range entries {
+	for _, e := range kept {
 		if e.LastAnalyzedDaysAgo == nil {
 			lines = append(lines, fmt.Sprintf("  %s: %s.%s - never analyzed", e.Node, e.Schema, e.Table))
 		} else {
 			lines = append(lines, fmt.Sprintf("  %s: %s.%s - last analyzed %d days ago", e.Node, e.Schema, e.Table, *e.LastAnalyzedDaysAgo))
 		}
 	}
-	return textResult(fmt.Sprintf("Stale statistics (%d entries):\n%s", len(entries), strings.Join(lines, "\n"))), nil
+	body := fmt.Sprintf("Stale statistics (%d entries):\n%s", total, strings.Join(lines, "\n"))
+	if omitted > 0 {
+		body += fmt.Sprintf("\n\n%d more not shown; narrow with schema=/table= or re-run with limit=0.", omitted)
+	}
+	return textResult(body), nil
 }
 
 func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -131,14 +155,13 @@ func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRe
 		return errResult(err.Error()), nil
 	}
 
-	entries := schema.DetectUnusedIndexes(a)
+	schemaF := schemaArg(req)
+	tableF := getArg(req, "table")
+	entries := filterByQual(schema.DetectUnusedIndexes(a), schemaF, tableF, unusedKey)
 	if len(entries) == 0 {
 		return textResult("No unused indexes detected. All indexes have at least one scan recorded."), nil
 	}
-	return jsonResult(map[string]any{
-		"unused_indexes": entries,
-		"count":          len(entries),
-	}), nil
+	return cappedKindResult(s, "unused_indexes", entries, limitArg(req), schemaF, tableF), nil
 }
 
 func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -151,11 +174,13 @@ func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolReques
 		return textResult("No node statistics available for anomaly detection."), nil
 	}
 
-	anomalies := buildAnomalies(a)
+	schemaF := schemaArg(req)
+	tableF := getArg(req, "table")
+	anomalies := filterByQual(buildAnomalies(a), schemaF, tableF, anomalyKey)
 	if len(anomalies) == 0 {
 		return textResult("No anomalies detected."), nil
 	}
-	return jsonResult(anomalies), nil
+	return cappedKindResult(s, "anomalies", anomalies, limitArg(req), schemaF, tableF), nil
 }
 
 func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -164,32 +189,55 @@ func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolR
 		return errResult(err.Error()), nil
 	}
 
+	schemaF := schemaArg(req)
+	tableF := getArg(req, "table")
 	threshold := getFloatArg(req, "threshold", 4.0)
-	entries := schema.DetectBloatedIndexes(a, threshold)
+	entries := filterByQual(schema.DetectBloatedIndexes(a, threshold), schemaF, tableF, bloatKey)
 	if len(entries) == 0 {
 		return textResult("No bloated indexes detected."), nil
 	}
-	return jsonResult(map[string]any{
-		"bloated_indexes": entries,
-		"count":           len(entries),
-	}), nil
+	return cappedKindResult(s, "bloated_indexes", entries, limitArg(req), schemaF, tableF), nil
 }
 
-func (s *Server) handleVacuumHealth(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func cappedKindResult[T any](s *Server, kind string, entries []T, max int, schemaF, tableF string) *mcp.CallToolResult {
+	kept, omitted := capItems(entries, max)
+	wrapper := map[string]any{
+		kind:    kept,
+		"count": len(entries),
+	}
+	if omitted > 0 {
+		wrapper["truncated"] = true
+		wrapper["omitted"] = omitted
+		hint := fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), len(entries), omitted)
+		s.injectMeta(wrapper, hint, narrowNext(kind, schemaF, tableF))
+	}
+	return jsonResult(wrapper)
+}
+
+func (s *Server) handleVacuumHealth(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
 
-	results := schema.AnalyzeVacuumHealth(a)
-
+	schemaF := schemaArg(req)
+	tableF := getArg(req, "table")
+	results := filterByQual(schema.AnalyzeVacuumHealth(a), schemaF, tableF, vacuumKey)
 	if len(results) == 0 {
 		return textResult(s.wrapText("No vacuum health concerns found.", "")), nil
 	}
+
+	kept, omitted := capItems(results, limitArg(req))
 	wrapper := map[string]any{
-		"vacuum_health": results,
+		"vacuum_health": kept,
 		"count":         len(results),
 	}
-	s.injectMeta(wrapper, "", nil)
+	hint := ""
+	if omitted > 0 {
+		wrapper["truncated"] = true
+		wrapper["omitted"] = omitted
+		hint = fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), len(results), omitted)
+	}
+	s.injectMeta(wrapper, hint, nil)
 	return jsonResult(wrapper), nil
 }
