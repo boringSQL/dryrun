@@ -1,4 +1,4 @@
-package schema
+package snapshot
 
 // Not persisted: in-memory join of one SchemaSnapshot, one PlannerStatsSnapshot
 // and N ActivityStatsSnapshot rows sharing the same schema_ref_hash
@@ -180,4 +180,3 @@ func (a *AnnotatedSchema) ColumnStats(table QualifiedName, column string) *Colum
 	}
 	return nil
 }
-

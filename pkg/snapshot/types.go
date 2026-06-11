@@ -1,4 +1,6 @@
-package schema
+// Package snapshot is the snapshot wire contract: types + content-hash funcs.
+// Stdlib-only so consumers can recompute content_hash without introspection.
+package snapshot
 
 import "time"
 

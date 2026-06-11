@@ -1,4 +1,4 @@
-package schema
+package snapshot
 
 import (
 	"crypto/sha256"
