@@ -306,6 +306,35 @@ type TableSizing struct {
 	TotalRelationSize int64   `json:"total_relation_size"`
 	IndexesSize       int64   `json:"indexes_size"`
 	ToastSize         int64   `json:"toast_size,omitempty"`
+	// raw relfrozenxid/relminmxid (0 = partitioned parent); stable, so kept in the hash.
+	// ages are derived against DatabaseXid/DatabaseMxid, not stored, to stay dedup-stable.
+	RelfrozenXid int64 `json:"relfrozenxid,omitempty"`
+	RelminMxid   int64 `json:"relminmxid,omitempty"`
+}
+
+// age(relfrozenxid) at capture, vs DatabaseXid (next-xid reference).
+func (s TableSizing) FrozenXidAge(databaseXid int64) (int64, bool) {
+	return counterAge(s.RelfrozenXid, databaseXid)
+}
+
+// mxid_age(relminmxid) at capture, vs DatabaseMxid (next-multixact reference).
+func (s TableSizing) MinMxidAge(databaseMxid int64) (int64, bool) {
+	return counterAge(s.RelminMxid, databaseMxid)
+}
+
+// Reproduces pg's age()/mxid_age(): wraparound-aware forward distance in 32-bit counter
+// space. ok=false when value 0 (partitioned parent) or reference 0 (pre-feature snapshot).
+// Guard stays at 0, not <=1: relminmxid 1 (FirstMultiXactId) is a real ageable value.
+func counterAge(value, reference int64) (int64, bool) {
+	if value == 0 || reference == 0 {
+		return 0, false
+	}
+	const modulo = int64(1) << 32
+	age := (reference%modulo - value%modulo) % modulo
+	if age < 0 {
+		age += modulo
+	}
+	return age, true
 }
 
 // Counters and vacuum/analyze timestamps from pg_stat_user_tables
@@ -381,13 +410,17 @@ type IndexActivityEntry struct {
 
 // Persisted planner inputs; schema_ref_hash binds rows to a SchemaSnapshot
 type PlannerStatsSnapshot struct {
-	SchemaRefHash string             `json:"schema_ref_hash"`
-	ContentHash   string             `json:"content_hash"`
-	Database      string             `json:"database"`
-	Timestamp     time.Time          `json:"timestamp"`
-	Tables        []TableSizingEntry `json:"tables"`
-	Indexes       []IndexSizingEntry `json:"indexes"`
-	Columns       []ColumnStatsEntry `json:"columns"`
+	SchemaRefHash string    `json:"schema_ref_hash"`
+	ContentHash   string    `json:"content_hash"`
+	Database      string    `json:"database"`
+	Timestamp     time.Time `json:"timestamp"`
+	// next-xid/next-multixact at capture; reference points for deriving the per-table
+	// ages. volatile, so excluded from ComputePlannerContentHash to preserve dedup.
+	DatabaseXid  int64              `json:"database_xid,omitempty"`
+	DatabaseMxid int64              `json:"database_mxid,omitempty"`
+	Tables       []TableSizingEntry `json:"tables"`
+	Indexes      []IndexSizingEntry `json:"indexes"`
+	Columns      []ColumnStatsEntry `json:"columns"`
 }
 
 // Persisted per-node activity counters

@@ -23,19 +23,25 @@ type (
 	}
 
 	VacuumHealth struct {
-		Schema                    string   `json:"schema"`
-		Table                     string   `json:"table"`
-		Reltuples                 float64  `json:"reltuples"`
-		DeadTuples                int64    `json:"dead_tuples"`
-		VacuumTriggerAt           float64  `json:"vacuum_trigger_at"`
-		VacuumProgress            float64  `json:"vacuum_progress"`
-		HasOverrides              bool     `json:"has_overrides"`
-		EffectiveThreshold        int64    `json:"effective_threshold"`
-		EffectiveScale            float64  `json:"effective_scale_factor"`
-		EffectiveAnalyzeThreshold int64    `json:"effective_analyze_threshold"`
-		EffectiveAnalyzeScale     float64  `json:"effective_analyze_scale_factor"`
+		Schema                    string     `json:"schema"`
+		Table                     string     `json:"table"`
+		Reltuples                 float64    `json:"reltuples"`
+		DeadTuples                int64      `json:"dead_tuples"`
+		VacuumTriggerAt           float64    `json:"vacuum_trigger_at"`
+		VacuumProgress            float64    `json:"vacuum_progress"`
+		HasOverrides              bool       `json:"has_overrides"`
+		EffectiveThreshold        int64      `json:"effective_threshold"`
+		EffectiveScale            float64    `json:"effective_scale_factor"`
+		EffectiveAnalyzeThreshold int64      `json:"effective_analyze_threshold"`
+		EffectiveAnalyzeScale     float64    `json:"effective_analyze_scale_factor"`
 		AnalyzeTriggerAt          float64    `json:"analyze_trigger_at"`
 		AutovacuumEnabled         bool       `json:"autovacuum_enabled"`
+		XidAge                    int64      `json:"xid_age,omitempty"`
+		FreezeMaxAge              int64      `json:"freeze_max_age,omitempty"`
+		FreezeProgress            float64    `json:"freeze_progress,omitempty"`
+		MxidAge                   int64      `json:"mxid_age,omitempty"`
+		MultixactFreezeMaxAge     int64      `json:"multixact_freeze_max_age,omitempty"`
+		MultixactFreezeProgress   float64    `json:"multixact_freeze_progress,omitempty"`
 		LastVacuum                *time.Time `json:"last_vacuum,omitempty"`
 		LastAutovacuum            *time.Time `json:"last_autovacuum,omitempty"`
 		LastAnalyze               *time.Time `json:"last_analyze,omitempty"`
@@ -196,6 +202,48 @@ func AnalyzeVacuumHealth(a *AnnotatedSchema) []VacuumHealth {
 			AnalyzeTriggerAt:          analyzeTrigger,
 			AutovacuumEnabled:         avEnabled,
 		}
+		// anti-wraparound: age(relfrozenxid) vs the (possibly overridden) freeze_max_age.
+		// ok=false (partitioned parents, pre-feature snapshots) skips freeze analysis.
+		freezeMaxAge := defaults.FreezeMaxAge
+		if v, ok := opts["autovacuum_freeze_max_age"]; ok {
+			if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+				freezeMaxAge = parsed
+			}
+		}
+		if age, ok := sizing.FrozenXidAge(a.Planner.DatabaseXid); ok {
+			vh.XidAge = age
+			vh.FreezeMaxAge = freezeMaxAge
+			if freezeMaxAge > 0 {
+				vh.FreezeProgress = float64(age) / float64(freezeMaxAge)
+				if vh.FreezeProgress >= 0.9 {
+					vh.Recommendations = append(vh.Recommendations,
+						fmt.Sprintf("relfrozenxid age is %d, %.0f%% of autovacuum_freeze_max_age (%d); "+
+							"anti-wraparound autovacuum is imminent, make sure it can finish",
+							age, vh.FreezeProgress*100, freezeMaxAge))
+				}
+			}
+		}
+
+		mxidFreezeMaxAge := defaults.MultixactFreezeMaxAge
+		if v, ok := opts["autovacuum_multixact_freeze_max_age"]; ok {
+			if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+				mxidFreezeMaxAge = parsed
+			}
+		}
+		if age, ok := sizing.MinMxidAge(a.Planner.DatabaseMxid); ok {
+			vh.MxidAge = age
+			vh.MultixactFreezeMaxAge = mxidFreezeMaxAge
+			if mxidFreezeMaxAge > 0 {
+				vh.MultixactFreezeProgress = float64(age) / float64(mxidFreezeMaxAge)
+				if vh.MultixactFreezeProgress >= 0.9 {
+					vh.Recommendations = append(vh.Recommendations,
+						fmt.Sprintf("relminmxid age is %d, %.0f%% of autovacuum_multixact_freeze_max_age (%d); "+
+							"anti-wraparound autovacuum is imminent, make sure it can finish",
+							age, vh.MultixactFreezeProgress*100, mxidFreezeMaxAge))
+				}
+			}
+		}
+
 		if activity != nil {
 			vh.LastVacuum = activity.LastVacuum
 			vh.LastAutovacuum = activity.LastAutovacuum

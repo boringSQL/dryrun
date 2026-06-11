@@ -163,6 +163,40 @@ func TestSchemaRefHash_PlannerBindsToSchemaContentHash(t *testing.T) {
 
 }
 
+// The volatile reference counters (DatabaseXid/DatabaseMxid) advance on every
+// capture even when nothing about the schema/sizing changed. They MUST stay out
+// of the planner content hash, or bundle dedup (filesystem_store keys on
+// content_hash) would write a fresh bundle on every single capture. This guards
+// that invariant directly: two snapshots differing only in the reference counters
+// hash identically. The stable raw relfrozenxid/relminmxid, by contrast, DO belong
+// in the hash and are exercised by the other tests via the Tables payload.
+func TestPlannerContentHash_IgnoresReferenceCounters(t *testing.T) {
+	base := &PlannerStatsSnapshot{
+		SchemaRefHash: "ddl-hash",
+		Tables: []TableSizingEntry{{
+			Table:  QualifiedName{Schema: "public", Name: "events"},
+			Sizing: TableSizing{Reltuples: 1_000_000, RelfrozenXid: 100, RelminMxid: 1},
+		}},
+	}
+	drifted := *base
+	drifted.DatabaseXid = base.DatabaseXid + 5_000_000
+	drifted.DatabaseMxid = base.DatabaseMxid + 5_000_000
+
+	if got, want := ComputePlannerContentHash(&drifted), ComputePlannerContentHash(base); got != want {
+		t.Errorf("reference counters leaked into planner content hash: %s vs %s", got, want)
+	}
+
+	// sanity: the stable frozen xids still move the hash, so they aren't silently dropped.
+	moved := *base
+	moved.Tables = []TableSizingEntry{{
+		Table:  base.Tables[0].Table,
+		Sizing: TableSizing{Reltuples: 1_000_000, RelfrozenXid: 200, RelminMxid: 1},
+	}}
+	if ComputePlannerContentHash(&moved) == ComputePlannerContentHash(base) {
+		t.Errorf("relfrozenxid change did not affect planner content hash")
+	}
+}
+
 // Same invariant for activity snapshots. Two nodes producing different
 // schema_ref values mean the cluster has drifted; under matched DDL the
 // binding must be stable across nodes.

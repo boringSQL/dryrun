@@ -15,6 +15,18 @@ func CapturePlannerStats(ctx context.Context, pool Querier, schemaRefHash string
 		return nil, fmt.Errorf("query current_database: %w", err)
 	}
 
+	// Reference counters for ageing relfrozenxid/relminmxid offline.
+	// xmax = next xid (pg_current_snapshot doesn't consume one, safe in our read tx).
+	// mxid_age('1')+1 = next_multixact, avoiding superuser-gated pg_control_checkpoint;
+	// cast before +1 since mxid_age is int4 and nears INT_MAX at wraparound.
+	var databaseXid, databaseMxid int64
+	if err := pool.QueryRow(ctx,
+		"SELECT pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot())::text::int8, "+
+			"(pg_catalog.mxid_age('1'::xid)::int8 + 1)",
+	).Scan(&databaseXid, &databaseMxid); err != nil {
+		return nil, fmt.Errorf("query reference counters: %w", err)
+	}
+
 	tables, err := fetchPlannerTableSizing(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("fetch table sizing: %w", err)
@@ -32,6 +44,8 @@ func CapturePlannerStats(ctx context.Context, pool Querier, schemaRefHash string
 		SchemaRefHash: schemaRefHash,
 		Database:      database,
 		Timestamp:     time.Now().UTC(),
+		DatabaseXid:   databaseXid,
+		DatabaseMxid:  databaseMxid,
 		Tables:        tables,
 		Indexes:       indexes,
 		Columns:       columns,
@@ -93,6 +107,7 @@ func fetchPlannerTableSizing(ctx context.Context, pool Querier) ([]TableSizingEn
 			&e.Sizing.Reltuples, &e.Sizing.Relpages,
 			&e.Sizing.TableSize, &e.Sizing.TotalRelationSize,
 			&e.Sizing.IndexesSize, &e.Sizing.ToastSize,
+			&e.Sizing.RelfrozenXid, &e.Sizing.RelminMxid,
 		)
 		return e, err
 	})
