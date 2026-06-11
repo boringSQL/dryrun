@@ -29,6 +29,7 @@ type (
 		Type     string `toml:"type"`
 		Ref      string `toml:"ref"`
 		TokenEnv string `toml:"token_env"`
+		Auth     string `toml:"auth"` // "" docker creds; "gcp" GAR/GCR via ADC
 		Default  bool   `toml:"default"`
 	}
 

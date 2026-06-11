@@ -260,6 +260,11 @@ dryrun snapshot pull --remote ghcr
 
 `--ref` is the registry base. Each database gets its own repository under it, `<ref>/<project_id>/<database_id>`, so `myapp`'s `auth` database lands at `ghcr.io/myorg/dryrun/myapp/auth`. Snapshots map to OCI artifacts addressed by content hash, so pushing the same one twice changes nothing and shared blobs deduplicate on the registry. For Google Artifact Registry, run `gcloud auth configure-docker us-docker.pkg.dev` in place of `docker login`; the rest is identical.
 
+**Authentication.** By default dryrun reuses your Docker credentials (`~/.docker/config.json` and credential helpers), so any registry you can `docker login` to works with no extra config. Two overrides on `remote add` cover the rest:
+
+- `--token-env VAR` reads a static bearer token from an environment variable, for registries that issue short-lived tokens (e.g. `--token-env GAR_TOKEN` fed by `gcloud auth print-access-token`).
+- `--auth gcp` uses Google Application Default Credentials directly, so Google Artifact Registry / Container Registry work after `gcloud auth login` (or a service-account key via `GOOGLE_APPLICATION_CREDENTIALS`) without `configure-docker`. The ADC token is refreshed automatically.
+
 See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for per-profile remotes and sharing one stream across projects.
 
 ## MCP server

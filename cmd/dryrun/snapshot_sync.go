@@ -203,10 +203,10 @@ func buildHTTPStore(name, ref, tokenEnv string) (history.SnapshotStore, error) {
 	return history.NewHTTPStore(history.HTTPConfig{BaseURL: ref, Token: token})
 }
 
-// --oci is a direct ref; --remote resolves base+token_env from [[remote]].
+// --oci is a direct ref; --remote resolves base+token_env+auth from [[remote]].
 func buildOCIStore(ociRef, remoteName string) (history.SnapshotStore, error) {
 	base := ociRef
-	var tokenEnv string
+	var tokenEnv, authMode string
 	if base == "" {
 		_, cfg, err := loadProjectConfig()
 		if err != nil {
@@ -219,9 +219,9 @@ func buildOCIStore(ociRef, remoteName string) (history.SnapshotStore, error) {
 		if r.Type != "" && r.Type != "oci" {
 			return nil, fmt.Errorf("remote %q has unsupported type %q", r.Name, r.Type)
 		}
-		base, tokenEnv = r.Ref, r.TokenEnv
+		base, tokenEnv, authMode = r.Ref, r.TokenEnv, r.Auth
 	}
-	client, err := history.NewAuthClient(history.AuthConfig{TokenEnv: tokenEnv})
+	client, err := history.NewAuthClient(history.AuthConfig{TokenEnv: tokenEnv, Mode: authMode})
 	if err != nil {
 		return nil, err
 	}
