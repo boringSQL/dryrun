@@ -238,6 +238,30 @@ Offline tools (`lint`, `check_migration`, `drift`) work immediately after the pu
 
 No server, no credentials. Same promise as before.
 
+### Push snapshots to an OCI registry
+
+Any OCI registry can hold snapshots: GitHub Container Registry, Google Artifact Registry, Amazon ECR, Docker Hub, Harbor, or a self-hosted one. The registry handles authentication, retention, and access control, so there is no server to run.
+
+Authenticate the same way you would for `docker push`, register the remote, and push:
+
+```sh
+docker login ghcr.io
+dryrun remote add ghcr --ref ghcr.io/myorg/dryrun --default
+dryrun snapshot take --push
+```
+
+`snapshot take --push` captures and publishes in one step. Consumers pull:
+
+```sh
+dryrun snapshot pull --remote ghcr
+```
+
+`pull` fetches only the latest take by default, so cold pulls (fresh CI, empty `history.db`) stay cheap regardless of how much history the registry holds. Use `--full` to backfill the entire history, or `--since 7d` (also `2w`, `24h`, or a UTC date like `2026-01-01`) for a window. `push` always sends your full local history; since it is incremental by content hash, an owner that pushes on a cadence only uploads the new observations each run.
+
+`--ref` is the registry base. Each database gets its own repository under it, `<ref>/<project_id>/<database_id>`, so `myapp`'s `auth` database lands at `ghcr.io/myorg/dryrun/myapp/auth`. Snapshots map to OCI artifacts addressed by content hash, so pushing the same one twice changes nothing and shared blobs deduplicate on the registry. For Google Artifact Registry, run `gcloud auth configure-docker us-docker.pkg.dev` in place of `docker login`; the rest is identical.
+
+See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for per-profile remotes and sharing one stream across projects.
+
 ## MCP server
 
 Add `dryrun` to your AI assistant. If you installed via Homebrew, `dryrun` is already on your PATH:
@@ -285,17 +309,14 @@ See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Clau
 
 - **[Tutorial](TUTORIAL.md)** for offline, online, and multi-node workflows with full tool reference
 - **[Multi-node statistics](docs/multi-node-stats.md)** for cluster-wide stats collection, aggregation rules, and replica imbalance detection
-- **[Configuration reference](docs/dryrun-toml.md)** for `dryrun.toml` profiles, conventions, and lint rules
+- **[Configuration reference](docs/dryrun-toml.md)** for `dryrun.toml` profiles, conventions, remotes, and lint rules
+- **[CLI stability](docs/cli-stability.md)** for which commands are stable versus experimental
 - **[Security overview](SECURITY.md)** for the CLI/MCP split and masking
 - **[boringSQL](https://boringsql.com)**, the blog and project home
+- **[dryrun project page](https://boringsql.com/products/dryrun/)**, overview and docs
+- **[Don't let AI touch your production database](https://boringsql.com/posts/dont-let-ai-to-prod/)**, why most Postgres MCPs are unsafe and what `dryrun` does differently
 - **[RegreSQL](https://github.com/boringsql/regresql)**, SQL regression testing and **`dryrun`**'s companion tool
-
-
-## Upgrading from 0.5.x
-
-- `dump-schema --stats-only` is removed. Use `dryrun snapshot take` (primary) and `dryrun snapshot activity` (replicas).
-- Snapshot JSON no longer embeds `Table.stats`, `Column.stats`, `Index.stats`, or `node_stats`. Stats are read per-kind from the history db via `HistoryStore::get_annotated`.
-- `check_drift` is now schema-only. It no longer flaps when `reltuples` or `idx_scan` change.
+- **[Fixturize](https://github.com/boringSQL/fixturize)**, subset and mask production data for dev/test
 
 ## License
 

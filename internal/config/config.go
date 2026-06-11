@@ -20,6 +20,16 @@ type (
 		Conventions  *ConventionsConfig       `toml:"conventions"`
 		Services     *ServicesConfig          `toml:"services"`
 		RequireMasks *bool                    `toml:"require_masks"`
+		Remotes      []RemoteConfig           `toml:"remote"`
+	}
+
+	// [[remote]] block; Ref is the registry base, e.g. ghcr.io/org/dryrun
+	RemoteConfig struct {
+		Name     string `toml:"name"`
+		Type     string `toml:"type"`
+		Ref      string `toml:"ref"`
+		TokenEnv string `toml:"token_env"`
+		Default  bool   `toml:"default"`
 	}
 
 	ProjectMeta struct {
@@ -40,6 +50,8 @@ type (
 		DatabaseID   *string  `toml:"database_id"`
 		MasksFile    *string  `toml:"masks_file"`
 		MaskPolicies []string `toml:"mask_policies"`
+		Remote       *string  `toml:"remote"`
+		Stream       *string  `toml:"stream"`
 	}
 
 	ConventionsConfig struct {
@@ -65,15 +77,57 @@ type (
 	}
 
 	ResolvedProfile struct {
-		Name         string
-		DBURL        *string
-		SchemaFile   *string
-		ProjectID    history.ProjectId
-		DatabaseID   *history.DatabaseId
-		MasksFile    *string
-		MaskPolicies []string
+		Name           string
+		DBURL          *string
+		SchemaFile     *string
+		ProjectID      history.ProjectId
+		DatabaseID     *history.DatabaseId
+		MasksFile      *string
+		MaskPolicies   []string
+		Remote         *string
+		streamOverride *string
 	}
 )
+
+// Stream is the remote repo-path suffix: explicit override or the default
+// <project>/<database> (shared with BundleDir so remote/local layouts match).
+func (r *ResolvedProfile) Stream() string {
+	if r.streamOverride != nil && *r.streamOverride != "" {
+		return *r.streamOverride
+	}
+	return history.StreamSuffix(r.SnapshotKey())
+}
+
+// ResolveRemote: by name, else the sole remote, else the sole default.
+func (c *ProjectConfig) ResolveRemote(name string) (*RemoteConfig, error) {
+	if name != "" {
+		for i := range c.Remotes {
+			if c.Remotes[i].Name == name {
+				return &c.Remotes[i], nil
+			}
+		}
+		return nil, fmt.Errorf("remote %q not found in dryrun.toml", name)
+	}
+	switch len(c.Remotes) {
+	case 0:
+		return nil, fmt.Errorf("no remotes configured in dryrun.toml")
+	case 1:
+		return &c.Remotes[0], nil
+	}
+	var def *RemoteConfig
+	for i := range c.Remotes {
+		if c.Remotes[i].Default {
+			if def != nil {
+				return nil, fmt.Errorf("multiple default remotes; pass --remote")
+			}
+			def = &c.Remotes[i]
+		}
+	}
+	if def == nil {
+		return nil, fmt.Errorf("multiple remotes and no default; pass --remote")
+	}
+	return def, nil
+}
 
 func (r *ResolvedProfile) SnapshotKey() history.SnapshotKey {
 	did := history.DatabaseId(string(r.ProjectID))
@@ -251,6 +305,8 @@ func resolveProfileConfig(name string, profile *ProfileConfig, projectRoot strin
 		rp.MasksFile = &p
 	}
 	rp.MaskPolicies = profile.MaskPolicies
+	rp.Remote = profile.Remote
+	rp.streamOverride = profile.Stream
 	return rp
 }
 
