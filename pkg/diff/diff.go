@@ -45,17 +45,19 @@ type (
 		Constraint *ConstraintChange `json:"constraint,omitempty"`
 		Function   *FunctionChange   `json:"function,omitempty"`
 		RLS        *RLSChange        `json:"rls,omitempty"`
-		Rename     *RenameChange     `json:"rename,omitempty"` // D2
+		Rename     *RenameChange     `json:"rename,omitempty"`
 
 		Note string `json:"note,omitempty"` // human hint, not load-bearing
 	}
 
 	ChangeType string
 
+	// OID-first identity; survives rename. 0 when the source carries none
 	ObjectRef struct {
 		Kind   string  `json:"kind"`
 		Schema *string `json:"schema,omitempty"`
 		Name   string  `json:"name"`
+		OID    uint32  `json:"oid,omitempty"`
 	}
 
 	ColumnChange struct {
@@ -103,7 +105,7 @@ type (
 const (
 	TableAdded          ChangeType = "table_added"
 	TableDropped        ChangeType = "table_dropped"
-	TableRenamed        ChangeType = "table_renamed" // D2
+	TableRenamed        ChangeType = "table_renamed"
 	TableCommentChanged ChangeType = "table_comment_changed"
 
 	ColumnAdded          ChangeType = "column_added"
@@ -174,7 +176,7 @@ func DiffSchema(from, to *snapshot.SchemaSnapshot) (*SchemaDelta, error) {
 
 func tableRef(t *snapshot.Table) ObjectRef {
 	s := t.Schema
-	return ObjectRef{Kind: "table", Schema: &s, Name: t.Name}
+	return ObjectRef{Kind: "table", Schema: &s, Name: t.Name, OID: t.OID}
 }
 
 func diffTables(from, to []snapshot.Table, changes *[]Change) {
@@ -188,25 +190,53 @@ func diffTables(from, to []snapshot.Table, changes *[]Change) {
 		toMap[key{to[i].Schema, to[i].Name}] = &to[i]
 	}
 
-	for k, t := range toMap {
-		if _, ok := fromMap[k]; !ok {
-			*changes = append(*changes, Change{Type: TableAdded, Object: tableRef(t), Note: plural(len(t.Columns), "column", "columns")})
-		}
-	}
-	for k, t := range fromMap {
-		if _, ok := toMap[k]; !ok {
-			*changes = append(*changes, Change{Type: TableDropped, Object: tableRef(t)})
-		}
-	}
+	paired := make(map[*snapshot.Table]*snapshot.Table, len(from))
+	pairedTo := make(map[*snapshot.Table]bool, len(to))
 	for k, old := range fromMap {
 		if nw, ok := toMap[k]; ok {
+			paired[old] = nw
+			pairedTo[nw] = true
+		}
+	}
+	toByOID := make(map[uint32]*snapshot.Table, len(to))
+	for i := range to {
+		if to[i].OID != 0 {
+			toByOID[to[i].OID] = &to[i]
+		}
+	}
+	for i := range from {
+		old := &from[i]
+		if _, done := paired[old]; done || old.OID == 0 {
+			continue
+		}
+		nw, ok := toByOID[old.OID]
+		if !ok || pairedTo[nw] {
+			continue // OID gone, or its to-table already matched by name
+		}
+		paired[old] = nw
+		pairedTo[nw] = true
+		*changes = append(*changes, Change{Type: TableRenamed, Object: tableRef(nw), Rename: &RenameChange{
+			FromName: old.Qual().String(), ToName: nw.Qual().String(),
+		}})
+	}
+
+	for i := range to {
+		if nw := &to[i]; !pairedTo[nw] {
+			*changes = append(*changes, Change{Type: TableAdded, Object: tableRef(nw), Note: plural(len(nw.Columns), "column", "columns")})
+		}
+	}
+	for i := range from {
+		old := &from[i]
+		if nw, ok := paired[old]; ok {
 			diffTableBody(old, nw, changes)
+		} else {
+			*changes = append(*changes, Change{Type: TableDropped, Object: tableRef(old)})
 		}
 	}
 }
 
 func diffTableBody(old, nw *snapshot.Table, changes *[]Change) {
-	ref := tableRef(old)
+	ref := tableRef(nw) // nw so a renamed table's body changes attach under the new name
 
 	oldCols := indexBy(old.Columns, func(c snapshot.Column) string { return c.Name })
 	newCols := indexBy(nw.Columns, func(c snapshot.Column) string { return c.Name })
@@ -307,7 +337,10 @@ func diffViews(from, to []snapshot.View, changes *[]Change) {
 	for i := range to {
 		toMap[key{to[i].Schema, to[i].Name}] = &to[i]
 	}
-	viewRef := func(v *snapshot.View) ObjectRef { s := v.Schema; return ObjectRef{Kind: "view", Schema: &s, Name: v.Name} }
+	viewRef := func(v *snapshot.View) ObjectRef {
+		s := v.Schema
+		return ObjectRef{Kind: "view", Schema: &s, Name: v.Name}
+	}
 	for k, v := range toMap {
 		if _, ok := fromMap[k]; !ok {
 			*changes = append(*changes, Change{Type: ViewAdded, Object: viewRef(v)})
