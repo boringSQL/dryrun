@@ -124,6 +124,96 @@ func TestDiffSchema_TableAddedDropped(t *testing.T) {
 	}
 }
 
+// --- OID identity + rename detection ---
+//
+// Keying tables purely on (schema, name) means renaming a table reads as a drop
+// of the old name plus an add of the new one — and a drop+add is a destructive,
+// data-losing event, the opposite of what a rename actually is. Keying on the
+// OID (stable across a rename within one database lifetime) lets the differ, when
+// the same OID resurfaces under a new name, emit a single TableRenamed carrying
+// both names instead of the misleading drop+add pair.
+
+// The canonical rename: same OID, new name. The differ must emit exactly one
+// TableRenamed (with FromName/ToName populated, qualified) and crucially must
+// NOT also emit a TableAdded or TableDropped — the whole point is that the data
+// moved, it was not destroyed and recreated.
+func TestDiffSchema_TableRenamedByOID(t *testing.T) {
+	from := emptySnap("a")
+	from.Tables = []snapshot.Table{{OID: 42, Schema: "public", Name: "old_name", Columns: []snapshot.Column{{Name: "id"}}}}
+	to := emptySnap("b")
+	to.Tables = []snapshot.Table{{OID: 42, Schema: "public", Name: "new_name", Columns: []snapshot.Column{{Name: "id"}}}}
+
+	delta, _ := DiffSchema(from, to)
+	r := findChange(t, delta.Changes, TableRenamed)
+	if r.Rename == nil || r.Rename.FromName != "public.old_name" || r.Rename.ToName != "public.new_name" {
+		t.Errorf("rename names: got %+v", r.Rename)
+	}
+	if r.Object.Name != "new_name" || r.Object.OID != 42 {
+		t.Errorf("rename object should carry the new name + OID: got %+v", r.Object)
+	}
+	for _, c := range delta.Changes {
+		if c.Type == TableAdded || c.Type == TableDropped {
+			t.Errorf("rename must not also produce %s: %+v", c.Type, c)
+		}
+	}
+}
+
+// A rename and a body change can land in the same diff. The renamed table's
+// per-attribute changes (here a new column) must attach under the *new* name and
+// OID, not the old one, so the cloud folds them onto the surviving identity.
+func TestDiffSchema_RenameCarriesBodyChanges(t *testing.T) {
+	from := emptySnap("a")
+	from.Tables = []snapshot.Table{{OID: 7, Schema: "public", Name: "before", Columns: []snapshot.Column{{Name: "id"}}}}
+	to := emptySnap("b")
+	to.Tables = []snapshot.Table{{OID: 7, Schema: "public", Name: "after", Columns: []snapshot.Column{{Name: "id"}, {Name: "extra"}}}}
+
+	delta, _ := DiffSchema(from, to)
+	findChange(t, delta.Changes, TableRenamed)
+	add := findChange(t, delta.Changes, ColumnAdded)
+	if add.Object.Name != "after" || add.Object.OID != 7 {
+		t.Errorf("body change should attach under the renamed identity: got %+v", add.Object)
+	}
+}
+
+// OID matching only fires on tables left unmatched by name. When the OID is
+// absent (0) — older snapshots, or the planner/activity channels that carry no
+// OID — there is nothing to pair on, so a name change must degrade gracefully to
+// the old drop+add behavior rather than mis-detecting a rename.
+func TestDiffSchema_NoOIDFallsBackToDropAdd(t *testing.T) {
+	from := emptySnap("a")
+	from.Tables = []snapshot.Table{{Schema: "public", Name: "old_name"}} // OID 0
+	to := emptySnap("b")
+	to.Tables = []snapshot.Table{{Schema: "public", Name: "new_name"}} // OID 0
+
+	delta, _ := DiffSchema(from, to)
+	findChange(t, delta.Changes, TableAdded)
+	findChange(t, delta.Changes, TableDropped)
+	for _, c := range delta.Changes {
+		if c.Type == TableRenamed {
+			t.Fatalf("no OID to key on — must not detect a rename: %+v", c)
+		}
+	}
+}
+
+// A genuine drop of one table plus an unrelated add of another, both carrying
+// OIDs, must NOT be collapsed into a rename: the OIDs differ, so the identities
+// are distinct and the destructive drop has to stay visible.
+func TestDiffSchema_DistinctOIDsStayDropAdd(t *testing.T) {
+	from := emptySnap("a")
+	from.Tables = []snapshot.Table{{OID: 1, Schema: "public", Name: "gone"}}
+	to := emptySnap("b")
+	to.Tables = []snapshot.Table{{OID: 2, Schema: "public", Name: "fresh"}}
+
+	delta, _ := DiffSchema(from, to)
+	findChange(t, delta.Changes, TableAdded)
+	findChange(t, delta.Changes, TableDropped)
+	for _, c := range delta.Changes {
+		if c.Type == TableRenamed {
+			t.Fatalf("distinct OIDs are distinct identities, not a rename: %+v", c)
+		}
+	}
+}
+
 // Adding a column is not one event but three risk profiles, and the differ has
 // to tell them apart up front because the cloud can't recover the distinction
 // later: a nullable column with no default is metadata-only, a constant default
