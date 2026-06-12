@@ -44,8 +44,8 @@ func remoteListCmd() *cobra.Command {
 
 func remoteAddCmd() *cobra.Command {
 	var (
-		typ, ref, tokenEnv string
-		isDefault          bool
+		typ, ref, tokenEnv, authMode string
+		isDefault                    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "add <name>",
@@ -65,8 +65,11 @@ func remoteAddCmd() *cobra.Command {
 					return fmt.Errorf("remote %q already exists", name)
 				}
 			}
+			if authMode != "" && authMode != "gcp" {
+				return fmt.Errorf("--auth must be empty or \"gcp\"")
+			}
 			block := remoteBlock(config.RemoteConfig{
-				Name: name, Type: typ, Ref: ref, TokenEnv: tokenEnv, Default: isDefault,
+				Name: name, Type: typ, Ref: ref, TokenEnv: tokenEnv, Auth: authMode, Default: isDefault,
 			})
 			data, err := os.ReadFile(path)
 			if err != nil {
@@ -83,6 +86,7 @@ func remoteAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&typ, "type", "oci", "remote type")
 	cmd.Flags().StringVar(&ref, "ref", "", "registry base ref (e.g. ghcr.io/org/dryrun)")
 	cmd.Flags().StringVar(&tokenEnv, "token-env", "", "env var holding a bearer token")
+	cmd.Flags().StringVar(&authMode, "auth", "", "auth mode: \"gcp\" for GAR/GCR via ADC")
 	cmd.Flags().BoolVar(&isDefault, "default", false, "mark as the default remote")
 	return cmd
 }
@@ -123,6 +127,9 @@ func remoteBlock(r config.RemoteConfig) string {
 	fmt.Fprintf(&b, "ref = %q\n", r.Ref)
 	if r.TokenEnv != "" {
 		fmt.Fprintf(&b, "token_env = %q\n", r.TokenEnv)
+	}
+	if r.Auth != "" {
+		fmt.Fprintf(&b, "auth = %q\n", r.Auth)
 	}
 	if r.Default {
 		b.WriteString("default = true\n")

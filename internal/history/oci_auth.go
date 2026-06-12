@@ -13,9 +13,10 @@ import (
 
 type AuthConfig struct {
 	TokenEnv string
+	Mode     string // "" docker creds; "gcp" GAR/GCR via ADC
 }
 
-// token_env wins; else docker creds (covers GAR/GHCR/ECR/Hub after login)
+// token_env wins; then mode=gcp (ADC); else docker creds (GAR/GHCR/ECR/Hub after login)
 func NewAuthClient(cfg AuthConfig) (remote.Client, error) {
 	if cfg.TokenEnv != "" {
 		token := os.Getenv(cfg.TokenEnv)
@@ -23,6 +24,14 @@ func NewAuthClient(cfg AuthConfig) (remote.Client, error) {
 			return nil, fmt.Errorf("oci auth: token_env %q is set but the variable is empty", cfg.TokenEnv)
 		}
 		return staticBearerClient(token), nil
+	}
+
+	switch cfg.Mode {
+	case "", "docker":
+	case "gcp":
+		return gcpADCClient(context.Background())
+	default:
+		return nil, fmt.Errorf("oci auth: unknown auth mode %q", cfg.Mode)
 	}
 
 	store, err := credentials.NewStoreFromDocker(credentials.StoreOptions{})
