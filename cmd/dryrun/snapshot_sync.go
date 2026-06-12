@@ -156,15 +156,51 @@ func parseRelative(s string) (time.Duration, error) {
 func resolveSyncStore(path, ociRef, remoteName string) (history.SnapshotStore, error) {
 	switch {
 	case ociRef != "" || remoteName != "":
-		return buildOCIStore(ociRef, remoteName)
+		return buildRemoteStore(ociRef, remoteName)
 	case path != "":
 		return history.NewFilesystemStore(path)
 	default:
 		if r := profileRemote(); r != "" {
-			return buildOCIStore("", r)
+			return buildRemoteStore("", r)
 		}
 		return nil, fmt.Errorf("specify --to-path/--from-path, --oci, or --remote")
 	}
+}
+
+// buildRemoteStore dispatches a configured remote to its backend. A direct --oci
+// ref is always OCI; a named [[remote]] selects by its type ("http" is the
+// Hindsight registry, "" or "oci" the OCI one).
+func buildRemoteStore(ociRef, remoteName string) (history.SnapshotStore, error) {
+	if ociRef == "" && remoteName != "" {
+		_, cfg, err := loadProjectConfig()
+		if err != nil {
+			return nil, err
+		}
+		r, err := cfg.ResolveRemote(remoteName)
+		if err != nil {
+			return nil, err
+		}
+		if r.Type == "http" {
+			return buildHTTPStore(r.Name, r.Ref, r.TokenEnv)
+		}
+	}
+	return buildOCIStore(ociRef, remoteName)
+}
+
+// buildHTTPStore builds a Hindsight (predict) /v1 store. The token comes from
+// token_env (default DRYRUN_TOKEN), never from disk.
+func buildHTTPStore(name, ref, tokenEnv string) (history.SnapshotStore, error) {
+	if ref == "" {
+		return nil, fmt.Errorf("remote %q: http remote requires a url in ref", name)
+	}
+	if tokenEnv == "" {
+		tokenEnv = "DRYRUN_TOKEN"
+	}
+	token := os.Getenv(tokenEnv)
+	if token == "" {
+		return nil, fmt.Errorf("remote %q: %s is not set", name, tokenEnv)
+	}
+	return history.NewHTTPStore(history.HTTPConfig{BaseURL: ref, Token: token})
 }
 
 // --oci is a direct ref; --remote resolves base+token_env from [[remote]].
