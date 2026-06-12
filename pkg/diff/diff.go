@@ -21,8 +21,6 @@ type (
 		Activity    *ActivityDelta `json:"activity,omitempty"`
 	}
 
-	ActivityDelta struct{} // activity sizing/scan deltas, not yet implemented
-
 	SchemaDelta struct {
 		FromHash string   `json:"from_hash"`
 		ToHash   string   `json:"to_hash"`

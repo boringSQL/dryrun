@@ -23,10 +23,14 @@ func (r ObjectRef) Qualified() string {
 	return r.Name
 }
 
-// Human +/~/- tree for schema, sizing movers for planner.
+// Human +/~/- tree for schema, sizing/stat movers for planner, counter movers for activity.
 func RenderConsole(w io.Writer, env *SnapshotDiff) {
 	if env.Planner != nil {
 		RenderPlannerConsole(w, env, DefaultMinPct)
+		return
+	}
+	if env.Activity != nil {
+		RenderActivityConsole(w, env, DefaultMinPct)
 		return
 	}
 	if env.Schema == nil {
