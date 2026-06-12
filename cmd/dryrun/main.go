@@ -15,11 +15,11 @@ import (
 
 	"github.com/boringsql/dryrun/internal/buildinfo"
 	"github.com/boringsql/dryrun/internal/config"
-	"github.com/boringsql/dryrun/internal/diff"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/lint"
 	drmcp "github.com/boringsql/dryrun/internal/mcp"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/diff"
 )
 
 var (
@@ -304,15 +304,8 @@ func driftCmd() *cobra.Command {
 			fmt.Printf("  %d added, %d removed, %d modified\n\n",
 				report.AddedCount, report.RemovedCount, report.ModifiedCount)
 
-			for _, c := range report.Changeset.Changes {
-				name := c.Name
-				if c.Schema != nil {
-					name = *c.Schema + "." + name
-				}
-				fmt.Printf("  [%s] %s %s\n", c.Kind, c.ObjectType, name)
-				for _, d := range c.Details {
-					fmt.Printf("         %s\n", d)
-				}
+			for _, c := range report.Delta.Changes {
+				fmt.Printf("  %s %s\n", diff.Marker(c), diff.Describe(c))
 			}
 			return nil
 		},
@@ -453,11 +446,11 @@ func snapshotCmd() *cobra.Command {
 	addHistFlag(listCmd)
 
 	var fromHash, toHash string
-	var latest, prettyDiff bool
+	var latest, prettyDiff, jsonDiff bool
 
 	diffCmd := &cobra.Command{
 		Use:   "diff",
-		Short: "Diff two snapshots",
+		Short: "Diff two snapshots of the same kind",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := openHistoryStore(historyDB)
 			if err != nil {
@@ -466,6 +459,33 @@ func snapshotCmd() *cobra.Command {
 			defer store.Close()
 
 			key := resolveSnapshotKey()
+
+			// same-kind guard; live (--to omitted) and --latest are schema by definition.
+			fromKind, fromLabel := history.SchemaKind(), "schema"
+			if fromHash != "" {
+				fromKind, err = store.ResolveKind(cmd.Context(), key, fromHash)
+				if err != nil {
+					return err
+				}
+				fromLabel = fromKind.String()
+			}
+			toKind, toLabel := history.SchemaKind(), "schema"
+			if toHash != "" {
+				toKind, err = store.ResolveKind(cmd.Context(), key, toHash)
+				if err != nil {
+					return err
+				}
+				toLabel = toKind.String()
+			}
+			if fromKind.Tag != toKind.Tag {
+				return fmt.Errorf("not comparable: %s is a %s snapshot, %s is a %s snapshot\n"+
+					"       diff snapshots of the same kind (schema↔schema, planner↔planner, activity↔activity)",
+					short(fromHash), fromLabel, short(toHash), toLabel)
+			}
+			if fromKind.Tag != history.KindSchema {
+				return fmt.Errorf("diffing %s snapshots is not yet supported (schema only for now)", fromLabel)
+			}
+
 			loadByHash := func(h string) (*schema.SchemaSnapshot, error) {
 				return store.GetSchema(cmd.Context(), key, history.NewRefHash(h))
 			}
@@ -498,8 +518,24 @@ func snapshotCmd() *cobra.Command {
 				return err
 			}
 
-			changeset := diff.DiffSchemas(fromSnap, toSnap)
-			fmt.Println(string(marshalJSON(changeset, prettyDiff)))
+			delta, err := diff.DiffSchema(fromSnap, toSnap)
+			if err != nil {
+				return err
+			}
+			env := &diff.SnapshotDiff{
+				Kind:        "schema",
+				FromHash:    fromSnap.ContentHash,
+				ToHash:      toSnap.ContentHash,
+				FromTakenAt: fromSnap.Timestamp,
+				ToTakenAt:   toSnap.Timestamp,
+				Schema:      delta,
+			}
+
+			if jsonDiff {
+				fmt.Println(string(marshalJSON(env, prettyDiff)))
+				return nil
+			}
+			diff.RenderConsole(os.Stdout, env)
 			return nil
 		},
 	}
@@ -507,6 +543,7 @@ func snapshotCmd() *cobra.Command {
 	diffCmd.Flags().StringVar(&toHash, "to", "", "target snapshot hash")
 	diffCmd.Flags().BoolVar(&latest, "latest", false, "use latest saved snapshot as source")
 	addHistFlag(diffCmd)
+	diffCmd.Flags().BoolVar(&jsonDiff, "json", false, "output the SnapshotDiff as JSON")
 	diffCmd.Flags().BoolVar(&prettyDiff, "pretty", false, "pretty-print JSON")
 
 	cmd.AddCommand(takeCmd, listCmd, diffCmd, snapshotActivityCmd(),
@@ -671,6 +708,13 @@ func connectDBFor(override string) (context.Context, *schema.DryRun, error) {
 		return nil, nil, err
 	}
 	return ctx, conn, nil
+}
+
+func short(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }
 
 func marshalJSON(v any, pretty bool) []byte {

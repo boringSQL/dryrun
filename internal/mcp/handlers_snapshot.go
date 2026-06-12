@@ -8,9 +8,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/boringsql/dryrun/internal/diff"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/diff"
 )
 
 func (s *Server) handleReloadSchema(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -74,11 +74,14 @@ func (s *Server) handleSchemaDiff(ctx context.Context, req mcp.CallToolRequest) 
 		return errResult(err.Error()), nil
 	}
 
-	changeset := diff.DiffSchemas(from, to)
-	if changeset.IsEmpty() {
-		return textResult(s.wrapText(fmt.Sprintf("No changes between %s and %s.", short(changeset.FromHash), short(changeset.ToHash)), "")), nil
+	delta, err := diff.DiffSchema(from, to)
+	if err != nil {
+		return errResult(err.Error()), nil
 	}
-	return s.metaJSONResult(changeset, "", "", nil), nil
+	if delta.IsEmpty() {
+		return textResult(s.wrapText(fmt.Sprintf("No changes between %s and %s.", short(delta.FromHash), short(delta.ToHash)), "")), nil
+	}
+	return s.metaJSONResult(delta, "", "", nil), nil
 }
 
 // from-side resolves empty → latest snapshot in history.db; to-side resolves

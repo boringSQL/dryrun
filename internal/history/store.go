@@ -586,6 +586,59 @@ func (s *Store) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind,
 	return out, rows.Err()
 }
 
+// Maps a content-hash prefix to its kind for the `snapshot diff` same-kind guard.
+func (s *Store) ResolveKind(ctx context.Context, key SnapshotKey, hashPrefix string) (SnapshotKind, error) {
+	pid := string(key.ProjectID)
+	did := string(key.DatabaseID)
+
+	var matches []SnapshotKind
+	count := func(table string) (int, error) {
+		var n int
+		err := s.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM "+table+" WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?",
+			pid, did, hashPrefix+"%").Scan(&n)
+		return n, err
+	}
+
+	if n, err := count("snapshots"); err != nil {
+		return SnapshotKind{}, err
+	} else if n > 0 {
+		matches = append(matches, SchemaKind())
+	}
+	if n, err := count("planner_stats"); err != nil {
+		return SnapshotKind{}, err
+	} else if n > 0 {
+		matches = append(matches, PlannerKind())
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT node_source FROM activity_stats
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?`,
+		pid, did, hashPrefix+"%")
+	if err != nil {
+		return SnapshotKind{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			return SnapshotKind{}, err
+		}
+		matches = append(matches, ActivityKind(label))
+	}
+	if err := rows.Err(); err != nil {
+		return SnapshotKind{}, err
+	}
+
+	switch len(matches) {
+	case 0:
+		return SnapshotKind{}, fmt.Errorf("%w (hash %s)", ErrSnapshotNotFound, hashPrefix)
+	case 1:
+		return matches[0], nil
+	default:
+		return SnapshotKind{}, fmt.Errorf("ambiguous snapshot hash prefix %q (matches multiple kinds)", hashPrefix)
+	}
+}
+
 // compile-time check that *Store satisfies SnapshotStore
 var _ SnapshotStore = (*Store)(nil)
 
