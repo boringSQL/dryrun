@@ -23,8 +23,12 @@ func (r ObjectRef) Qualified() string {
 	return r.Name
 }
 
-// Human +/~/- tree. Planner/activity rendering lands with D3/D4.
+// Human +/~/- tree for schema, sizing movers for planner.
 func RenderConsole(w io.Writer, env *SnapshotDiff) {
+	if env.Planner != nil {
+		RenderPlannerConsole(w, env, DefaultMinPct)
+		return
+	}
 	if env.Schema == nil {
 		fmt.Fprintf(w, "%s diff %s → %s: no renderer yet\n", env.Kind, short(env.FromHash), short(env.ToHash))
 		return

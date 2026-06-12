@@ -17,12 +17,11 @@ type (
 		FromTakenAt time.Time      `json:"from_taken_at"`
 		ToTakenAt   time.Time      `json:"to_taken_at"`
 		Schema      *SchemaDelta   `json:"schema,omitempty"`
-		Planner     *PlannerDelta  `json:"planner,omitempty"`  // D3
-		Activity    *ActivityDelta `json:"activity,omitempty"` // D4
+		Planner     *PlannerDelta  `json:"planner,omitempty"`
+		Activity    *ActivityDelta `json:"activity,omitempty"`
 	}
 
-	PlannerDelta  struct{} // D3
-	ActivityDelta struct{} // D4
+	ActivityDelta struct{} // activity sizing/scan deltas, not yet implemented
 
 	SchemaDelta struct {
 		FromHash string   `json:"from_hash"`
@@ -158,7 +157,7 @@ func (t ChangeType) Category() string {
 	}
 }
 
-// error is for symmetry with DiffPlanner/DiffActivity (D3/D4); schema diffing never fails.
+// error is for symmetry with DiffPlanner/DiffActivity; schema diffing never fails.
 func DiffSchema(from, to *snapshot.SchemaSnapshot) (*SchemaDelta, error) {
 	var changes []Change
 
