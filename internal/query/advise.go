@@ -121,7 +121,7 @@ func adviseSeqScan(node *PlanNode, a *schema.AnnotatedSchema, pgVersion *dryrun.
 
 	if matchingIdx != nil {
 		if sz := a.IndexSizingFor(qual, matchingIdx.Name); sz != nil {
-			if est, ok := bloat.EstimateIndexBloat(*sz, matchingIdx.Columns, *table, matchingIdx.IndexType); ok && est.BloatRatio > 3.0 {
+			if est, ok := bloat.EstimateIndexBloat(*sz, matchingIdx.Columns, matchingIdx.IncludeColumns, *table, matchingIdx.IndexType); ok && est.BloatRatio > 3.0 {
 				*advice = append(*advice, Advice{
 					Issue:          fmt.Sprintf("sequential scan on '%s' (~%d rows) - index '%s' exists but appears bloated (%.1fx)", qualified, int64(node.PlanRows), matchingIdx.Name, est.BloatRatio),
 					Severity:       "warning",
@@ -363,7 +363,7 @@ func adviseIndexScanBloat(node *PlanNode, a *schema.AnnotatedSchema, advice *[]A
 		if sz == nil {
 			break
 		}
-		est, ok := bloat.EstimateIndexBloat(*sz, idx.Columns, *table, idx.IndexType)
+		est, ok := bloat.EstimateIndexBloat(*sz, idx.Columns, idx.IncludeColumns, *table, idx.IndexType)
 		if ok && est.BloatRatio > 3.0 {
 			qualified := schemaName + "." + tableName
 			*advice = append(*advice, Advice{

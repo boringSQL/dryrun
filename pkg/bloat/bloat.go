@@ -2,6 +2,7 @@ package bloat
 
 import (
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/boringsql/dryrun/pkg/snapshot"
@@ -12,6 +13,10 @@ const (
 	btreeFillfactor = 0.9
 	tupleOverhead   = 8 // item pointer + tuple header alignment, bytes
 	defaultWidth    = 32
+
+	pageHeaderSize    = 24  // PageHeaderData
+	heapTupleOverhead = 28  // MAXALIGN'd tuple header (24) + item pointer (4)
+	heapFillfactor    = 1.0 // heap default; overridden by reloptions
 )
 
 // Avg byte widths per type for btree tuple sizing
@@ -52,20 +57,13 @@ var typeWidths = map[string]int{
 	"xml":                         64,
 }
 
-type BloatEstimate struct {
-	BloatRatio    float64 `json:"bloat_ratio"`
-	ExpectedPages int64   `json:"expected_pages"`
-	ActualPages   int64   `json:"actual_pages"`
-	AvgKeyWidth   int     `json:"avg_key_width"`
-	SizeBytes     int64   `json:"size_bytes"`
-}
-
-func EstimateIndexBloat(sizing snapshot.IndexSizing, columns []string, table snapshot.Table, indexType string) (BloatEstimate, bool) {
+// INCLUDE columns live in the leaf tuple too; count them toward tuple width
+func EstimateIndexBloat(sizing snapshot.IndexSizing, columns, includeColumns []string, table snapshot.Table, indexType string) (snapshot.BloatEstimate, bool) {
 	if indexType != "btree" {
-		return BloatEstimate{}, false
+		return snapshot.BloatEstimate{}, false
 	}
 	if sizing.Reltuples <= 0 || sizing.Relpages <= 0 {
-		return BloatEstimate{}, false
+		return snapshot.BloatEstimate{}, false
 	}
 
 	colTypes := make(map[string]string, len(table.Columns))
@@ -83,26 +81,116 @@ func EstimateIndexBloat(sizing snapshot.IndexSizing, columns []string, table sna
 		}
 		avgKeyWidth += lookupTypeWidth(typeName)
 	}
+	for _, col := range includeColumns {
+		if typeName, ok := colTypes[col]; ok {
+			avgKeyWidth += lookupTypeWidth(typeName)
+		} else {
+			avgKeyWidth += defaultWidth
+		}
+	}
 
 	if avgKeyWidth == 0 {
-		return BloatEstimate{}, false
+		return snapshot.BloatEstimate{}, false
 	}
 
 	usable := float64(pageSize) * btreeFillfactor
 	tupleSize := float64(tupleOverhead + avgKeyWidth)
 	tuplesPerPage := usable / tupleSize
-	expectedPages := int64(math.Ceil(sizing.Reltuples / tuplesPerPage))
-	if expectedPages < 1 {
-		expectedPages = 1
-	}
+	expectedPages := max(int64(math.Ceil(sizing.Reltuples/tuplesPerPage)), 1)
 
-	return BloatEstimate{
+	return snapshot.BloatEstimate{
 		BloatRatio:    float64(sizing.Relpages) / float64(expectedPages),
 		ExpectedPages: expectedPages,
 		ActualPages:   sizing.Relpages,
-		AvgKeyWidth:   avgKeyWidth,
+		AvgTupleWidth: avgKeyWidth,
 		SizeBytes:     sizing.Size,
 	}, true
+}
+
+// Wide values get TOASTed out of the heap; summing raw type widths overcounts
+// them, so this under-reports bloat on wide tables rather than over.
+func EstimateTableBloat(sizing snapshot.TableSizing, table snapshot.Table) (snapshot.BloatEstimate, bool) {
+	if sizing.Reltuples <= 0 || sizing.Relpages <= 0 {
+		return snapshot.BloatEstimate{}, false
+	}
+
+	rowWidth := 0
+	for i := range table.Columns {
+		rowWidth += lookupTypeWidth(table.Columns[i].TypeName)
+	}
+	if rowWidth == 0 {
+		return snapshot.BloatEstimate{}, false
+	}
+
+	usable := float64(pageSize-pageHeaderSize) * tableFillfactor(table.Reloptions)
+	tupleSize := float64(heapTupleOverhead + rowWidth)
+	tuplesPerPage := usable / tupleSize
+	expectedPages := max(int64(math.Ceil(sizing.Reltuples/tuplesPerPage)), 1)
+
+	return snapshot.BloatEstimate{
+		BloatRatio:    float64(sizing.Relpages) / float64(expectedPages),
+		ExpectedPages: expectedPages,
+		ActualPages:   sizing.Relpages,
+		AvgTupleWidth: rowWidth,
+		SizeBytes:     sizing.TableSize,
+	}, true
+}
+
+// fillfactor from reloptions ("fillfactor=70" -> 0.70); heap default 100%.
+func tableFillfactor(reloptions []string) float64 {
+	for _, opt := range reloptions {
+		if v, ok := strings.CutPrefix(opt, "fillfactor="); ok {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+				return float64(n) / 100
+			}
+		}
+	}
+	return heapFillfactor
+}
+
+// Fills entry.Bloat for tables and btree indexes, joining planner against schema;
+// non-btree and pre-ANALYZE entries stay nil.
+func Annotate(planner *snapshot.PlannerStatsSnapshot, sch *snapshot.SchemaSnapshot) {
+	if planner == nil || sch == nil {
+		return
+	}
+
+	tables := make(map[snapshot.QualifiedName]*snapshot.Table, len(sch.Tables))
+	for i := range sch.Tables {
+		tables[sch.Tables[i].Qual()] = &sch.Tables[i]
+	}
+
+	for i := range planner.Tables {
+		e := &planner.Tables[i]
+		table := tables[e.Table]
+		if table == nil {
+			continue
+		}
+		if est, ok := EstimateTableBloat(e.Sizing, *table); ok {
+			e.Bloat = &est
+		}
+	}
+
+	for i := range planner.Indexes {
+		e := &planner.Indexes[i]
+		table := tables[e.Table]
+		if table == nil {
+			continue
+		}
+		var idx *snapshot.Index
+		for j := range table.Indexes {
+			if table.Indexes[j].Name == e.Index {
+				idx = &table.Indexes[j]
+				break
+			}
+		}
+		if idx == nil {
+			continue
+		}
+		if est, ok := EstimateIndexBloat(e.Sizing, idx.Columns, idx.IncludeColumns, *table, idx.IndexType); ok {
+			e.Bloat = &est
+		}
+	}
 }
 
 // lookupTypeWidth returns the estimated byte width for a PostgreSQL type name.

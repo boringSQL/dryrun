@@ -400,12 +400,25 @@ type NodeIdentity struct {
 type TableSizingEntry struct {
 	Table  QualifiedName `json:"table"`
 	Sizing TableSizing   `json:"sizing"`
+	// see IndexSizingEntry.Bloat
+	Bloat *BloatEstimate `json:"bloat,omitempty"`
 }
 
 type IndexSizingEntry struct {
 	Table  QualifiedName `json:"table"`
 	Index  string        `json:"index"`
 	Sizing IndexSizing   `json:"sizing"`
+	// derived at capture, kept out of the content hash; nil for non-btree/pre-ANALYZE
+	Bloat *BloatEstimate `json:"bloat,omitempty"`
+}
+
+type BloatEstimate struct {
+	BloatRatio    float64 `json:"bloat_ratio"`
+	ExpectedPages int64   `json:"expected_pages"`
+	ActualPages   int64   `json:"actual_pages"`
+	// index-key width for index entries, heap row width for table entries
+	AvgTupleWidth int   `json:"avg_tuple_width"`
+	SizeBytes     int64 `json:"size_bytes"`
 }
 
 type ColumnStatsEntry struct {

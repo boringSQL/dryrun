@@ -192,7 +192,7 @@ func DetectBloatedIndexes(a *AnnotatedSchema, threshold float64) []BloatedIndexE
 			if sz == nil {
 				continue
 			}
-			est, ok := bloat.EstimateIndexBloat(*sz, idx.Columns, *t, idx.IndexType)
+			est, ok := bloat.EstimateIndexBloat(*sz, idx.Columns, idx.IncludeColumns, *t, idx.IndexType)
 			if !ok || est.BloatRatio <= threshold {
 				continue
 			}

@@ -18,6 +18,7 @@ import (
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/bloat"
 )
 
 // init capture surface; kept narrow so tests can stub it.
@@ -292,6 +293,7 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 	if err != nil {
 		return snap, nil, nil, 0, fmt.Errorf("capture planner stats: %w", err)
 	}
+	bloat.Annotate(planner, snap)
 	masked := datamask.MaskPlanner(policy, planner)
 	if _, err := store.PutPlanner(ctx, key, planner); err != nil {
 		slog.Warn("could not save planner stats", "error", err)
