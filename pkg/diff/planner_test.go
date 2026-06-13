@@ -155,6 +155,92 @@ func TestDiffPlanner_ToastOnlyWhenPresent(t *testing.T) {
 	}
 }
 
+// bloat is a derived estimate (kept out of the content hash) that the differ
+// surfaces as a bloat_ratio row only when at least one endpoint carries an
+// estimate — non-btree and pre-ANALYZE entries leave Bloat nil and must produce
+// no bloat row at all. A table whose estimated ratio climbed between snapshots is
+// exactly the signal an operator wants out of a diff: the heap is rotting even if
+// the row count barely moved.
+func TestDiffPlanner_TableBloatRow(t *testing.T) {
+	from := emptyPlanner("a")
+	from.Tables = []snapshot.TableSizingEntry{{
+		Table:  snapshot.QualifiedName{Schema: "public", Name: "time_entry"},
+		Sizing: snapshot.TableSizing{Reltuples: 1_000_000, Relpages: 20_000},
+		Bloat:  &snapshot.BloatEstimate{BloatRatio: 1.4, ExpectedPages: 14_285, ActualPages: 20_000},
+	}}
+	to := emptyPlanner("b")
+	to.Tables = []snapshot.TableSizingEntry{{
+		Table:  snapshot.QualifiedName{Schema: "public", Name: "time_entry"},
+		Sizing: snapshot.TableSizing{Reltuples: 1_000_000, Relpages: 42_000},
+		Bloat:  &snapshot.BloatEstimate{BloatRatio: 2.94, ExpectedPages: 14_285, ActualPages: 42_000},
+	}}
+
+	delta, _ := DiffPlanner(from, to)
+	row := findSizing(t, delta.Sizing, "time_entry", MetricBloatRatio)
+	if row.Identity.Kind != "table" {
+		t.Errorf("expected table kind, got %q", row.Identity.Kind)
+	}
+	if row.ValueA != 1.4 || row.ValueB != 2.94 {
+		t.Errorf("bloat ratios not carried verbatim: %+v", row)
+	}
+	if math.Abs(row.Delta-1.54) > 1e-9 {
+		t.Errorf("expected bloat delta 1.54, got %v", row.Delta)
+	}
+}
+
+// No bloat estimate on either side means no bloat_ratio row — the differ must not
+// invent a 0 → 0 row for the (common) entries Postgres can't estimate.
+func TestDiffPlanner_NoBloatRowWhenAbsent(t *testing.T) {
+	from := emptyPlanner("a")
+	from.Tables = []snapshot.TableSizingEntry{tbl("public", "plain", snapshot.TableSizing{Reltuples: 10})}
+	to := emptyPlanner("b")
+	to.Tables = []snapshot.TableSizingEntry{tbl("public", "plain", snapshot.TableSizing{Reltuples: 20})}
+
+	delta, _ := DiffPlanner(from, to)
+	for _, r := range delta.Sizing {
+		if r.Metric == MetricBloatRatio {
+			t.Errorf("expected no bloat_ratio row when neither side estimates bloat, got %+v", r)
+		}
+	}
+}
+
+// An index that gains a bloat estimate (nil → value) surfaces a bloat_ratio row
+// from a zero baseline, mirroring how newly-present sizing metrics behave, and the
+// console renders the ratio with an "x" suffix rather than a humanized count.
+func TestRenderPlannerConsole_IndexBloatRendersRatio(t *testing.T) {
+	from := emptyPlanner("aaaaaaaaaaaa")
+	from.Indexes = []snapshot.IndexSizingEntry{{
+		Table:  snapshot.QualifiedName{Schema: "public", Name: "time_entry"},
+		Index:  "time_entry_pkey",
+		Sizing: snapshot.IndexSizing{Reltuples: 1_000_000, Relpages: 2_740},
+		Bloat:  &snapshot.BloatEstimate{BloatRatio: 1.1},
+	}}
+	to := emptyPlanner("bbbbbbbbbbbb")
+	to.Indexes = []snapshot.IndexSizingEntry{{
+		Table:  snapshot.QualifiedName{Schema: "public", Name: "time_entry"},
+		Index:  "time_entry_pkey",
+		Sizing: snapshot.IndexSizing{Reltuples: 1_000_000, Relpages: 9_900},
+		Bloat:  &snapshot.BloatEstimate{BloatRatio: 4.0},
+	}}
+
+	delta, _ := DiffPlanner(from, to)
+	row := findSizing(t, delta.Sizing, "time_entry_pkey", MetricBloatRatio)
+	if row.Identity.Kind != "index" {
+		t.Errorf("expected index kind, got %q", row.Identity.Kind)
+	}
+
+	env := &SnapshotDiff{Kind: "planner", FromHash: from.ContentHash, ToHash: to.ContentHash, Planner: delta}
+	var buf bytes.Buffer
+	RenderPlannerConsole(&buf, env, DefaultMinPct)
+	out := buf.String()
+	if !strings.Contains(out, "bloat_ratio") {
+		t.Errorf("expected a bloat_ratio mover, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1.10x") || !strings.Contains(out, "4.00x") {
+		t.Errorf("expected ratios rendered with an x suffix, got:\n%s", out)
+	}
+}
+
 // Indexes are diffed alongside tables, keyed on the index name, and carry their
 // own metric set (reltuples, relpages, index_bytes). The Identity.Kind must say
 // "index" so the engine and renderer can label the object correctly.
