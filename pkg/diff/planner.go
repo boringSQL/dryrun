@@ -47,7 +47,7 @@ const (
 	MetricMCVChurn    = "mcv_churn"
 )
 
-func (d *PlannerDelta) IsEmpty() bool { return d == nil || len(d.Sizing) == 0 }
+func (d *PlannerDelta) IsEmpty() bool { return d == nil || (len(d.Sizing) == 0 && len(d.Stats) == 0) }
 
 // error is for symmetry with the other Diff* funcs; sizing diffing never fails.
 func DiffPlanner(from, to *snapshot.PlannerStatsSnapshot) (*PlannerDelta, error) {

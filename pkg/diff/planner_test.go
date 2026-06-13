@@ -348,3 +348,228 @@ func TestRenderConsole_DispatchesPlanner(t *testing.T) {
 		t.Errorf("expected RenderConsole to route to the planner renderer, got:\n%s", buf.String())
 	}
 }
+
+// fp returns a pointer to a float64 literal; pg_stats fields are all nullable
+// (*float64), and the column-stats tests need to express "stat is present with
+// value X" versus "stat is absent" (nil) on each side of the diff.
+func fp(v float64) *float64 { return &v }
+
+// col builds a single column-stats entry keyed on its qualified table + column.
+// The differ joins from/to columns on this key and only emits a StatDelta when
+// both sides carry the same stat, so tests pass the table+column explicitly.
+func col(schema, table, column string, s snapshot.ColumnStats) snapshot.ColumnStatsEntry {
+	return snapshot.ColumnStatsEntry{
+		Table:  snapshot.QualifiedName{Schema: schema, Name: table},
+		Column: column,
+		Stats:  s,
+	}
+}
+
+// --- column-stats deltas (D4) ---
+//
+// pg_stats.n_distinct is encoded two ways: an absolute count when >= 0, or a
+// negative ratio-of-reltuples when < 0 (e.g. -0.5 means "half the rows are
+// distinct"). The same column can flip representation between two snapshots as
+// the row count crosses Postgres' heuristic boundary. DiffPlanner must resolve
+// both sides to an absolute count (via the table's reltuples) before subtracting,
+// otherwise a representation flip injects a phantom delta — the toggl case where
+// tags.deleted_at went 2221 → -0.0276 and a naive diff reads it as ~-2221.
+func TestDiffPlanner_NDistinctNormalizedAcrossEncodingFlip(t *testing.T) {
+	from := emptyPlanner("a")
+	from.Tables = []snapshot.TableSizingEntry{tbl("public", "tags", snapshot.TableSizing{Reltuples: 80_000})}
+	from.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "tags", "deleted_at", snapshot.ColumnStats{NDistinct: fp(2221)}), // absolute count
+	}
+	to := emptyPlanner("b")
+	to.Tables = []snapshot.TableSizingEntry{tbl("public", "tags", snapshot.TableSizing{Reltuples: 80_000})}
+	to.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "tags", "deleted_at", snapshot.ColumnStats{NDistinct: fp(-0.0276)}), // ratio: 0.0276 * 80000 = 2208
+	}
+
+	delta, _ := DiffPlanner(from, to)
+	row := findSizing(t, delta.Stats, "tags.deleted_at", MetricNDistinct)
+	if math.Abs(row.ValueA-2221) > 0.001 {
+		t.Errorf("expected ValueA resolved to 2221, got %v", row.ValueA)
+	}
+	if math.Abs(row.ValueB-2208) > 0.001 {
+		t.Errorf("expected ValueB resolved to ~2208 (0.0276*80000), got %v", row.ValueB)
+	}
+	// The honest delta is a tiny -13, not the ~-2221 a naive subtraction would yield.
+	if math.Abs(row.Delta-(-13)) > 0.5 {
+		t.Errorf("expected a small normalized delta near -13, got %v", row.Delta)
+	}
+}
+
+// A negative n_distinct on both sides is still a ratio: with reltuples doubling
+// and the ratio held constant, the absolute distinct count must double too.
+func TestDiffPlanner_NDistinctRatioScalesWithReltuples(t *testing.T) {
+	from := emptyPlanner("a")
+	from.Tables = []snapshot.TableSizingEntry{tbl("public", "events", snapshot.TableSizing{Reltuples: 1_000})}
+	from.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "events", "kind", snapshot.ColumnStats{NDistinct: fp(-0.5)}), // 500 distinct
+	}
+	to := emptyPlanner("b")
+	to.Tables = []snapshot.TableSizingEntry{tbl("public", "events", snapshot.TableSizing{Reltuples: 2_000})}
+	to.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "events", "kind", snapshot.ColumnStats{NDistinct: fp(-0.5)}), // 1000 distinct
+	}
+
+	delta, _ := DiffPlanner(from, to)
+	row := findSizing(t, delta.Stats, "events.kind", MetricNDistinct)
+	if row.ValueA != 500 || row.ValueB != 1_000 || row.Delta != 500 {
+		t.Errorf("expected 500 -> 1000 (delta 500), got %+v", row)
+	}
+}
+
+// null_frac and correlation are plain bounded floats; their deltas are the raw
+// signed difference, and the Identity must be a "column" kind so the engine can
+// attribute distribution drift to the right object.
+func TestDiffPlanner_NullFracAndCorrelation(t *testing.T) {
+	from := emptyPlanner("a")
+	from.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "users", "email", snapshot.ColumnStats{NullFrac: fp(0.0), Correlation: fp(0.95)}),
+	}
+	to := emptyPlanner("b")
+	to.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "users", "email", snapshot.ColumnStats{NullFrac: fp(0.2), Correlation: fp(-0.10)}),
+	}
+
+	delta, _ := DiffPlanner(from, to)
+
+	nf := findSizing(t, delta.Stats, "users.email", MetricNullFrac)
+	if math.Abs(nf.Delta-0.2) > 1e-9 {
+		t.Errorf("expected null_frac delta 0.2, got %v", nf.Delta)
+	}
+	if nf.Identity.Kind != "column" {
+		t.Errorf("expected column kind, got %q", nf.Identity.Kind)
+	}
+	corr := findSizing(t, delta.Stats, "users.email", MetricCorrelation)
+	if math.Abs(corr.Delta-(-1.05)) > 1e-9 {
+		t.Errorf("expected correlation delta -1.05 (0.95 -> -0.10), got %v", corr.Delta)
+	}
+}
+
+// A StatDelta needs the stat present on both sides; a column that gains a stat
+// it never had (nil -> value) produces no row, since there is no honest baseline
+// to subtract. One-sided physical presence is the sizing channel's concern.
+func TestDiffPlanner_StatNeedsBothSides(t *testing.T) {
+	from := emptyPlanner("a")
+	from.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "t", "c", snapshot.ColumnStats{NullFrac: fp(0.1)}), // no correlation on the from side
+	}
+	to := emptyPlanner("b")
+	to.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "t", "c", snapshot.ColumnStats{NullFrac: fp(0.1), Correlation: fp(0.5)}),
+	}
+
+	delta, _ := DiffPlanner(from, to)
+	for _, r := range delta.Stats {
+		if r.Metric == MetricCorrelation {
+			t.Errorf("expected no correlation row when one side lacks it, got %+v", r)
+		}
+	}
+}
+
+// most_common_vals has no meaningful arithmetic delta, so the differ reports
+// churn: Delta is the set turnover (members that entered or left) and Pct is the
+// churn fraction. Here {a,b,c} -> {b,c,d} drops "a" and adds "d": union 4,
+// intersection 2, turnover 2, churn 50%.
+func TestDiffPlanner_MCVChurn(t *testing.T) {
+	from := emptyPlanner("a")
+	from.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "t", "status", snapshot.ColumnStats{MostCommonVals: strp("{a,b,c}")}),
+	}
+	to := emptyPlanner("b")
+	to.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "t", "status", snapshot.ColumnStats{MostCommonVals: strp("{b,c,d}")}),
+	}
+
+	delta, _ := DiffPlanner(from, to)
+	row := findSizing(t, delta.Stats, "t.status", MetricMCVChurn)
+	if row.Delta != 2 {
+		t.Errorf("expected turnover 2, got %v", row.Delta)
+	}
+	if row.Pct == nil || math.Abs(*row.Pct-50) > 1e-9 {
+		t.Errorf("expected 50%% churn, got %v", row.Pct)
+	}
+}
+
+// Identical most_common_vals is zero churn — and a quoted element containing a
+// comma must be treated as a single member, not split on the inner comma.
+func TestDiffPlanner_MCVChurnZeroWithQuotedElement(t *testing.T) {
+	from := emptyPlanner("a")
+	from.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "t", "label", snapshot.ColumnStats{MostCommonVals: strp(`{"a,b",c}`)}),
+	}
+	to := emptyPlanner("b")
+	to.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "t", "label", snapshot.ColumnStats{MostCommonVals: strp(`{"a,b",c}`)}),
+	}
+
+	delta, _ := DiffPlanner(from, to)
+	row := findSizing(t, delta.Stats, "t.label", MetricMCVChurn)
+	if row.ValueA != 2 || row.ValueB != 2 {
+		t.Errorf("expected 2-element sets (quoted comma not split), got %+v", row)
+	}
+	if row.Delta != 0 || row.Pct == nil || *row.Pct != 0 {
+		t.Errorf("expected zero churn for identical MCV lists, got %+v", row)
+	}
+}
+
+// Stats live on PlannerDelta.Stats and must survive the JSON contract the cloud
+// imports, including the nullable pct.
+func TestDiffPlanner_StatsSurviveJSON(t *testing.T) {
+	from := emptyPlanner("a")
+	from.Tables = []snapshot.TableSizingEntry{tbl("public", "t", snapshot.TableSizing{Reltuples: 1_000})}
+	from.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "t", "c", snapshot.ColumnStats{NDistinct: fp(100), Correlation: fp(0.5)}),
+	}
+	to := emptyPlanner("b")
+	to.Tables = []snapshot.TableSizingEntry{tbl("public", "t", snapshot.TableSizing{Reltuples: 1_000})}
+	to.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "t", "c", snapshot.ColumnStats{NDistinct: fp(150), Correlation: fp(0.6)}),
+	}
+
+	delta, _ := DiffPlanner(from, to)
+	raw, err := json.Marshal(delta)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var out PlannerDelta
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if len(out.Stats) != len(delta.Stats) {
+		t.Errorf("JSON dropped stat rows: %d in, %d out", len(delta.Stats), len(out.Stats))
+	}
+	row := findSizing(t, out.Stats, "t.c", MetricNDistinct)
+	if row.Delta != 50 || row.Pct == nil {
+		t.Errorf("round-trip lost stat delta/pct fidelity: %+v", row)
+	}
+}
+
+// The console grows a "stats drift:" section when column stats moved; a big
+// distribution shift (correlation 0.95 -> -0.1) must surface there.
+func TestRenderPlannerConsole_StatsDriftSection(t *testing.T) {
+	from := emptyPlanner("aaaaaaaaaaaa")
+	from.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "orders", "created_at", snapshot.ColumnStats{Correlation: fp(0.95)}),
+	}
+	to := emptyPlanner("bbbbbbbbbbbb")
+	to.Columns = []snapshot.ColumnStatsEntry{
+		col("public", "orders", "created_at", snapshot.ColumnStats{Correlation: fp(-0.10)}),
+	}
+
+	delta, _ := DiffPlanner(from, to)
+	env := &SnapshotDiff{Kind: "planner", FromHash: from.ContentHash, ToHash: to.ContentHash, Planner: delta}
+
+	var buf bytes.Buffer
+	RenderPlannerConsole(&buf, env, DefaultMinPct)
+	out := buf.String()
+	if !strings.Contains(out, "stats drift:") {
+		t.Errorf("expected a stats drift section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "correlation") || !strings.Contains(out, "created_at") {
+		t.Errorf("expected the correlation mover on created_at, got:\n%s", out)
+	}
+}
