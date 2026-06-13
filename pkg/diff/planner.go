@@ -40,6 +40,7 @@ const (
 	MetricIndexesBytes = "indexes_bytes"
 	MetricToastBytes   = "toast_bytes"
 	MetricIndexBytes   = "index_bytes"
+	MetricBloatRatio   = "bloat_ratio"
 
 	MetricNDistinct   = "n_distinct"
 	MetricNullFrac    = "null_frac"
@@ -67,6 +68,9 @@ func DiffPlanner(from, to *snapshot.PlannerStatsSnapshot) (*PlannerDelta, error)
 		if a.ToastSize != 0 || b.ToastSize != 0 {
 			rows = append(rows, sizingRow(ref, MetricToastBytes, float64(a.ToastSize), float64(b.ToastSize)))
 		}
+		if r, ok := bloatRow(ref, tableBloat(fromT[k]), tableBloat(toT[k])); ok {
+			rows = append(rows, r)
+		}
 	}
 
 	fromI := indexBy(from.Indexes, func(e snapshot.IndexSizingEntry) string { return e.Table.String() + "\x00" + e.Index })
@@ -78,6 +82,9 @@ func DiffPlanner(from, to *snapshot.PlannerStatsSnapshot) (*PlannerDelta, error)
 			sizingRow(ref, MetricRelpages, float64(a.Relpages), float64(b.Relpages)),
 			sizingRow(ref, MetricIndexBytes, float64(a.Size), float64(b.Size)),
 		)
+		if r, ok := bloatRow(ref, indexBloat(fromI[k]), indexBloat(toI[k])); ok {
+			rows = append(rows, r)
+		}
 	}
 
 	sortSizing(rows)
@@ -204,6 +211,36 @@ func parseMCV(p *string) map[string]bool {
 	return set
 }
 
+func tableBloat(e *snapshot.TableSizingEntry) *snapshot.BloatEstimate {
+	if e == nil {
+		return nil
+	}
+	return e.Bloat
+}
+
+func indexBloat(e *snapshot.IndexSizingEntry) *snapshot.BloatEstimate {
+	if e == nil {
+		return nil
+	}
+	return e.Bloat
+}
+
+// bloat is derived (kept out of the content hash); surface it only when at least
+// one endpoint carries an estimate. an unchanged ratio falls out as Delta==0.
+func bloatRow(ref ObjectRef, a, b *snapshot.BloatEstimate) (SizingDelta, bool) {
+	if a == nil && b == nil {
+		return SizingDelta{}, false
+	}
+	var av, bv float64
+	if a != nil {
+		av = a.BloatRatio
+	}
+	if b != nil {
+		bv = b.BloatRatio
+	}
+	return sizingRow(ref, MetricBloatRatio, av, bv), true
+}
+
 func sizingRow(ref ObjectRef, metric string, a, b float64) SizingDelta {
 	d := SizingDelta{Identity: ref, Metric: metric, ValueA: a, ValueB: b, Delta: b - a}
 	if a != 0 {
@@ -264,8 +301,9 @@ func unionKeys[T any](a, b map[string]*T) []string {
 
 var sizingMetricOrder = map[string]int{
 	MetricReltuples: 0, MetricRelpages: 1, MetricTableBytes: 2,
-	MetricTotalBytes: 3, MetricIndexesBytes: 4, MetricToastBytes: 5, MetricIndexBytes: 6,
-	MetricNDistinct: 7, MetricNullFrac: 8, MetricCorrelation: 9, MetricMCVChurn: 10,
+	MetricTotalBytes: 3, MetricIndexesBytes: 4, MetricToastBytes: 5,
+	MetricIndexBytes: 6, MetricBloatRatio: 7,
+	MetricNDistinct: 8, MetricNullFrac: 9, MetricCorrelation: 10, MetricMCVChurn: 11,
 }
 
 // Deterministic order is load-bearing: the cloud dedups on the delta.
@@ -357,6 +395,8 @@ func describeSizing(r SizingDelta) string {
 		h = humanizeBytes
 	case isFracMetric(r.Metric):
 		h = humanizeFrac
+	case r.Metric == MetricBloatRatio:
+		h = humanizeRatio
 	}
 	if r.Pct == nil {
 		return fmt.Sprintf("%s  %s → %s  (%s)", r.Metric, h(r.ValueA), h(r.ValueB), signed(r.Delta, h))
@@ -377,6 +417,8 @@ func isFracMetric(m string) bool {
 }
 
 func humanizeFrac(v float64) string { return fmt.Sprintf("%.3f", v) }
+
+func humanizeRatio(v float64) string { return fmt.Sprintf("%.2fx", v) }
 
 func signed(v float64, h func(float64) string) string {
 	if v < 0 {
