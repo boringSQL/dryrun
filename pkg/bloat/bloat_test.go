@@ -1,8 +1,10 @@
-package schema
+package bloat
 
 import (
 	"math"
 	"testing"
+
+	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
 func TestLookupTypeWidth(t *testing.T) {
@@ -42,8 +44,8 @@ func TestLookupTypeWidth(t *testing.T) {
 func TestEstimateIndexBloat_NonBtree(t *testing.T) {
 	for _, idxType := range []string{"hash", "gin", "gist", "brin"} {
 		t.Run(idxType, func(t *testing.T) {
-			sz := IndexSizing{Relpages: 100, Reltuples: 10000}
-			table := Table{Columns: []Column{{Name: "data", TypeName: "jsonb"}}}
+			sz := snapshot.IndexSizing{Relpages: 100, Reltuples: 10000}
+			table := snapshot.Table{Columns: []snapshot.Column{{Name: "data", TypeName: "jsonb"}}}
 			_, ok := EstimateIndexBloat(sz, []string{"data"}, table, idxType)
 			if ok {
 				t.Errorf("expected false for %s index", idxType)
@@ -55,8 +57,8 @@ func TestEstimateIndexBloat_NonBtree(t *testing.T) {
 // Zero reltuples / zero relpages are degenerate inputs that mean ANALYZE never ran;
 // the estimator must refuse rather than emit a division-by-zero ratio.
 func TestEstimateIndexBloat_DegenerateSizing(t *testing.T) {
-	table := Table{Columns: []Column{{Name: "id", TypeName: "integer"}}}
-	for _, sz := range []IndexSizing{
+	table := snapshot.Table{Columns: []snapshot.Column{{Name: "id", TypeName: "integer"}}}
+	for _, sz := range []snapshot.IndexSizing{
 		{Relpages: 10, Reltuples: 0},
 		{Relpages: 0, Reltuples: 1000},
 	} {
@@ -71,8 +73,8 @@ func TestEstimateIndexBloat_DegenerateSizing(t *testing.T) {
 func TestEstimateIndexBloat_NormalIndex(t *testing.T) {
 	expected := int64(math.Ceil(100000.0 / (float64(pageSize) * btreeFillfactor / float64(tupleOverhead+4))))
 
-	sz := IndexSizing{Relpages: expected, Reltuples: 100000, Size: expected * pageSize}
-	table := Table{Columns: []Column{{Name: "id", TypeName: "integer"}}}
+	sz := snapshot.IndexSizing{Relpages: expected, Reltuples: 100000, Size: expected * pageSize}
+	table := snapshot.Table{Columns: []snapshot.Column{{Name: "id", TypeName: "integer"}}}
 	est, ok := EstimateIndexBloat(sz, []string{"id"}, table, "btree")
 	if !ok {
 		t.Fatal("expected ok")
@@ -94,8 +96,8 @@ func TestEstimateIndexBloat_BloatedIndex(t *testing.T) {
 	expected := int64(math.Ceil(100000.0 / (float64(pageSize) * btreeFillfactor / float64(tupleOverhead+4))))
 	actualPages := expected * 10
 
-	sz := IndexSizing{Relpages: actualPages, Reltuples: 100000}
-	table := Table{Columns: []Column{{Name: "id", TypeName: "integer"}}}
+	sz := snapshot.IndexSizing{Relpages: actualPages, Reltuples: 100000}
+	table := snapshot.Table{Columns: []snapshot.Column{{Name: "id", TypeName: "integer"}}}
 	est, ok := EstimateIndexBloat(sz, []string{"id"}, table, "btree")
 	if !ok {
 		t.Fatal("expected ok")
@@ -111,8 +113,8 @@ func TestEstimateIndexBloat_BloatedIndex(t *testing.T) {
 // Expression indexes reference a synthetic column not in the table; the
 // estimator falls back to defaultWidth so we still get a bloat estimate.
 func TestEstimateIndexBloat_ExpressionColumn(t *testing.T) {
-	sz := IndexSizing{Relpages: 500, Reltuples: 10000}
-	table := Table{Columns: []Column{{Name: "email", TypeName: "text"}}}
+	sz := snapshot.IndexSizing{Relpages: 500, Reltuples: 10000}
+	table := snapshot.Table{Columns: []snapshot.Column{{Name: "email", TypeName: "text"}}}
 	est, ok := EstimateIndexBloat(sz, []string{"lower_email"}, table, "btree")
 	if !ok {
 		t.Fatal("expected ok")
@@ -125,8 +127,8 @@ func TestEstimateIndexBloat_ExpressionColumn(t *testing.T) {
 // Multi-column indexes sum the per-column type widths into the avg_key_width;
 // for (integer, timestamptz) that's 4 + 8 = 12 bytes.
 func TestEstimateIndexBloat_MultiColumn(t *testing.T) {
-	sz := IndexSizing{Relpages: 500, Reltuples: 50000}
-	table := Table{Columns: []Column{
+	sz := snapshot.IndexSizing{Relpages: 500, Reltuples: 50000}
+	table := snapshot.Table{Columns: []snapshot.Column{
 		{Name: "user_id", TypeName: "integer"},
 		{Name: "created_at", TypeName: "timestamptz"},
 	}}

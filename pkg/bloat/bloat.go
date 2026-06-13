@@ -1,8 +1,10 @@
-package schema
+package bloat
 
 import (
 	"math"
 	"strings"
+
+	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
 const (
@@ -58,7 +60,7 @@ type BloatEstimate struct {
 	SizeBytes     int64   `json:"size_bytes"`
 }
 
-func EstimateIndexBloat(sizing IndexSizing, columns []string, table Table, indexType string) (BloatEstimate, bool) {
+func EstimateIndexBloat(sizing snapshot.IndexSizing, columns []string, table snapshot.Table, indexType string) (BloatEstimate, bool) {
 	if indexType != "btree" {
 		return BloatEstimate{}, false
 	}
