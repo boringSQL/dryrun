@@ -7,8 +7,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/boringsql/dryrun/internal/lint"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 // Two schemas (public, billing) with overlapping table names so we can pin

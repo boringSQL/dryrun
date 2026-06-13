@@ -8,8 +8,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/boringsql/dryrun/internal/audit"
-	"github.com/boringsql/dryrun/internal/lint"
+	"github.com/boringsql/dryrun/pkg/audit"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

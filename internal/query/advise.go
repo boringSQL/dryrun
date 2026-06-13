@@ -5,9 +5,9 @@ import (
 	"strings"
 
 	"github.com/boringsql/dryrun/internal/dryrun"
-	"github.com/boringsql/dryrun/internal/jit"
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/bloat"
+	"github.com/boringsql/dryrun/pkg/jit"
 )
 
 type Advice struct {

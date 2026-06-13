@@ -16,10 +16,10 @@ import (
 	"github.com/boringsql/dryrun/internal/buildinfo"
 	"github.com/boringsql/dryrun/internal/config"
 	"github.com/boringsql/dryrun/internal/history"
-	"github.com/boringsql/dryrun/internal/lint"
 	drmcp "github.com/boringsql/dryrun/internal/mcp"
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/diff"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 var (

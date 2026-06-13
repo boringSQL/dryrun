@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/boringsql/dryrun/internal/lint"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 // Smoke tests for lint_schema scopes and filters. Each subtest exercises a

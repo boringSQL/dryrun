@@ -7,8 +7,8 @@ import (
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 
 	"github.com/boringsql/dryrun/internal/dryrun"
-	"github.com/boringsql/dryrun/internal/jit"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/jit"
 )
 
 type (

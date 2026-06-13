@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/boringsql/dryrun/internal/lint"
-	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/lint"
+	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
-func runAllRules(snap *schema.SchemaSnapshot, config *Config) []lint.Finding {
+func runAllRules(snap *snapshot.SchemaSnapshot, config *Config) []lint.Finding {
 	var findings []lint.Finding
 	disabled := make(map[string]bool)
 	for _, r := range config.DisabledRules {
@@ -17,23 +17,23 @@ func runAllRules(snap *schema.SchemaSnapshot, config *Config) []lint.Finding {
 
 	type rule struct {
 		id string
-		fn func(*schema.SchemaSnapshot, *Config) []lint.Finding
+		fn func(*snapshot.SchemaSnapshot, *Config) []lint.Finding
 	}
 	rules := []rule{
-		{"indexes/duplicate", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkDuplicateIndexes(s) }},
-		{"indexes/redundant", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkRedundantIndexes(s) }},
-		{"indexes/too_many", func(s *schema.SchemaSnapshot, c *Config) []lint.Finding { return checkTooManyIndexes(s, c) }},
-		{"indexes/wide_columns", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkWideColumnIndexes(s) }},
-		{"indexes/bloated", func(s *schema.SchemaSnapshot, c *Config) []lint.Finding { return checkBloatedIndexes(s, c) }},
-		{"fk/type_mismatch", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkFKTypeMismatch(s) }},
-		{"fk/circular", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkCircularFKs(s) }},
-		{"fk/orphan", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkOrphanTables(s) }},
-		{"pk/non_sequential", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkPKNonSequential(s) }},
-		{"naming/bool_prefix", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkBoolPrefix(s) }},
-		{"naming/reserved", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkReservedWords(s) }},
-		{"naming/id_mismatch", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkIDMismatch(s) }},
-		{"docs/no_comment", func(s *schema.SchemaSnapshot, c *Config) []lint.Finding { return checkNoComment(s, c) }},
-		{"vacuum/large_table_defaults", func(s *schema.SchemaSnapshot, _ *Config) []lint.Finding { return checkVacuumLargeTableDefaults(s) }},
+		{"indexes/duplicate", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkDuplicateIndexes(s) }},
+		{"indexes/redundant", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkRedundantIndexes(s) }},
+		{"indexes/too_many", func(s *snapshot.SchemaSnapshot, c *Config) []lint.Finding { return checkTooManyIndexes(s, c) }},
+		{"indexes/wide_columns", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkWideColumnIndexes(s) }},
+		{"indexes/bloated", func(s *snapshot.SchemaSnapshot, c *Config) []lint.Finding { return checkBloatedIndexes(s, c) }},
+		{"fk/type_mismatch", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkFKTypeMismatch(s) }},
+		{"fk/circular", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkCircularFKs(s) }},
+		{"fk/orphan", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkOrphanTables(s) }},
+		{"pk/non_sequential", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkPKNonSequential(s) }},
+		{"naming/bool_prefix", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkBoolPrefix(s) }},
+		{"naming/reserved", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkReservedWords(s) }},
+		{"naming/id_mismatch", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkIDMismatch(s) }},
+		{"docs/no_comment", func(s *snapshot.SchemaSnapshot, c *Config) []lint.Finding { return checkNoComment(s, c) }},
+		{"vacuum/large_table_defaults", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkVacuumLargeTableDefaults(s) }},
 	}
 
 	for _, r := range rules {
@@ -46,11 +46,11 @@ func runAllRules(snap *schema.SchemaSnapshot, config *Config) []lint.Finding {
 
 var wideTypes = []string{"text", "varchar", "bytea", "jsonb", "json", "xml"}
 
-func checkDuplicateIndexes(snap *schema.SchemaSnapshot) []lint.Finding {
+func checkDuplicateIndexes(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
 		qualified := t.Schema + "." + t.Name
-		var nonPrimary []schema.Index
+		var nonPrimary []snapshot.Index
 		for _, idx := range t.Indexes {
 			if !idx.IsPrimary {
 				nonPrimary = append(nonPrimary, idx)
@@ -104,11 +104,11 @@ func checkDuplicateIndexes(snap *schema.SchemaSnapshot) []lint.Finding {
 	return findings
 }
 
-func checkRedundantIndexes(snap *schema.SchemaSnapshot) []lint.Finding {
+func checkRedundantIndexes(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
 		qualified := t.Schema + "." + t.Name
-		var btree []schema.Index
+		var btree []snapshot.Index
 		for _, idx := range t.Indexes {
 			if !idx.IsPrimary && idx.IndexType == "btree" && idx.Predicate == nil {
 				btree = append(btree, idx)
@@ -150,7 +150,7 @@ func checkRedundantIndexes(snap *schema.SchemaSnapshot) []lint.Finding {
 	return findings
 }
 
-func checkTooManyIndexes(snap *schema.SchemaSnapshot, config *Config) []lint.Finding {
+func checkTooManyIndexes(snap *snapshot.SchemaSnapshot, config *Config) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
 		if len(t.Indexes) > config.MaxIndexesPerTable {
@@ -165,7 +165,7 @@ func checkTooManyIndexes(snap *schema.SchemaSnapshot, config *Config) []lint.Fin
 	return findings
 }
 
-func checkWideColumnIndexes(snap *schema.SchemaSnapshot) []lint.Finding {
+func checkWideColumnIndexes(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
 		qualified := t.Schema + "." + t.Name
@@ -199,13 +199,13 @@ func checkWideColumnIndexes(snap *schema.SchemaSnapshot) []lint.Finding {
 }
 
 // stats-dependent; audit harness only passes DDL — detect/bloated_indexes MCP tool covers the live path
-func checkBloatedIndexes(_ *schema.SchemaSnapshot, _ *Config) []lint.Finding {
+func checkBloatedIndexes(_ *snapshot.SchemaSnapshot, _ *Config) []lint.Finding {
 	return nil
 }
 
-func checkFKTypeMismatch(snap *schema.SchemaSnapshot) []lint.Finding {
+func checkFKTypeMismatch(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
-	tableMap := make(map[string]*schema.Table)
+	tableMap := make(map[string]*snapshot.Table)
 	for i := range snap.Tables {
 		tableMap[snap.Tables[i].Schema+"."+snap.Tables[i].Name] = &snap.Tables[i]
 	}
@@ -217,7 +217,7 @@ func checkFKTypeMismatch(snap *schema.SchemaSnapshot) []lint.Finding {
 			colTypes[c.Name] = c.TypeName
 		}
 		for _, con := range t.Constraints {
-			if con.Kind != schema.ConstraintForeignKey || con.FKTable == nil {
+			if con.Kind != snapshot.ConstraintForeignKey || con.FKTable == nil {
 				continue
 			}
 			refTable, ok := tableMap[*con.FKTable]
@@ -250,14 +250,14 @@ func checkFKTypeMismatch(snap *schema.SchemaSnapshot) []lint.Finding {
 	return findings
 }
 
-func checkCircularFKs(snap *schema.SchemaSnapshot) []lint.Finding {
+func checkCircularFKs(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	edges := make(map[string][]string)
 	nodes := make(map[string]bool)
 	for _, t := range snap.Tables {
 		q := t.Schema + "." + t.Name
 		nodes[q] = true
 		for _, con := range t.Constraints {
-			if con.Kind == schema.ConstraintForeignKey && con.FKTable != nil {
+			if con.Kind == snapshot.ConstraintForeignKey && con.FKTable != nil {
 				edges[q] = append(edges[q], *con.FKTable)
 				nodes[*con.FKTable] = true
 			}
@@ -310,13 +310,13 @@ func checkCircularFKs(snap *schema.SchemaSnapshot) []lint.Finding {
 	return findings
 }
 
-func checkOrphanTables(snap *schema.SchemaSnapshot) []lint.Finding {
+func checkOrphanTables(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	inDeg := make(map[string]int)
 	outDeg := make(map[string]int)
 	for _, t := range snap.Tables {
 		q := t.Schema + "." + t.Name
 		for _, con := range t.Constraints {
-			if con.Kind == schema.ConstraintForeignKey && con.FKTable != nil {
+			if con.Kind == snapshot.ConstraintForeignKey && con.FKTable != nil {
 				outDeg[q]++
 				inDeg[*con.FKTable]++
 			}
@@ -338,12 +338,12 @@ func checkOrphanTables(snap *schema.SchemaSnapshot) []lint.Finding {
 	return findings
 }
 
-func checkPKNonSequential(snap *schema.SchemaSnapshot) []lint.Finding {
+func checkPKNonSequential(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
 		qualified := t.Schema + "." + t.Name
 		for _, con := range t.Constraints {
-			if con.Kind != schema.ConstraintPrimaryKey {
+			if con.Kind != snapshot.ConstraintPrimaryKey {
 				continue
 			}
 			for _, pkCol := range con.Columns {
@@ -365,7 +365,7 @@ func checkPKNonSequential(snap *schema.SchemaSnapshot) []lint.Finding {
 
 var boolPrefixes = []string{"is_", "has_", "can_", "should_", "was_", "will_"}
 
-func checkBoolPrefix(snap *schema.SchemaSnapshot) []lint.Finding {
+func checkBoolPrefix(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
 		qualified := t.Schema + "." + t.Name
@@ -409,7 +409,7 @@ var reservedWords = map[string]bool{
 	"using": true, "values": true, "when": true, "where": true, "with": true,
 }
 
-func checkReservedWords(snap *schema.SchemaSnapshot) []lint.Finding {
+func checkReservedWords(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
 		qualified := t.Schema + "." + t.Name
@@ -435,7 +435,7 @@ func checkReservedWords(snap *schema.SchemaSnapshot) []lint.Finding {
 	return findings
 }
 
-func checkIDMismatch(snap *schema.SchemaSnapshot) []lint.Finding {
+func checkIDMismatch(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	type ref struct {
 		colName string
 		source  string
@@ -445,7 +445,7 @@ func checkIDMismatch(snap *schema.SchemaSnapshot) []lint.Finding {
 	for _, t := range snap.Tables {
 		qualified := t.Schema + "." + t.Name
 		for _, con := range t.Constraints {
-			if con.Kind != schema.ConstraintForeignKey || con.FKTable == nil || len(con.Columns) != 1 {
+			if con.Kind != snapshot.ConstraintForeignKey || con.FKTable == nil || len(con.Columns) != 1 {
 				continue
 			}
 			refNames[*con.FKTable] = append(refNames[*con.FKTable], ref{con.Columns[0], qualified})
@@ -482,7 +482,7 @@ func checkIDMismatch(snap *schema.SchemaSnapshot) []lint.Finding {
 	return findings
 }
 
-func checkNoComment(snap *schema.SchemaSnapshot, config *Config) []lint.Finding {
+func checkNoComment(snap *snapshot.SchemaSnapshot, config *Config) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
 		if len(t.Columns) < config.NoCommentMinColumns {
@@ -537,7 +537,7 @@ func sliceEqual(a, b []string) bool {
 }
 
 // stats-dependent; audit harness only passes DDL — vacuum_health MCP tool covers the live path
-func checkVacuumLargeTableDefaults(_ *schema.SchemaSnapshot) []lint.Finding {
+func checkVacuumLargeTableDefaults(_ *snapshot.SchemaSnapshot) []lint.Finding {
 	return nil
 }
 

@@ -11,8 +11,8 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/boringsql/dryrun/internal/history"
-	"github.com/boringsql/dryrun/internal/lint"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 // verifies that reload_schema picks up a candidate path written at runtime,

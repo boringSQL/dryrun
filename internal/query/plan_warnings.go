@@ -3,8 +3,8 @@ package query
 import (
 	"fmt"
 
-	"github.com/boringsql/dryrun/internal/jit"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/jit"
 )
 
 const seqScanRowThreshold = 5_000.0

@@ -3,14 +3,14 @@ package audit
 import (
 	"testing"
 
-	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
 func TestDuplicateIndexSkipsInvalid(t *testing.T) {
 	snap := testSnap()
-	snap.Tables = []schema.Table{{
+	snap.Tables = []snapshot.Table{{
 		Schema: "public", Name: "orders",
-		Indexes: []schema.Index{
+		Indexes: []snapshot.Index{
 			{Name: "idx_a", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true, IsReady: true},
 			{Name: "idx_b", Columns: []string{"user_id"}, IndexType: "btree", IsValid: false},
 		},
@@ -23,9 +23,9 @@ func TestDuplicateIndexSkipsInvalid(t *testing.T) {
 
 func TestRedundantSkipsUniqueIndex(t *testing.T) {
 	snap := testSnap()
-	snap.Tables = []schema.Table{{
+	snap.Tables = []snapshot.Table{{
 		Schema: "public", Name: "orders",
-		Indexes: []schema.Index{
+		Indexes: []snapshot.Index{
 			{Name: "idx_unique_email", Columns: []string{"email"}, IndexType: "btree", IsUnique: true, IsValid: true, IsReady: true},
 			{Name: "idx_email_created", Columns: []string{"email", "created_at"}, IndexType: "btree", IsValid: true, IsReady: true},
 		},
@@ -38,9 +38,9 @@ func TestRedundantSkipsUniqueIndex(t *testing.T) {
 
 func TestNonUniqueRedundantWithUnique(t *testing.T) {
 	snap := testSnap()
-	snap.Tables = []schema.Table{{
+	snap.Tables = []snapshot.Table{{
 		Schema: "public", Name: "orders",
-		Indexes: []schema.Index{
+		Indexes: []snapshot.Index{
 			{Name: "idx_email", Columns: []string{"email"}, IndexType: "btree", IsValid: true, IsReady: true},
 			{Name: "idx_email_unique", Columns: []string{"email"}, IndexType: "btree", IsUnique: true, IsValid: true, IsReady: true},
 		},
@@ -56,9 +56,9 @@ func TestNonUniqueRedundantWithUnique(t *testing.T) {
 
 func TestDuplicateIndexBothValid(t *testing.T) {
 	snap := testSnap()
-	snap.Tables = []schema.Table{{
+	snap.Tables = []snapshot.Table{{
 		Schema: "public", Name: "orders",
-		Indexes: []schema.Index{
+		Indexes: []snapshot.Index{
 			{Name: "idx_a", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true, IsReady: true},
 			{Name: "idx_b", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true, IsReady: true},
 		},
@@ -110,9 +110,9 @@ func TestDuplicateIndexValidityMatrix(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			snap := testSnap()
-			snap.Tables = []schema.Table{{
+			snap.Tables = []snapshot.Table{{
 				Schema: "public", Name: "orders",
-				Indexes: []schema.Index{
+				Indexes: []snapshot.Index{
 					// The first index is always perfectly healthy so that the
 					// outcome hinges solely on the second index's flags.
 					{Name: "idx_a", Columns: []string{"user_id"}, IndexType: "btree", IsValid: true, IsReady: true},

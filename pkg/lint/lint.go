@@ -3,11 +3,11 @@ package lint
 import (
 	"fmt"
 
-	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
 // CLI entry: run rules and wrap in a report
-func LintSchema(snap *schema.SchemaSnapshot, config *Config) Report {
+func LintSchema(snap *snapshot.SchemaSnapshot, config *Config) Report {
 	configSource := "default (boringsql)"
 	if len(config.DisabledRules) > 0 {
 		configSource = fmt.Sprintf("custom (%d rules disabled)", len(config.DisabledRules))
@@ -15,7 +15,7 @@ func LintSchema(snap *schema.SchemaSnapshot, config *Config) Report {
 	return NewReport(RunRules(snap, config), len(snap.Tables), configSource)
 }
 
-func RunRules(snap *schema.SchemaSnapshot, config *Config) []Finding {
+func RunRules(snap *snapshot.SchemaSnapshot, config *Config) []Finding {
 	return suppressOverlapping(runAllRules(snap, config))
 }
 

@@ -286,4 +286,3 @@ func extractPlanNode(v any) (json.RawMessage, error) {
 	}
 	return nil, fmt.Errorf("no Plan key and no Node Type at root")
 }
-

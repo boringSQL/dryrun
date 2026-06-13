@@ -9,7 +9,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/boringsql/dryrun/internal/history"
-	"github.com/boringsql/dryrun/internal/lint"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 type (

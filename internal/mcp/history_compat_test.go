@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/boringsql/dryrun/internal/history"
-	"github.com/boringsql/dryrun/internal/lint"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 // legacyHistoryStore writes a Rust-shaped history.db — a snapshots table with
