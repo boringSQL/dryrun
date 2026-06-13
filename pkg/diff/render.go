@@ -25,12 +25,17 @@ func (r ObjectRef) Qualified() string {
 
 // Human +/~/- tree for schema, sizing/stat movers for planner, counter movers for activity.
 func RenderConsole(w io.Writer, env *SnapshotDiff) {
+	RenderConsoleMinPct(w, env, DefaultMinPct)
+}
+
+// minPct suppresses sub-threshold planner/activity movers; schema ignores it.
+func RenderConsoleMinPct(w io.Writer, env *SnapshotDiff, minPct float64) {
 	if env.Planner != nil {
-		RenderPlannerConsole(w, env, DefaultMinPct)
+		RenderPlannerConsole(w, env, minPct)
 		return
 	}
 	if env.Activity != nil {
-		RenderActivityConsole(w, env, DefaultMinPct)
+		RenderActivityConsole(w, env, minPct)
 		return
 	}
 	if env.Schema == nil {

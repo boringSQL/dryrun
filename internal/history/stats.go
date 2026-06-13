@@ -172,6 +172,39 @@ func (s *Store) GetAnnotated(ctx context.Context, key SnapshotKey, at SnapshotRe
 	return out, nil
 }
 
+// scanHashPrefix runs a git like LIMIT 2 prefix query, returning the single
+// match's payload or sql.ErrNoRows; an ambiguous prefix is rejected
+func scanHashPrefix(ctx context.Context, db *sql.DB, query string, args ...any) (string, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var (
+		jsonStr string
+		matches int
+	)
+	for rows.Next() {
+		matches++
+		if matches == 1 {
+			if err := rows.Scan(&jsonStr); err != nil {
+				return "", err
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	switch matches {
+	case 0:
+		return "", sql.ErrNoRows
+	case 1:
+		return jsonStr, nil
+	default:
+		return "", fmt.Errorf("ambiguous snapshot hash prefix (matches multiple)")
+	}
+}
+
 // getPlannerRef resolves a SnapshotRef against the planner_stats table.
 func (s *Store) getPlannerRef(ctx context.Context, key SnapshotKey, at SnapshotRef) (*schema.PlannerStatsSnapshot, error) {
 	pid := string(key.ProjectID)
@@ -201,12 +234,12 @@ func (s *Store) getPlannerRef(ctx context.Context, key SnapshotKey, at SnapshotR
 		).Scan(&jsonStr)
 	case RefHash:
 		detail = "planner hash " + at.Hash
-		err = s.db.QueryRowContext(ctx,
+		// git-style prefix match; ambiguous prefixes are rejected
+		jsonStr, err = scanHashPrefix(ctx, s.db,
 			`SELECT payload_json FROM planner_stats
-			  WHERE project_id = ? AND database_id = ? AND content_hash = ?
-			  LIMIT 1`,
-			pid, did, at.Hash,
-		).Scan(&jsonStr)
+			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
+			  LIMIT 2`,
+			pid, did, at.Hash+"%")
 	default:
 		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 	}
@@ -255,10 +288,9 @@ func (s *Store) getActivityRef(ctx context.Context, key SnapshotKey, nodeLabel s
 			args...).Scan(&jsonStr)
 	case RefHash:
 		detail = "activity hash " + at.Hash
-		args = append(args, at.Hash)
-		err = s.db.QueryRowContext(ctx,
-			base+" AND content_hash = ? LIMIT 1",
-			args...).Scan(&jsonStr)
+		// git-style prefix match; ambiguous prefixes are rejected
+		args = append(args, at.Hash+"%")
+		jsonStr, err = scanHashPrefix(ctx, s.db, base+" AND content_hash LIKE ? LIMIT 2", args...)
 	default:
 		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 	}
