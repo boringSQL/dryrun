@@ -131,7 +131,7 @@ func bloatedAnnotated(idxName string, relpages int64, reltuples float64) *Annota
 		Schema: &SchemaSnapshot{Tables: []Table{t}},
 		Planner: &PlannerStatsSnapshot{Indexes: []IndexSizingEntry{{
 			Table: qual("public", "orders"), Index: idxName,
-			Sizing: IndexSizing{Relpages: relpages, Reltuples: reltuples, Size: relpages * pageSize},
+			Sizing: IndexSizing{Relpages: relpages, Reltuples: reltuples, Size: relpages * 8192},
 		}}},
 	}
 }
@@ -171,7 +171,7 @@ func TestDetectBloatedIndexes_NonBtreeSkipped(t *testing.T) {
 		Schema: &SchemaSnapshot{Tables: []Table{t1}},
 		Planner: &PlannerStatsSnapshot{Indexes: []IndexSizingEntry{{
 			Table: qual("public", "docs"), Index: "idx_docs_body",
-			Sizing: IndexSizing{Relpages: 5000, Reltuples: 100000, Size: 5000 * pageSize},
+			Sizing: IndexSizing{Relpages: 5000, Reltuples: 100000, Size: 5000 * 8192},
 		}}},
 	}
 	if got := DetectBloatedIndexes(a, 2.0); len(got) != 0 {

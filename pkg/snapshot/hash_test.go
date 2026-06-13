@@ -197,6 +197,53 @@ func TestPlannerContentHash_IgnoresReferenceCounters(t *testing.T) {
 	}
 }
 
+// Bloat is derived from sizing+schema, so it must not perturb the planner
+// content hash — otherwise a re-capture of unchanged stats post-bloat would
+// look "new" and dedup would break across the format change. An entry with a
+// populated Bloat must hash identically to the same entry without one.
+func TestPlannerContentHash_IgnoresBloat(t *testing.T) {
+	qual := QualifiedName{Schema: "public", Name: "users"}
+	base := &PlannerStatsSnapshot{
+		SchemaRefHash: "ddl-hash",
+		Tables: []TableSizingEntry{{
+			Table:  qual,
+			Sizing: TableSizing{Relpages: 500, Reltuples: 10_000, TableSize: 4_096_000},
+		}},
+		Indexes: []IndexSizingEntry{{
+			Table:  qual,
+			Index:  "users_pkey",
+			Sizing: IndexSizing{Relpages: 100, Reltuples: 10_000, Size: 819_200},
+		}},
+	}
+	annotated := *base
+	annotated.Tables = []TableSizingEntry{{
+		Table:  base.Tables[0].Table,
+		Sizing: base.Tables[0].Sizing,
+		Bloat:  &BloatEstimate{BloatRatio: 2.1, ExpectedPages: 238, ActualPages: 500, AvgTupleWidth: 12, SizeBytes: 4_096_000},
+	}}
+	annotated.Indexes = []IndexSizingEntry{{
+		Table:  base.Indexes[0].Table,
+		Index:  base.Indexes[0].Index,
+		Sizing: base.Indexes[0].Sizing,
+		Bloat:  &BloatEstimate{BloatRatio: 4.2, ExpectedPages: 24, ActualPages: 100, AvgTupleWidth: 4, SizeBytes: 819_200},
+	}}
+
+	if got, want := ComputePlannerContentHash(&annotated), ComputePlannerContentHash(base); got != want {
+		t.Errorf("bloat leaked into planner content hash: %s vs %s", got, want)
+	}
+
+	// sanity: the underlying sizing still moves the hash, so it isn't silently dropped.
+	moved := *base
+	moved.Indexes = []IndexSizingEntry{{
+		Table:  base.Indexes[0].Table,
+		Index:  base.Indexes[0].Index,
+		Sizing: IndexSizing{Relpages: 200, Reltuples: 10_000, Size: 819_200},
+	}}
+	if ComputePlannerContentHash(&moved) == ComputePlannerContentHash(base) {
+		t.Errorf("relpages change did not affect planner content hash")
+	}
+}
+
 // Same invariant for activity snapshots. Two nodes producing different
 // schema_ref values mean the cluster has drifted; under matched DDL the
 // binding must be stable across nodes.

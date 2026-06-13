@@ -2,6 +2,8 @@ package schema
 
 import (
 	"sort"
+
+	"github.com/boringsql/dryrun/pkg/bloat"
 )
 
 type TableSummary struct {
@@ -190,7 +192,7 @@ func DetectBloatedIndexes(a *AnnotatedSchema, threshold float64) []BloatedIndexE
 			if sz == nil {
 				continue
 			}
-			est, ok := EstimateIndexBloat(*sz, idx.Columns, *t, idx.IndexType)
+			est, ok := bloat.EstimateIndexBloat(*sz, idx.Columns, idx.IncludeColumns, *t, idx.IndexType)
 			if !ok || est.BloatRatio <= threshold {
 				continue
 			}
