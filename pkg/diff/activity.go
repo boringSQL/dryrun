@@ -122,7 +122,8 @@ func DiffActivity(from, to *snapshot.ActivityStatsSnapshot) (*ActivityDelta, err
 			e = b
 		}
 		s := e.Table.Schema
-		ref := ObjectRef{Kind: "index", Schema: &s, Name: e.Index}
+		tn := e.Table.Name
+		ref := ObjectRef{Kind: "index", Schema: &s, Name: e.Index, Table: &tn}
 		var av, bv snapshot.IndexActivity
 		if a != nil {
 			av = a.Activity

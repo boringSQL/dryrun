@@ -1,5 +1,5 @@
-// Package diff is the raw snapshot-delta contract: stdlib + pkg/snapshot only so
-// the predict engine can import it. No judgment (severity/risk/forecast) here.
+// Package diff turns two snapshots into a typed delta. Imports stay limited to
+// stdlib + pkg/snapshot so predictd can vendor it. No severity/risk scoring here.
 package diff
 
 import (
@@ -8,7 +8,7 @@ import (
 	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
-// Envelope carrying exactly one typed delta, whichever kind was diffed.
+// holds exactly one of the three deltas
 type (
 	SnapshotDiff struct {
 		Kind        string         `json:"kind"` // schema | planner | activity
@@ -30,8 +30,8 @@ type (
 
 func (d *SchemaDelta) IsEmpty() bool { return d == nil || len(d.Changes) == 0 }
 
-// Tagged union: Type selects which detail pointer is populated, so the cloud
-// matches on Type + typed detail, never on prose.
+// Type says which detail pointer is set. predictd keys off Type + that detail,
+// not the Note text.
 type (
 	Change struct {
 		Type   ChangeType `json:"type"`
@@ -44,17 +44,18 @@ type (
 		RLS        *RLSChange        `json:"rls,omitempty"`
 		Rename     *RenameChange     `json:"rename,omitempty"`
 
-		Note string `json:"note,omitempty"` // human hint, not load-bearing
+		Note string `json:"note,omitempty"` // free-text, predictd ignores it
 	}
 
 	ChangeType string
 
-	// OID-first identity; survives rename. 0 when the source carries none
+	// keyed by OID so renames still match; 0 when the source has none
 	ObjectRef struct {
 		Kind   string  `json:"kind"`
 		Schema *string `json:"schema,omitempty"`
 		Name   string  `json:"name"`
 		OID    uint32  `json:"oid,omitempty"`
+		Table  *string `json:"table,omitempty"` // owning table for index rows
 	}
 
 	ColumnChange struct {
@@ -131,7 +132,7 @@ const (
 	FuncVolatilityChanged ChangeType = "func_volatility_changed"
 	FuncReturnTypeChanged ChangeType = "func_return_type_changed"
 
-	// enum/domain/composite/extension: no risk-relevant detail
+	// enum/domain/composite/extension: nothing worth a typed detail
 	ObjectAdded    ChangeType = "object_added"
 	ObjectDropped  ChangeType = "object_dropped"
 	ObjectModified ChangeType = "object_modified"
@@ -143,7 +144,6 @@ const (
 	DefaultVolatile DefaultKind = "volatile"
 )
 
-// Folds the typed vocabulary back to added/removed/modified.
 func (t ChangeType) Category() string {
 	switch t {
 	case TableAdded, ColumnAdded, IndexAdded, ConstraintAdded, ViewAdded, FunctionAdded, ObjectAdded:
@@ -155,7 +155,7 @@ func (t ChangeType) Category() string {
 	}
 }
 
-// error is for symmetry with DiffPlanner/DiffActivity; schema diffing never fails.
+// the error is just to mirror DiffPlanner/DiffActivity; schema diff can't fail.
 func DiffSchema(from, to *snapshot.SchemaSnapshot) (*SchemaDelta, error) {
 	var changes []Change
 
@@ -263,7 +263,7 @@ func diffTableBody(old, nw *snapshot.Table, changes *[]Change) {
 			}})
 		}
 		if oc.Nullable != nc.Nullable {
-			t := ColumnSetNotNull // nullable → NOT NULL
+			t := ColumnSetNotNull // was nullable
 			if nc.Nullable {
 				t = ColumnDropNotNull
 			}
@@ -402,7 +402,7 @@ func diffFunctions(from, to []snapshot.Function, changes *[]Change) {
 	}
 }
 
-// modified = JSON inequality (definition changed).
+// "modified" here just means the canonical JSON differs.
 func diffGeneric[T any](kind string, from, to []T, keyFn func(T) string, changes *[]Change) {
 	fromMap := jsonIndex(from, keyFn)
 	toMap := jsonIndex(to, keyFn)

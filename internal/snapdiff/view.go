@@ -221,20 +221,27 @@ func counterMover(r diff.CounterDelta) bool {
 	return r.Pct == nil || math.Abs(*r.Pct) >= minMoverPct
 }
 
-// keep matches a row against the schema/table filter. column rows (table.col)
-// match on the table part.
-func keep(schema, name, schemaF, tableF string) bool {
-	if schemaF != "" && schema != schemaF {
+// keepRef matches a ref against the schema/table filter, resolving the row to its
+// owning table so an index's sizing/scan drift surfaces under its table.
+func keepRef(o diff.ObjectRef, schemaF, tableF string) bool {
+	if schemaF != "" && ptrStr(o.Schema) != schemaF {
 		return false
 	}
-	if tableF != "" {
-		if name == tableF {
-			return true
-		}
-		t, _ := splitColumn(name)
-		return t == tableF
+	if tableF == "" {
+		return true
 	}
-	return true
+	return owningTable(o) == tableF
+}
+
+func owningTable(o diff.ObjectRef) string {
+	if o.Table != nil && *o.Table != "" { // index rows carry their table
+		return *o.Table
+	}
+	if o.Kind == "column" { // column rows are table.col
+		t, _ := splitColumn(o.Name)
+		return t
+	}
+	return o.Name // the table (or view/function) itself
 }
 
 func filterSchemaDelta(d *diff.SchemaDelta, sf, tf string) *diff.SchemaDelta {
@@ -243,7 +250,7 @@ func filterSchemaDelta(d *diff.SchemaDelta, sf, tf string) *diff.SchemaDelta {
 	}
 	var ch []diff.Change
 	for _, c := range d.Changes {
-		if keep(ptrStr(c.Object.Schema), c.Object.Name, sf, tf) {
+		if keepRef(c.Object, sf, tf) {
 			ch = append(ch, c)
 		}
 	}
@@ -265,7 +272,7 @@ func filterPlannerDelta(d *diff.PlannerDelta, sf, tf string) *diff.PlannerDelta 
 func filterSizing(rows []diff.SizingDelta, sf, tf string) []diff.SizingDelta {
 	var out []diff.SizingDelta
 	for _, r := range rows {
-		if keep(ptrStr(r.Identity.Schema), r.Identity.Name, sf, tf) {
+		if keepRef(r.Identity, sf, tf) {
 			out = append(out, r)
 		}
 	}
@@ -280,7 +287,7 @@ func filterActivityDeltas(nds []NodeActivityDelta, sf, tf string) []NodeActivity
 		}
 		var cs []diff.CounterDelta
 		for _, r := range nd.Delta.Counters {
-			if keep(ptrStr(r.Identity.Schema), r.Identity.Name, sf, tf) {
+			if keepRef(r.Identity, sf, tf) {
 				cs = append(cs, r)
 			}
 		}

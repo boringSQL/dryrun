@@ -27,7 +27,7 @@ type (
 		Pct      *float64  `json:"pct,omitempty"`
 	}
 
-	// column-stats deltas share the sizing shape; only the metric vocabulary differs.
+	// stats deltas reuse the sizing shape, just a different metric set
 	StatDelta = SizingDelta
 )
 
@@ -50,7 +50,7 @@ const (
 
 func (d *PlannerDelta) IsEmpty() bool { return d == nil || (len(d.Sizing) == 0 && len(d.Stats) == 0) }
 
-// error is for symmetry with the other Diff* funcs; sizing diffing never fails.
+// never errors; the signature just matches the other Diff* funcs.
 func DiffPlanner(from, to *snapshot.PlannerStatsSnapshot) (*PlannerDelta, error) {
 	var rows []SizingDelta
 
@@ -143,8 +143,8 @@ func tableReltuples(m map[string]*snapshot.TableSizingEntry, t snapshot.Qualifie
 	return 0
 }
 
-// Delta carries MCV set turnover (members that entered or left), Pct the churn
-// fraction; the most-common-values list has no meaningful B-A on its own.
+// MCV lists have no meaningful B-A, so Delta is set turnover (members in or out)
+// and Pct the churn fraction.
 func mcvChurn(ref ObjectRef, a, b *string) (StatDelta, bool) {
 	if a == nil && b == nil {
 		return StatDelta{}, false
@@ -225,8 +225,8 @@ func indexBloat(e *snapshot.IndexSizingEntry) *snapshot.BloatEstimate {
 	return e.Bloat
 }
 
-// bloat is derived (kept out of the content hash); surface it only when at least
-// one endpoint carries an estimate. an unchanged ratio falls out as Delta==0.
+// bloat is derived, so it's not in the content hash. only emit a row when one
+// side actually has an estimate; unchanged ratios fall out at Delta==0.
 func bloatRow(ref ObjectRef, a, b *snapshot.BloatEstimate) (SizingDelta, bool) {
 	if a == nil && b == nil {
 		return SizingDelta{}, false
@@ -273,7 +273,8 @@ func indexSizing(a, b *snapshot.IndexSizingEntry) (ObjectRef, snapshot.IndexSizi
 		e = b
 	}
 	s := e.Table.Schema
-	ref := ObjectRef{Kind: "index", Schema: &s, Name: e.Index}
+	tn := e.Table.Name
+	ref := ObjectRef{Kind: "index", Schema: &s, Name: e.Index, Table: &tn}
 	var as, bs snapshot.IndexSizing
 	if a != nil {
 		as = a.Sizing
@@ -306,7 +307,7 @@ var sizingMetricOrder = map[string]int{
 	MetricNDistinct: 8, MetricNullFrac: 9, MetricCorrelation: 10, MetricMCVChurn: 11,
 }
 
-// Deterministic order is load-bearing: the cloud dedups on the delta.
+// keep this deterministic; predictd dedups on the serialized delta.
 func sortSizing(rows []SizingDelta) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
