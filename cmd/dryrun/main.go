@@ -15,11 +15,11 @@ import (
 
 	"github.com/boringsql/dryrun/internal/buildinfo"
 	"github.com/boringsql/dryrun/internal/config"
-	"github.com/boringsql/dryrun/internal/diff"
 	"github.com/boringsql/dryrun/internal/history"
-	"github.com/boringsql/dryrun/internal/lint"
 	drmcp "github.com/boringsql/dryrun/internal/mcp"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/diff"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 var (
@@ -304,15 +304,8 @@ func driftCmd() *cobra.Command {
 			fmt.Printf("  %d added, %d removed, %d modified\n\n",
 				report.AddedCount, report.RemovedCount, report.ModifiedCount)
 
-			for _, c := range report.Changeset.Changes {
-				name := c.Name
-				if c.Schema != nil {
-					name = *c.Schema + "." + name
-				}
-				fmt.Printf("  [%s] %s %s\n", c.Kind, c.ObjectType, name)
-				for _, d := range c.Details {
-					fmt.Printf("         %s\n", d)
-				}
+			for _, c := range report.Delta.Changes {
+				fmt.Printf("  %s %s\n", diff.Marker(c), diff.Describe(c))
 			}
 			return nil
 		},
@@ -452,62 +445,8 @@ func snapshotCmd() *cobra.Command {
 	}
 	addHistFlag(listCmd)
 
-	var fromHash, toHash string
-	var latest, prettyDiff bool
-
-	diffCmd := &cobra.Command{
-		Use:   "diff",
-		Short: "Diff two snapshots",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := openHistoryStore(historyDB)
-			if err != nil {
-				return err
-			}
-			defer store.Close()
-
-			key := resolveSnapshotKey()
-			loadByHash := func(h string) (*schema.SchemaSnapshot, error) {
-				return store.GetSchema(cmd.Context(), key, history.NewRefHash(h))
-			}
-
-			var fromSnap *schema.SchemaSnapshot
-			switch {
-			case fromHash != "":
-				fromSnap, err = loadByHash(fromHash)
-			case latest:
-				fromSnap, err = store.GetSchema(cmd.Context(), key, history.NewRefLatest())
-			default:
-				return fmt.Errorf("specify --from <hash> or --latest")
-			}
-			if err != nil {
-				return err
-			}
-
-			var toSnap *schema.SchemaSnapshot
-			if toHash != "" {
-				toSnap, err = loadByHash(toHash)
-			} else {
-				ctx, conn, cerr := connectDB()
-				if cerr != nil {
-					return cerr
-				}
-				defer conn.Close()
-				toSnap, err = conn.Introspect(ctx)
-			}
-			if err != nil {
-				return err
-			}
-
-			changeset := diff.DiffSchemas(fromSnap, toSnap)
-			fmt.Println(string(marshalJSON(changeset, prettyDiff)))
-			return nil
-		},
-	}
-	diffCmd.Flags().StringVar(&fromHash, "from", "", "source snapshot hash")
-	diffCmd.Flags().StringVar(&toHash, "to", "", "target snapshot hash")
-	diffCmd.Flags().BoolVar(&latest, "latest", false, "use latest saved snapshot as source")
+	diffCmd := newDiffCmd(&historyDB)
 	addHistFlag(diffCmd)
-	diffCmd.Flags().BoolVar(&prettyDiff, "pretty", false, "pretty-print JSON")
 
 	cmd.AddCommand(takeCmd, listCmd, diffCmd, snapshotActivityCmd(),
 		snapshotPushCmd(), snapshotPullCmd())
@@ -671,6 +610,13 @@ func connectDBFor(override string) (context.Context, *schema.DryRun, error) {
 		return nil, nil, err
 	}
 	return ctx, conn, nil
+}
+
+func short(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }
 
 func marshalJSON(v any, pretty bool) []byte {

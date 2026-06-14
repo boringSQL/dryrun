@@ -27,6 +27,7 @@ type (
 		Table                     string     `json:"table"`
 		Reltuples                 float64    `json:"reltuples"`
 		DeadTuples                int64      `json:"dead_tuples"`
+		ModSinceAnalyze           int64      `json:"mod_since_analyze"`
 		VacuumTriggerAt           float64    `json:"vacuum_trigger_at"`
 		VacuumProgress            float64    `json:"vacuum_progress"`
 		HasOverrides              bool       `json:"has_overrides"`
@@ -35,6 +36,7 @@ type (
 		EffectiveAnalyzeThreshold int64      `json:"effective_analyze_threshold"`
 		EffectiveAnalyzeScale     float64    `json:"effective_analyze_scale_factor"`
 		AnalyzeTriggerAt          float64    `json:"analyze_trigger_at"`
+		AnalyzeProgress           float64    `json:"analyze_progress"`
 		AutovacuumEnabled         bool       `json:"autovacuum_enabled"`
 		XidAge                    int64      `json:"xid_age,omitempty"`
 		FreezeMaxAge              int64      `json:"freeze_max_age,omitempty"`
@@ -135,9 +137,10 @@ func AnalyzeVacuumHealth(a *AnnotatedSchema) []VacuumHealth {
 			continue
 		}
 		var reltuples float64 = sizing.Reltuples
-		var deadTuples int64
+		var deadTuples, modSinceAnalyze int64
 		if activity != nil {
 			deadTuples = activity.NDeadTup
+			modSinceAnalyze = activity.NModSinceAnalyze
 		}
 
 		opts := parseReloptions(t.Reloptions)
@@ -186,12 +189,17 @@ func AnalyzeVacuumHealth(a *AnnotatedSchema) []VacuumHealth {
 		if triggerAt > 0 {
 			progress = float64(deadTuples) / triggerAt
 		}
+		var analyzeProgress float64
+		if analyzeTrigger > 0 {
+			analyzeProgress = float64(modSinceAnalyze) / analyzeTrigger
+		}
 
 		vh := VacuumHealth{
 			Schema:                    t.Schema,
 			Table:                     t.Name,
 			Reltuples:                 reltuples,
 			DeadTuples:                deadTuples,
+			ModSinceAnalyze:           modSinceAnalyze,
 			VacuumTriggerAt:           triggerAt,
 			VacuumProgress:            progress,
 			HasOverrides:              hasOverrides,
@@ -200,6 +208,7 @@ func AnalyzeVacuumHealth(a *AnnotatedSchema) []VacuumHealth {
 			EffectiveAnalyzeThreshold: analyzeThreshold,
 			EffectiveAnalyzeScale:     analyzeScaleFactor,
 			AnalyzeTriggerAt:          analyzeTrigger,
+			AnalyzeProgress:           analyzeProgress,
 			AutovacuumEnabled:         avEnabled,
 		}
 		// anti-wraparound: age(relfrozenxid) vs the (possibly overridden) freeze_max_age.

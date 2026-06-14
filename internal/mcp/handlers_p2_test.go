@@ -124,27 +124,24 @@ func TestAnalyzePlan_MalformedPlanJSONErrors(t *testing.T) {
 	}
 }
 
-// schema_diff in pure-offline mode (no history store, no live DB) must surface
-// a helpful error instead of panicking. With no `to` it has nothing to compare
-// against.
-func TestSchemaDiff_NoHistoryNoPool(t *testing.T) {
+// snapshot_diff in pure-offline mode (no history store) must surface a helpful
+// error instead of panicking — there are no snapshots to diff.
+func TestSnapshotDiff_NoHistory(t *testing.T) {
 	c := setupOfflineTest(t)
-	out := callTool(t, c, "schema_diff", map[string]any{})
+	out := callTool(t, c, "snapshot_diff", map[string]any{})
 	if out == "" {
 		t.Fatal("empty result")
 	}
-	// Either "history store" or "live DB" guidance — both are acceptable;
-	// the contract is "graceful error, no panic".
-	if !strings.Contains(out, "history") && !strings.Contains(out, "live DB") {
-		t.Errorf("expected guidance about history or live DB, got: %s", out)
+	if !strings.Contains(out, "history") {
+		t.Errorf("expected guidance about missing history, got: %s", out)
 	}
 }
 
-// schema_diff with `from` set but no history store also errors gracefully,
+// snapshot_diff with `from` set but no history store also errors gracefully,
 // pointing the user at the missing history.
-func TestSchemaDiff_HashWithoutHistoryErrors(t *testing.T) {
+func TestSnapshotDiff_HashWithoutHistoryErrors(t *testing.T) {
 	c := setupOfflineTest(t)
-	out := callTool(t, c, "schema_diff", map[string]any{
+	out := callTool(t, c, "snapshot_diff", map[string]any{
 		"from": "deadbeef",
 	})
 	if !strings.Contains(out, "history") {
@@ -152,13 +149,13 @@ func TestSchemaDiff_HashWithoutHistoryErrors(t *testing.T) {
 	}
 }
 
-// Sanity: the schema_diff tool resolves and the handler is wired. The actual
+// Sanity: the snapshot_diff tool resolves and the handler is wired. The actual
 // JSON-RPC layer would return an error response, but we use TextContent for
 // all error paths so the client always gets a body.
-func TestSchemaDiff_HandlerReachable(t *testing.T) {
+func TestSnapshotDiff_HandlerReachable(t *testing.T) {
 	c := setupOfflineTest(t)
 	var req mcp.CallToolRequest
-	req.Params.Name = "schema_diff"
+	req.Params.Name = "snapshot_diff"
 	res, err := c.CallTool(context.Background(), req)
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)

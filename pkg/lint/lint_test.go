@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
-func emptySnapshot() *schema.SchemaSnapshot {
-	return &schema.SchemaSnapshot{
+func emptySnapshot() *snapshot.SchemaSnapshot {
+	return &snapshot.SchemaSnapshot{
 		PgVersion:   "PostgreSQL 17.0",
 		Database:    "test",
 		Timestamp:   time.Now().UTC(),
@@ -17,35 +17,35 @@ func emptySnapshot() *schema.SchemaSnapshot {
 	}
 }
 
-func makeCol(name, typeName string) schema.Column {
-	return schema.Column{Name: name, TypeName: typeName}
+func makeCol(name, typeName string) snapshot.Column {
+	return snapshot.Column{Name: name, TypeName: typeName}
 }
 
-func makePK(name string, columns ...string) schema.Constraint {
-	return schema.Constraint{Name: name, Kind: schema.ConstraintPrimaryKey, Columns: columns}
+func makePK(name string, columns ...string) snapshot.Constraint {
+	return snapshot.Constraint{Name: name, Kind: snapshot.ConstraintPrimaryKey, Columns: columns}
 }
 
-func makeFK(name string, columns []string, fkTable string) schema.Constraint {
-	return schema.Constraint{
-		Name: name, Kind: schema.ConstraintForeignKey,
+func makeFK(name string, columns []string, fkTable string) snapshot.Constraint {
+	return snapshot.Constraint{
+		Name: name, Kind: snapshot.ConstraintForeignKey,
 		Columns: columns, FKTable: new(fkTable), FKColumns: []string{"id"},
 	}
 }
 
-func makeIndex(name string, columns ...string) schema.Index {
-	return schema.Index{Name: name, Columns: columns, IndexType: "btree"}
+func makeIndex(name string, columns ...string) snapshot.Index {
+	return snapshot.Index{Name: name, Columns: columns, IndexType: "btree"}
 }
 
 func TestCleanSchemaNoErrors(t *testing.T) {
 	snap := emptySnapshot()
 	idCol := makeCol("id", "bigint")
 	idCol.Identity = new("ALWAYS")
-	snap.Tables = []schema.Table{{
+	snap.Tables = []snapshot.Table{{
 		Schema: "public", Name: "user",
-		Columns: []schema.Column{idCol, makeCol("email", "text"),
+		Columns: []snapshot.Column{idCol, makeCol("email", "text"),
 			makeCol("created_at", "timestamp with time zone"),
 			makeCol("updated_at", "timestamp with time zone")},
-		Constraints: []schema.Constraint{makePK("pk_user", "id")},
+		Constraints: []snapshot.Constraint{makePK("pk_user", "id")},
 	}}
 
 	report := LintSchema(snap, &Config{TableNameStyle: "snake_singular", ColumnNameStyle: "snake_case", PKType: "bigint_identity", RequireTimestamps: true, TimestampType: "timestamptz", PreferTextOverVarchar: true, FKPattern: "fk_{table}_{column}", IndexPattern: "idx_{table}_{columns}"})
@@ -58,9 +58,9 @@ func TestCleanSchemaNoErrors(t *testing.T) {
 
 func TestMissingPK(t *testing.T) {
 	snap := emptySnapshot()
-	snap.Tables = []schema.Table{{
+	snap.Tables = []snapshot.Table{{
 		Schema: "public", Name: "log",
-		Columns: []schema.Column{makeCol("message", "text"),
+		Columns: []snapshot.Column{makeCol("message", "text"),
 			makeCol("created_at", "timestamp with time zone"),
 			makeCol("updated_at", "timestamp with time zone")},
 	}}
@@ -82,12 +82,12 @@ func TestFKWithoutIndex(t *testing.T) {
 	snap := emptySnapshot()
 	idCol := makeCol("id", "bigint")
 	idCol.Identity = new("ALWAYS")
-	snap.Tables = []schema.Table{{
+	snap.Tables = []snapshot.Table{{
 		Schema: "public", Name: "order_item",
-		Columns: []schema.Column{idCol, makeCol("order_id", "bigint"),
+		Columns: []snapshot.Column{idCol, makeCol("order_id", "bigint"),
 			makeCol("created_at", "timestamp with time zone"),
 			makeCol("updated_at", "timestamp with time zone")},
-		Constraints: []schema.Constraint{
+		Constraints: []snapshot.Constraint{
 			makePK("pk_order_item", "id"),
 			makeFK("fk_order_item_order_id", []string{"order_id"}, "public.order"),
 		},
@@ -110,16 +110,16 @@ func TestFKWithPrefixIndexPasses(t *testing.T) {
 	snap := emptySnapshot()
 	idCol := makeCol("id", "bigint")
 	idCol.Identity = new("ALWAYS")
-	snap.Tables = []schema.Table{{
+	snap.Tables = []snapshot.Table{{
 		Schema: "public", Name: "order_item",
-		Columns: []schema.Column{idCol, makeCol("order_id", "bigint"), makeCol("product_id", "bigint"),
+		Columns: []snapshot.Column{idCol, makeCol("order_id", "bigint"), makeCol("product_id", "bigint"),
 			makeCol("created_at", "timestamp with time zone"),
 			makeCol("updated_at", "timestamp with time zone")},
-		Constraints: []schema.Constraint{
+		Constraints: []snapshot.Constraint{
 			makePK("pk_order_item", "id"),
 			makeFK("fk_order_item_order_id", []string{"order_id"}, "public.order"),
 		},
-		Indexes: []schema.Index{
+		Indexes: []snapshot.Index{
 			makeIndex("idx_order_item_order_id_product_id", "order_id", "product_id"),
 		},
 	}}
@@ -137,16 +137,16 @@ func TestMultiColumnFKNeedsPrefixIndex(t *testing.T) {
 	snap := emptySnapshot()
 	idCol := makeCol("id", "bigint")
 	idCol.Identity = new("ALWAYS")
-	snap.Tables = []schema.Table{{
+	snap.Tables = []snapshot.Table{{
 		Schema: "public", Name: "shipment",
-		Columns: []schema.Column{idCol, makeCol("order_id", "bigint"), makeCol("warehouse_id", "bigint"),
+		Columns: []snapshot.Column{idCol, makeCol("order_id", "bigint"), makeCol("warehouse_id", "bigint"),
 			makeCol("created_at", "timestamp with time zone"),
 			makeCol("updated_at", "timestamp with time zone")},
-		Constraints: []schema.Constraint{
+		Constraints: []snapshot.Constraint{
 			makePK("pk_shipment", "id"),
 			makeFK("fk_shipment_order_warehouse", []string{"order_id", "warehouse_id"}, "public.order_warehouse"),
 		},
-		Indexes: []schema.Index{
+		Indexes: []snapshot.Index{
 			// Index on (warehouse_id, order_id) does NOT cover FK (order_id, warehouse_id) as prefix
 			makeIndex("idx_shipment_wh_order", "warehouse_id", "order_id"),
 		},
@@ -167,9 +167,9 @@ func TestMultiColumnFKNeedsPrefixIndex(t *testing.T) {
 
 func TestDisabledRulesSkipped(t *testing.T) {
 	snap := emptySnapshot()
-	snap.Tables = []schema.Table{{
+	snap.Tables = []snapshot.Table{{
 		Schema: "public", Name: "log",
-		Columns: []schema.Column{makeCol("message", "text")},
+		Columns: []snapshot.Column{makeCol("message", "text")},
 	}}
 
 	config := DefaultConfig()
@@ -186,19 +186,19 @@ func TestPartitionChildSkipped(t *testing.T) {
 	snap := emptySnapshot()
 	idCol := makeCol("id", "bigint")
 	idCol.Identity = new("ALWAYS")
-	snap.Tables = []schema.Table{
+	snap.Tables = []snapshot.Table{
 		{
 			Schema: "public", Name: "events",
-			Columns:     []schema.Column{idCol, makeCol("created_at", "timestamp with time zone"), makeCol("updated_at", "timestamp with time zone")},
-			Constraints: []schema.Constraint{makePK("pk_events", "id")},
-			PartitionInfo: &schema.PartitionInfo{
-				Strategy: schema.PartitionRange, Key: "created_at",
-				Children: []schema.PartitionChild{{Schema: "public", Name: "events_2024"}},
+			Columns:     []snapshot.Column{idCol, makeCol("created_at", "timestamp with time zone"), makeCol("updated_at", "timestamp with time zone")},
+			Constraints: []snapshot.Constraint{makePK("pk_events", "id")},
+			PartitionInfo: &snapshot.PartitionInfo{
+				Strategy: snapshot.PartitionRange, Key: "created_at",
+				Children: []snapshot.PartitionChild{{Schema: "public", Name: "events_2024"}},
 			},
 		},
 		{
 			Schema: "public", Name: "events_2024",
-			Columns: []schema.Column{makeCol("id", "bigint"), makeCol("created_at", "timestamp with time zone"), makeCol("updated_at", "timestamp with time zone")},
+			Columns: []snapshot.Column{makeCol("id", "bigint"), makeCol("created_at", "timestamp with time zone"), makeCol("updated_at", "timestamp with time zone")},
 		},
 	}
 
@@ -218,10 +218,10 @@ func TestAutoDetectTableNameStyle(t *testing.T) {
 	for _, name := range []string{"users", "orders", "products", "item"} {
 		idCol := makeCol("id", "bigint")
 		idCol.Identity = new("ALWAYS")
-		snap.Tables = append(snap.Tables, schema.Table{
+		snap.Tables = append(snap.Tables, snapshot.Table{
 			Schema: "public", Name: name,
-			Columns:     []schema.Column{idCol, makeCol("created_at", "timestamp with time zone"), makeCol("updated_at", "timestamp with time zone")},
-			Constraints: []schema.Constraint{makePK("pk_"+name, "id")},
+			Columns:     []snapshot.Column{idCol, makeCol("created_at", "timestamp with time zone"), makeCol("updated_at", "timestamp with time zone")},
+			Constraints: []snapshot.Constraint{makePK("pk_"+name, "id")},
 		})
 	}
 
@@ -238,16 +238,16 @@ func TestAutoDetectTableNameStyle(t *testing.T) {
 	}
 }
 
-func makePartitionedTable(children []schema.PartitionChild) schema.Table {
+func makePartitionedTable(children []snapshot.PartitionChild) snapshot.Table {
 	idCol := makeCol("id", "bigint")
 	idCol.Identity = new("ALWAYS")
-	return schema.Table{
+	return snapshot.Table{
 		Schema:      "public",
 		Name:        "events",
-		Columns:     []schema.Column{idCol, makeCol("created_at", "timestamp with time zone"), makeCol("updated_at", "timestamp with time zone")},
-		Constraints: []schema.Constraint{makePK("pk_events", "id", "created_at")},
-		PartitionInfo: &schema.PartitionInfo{
-			Strategy: schema.PartitionRange,
+		Columns:     []snapshot.Column{idCol, makeCol("created_at", "timestamp with time zone"), makeCol("updated_at", "timestamp with time zone")},
+		Constraints: []snapshot.Constraint{makePK("pk_events", "id", "created_at")},
+		PartitionInfo: &snapshot.PartitionInfo{
+			Strategy: snapshot.PartitionRange,
 			Key:      "created_at",
 			Children: children,
 		},
@@ -255,12 +255,12 @@ func makePartitionedTable(children []schema.PartitionChild) schema.Table {
 }
 
 func TestPartitionTooManyChildren(t *testing.T) {
-	children := make([]schema.PartitionChild, 501)
+	children := make([]snapshot.PartitionChild, 501)
 	for i := range children {
-		children[i] = schema.PartitionChild{Schema: "public", Name: fmt.Sprintf("events_%d", i), Bound: "FOR VALUES FROM ('2020-01-01') TO ('2020-02-01')"}
+		children[i] = snapshot.PartitionChild{Schema: "public", Name: fmt.Sprintf("events_%d", i), Bound: "FOR VALUES FROM ('2020-01-01') TO ('2020-02-01')"}
 	}
 	snap := emptySnapshot()
-	snap.Tables = []schema.Table{makePartitionedTable(children)}
+	snap.Tables = []snapshot.Table{makePartitionedTable(children)}
 
 	config := DefaultConfig()
 	report := LintSchema(snap, &config)
@@ -276,12 +276,12 @@ func TestPartitionTooManyChildren(t *testing.T) {
 }
 
 func TestPartitionTooManyChildrenNoWarning(t *testing.T) {
-	children := make([]schema.PartitionChild, 100)
+	children := make([]snapshot.PartitionChild, 100)
 	for i := range children {
-		children[i] = schema.PartitionChild{Schema: "public", Name: fmt.Sprintf("events_%d", i), Bound: "FOR VALUES FROM ('2020-01-01') TO ('2020-02-01')"}
+		children[i] = snapshot.PartitionChild{Schema: "public", Name: fmt.Sprintf("events_%d", i), Bound: "FOR VALUES FROM ('2020-01-01') TO ('2020-02-01')"}
 	}
 	snap := emptySnapshot()
-	snap.Tables = []schema.Table{makePartitionedTable(children)}
+	snap.Tables = []snapshot.Table{makePartitionedTable(children)}
 
 	config := DefaultConfig()
 	report := LintSchema(snap, &config)
@@ -294,7 +294,7 @@ func TestPartitionTooManyChildrenNoWarning(t *testing.T) {
 
 func TestPartitionRangeGap(t *testing.T) {
 	snap := emptySnapshot()
-	snap.Tables = []schema.Table{makePartitionedTable([]schema.PartitionChild{
+	snap.Tables = []snapshot.Table{makePartitionedTable([]snapshot.PartitionChild{
 		{Schema: "public", Name: "events_2025_01", Bound: "FOR VALUES FROM ('2025-01-01') TO ('2025-02-01')"},
 		{Schema: "public", Name: "events_2025_03", Bound: "FOR VALUES FROM ('2025-03-01') TO ('2025-04-01')"},
 	})}
@@ -314,7 +314,7 @@ func TestPartitionRangeGap(t *testing.T) {
 
 func TestPartitionRangeNoGap(t *testing.T) {
 	snap := emptySnapshot()
-	snap.Tables = []schema.Table{makePartitionedTable([]schema.PartitionChild{
+	snap.Tables = []snapshot.Table{makePartitionedTable([]snapshot.PartitionChild{
 		{Schema: "public", Name: "events_2025_01", Bound: "FOR VALUES FROM ('2025-01-01') TO ('2025-02-01')"},
 		{Schema: "public", Name: "events_2025_02", Bound: "FOR VALUES FROM ('2025-02-01') TO ('2025-03-01')"},
 	})}
@@ -331,7 +331,7 @@ func TestPartitionRangeNoGap(t *testing.T) {
 func TestPartitionRangeGapUnsortedChildren(t *testing.T) {
 	snap := emptySnapshot()
 	// Children listed out of order - sorting must handle this
-	snap.Tables = []schema.Table{makePartitionedTable([]schema.PartitionChild{
+	snap.Tables = []snapshot.Table{makePartitionedTable([]snapshot.PartitionChild{
 		{Schema: "public", Name: "events_2025_03", Bound: "FOR VALUES FROM ('2025-03-01') TO ('2025-04-01')"},
 		{Schema: "public", Name: "events_2025_01", Bound: "FOR VALUES FROM ('2025-01-01') TO ('2025-02-01')"},
 	})}
@@ -351,7 +351,7 @@ func TestPartitionRangeGapUnsortedChildren(t *testing.T) {
 
 func TestPartitionNoDefault(t *testing.T) {
 	snap := emptySnapshot()
-	snap.Tables = []schema.Table{makePartitionedTable([]schema.PartitionChild{
+	snap.Tables = []snapshot.Table{makePartitionedTable([]snapshot.PartitionChild{
 		{Schema: "public", Name: "events_2025_01", Bound: "FOR VALUES FROM ('2025-01-01') TO ('2025-02-01')"},
 	})}
 
@@ -370,7 +370,7 @@ func TestPartitionNoDefault(t *testing.T) {
 
 func TestPartitionWithDefault(t *testing.T) {
 	snap := emptySnapshot()
-	snap.Tables = []schema.Table{makePartitionedTable([]schema.PartitionChild{
+	snap.Tables = []snapshot.Table{makePartitionedTable([]snapshot.PartitionChild{
 		{Schema: "public", Name: "events_2025_01", Bound: "FOR VALUES FROM ('2025-01-01') TO ('2025-02-01')"},
 		{Schema: "public", Name: "events_default", Bound: "DEFAULT"},
 	})}

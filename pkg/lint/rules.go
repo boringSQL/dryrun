@@ -5,11 +5,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/boringsql/dryrun/internal/jit"
-	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/jit"
+	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
-func runAllRules(snap *schema.SchemaSnapshot, config *Config) []Finding {
+func runAllRules(snap *snapshot.SchemaSnapshot, config *Config) []Finding {
 	var violations []Finding
 
 	// collect partition children so we skip them - parent violations cover them
@@ -38,60 +38,60 @@ func runAllRules(snap *schema.SchemaSnapshot, config *Config) []Finding {
 
 		rules := []struct {
 			name string
-			fn   func(*schema.Table, string, *Config, *schema.SchemaSnapshot, *[]Finding)
+			fn   func(*snapshot.Table, string, *Config, *snapshot.SchemaSnapshot, *[]Finding)
 		}{
-			{"naming/table_style", func(t *schema.Table, q string, c *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"naming/table_style", func(t *snapshot.Table, q string, c *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkTableNameStyle(t, q, c, v)
 			}},
-			{"naming/column_style", func(t *schema.Table, q string, c *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"naming/column_style", func(t *snapshot.Table, q string, c *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkColumnNameStyle(t, q, c, v)
 			}},
-			{"naming/fk_pattern", func(t *schema.Table, q string, c *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"naming/fk_pattern", func(t *snapshot.Table, q string, c *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkFKNaming(t, q, c, v)
 			}},
-			{"naming/index_pattern", func(t *schema.Table, q string, c *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"naming/index_pattern", func(t *snapshot.Table, q string, c *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkIndexNaming(t, q, c, v)
 			}},
-			{"pk/exists", func(t *schema.Table, q string, _ *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"pk/exists", func(t *snapshot.Table, q string, _ *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkPKExists(t, q, v)
 			}},
-			{"pk/bigint_identity", func(t *schema.Table, q string, c *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"pk/bigint_identity", func(t *snapshot.Table, q string, c *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkPKType(t, q, c, v)
 			}},
-			{"types/text_over_varchar", func(t *schema.Table, q string, c *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"types/text_over_varchar", func(t *snapshot.Table, q string, c *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkTextOverVarchar(t, q, c, v)
 			}},
-			{"types/timestamptz", func(t *schema.Table, q string, _ *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"types/timestamptz", func(t *snapshot.Table, q string, _ *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkTimestamptz(t, q, v)
 			}},
-			{"types/no_serial", func(t *schema.Table, q string, _ *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"types/no_serial", func(t *snapshot.Table, q string, _ *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkNoSerial(t, q, v)
 			}},
-			{"types/bigint_pk_fk", func(t *schema.Table, q string, c *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"types/bigint_pk_fk", func(t *snapshot.Table, q string, c *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkBigintPKFK(t, q, c, v)
 			}},
-			{"constraints/fk_has_index", func(t *schema.Table, q string, _ *Config, s *schema.SchemaSnapshot, v *[]Finding) {
+			{"constraints/fk_has_index", func(t *snapshot.Table, q string, _ *Config, s *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkFKHasIndex(t, q, s, v)
 			}},
-			{"constraints/unnamed", func(t *schema.Table, q string, _ *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"constraints/unnamed", func(t *snapshot.Table, q string, _ *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkUnnamedConstraints(t, q, v)
 			}},
-			{"timestamps/has_created_at", func(t *schema.Table, q string, c *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"timestamps/has_created_at", func(t *snapshot.Table, q string, c *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkHasCreatedAt(t, q, c, v)
 			}},
-			{"timestamps/has_updated_at", func(t *schema.Table, q string, c *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"timestamps/has_updated_at", func(t *snapshot.Table, q string, c *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkHasUpdatedAt(t, q, c, v)
 			}},
-			{"timestamps/correct_type", func(t *schema.Table, q string, c *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"timestamps/correct_type", func(t *snapshot.Table, q string, c *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkTimestampType(t, q, c, v)
 			}},
-			{"partition/too_many_children", func(t *schema.Table, q string, _ *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"partition/too_many_children", func(t *snapshot.Table, q string, _ *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkPartitionTooManyChildren(t, q, v)
 			}},
-			{"partition/range_gaps", func(t *schema.Table, q string, _ *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"partition/range_gaps", func(t *snapshot.Table, q string, _ *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkPartitionRangeGaps(t, q, v)
 			}},
-			{"partition/no_default", func(t *schema.Table, q string, _ *Config, _ *schema.SchemaSnapshot, v *[]Finding) {
+			{"partition/no_default", func(t *snapshot.Table, q string, _ *Config, _ *snapshot.SchemaSnapshot, v *[]Finding) {
 				checkPartitionNoDefault(t, q, v)
 			}},
 		}
@@ -118,7 +118,7 @@ func isDisabled(config *Config, rule string) bool {
 }
 
 // Guess dominant naming convention from existing tables
-func autoDetectTableNameStyle(tables []schema.Table) string {
+func autoDetectTableNameStyle(tables []snapshot.Table) string {
 	var plural, singular int
 	for _, t := range tables {
 		if !isSnakeCase(t.Name) {
@@ -136,7 +136,7 @@ func autoDetectTableNameStyle(tables []schema.Table) string {
 	return "snake_singular"
 }
 
-func checkTableNameStyle(t *schema.Table, qualified string, config *Config, violations *[]Finding) {
+func checkTableNameStyle(t *snapshot.Table, qualified string, config *Config, violations *[]Finding) {
 	name := t.Name
 	valid := true
 
@@ -176,7 +176,7 @@ func checkTableNameStyle(t *schema.Table, qualified string, config *Config, viol
 	}
 }
 
-func checkColumnNameStyle(t *schema.Table, qualified string, config *Config, violations *[]Finding) {
+func checkColumnNameStyle(t *snapshot.Table, qualified string, config *Config, violations *[]Finding) {
 	var camelRe *regexp.Regexp
 	var customRe *regexp.Regexp
 
@@ -215,9 +215,9 @@ func checkColumnNameStyle(t *schema.Table, qualified string, config *Config, vio
 	}
 }
 
-func checkFKNaming(t *schema.Table, qualified string, config *Config, violations *[]Finding) {
+func checkFKNaming(t *snapshot.Table, qualified string, config *Config, violations *[]Finding) {
 	for _, con := range t.Constraints {
-		if con.Kind != schema.ConstraintForeignKey {
+		if con.Kind != snapshot.ConstraintForeignKey {
 			continue
 		}
 		expected := strings.ReplaceAll(config.FKPattern, "{table}", t.Name)
@@ -235,7 +235,7 @@ func checkFKNaming(t *schema.Table, qualified string, config *Config, violations
 	}
 }
 
-func checkIndexNaming(t *schema.Table, qualified string, config *Config, violations *[]Finding) {
+func checkIndexNaming(t *snapshot.Table, qualified string, config *Config, violations *[]Finding) {
 	for _, idx := range t.Indexes {
 		if idx.IsPrimary {
 			continue
@@ -255,9 +255,9 @@ func checkIndexNaming(t *schema.Table, qualified string, config *Config, violati
 	}
 }
 
-func checkPKExists(t *schema.Table, qualified string, violations *[]Finding) {
+func checkPKExists(t *snapshot.Table, qualified string, violations *[]Finding) {
 	for _, c := range t.Constraints {
-		if c.Kind == schema.ConstraintPrimaryKey {
+		if c.Kind == snapshot.ConstraintPrimaryKey {
 			return
 		}
 	}
@@ -273,7 +273,7 @@ func checkPKExists(t *schema.Table, qualified string, violations *[]Finding) {
 	})
 }
 
-func checkPKType(t *schema.Table, qualified string, config *Config, violations *[]Finding) {
+func checkPKType(t *snapshot.Table, qualified string, config *Config, violations *[]Finding) {
 	var acceptedTypes map[string]bool
 	var recommend string
 
@@ -291,9 +291,9 @@ func checkPKType(t *schema.Table, qualified string, config *Config, violations *
 		return
 	}
 
-	var pk *schema.Constraint
+	var pk *snapshot.Constraint
 	for i := range t.Constraints {
-		if t.Constraints[i].Kind == schema.ConstraintPrimaryKey {
+		if t.Constraints[i].Kind == snapshot.ConstraintPrimaryKey {
 			pk = &t.Constraints[i]
 			break
 		}
@@ -303,7 +303,7 @@ func checkPKType(t *schema.Table, qualified string, config *Config, violations *
 	}
 
 	for _, pkColName := range pk.Columns {
-		var col *schema.Column
+		var col *snapshot.Column
 		for i := range t.Columns {
 			if t.Columns[i].Name == pkColName {
 				col = &t.Columns[i]
@@ -336,7 +336,7 @@ func checkPKType(t *schema.Table, qualified string, config *Config, violations *
 	}
 }
 
-func checkTextOverVarchar(t *schema.Table, qualified string, config *Config, violations *[]Finding) {
+func checkTextOverVarchar(t *snapshot.Table, qualified string, config *Config, violations *[]Finding) {
 	if !config.PreferTextOverVarchar {
 		return
 	}
@@ -358,7 +358,7 @@ func checkTextOverVarchar(t *schema.Table, qualified string, config *Config, vio
 	}
 }
 
-func checkTimestamptz(t *schema.Table, qualified string, violations *[]Finding) {
+func checkTimestamptz(t *snapshot.Table, qualified string, violations *[]Finding) {
 	for _, col := range t.Columns {
 		typeLower := strings.ToLower(col.TypeName)
 		if typeLower == "timestamp without time zone" || typeLower == "timestamp" {
@@ -377,7 +377,7 @@ func checkTimestamptz(t *schema.Table, qualified string, violations *[]Finding) 
 	}
 }
 
-func checkNoSerial(t *schema.Table, qualified string, violations *[]Finding) {
+func checkNoSerial(t *snapshot.Table, qualified string, violations *[]Finding) {
 	for _, col := range t.Columns {
 		if col.Default != nil && strings.Contains(strings.ToLower(*col.Default), "nextval(") {
 			*violations = append(*violations, Finding{
@@ -393,16 +393,16 @@ func checkNoSerial(t *schema.Table, qualified string, violations *[]Finding) {
 	}
 }
 
-func checkBigintPKFK(t *schema.Table, qualified string, config *Config, violations *[]Finding) {
+func checkBigintPKFK(t *snapshot.Table, qualified string, config *Config, violations *[]Finding) {
 	pkCols := make(map[string]bool)
 	fkCols := make(map[string]bool)
 	for _, c := range t.Constraints {
-		if c.Kind == schema.ConstraintPrimaryKey {
+		if c.Kind == snapshot.ConstraintPrimaryKey {
 			for _, col := range c.Columns {
 				pkCols[col] = true
 			}
 		}
-		if c.Kind == schema.ConstraintForeignKey {
+		if c.Kind == snapshot.ConstraintForeignKey {
 			for _, col := range c.Columns {
 				fkCols[col] = true
 			}
@@ -434,9 +434,9 @@ func checkBigintPKFK(t *schema.Table, qualified string, config *Config, violatio
 	}
 }
 
-func checkFKHasIndex(t *schema.Table, qualified string, _ *schema.SchemaSnapshot, violations *[]Finding) {
+func checkFKHasIndex(t *snapshot.Table, qualified string, _ *snapshot.SchemaSnapshot, violations *[]Finding) {
 	for _, con := range t.Constraints {
-		if con.Kind != schema.ConstraintForeignKey || len(con.Columns) == 0 {
+		if con.Kind != snapshot.ConstraintForeignKey || len(con.Columns) == 0 {
 			continue
 		}
 
@@ -476,7 +476,7 @@ func checkFKHasIndex(t *schema.Table, qualified string, _ *schema.SchemaSnapshot
 	}
 }
 
-func checkUnnamedConstraints(t *schema.Table, qualified string, violations *[]Finding) {
+func checkUnnamedConstraints(t *snapshot.Table, qualified string, violations *[]Finding) {
 	for _, con := range t.Constraints {
 		isAuto := strings.HasSuffix(con.Name, "_pkey") ||
 			strings.HasSuffix(con.Name, "_fkey") ||
@@ -497,7 +497,7 @@ func checkUnnamedConstraints(t *schema.Table, qualified string, violations *[]Fi
 	}
 }
 
-func checkHasCreatedAt(t *schema.Table, qualified string, config *Config, violations *[]Finding) {
+func checkHasCreatedAt(t *snapshot.Table, qualified string, config *Config, violations *[]Finding) {
 	if !config.RequireTimestamps {
 		return
 	}
@@ -518,7 +518,7 @@ func checkHasCreatedAt(t *schema.Table, qualified string, config *Config, violat
 	})
 }
 
-func checkHasUpdatedAt(t *schema.Table, qualified string, config *Config, violations *[]Finding) {
+func checkHasUpdatedAt(t *snapshot.Table, qualified string, config *Config, violations *[]Finding) {
 	if !config.RequireTimestamps {
 		return
 	}
@@ -539,7 +539,7 @@ func checkHasUpdatedAt(t *schema.Table, qualified string, config *Config, violat
 	})
 }
 
-func checkTimestampType(t *schema.Table, qualified string, config *Config, violations *[]Finding) {
+func checkTimestampType(t *snapshot.Table, qualified string, config *Config, violations *[]Finding) {
 	if config.TimestampType != "timestamptz" {
 		return
 	}
@@ -563,7 +563,7 @@ func checkTimestampType(t *schema.Table, qualified string, config *Config, viola
 	}
 }
 
-func checkPartitionTooManyChildren(t *schema.Table, qualified string, violations *[]Finding) {
+func checkPartitionTooManyChildren(t *snapshot.Table, qualified string, violations *[]Finding) {
 	if t.PartitionInfo == nil {
 		return
 	}
@@ -583,8 +583,8 @@ func checkPartitionTooManyChildren(t *schema.Table, qualified string, violations
 
 var rangeBoundRe = regexp.MustCompile(`FROM \('([^']+)'\) TO \('([^']+)'\)`)
 
-func checkPartitionRangeGaps(t *schema.Table, qualified string, violations *[]Finding) {
-	if t.PartitionInfo == nil || t.PartitionInfo.Strategy != schema.PartitionRange {
+func checkPartitionRangeGaps(t *snapshot.Table, qualified string, violations *[]Finding) {
+	if t.PartitionInfo == nil || t.PartitionInfo.Strategy != snapshot.PartitionRange {
 		return
 	}
 
@@ -627,7 +627,7 @@ func checkPartitionRangeGaps(t *schema.Table, qualified string, violations *[]Fi
 	}
 }
 
-func checkPartitionNoDefault(t *schema.Table, qualified string, violations *[]Finding) {
+func checkPartitionNoDefault(t *snapshot.Table, qualified string, violations *[]Finding) {
 	if t.PartitionInfo == nil {
 		return
 	}
@@ -656,7 +656,7 @@ func parsePartitionKey(key string) []string {
 	return parts
 }
 
-func checkPartitionGUCs(snap *schema.SchemaSnapshot, config *Config, violations *[]Finding) {
+func checkPartitionGUCs(snap *snapshot.SchemaSnapshot, config *Config, violations *[]Finding) {
 	var partitionedCount int
 	for _, t := range snap.Tables {
 		if t.PartitionInfo != nil {
@@ -701,7 +701,7 @@ func checkPartitionGUCs(snap *schema.SchemaSnapshot, config *Config, violations 
 	}
 }
 
-func findGUC(snap *schema.SchemaSnapshot, name string) string {
+func findGUC(snap *snapshot.SchemaSnapshot, name string) string {
 	for _, g := range snap.GUCs {
 		if g.Name == name {
 			return g.Setting

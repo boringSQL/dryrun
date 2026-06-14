@@ -11,9 +11,9 @@ import (
 	"github.com/boringsql/dryrun/internal/buildinfo"
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
-	"github.com/boringsql/dryrun/internal/lint"
 	"github.com/boringsql/dryrun/internal/pgmustard"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 type (

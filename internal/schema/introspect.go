@@ -144,17 +144,18 @@ func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error
 	)
 
 	snap := &SchemaSnapshot{
-		PgVersion:  pgVersion,
-		Database:   database,
-		Timestamp:  time.Now().UTC(),
-		Tables:     tables,
-		Enums:      enums,
-		Domains:    domains,
-		Composites: composites,
-		Views:      views,
-		Functions:  functions,
-		Extensions: extensions,
-		GUCs:       gucs,
+		FormatVersion: FormatVersion,
+		PgVersion:     pgVersion,
+		Database:      database,
+		Timestamp:     time.Now().UTC(),
+		Tables:        tables,
+		Enums:         enums,
+		Domains:       domains,
+		Composites:    composites,
+		Views:         views,
+		Functions:     functions,
+		Extensions:    extensions,
+		GUCs:          gucs,
 	}
 	snap.ContentHash = ComputeContentHash(snap)
 	return snap, nil
@@ -249,7 +250,6 @@ type (
 		name       string
 		definition string
 	}
-
 )
 
 // Fetchers - each uses a named query from sql/introspect.sql
@@ -494,7 +494,6 @@ func fetchTriggers(ctx context.Context, pool Querier) ([]rawTrigger, error) {
 		return rt, err
 	})
 }
-
 
 func fetchViews(ctx context.Context, pool Querier) ([]View, error) {
 	rows, err := query(ctx, pool, "fetch-views")

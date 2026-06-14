@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/boringsql/dryrun/internal/lint"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 func testSnap() *schema.SchemaSnapshot {

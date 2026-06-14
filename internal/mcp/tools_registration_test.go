@@ -139,7 +139,7 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 		"reload_schema":   true,
 		"advise":          true,
 		"analyze_plan":    true,
-		"schema_diff":     true,
+		"snapshot_diff":   true,
 	}
 	got := map[string]bool{}
 	for _, tool := range list.Tools {
@@ -155,5 +155,9 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 		if got[online] {
 			t.Errorf("online-only tool %q should not be registered offline", online)
 		}
+	}
+	// schema_diff was dropped in favor of snapshot_diff
+	if got["schema_diff"] {
+		t.Error("schema_diff should no longer be registered")
 	}
 }

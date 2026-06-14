@@ -8,8 +8,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/boringsql/dryrun/internal/lint"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 // Smoke tests for health-family tools: detect (all kinds), vacuum_health.
