@@ -1,12 +1,8 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"regexp"
-	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -14,10 +10,8 @@ import (
 	"github.com/boringsql/dryrun/pkg/diff"
 )
 
-var latestRefRe = regexp.MustCompile(`^latest(?:~(\d+))?$`)
-
-// Store-to-store is the default (no connection); --live is the lone schema-only
-// exception and never silently captures.
+// default is store-to-store, no DB connection. --live is the one exception
+// (schema only) and never captures behind the user's back.
 func newDiffCmd(historyDB *string) *cobra.Command {
 	var (
 		fromHash, toHash     string
@@ -56,7 +50,7 @@ hash-prefix operands carry their own kind. Mixing kinds is rejected.`,
 				return err
 			}
 
-			fromKind, fromRef, err := resolveDiffToken(ctx, store, key, fromTok, kindFlag, nodeFlag)
+			fromKind, fromRef, err := store.ResolveToken(ctx, key, fromTok, kindFlag, nodeFlag)
 			if err != nil {
 				return err
 			}
@@ -87,7 +81,7 @@ hash-prefix operands carry their own kind. Mixing kinds is rejected.`,
 				return emitDiff(env, jsonDiff, prettyDiff, minPct)
 			}
 
-			toKind, toRef, err := resolveDiffToken(ctx, store, key, toTok, kindFlag, nodeFlag)
+			toKind, toRef, err := store.ResolveToken(ctx, key, toTok, kindFlag, nodeFlag)
 			if err != nil {
 				return err
 			}
@@ -158,72 +152,6 @@ func diffOperands(args []string, fromHash, toHash string, latest, live bool) (fr
 		return "", "", false, fmt.Errorf("specify two snapshots: `diff <from> <to>`, `--latest`, or `--from/--to` (add `--live` to diff against the database)")
 	}
 	return ops[0], ops[1], false, nil
-}
-
-// latest/latest~N takes its kind from --kind; a hash prefix carries its own.
-func resolveDiffToken(ctx context.Context, store *history.Store, key history.SnapshotKey, token, kindFlag, nodeFlag string) (history.SnapshotKind, history.SnapshotRef, error) {
-	if m := latestRefRe.FindStringSubmatch(token); m != nil {
-		kind, err := parseKindFlag(ctx, store, key, kindFlag, nodeFlag)
-		if err != nil {
-			return history.SnapshotKind{}, history.SnapshotRef{}, err
-		}
-		if m[1] == "" {
-			return kind, history.NewRefLatest(), nil
-		}
-		n, _ := strconv.Atoi(m[1])
-		list, err := store.List(ctx, key, kind, history.TimeRange{})
-		if err != nil {
-			return history.SnapshotKind{}, history.SnapshotRef{}, err
-		}
-		if n >= len(list) {
-			return history.SnapshotKind{}, history.SnapshotRef{},
-				fmt.Errorf("latest~%d: only %d %s snapshot(s) in history", n, len(list), kind)
-		}
-		return kind, history.NewRefHash(list[n].ContentHash), nil
-	}
-	kind, err := store.ResolveKind(ctx, key, token)
-	if err != nil {
-		return history.SnapshotKind{}, history.SnapshotRef{}, err
-	}
-	return kind, history.NewRefHash(token), nil
-}
-
-func parseKindFlag(ctx context.Context, store *history.Store, key history.SnapshotKey, kindFlag, nodeFlag string) (history.SnapshotKind, error) {
-	switch strings.ToLower(kindFlag) {
-	case "", "schema":
-		return history.SchemaKind(), nil
-	case "planner":
-		return history.PlannerKind(), nil
-	case "activity":
-		return resolveActivityKind(ctx, store, key, nodeFlag)
-	default:
-		return history.SnapshotKind{}, fmt.Errorf("unknown --kind %q (use schema|planner|activity)", kindFlag)
-	}
-}
-
-// --node, else the sole activity node, else error listing the choices
-func resolveActivityKind(ctx context.Context, store *history.Store, key history.SnapshotKey, nodeFlag string) (history.SnapshotKind, error) {
-	if nodeFlag != "" {
-		return history.ActivityKind(nodeFlag), nil
-	}
-	kinds, err := store.ListKinds(ctx, key)
-	if err != nil {
-		return history.SnapshotKind{}, err
-	}
-	var nodes []string
-	for _, k := range kinds {
-		if k.Tag == history.KindActivity {
-			nodes = append(nodes, k.NodeLabel)
-		}
-	}
-	switch len(nodes) {
-	case 0:
-		return history.SnapshotKind{}, fmt.Errorf("no activity snapshots in history")
-	case 1:
-		return history.ActivityKind(nodes[0]), nil
-	default:
-		return history.SnapshotKind{}, fmt.Errorf("multiple activity nodes (%s); pass --node to pick one", strings.Join(nodes, ", "))
-	}
 }
 
 func buildSnapshotDiff(kind history.SnapshotKind, from, to history.StoredSnapshot) (*diff.SnapshotDiff, error) {
