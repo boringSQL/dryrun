@@ -428,3 +428,113 @@ func TestBuild_FilterByTable(t *testing.T) {
 		t.Fatalf("table filter should keep only orders, got %+v", res.Objects)
 	}
 }
+
+// seedTwoNodes lays down a primary+replica activity pair at each of two schema
+// moments, with the seq_scan counters climbing on both nodes. It's the fixture
+// for the multi-node correlation cases: the whole reason activity is per-node is
+// that a primary and its standby see different traffic, and the diff has to keep
+// those streams distinct rather than blurring them into one number.
+func seedTwoNodes(t *testing.T) (*history.Store, time.Time, time.Time) {
+	t.Helper()
+	store := openStore(t)
+	t0 := time.Now().Truncate(time.Second).Add(-3 * time.Hour)
+	t1 := t0.Add(2 * time.Hour)
+
+	put(t, store, history.WrapSchema(mkSchema("schema-a", t0, table("users", "id"))))
+	put(t, store, history.WrapActivity(mkActivity("schema-a", "primary-a", "primary", t0.Add(time.Minute), 10)))
+	put(t, store, history.WrapActivity(mkActivity("schema-a", "replica-a", "replica", t0.Add(time.Minute), 5)))
+
+	put(t, store, history.WrapSchema(mkSchema("schema-b", t1, table("users", "id", "email"))))
+	put(t, store, history.WrapActivity(mkActivity("schema-b", "primary-b", "primary", t1.Add(time.Minute), 100)))
+	put(t, store, history.WrapActivity(mkActivity("schema-b", "replica-b", "replica", t1.Add(time.Minute), 50)))
+
+	return store, t0, t1
+}
+
+// TestBuild_MultiNodeActivity is the core of the standby-vs-primary story: with
+// two nodes captured at both moments, the diff must carry a separate activity
+// delta per node AND tag every activity line in the object view with which node
+// it came from, so an agent can tell "seq scans spiked on the replica" from "on
+// the primary". A regression that merged nodes or dropped the [node] suffix would
+// quietly turn two independent signals into one ambiguous one, which is exactly
+// the failure this guards.
+func TestBuild_MultiNodeActivity(t *testing.T) {
+	store, _, _ := seedTwoNodes(t)
+
+	res, err := Build(context.Background(), store, key(), Options{From: "latest~1", To: "latest", Kind: "schema"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if len(res.ActivityDelta) != 2 {
+		t.Fatalf("expected a per-node activity delta for primary and replica, got %d", len(res.ActivityDelta))
+	}
+	if len(res.Correlation.From.Activity) != 2 {
+		t.Fatalf("from side should correlate both nodes, got %d", len(res.Correlation.From.Activity))
+	}
+	for _, mi := range res.Correlation.From.Activity {
+		if mi.Source != "schema_ref" {
+			t.Errorf("node %q should be matched via the exact link, got %q", mi.Node, mi.Source)
+		}
+	}
+
+	users := findObject(res.Objects, "users")
+	if users == nil {
+		t.Fatalf("no users object in %+v", res.Objects)
+	}
+	joined := strings.Join(users.Activity, " | ")
+	if !strings.Contains(joined, "[primary]") || !strings.Contains(joined, "[replica]") {
+		t.Errorf("multi-node activity lines must be tagged with their node, got: %q", joined)
+	}
+}
+
+// TestBuild_NodeFilterSelectsOne: asking for a single node narrows the activity
+// to just that node, and since there's then only one stream the [node] suffix is
+// dropped — no point disambiguating a set of one. This is the standby operator's
+// "only show me the replica" call.
+func TestBuild_NodeFilterSelectsOne(t *testing.T) {
+	store, _, _ := seedTwoNodes(t)
+
+	res, err := Build(context.Background(), store, key(), Options{From: "latest~1", To: "latest", Kind: "schema", Node: "replica"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(res.ActivityDelta) != 1 || res.ActivityDelta[0].Node != "replica" {
+		t.Fatalf("node filter should keep only replica, got %+v", res.ActivityDelta)
+	}
+	users := findObject(res.Objects, "users")
+	if users == nil {
+		t.Fatalf("no users object in %+v", res.Objects)
+	}
+	for _, line := range users.Activity {
+		if strings.Contains(line, "[") {
+			t.Errorf("a single-node diff should not tag lines with a node, got: %q", line)
+		}
+	}
+}
+
+// TestBuild_NodeMissingOnOneSide: a node present at only one of the two moments
+// can't be diffed — there's no before-or-after to compare against — so it's
+// dropped rather than invented. Here the replica was captured at the first moment
+// but not the second, so only the primary survives into the delta.
+func TestBuild_NodeMissingOnOneSide(t *testing.T) {
+	store := openStore(t)
+	t0 := time.Now().Truncate(time.Second).Add(-3 * time.Hour)
+	t1 := t0.Add(2 * time.Hour)
+
+	put(t, store, history.WrapSchema(mkSchema("schema-a", t0, table("users", "id"))))
+	put(t, store, history.WrapActivity(mkActivity("schema-a", "primary-a", "primary", t0.Add(time.Minute), 10)))
+	put(t, store, history.WrapActivity(mkActivity("schema-a", "replica-a", "replica", t0.Add(time.Minute), 5)))
+
+	put(t, store, history.WrapSchema(mkSchema("schema-b", t1, table("users", "id", "email"))))
+	put(t, store, history.WrapActivity(mkActivity("schema-b", "primary-b", "primary", t1.Add(time.Minute), 100)))
+	// no replica capture at the second moment
+
+	res, err := Build(context.Background(), store, key(), Options{From: "latest~1", To: "latest", Kind: "schema"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(res.ActivityDelta) != 1 || res.ActivityDelta[0].Node != "primary" {
+		t.Fatalf("only the primary (present on both sides) should be diffed, got %+v", res.ActivityDelta)
+	}
+}
