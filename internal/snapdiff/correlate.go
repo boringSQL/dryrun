@@ -91,6 +91,40 @@ func Build(ctx context.Context, store *history.Store, key history.SnapshotKey, o
 	return res, nil
 }
 
+// pull planner+activity captured against this schemaHash. want==nil means all nodes
+func assembleBySchemaRef(ctx context.Context, store *history.Store, key history.SnapshotKey, m *moment, schemaHash string, want map[string]bool) {
+	if p, err := store.GetPlanner(ctx, key, schemaHash); err == nil {
+		m.planner = p
+		m.plannerMatch = &MatchInfo{Hash: p.ContentHash, TakenAt: p.Timestamp, SkewSeconds: p.Timestamp.Sub(m.takenAt).Seconds(), Source: "schema_ref"}
+	}
+	acts, err := store.GetActivity(ctx, key, schemaHash)
+	if err != nil {
+		return
+	}
+	for i := range acts {
+		a := &acts[i]
+		if want != nil && !want[a.Node.Source] {
+			continue
+		}
+		m.activity[a.Node.Source] = a
+		m.activityMatch = append(m.activityMatch, MatchInfo{
+			Node: a.Node.Source, Hash: a.ContentHash, TakenAt: a.Node.Timestamp,
+			SkewSeconds: a.Node.Timestamp.Sub(m.takenAt).Seconds(), Source: "schema_ref",
+		})
+	}
+}
+
+func nodeSet(nodes []string) map[string]bool {
+	if len(nodes) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		set[n] = true
+	}
+	return set
+}
+
 // explicit node, else every node with activity
 func activityNodes(ctx context.Context, store *history.Store, key history.SnapshotKey, node string) []string {
 	if node != "" {
@@ -117,11 +151,16 @@ func assembleMoment(ctx context.Context, store *history.Store, key history.Snaps
 		activity:   map[string]*snapshot.ActivityStatsSnapshot{},
 	}
 
-	// schema: anchor itself, else exact schema_ref link (no window)
+	// schema anchor: exact schema_ref join, no window
 	if s := anchor.AsSchema(); s != nil {
 		m.schema = s
 		m.schemaMatch = &MatchInfo{Hash: m.hash, TakenAt: m.takenAt, Source: "anchor"}
-	} else if ref := anchor.SchemaRefHash(); ref != "" {
+		assembleBySchemaRef(ctx, store, key, m, s.ContentHash, nodeSet(nodes))
+		return m
+	}
+
+	// non-schema anchor: schema exact via ref; other kind by window
+	if ref := anchor.SchemaRefHash(); ref != "" {
 		if got, err := store.Get(ctx, key, history.SchemaKind(), history.NewRefHash(ref)); err == nil {
 			m.schema = got.AsSchema()
 			m.schemaMatch = &MatchInfo{Hash: got.ContentHash(), TakenAt: got.Timestamp(), Source: "schema_ref"}
@@ -190,7 +229,7 @@ func windowRange(t time.Time, window time.Duration) history.TimeRange {
 	return history.TimeRange{From: &from, To: &to}
 }
 
-// closest to the anchor; list is already window-bounded by the query
+// pick the capture closest to the anchor; the query already bounded the window
 func nearest(list []history.SnapshotSummary, err error, anchor time.Time) *history.SnapshotSummary {
 	if err != nil || len(list) == 0 {
 		return nil
