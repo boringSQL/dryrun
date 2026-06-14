@@ -157,7 +157,7 @@ func fetchActivityTables(ctx context.Context, pool Querier) ([]TableActivityEntr
 			&e.Activity.SeqScan, &e.Activity.SeqTupRead,
 			&e.Activity.IdxScan, &e.Activity.IdxTupFetch,
 			&e.Activity.NTupIns, &e.Activity.NTupUpd, &e.Activity.NTupDel, &e.Activity.NTupHotUpd,
-			&e.Activity.NLiveTup, &e.Activity.NDeadTup,
+			&e.Activity.NLiveTup, &e.Activity.NDeadTup, &e.Activity.NModSinceAnalyze,
 			&e.Activity.LastVacuum, &e.Activity.LastAutovacuum,
 			&e.Activity.LastAnalyze, &e.Activity.LastAutoanalyze,
 			&e.Activity.VacuumCount, &e.Activity.AutovacuumCount,
