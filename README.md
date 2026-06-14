@@ -29,7 +29,7 @@ Once you have the snapshot, the CLI works offline:
 - **Lint** - 20+ convention rules (naming, types, primary keys, timestamps, partitioning) and 13 structural audit rules (duplicate indexes, FK coverage, circular FKs, vacuum tuning)
 - **Migration safety** - lock type analysis, duration estimates, table rewrite detection, safe alternatives for each DDL statement
 - **Query validation** - SQL parsing via libpg_query, column reference checks against the actual schema, anti-pattern detection
-- **Schema diff** - compare snapshots over time, detect drift between live database and saved state
+- **Snapshot diff** - compare schema, planner stats, or activity between snapshots; detect drift against the live database
 - **[Multi-node stats](docs/multi-node-stats.md)** - per-replica statistics, seq_scan hotspots, routing imbalances
 
 ### MCP server - give your AI assistant a schema brain
