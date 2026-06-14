@@ -5,6 +5,10 @@ import (
 	"io"
 )
 
+// exported so the snapshot_diff correlator can reuse the per-row formatting
+func DescribeSizing(r SizingDelta) string   { return describeSizing(r) }
+func DescribeCounter(r CounterDelta) string { return describeCounter(r) }
+
 func Marker(c Change) string {
 	switch c.Type.Category() {
 	case "added":
@@ -28,7 +32,7 @@ func RenderConsole(w io.Writer, env *SnapshotDiff) {
 	RenderConsoleMinPct(w, env, DefaultMinPct)
 }
 
-// minPct suppresses sub-threshold planner/activity movers; schema ignores it.
+// minPct drops small planner/activity movers; schema doesn't use it.
 func RenderConsoleMinPct(w io.Writer, env *SnapshotDiff, minPct float64) {
 	if env.Planner != nil {
 		RenderPlannerConsole(w, env, minPct)
@@ -107,7 +111,7 @@ func groupByObject(changes []Change) [][]Change {
 	return groups
 }
 
-// Human one-liner for a single change (child line / drift output).
+// one-liner for a single change (child rows, drift output).
 func Describe(c Change) string {
 	switch c.Type {
 	case TableAdded:
