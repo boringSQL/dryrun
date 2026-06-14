@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/lint"
@@ -82,20 +84,27 @@ func TestInstructionsCleanWhenNoHistory(t *testing.T) {
 	}
 }
 
-// TestSchemaDiffReportsLegacyHistory: schema_diff resolves snapshot hashes
-// through history.db. When that store is legacy, the failure must explain
-// itself in-band — the tool response is the only channel an MCP user reads.
-// A bare "history lookup failed: no such column" would leave them stranded.
+// TestSchemaDiffReportsLegacyHistory: snapshot_diff resolves snapshots through
+// history.db. When that store is legacy, the failure must explain itself in-band
+// — the tool response is the only channel an MCP user reads. A bare "no such
+// column" would leave them stranded.
 func TestSchemaDiffReportsLegacyHistory(t *testing.T) {
 	srv := NewServer(nil, "", minimalSnapshot(), legacyHistoryStore(t), lint.DefaultConfig(), "")
 	srv.SetSnapshotKey(history.SnapshotKey{ProjectID: "p", DatabaseID: "d"})
 
-	_, err := srv.resolveSnapshotForDiff(context.Background(), "abc123", "from")
-	if err == nil {
-		t.Fatal("expected an error resolving a snapshot against a legacy store")
+	var req mcp.CallToolRequest
+	req.Params.Name = "snapshot_diff"
+	req.Params.Arguments = map[string]any{"from": "abc123"}
+	res, err := srv.handleSnapshotDiff(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler returned a transport error instead of an in-band result: %v", err)
 	}
-	if !strings.Contains(err.Error(), "older dryrun") {
-		t.Errorf("error should explain the legacy history.db, got: %v", err)
+	text, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", res.Content[0])
+	}
+	if !strings.Contains(text.Text, "older dryrun") {
+		t.Errorf("result should explain the legacy history.db, got: %s", text.Text)
 	}
 }
 
