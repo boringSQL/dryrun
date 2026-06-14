@@ -23,6 +23,8 @@ type Options struct {
 	Kind   string        // schema|planner|activity; the timeline refs name. default schema
 	Node   string        // activity node label, when several exist
 	Window time.Duration // correlation window; default DefaultWindow
+	Schema string        // narrow to one schema
+	Table  string        // narrow to one table
 }
 
 type (
@@ -34,8 +36,10 @@ type (
 
 		Summary Summary        `json:"summary"`
 		Objects []ObjectChange `json:"objects"`
-		// set only in summary view when Objects was truncated
-		OmittedObjects int `json:"omitted_objects,omitempty"`
+
+		Truncated      bool `json:"truncated,omitempty"`
+		OmittedObjects int  `json:"omitted_objects,omitempty"`
+		OmittedRows    int  `json:"omitted_rows,omitempty"` // raw delta rows dropped in full view
 
 		Correlation Correlation `json:"correlation"`
 
@@ -102,8 +106,6 @@ type (
 	}
 )
 
-const summaryObjectCap = 20
-
 func (r *Result) IsEmpty() bool {
 	return len(r.Objects) == 0 &&
 		r.SchemaDelta.IsEmpty() &&
@@ -120,18 +122,68 @@ func hasActivity(nds []NodeActivityDelta) bool {
 	return false
 }
 
-// full keeps the raw deltas; summary drops them and caps the object list
-func (r *Result) ForView(view string) *Result {
-	if view == "full" {
-		return r
-	}
+// full keeps the raw deltas (capped at limit); summary drops them. limit<=0 = all.
+func (r *Result) ForView(view string, limit int) *Result {
 	cp := *r
-	cp.SchemaDelta = nil
-	cp.PlannerDelta = nil
-	cp.ActivityDelta = nil
-	if len(cp.Objects) > summaryObjectCap {
-		cp.OmittedObjects = len(cp.Objects) - summaryObjectCap
-		cp.Objects = cp.Objects[:summaryObjectCap]
+	cp.Objects, cp.OmittedObjects = capSlice(cp.Objects, limit)
+	if view == "full" {
+		var po, ao int
+		cp.SchemaDelta, cp.OmittedRows = capSchemaDelta(cp.SchemaDelta, limit)
+		cp.PlannerDelta, po = capPlannerDelta(cp.PlannerDelta, limit)
+		cp.ActivityDelta, ao = capActivityDeltas(cp.ActivityDelta, limit)
+		cp.OmittedRows += po + ao
+	} else {
+		cp.SchemaDelta = nil
+		cp.PlannerDelta = nil
+		cp.ActivityDelta = nil
 	}
+	cp.Truncated = cp.OmittedObjects > 0 || cp.OmittedRows > 0
 	return &cp
+}
+
+func capSlice[T any](s []T, limit int) ([]T, int) {
+	if limit <= 0 || len(s) <= limit {
+		return s, 0
+	}
+	return s[:limit], len(s) - limit
+}
+
+func capSchemaDelta(d *diff.SchemaDelta, limit int) (*diff.SchemaDelta, int) {
+	if d == nil {
+		return nil, 0
+	}
+	ch, om := capSlice(d.Changes, limit)
+	cp := *d
+	cp.Changes = ch
+	return &cp, om
+}
+
+func capPlannerDelta(d *diff.PlannerDelta, limit int) (*diff.PlannerDelta, int) {
+	if d == nil {
+		return nil, 0
+	}
+	sz, o1 := capSlice(d.Sizing, limit)
+	st, o2 := capSlice(d.Stats, limit)
+	cp := *d
+	cp.Sizing, cp.Stats = sz, st
+	return &cp, o1 + o2
+}
+
+func capActivityDeltas(nds []NodeActivityDelta, limit int) ([]NodeActivityDelta, int) {
+	if nds == nil {
+		return nil, 0
+	}
+	out := make([]NodeActivityDelta, len(nds))
+	total := 0
+	for i, nd := range nds {
+		out[i] = nd
+		if nd.Delta != nil {
+			c, om := capSlice(nd.Delta.Counters, limit)
+			cpd := *nd.Delta
+			cpd.Counters = c
+			out[i].Delta = &cpd
+			total += om
+		}
+	}
+	return out, total
 }

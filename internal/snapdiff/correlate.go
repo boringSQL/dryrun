@@ -78,6 +78,12 @@ func Build(ctx context.Context, store *history.Store, key history.SnapshotKey, o
 	}
 	res.ActivityDelta = diffActivityByNode(fromM, toM)
 
+	if opt.Schema != "" || opt.Table != "" {
+		res.SchemaDelta = filterSchemaDelta(res.SchemaDelta, opt.Schema, opt.Table)
+		res.PlannerDelta = filterPlannerDelta(res.PlannerDelta, opt.Schema, opt.Table)
+		res.ActivityDelta = filterActivityDeltas(res.ActivityDelta, opt.Schema, opt.Table)
+	}
+
 	res.Objects = buildObjects(res.SchemaDelta, res.PlannerDelta, res.ActivityDelta)
 	res.Summary = buildSummary(res)
 	res.Correlation = buildCorrelation(opt.Window, fromKind, toKind, fromM, toM)

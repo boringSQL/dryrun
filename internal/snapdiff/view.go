@@ -221,6 +221,79 @@ func counterMover(r diff.CounterDelta) bool {
 	return r.Pct == nil || math.Abs(*r.Pct) >= minMoverPct
 }
 
+// keep matches a row against the schema/table filter. column rows (table.col)
+// match on the table part.
+func keep(schema, name, schemaF, tableF string) bool {
+	if schemaF != "" && schema != schemaF {
+		return false
+	}
+	if tableF != "" {
+		if name == tableF {
+			return true
+		}
+		t, _ := splitColumn(name)
+		return t == tableF
+	}
+	return true
+}
+
+func filterSchemaDelta(d *diff.SchemaDelta, sf, tf string) *diff.SchemaDelta {
+	if d == nil {
+		return nil
+	}
+	var ch []diff.Change
+	for _, c := range d.Changes {
+		if keep(ptrStr(c.Object.Schema), c.Object.Name, sf, tf) {
+			ch = append(ch, c)
+		}
+	}
+	cp := *d
+	cp.Changes = ch
+	return &cp
+}
+
+func filterPlannerDelta(d *diff.PlannerDelta, sf, tf string) *diff.PlannerDelta {
+	if d == nil {
+		return nil
+	}
+	cp := *d
+	cp.Sizing = filterSizing(d.Sizing, sf, tf)
+	cp.Stats = filterSizing(d.Stats, sf, tf)
+	return &cp
+}
+
+func filterSizing(rows []diff.SizingDelta, sf, tf string) []diff.SizingDelta {
+	var out []diff.SizingDelta
+	for _, r := range rows {
+		if keep(ptrStr(r.Identity.Schema), r.Identity.Name, sf, tf) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func filterActivityDeltas(nds []NodeActivityDelta, sf, tf string) []NodeActivityDelta {
+	var out []NodeActivityDelta
+	for _, nd := range nds {
+		if nd.Delta == nil {
+			continue
+		}
+		var cs []diff.CounterDelta
+		for _, r := range nd.Delta.Counters {
+			if keep(ptrStr(r.Identity.Schema), r.Identity.Name, sf, tf) {
+				cs = append(cs, r)
+			}
+		}
+		if len(cs) == 0 {
+			continue
+		}
+		cpd := *nd.Delta
+		cpd.Counters = cs
+		out = append(out, NodeActivityDelta{Node: nd.Node, Delta: &cpd})
+	}
+	return out
+}
+
 func qualifiedName(o ObjectChange) string {
 	if o.Schema != "" {
 		return o.Kind + " " + o.Schema + "." + o.Name
