@@ -137,44 +137,76 @@ func TestBuild_CorrelatesAcrossKinds(t *testing.T) {
 		t.Error("users should carry activity drift (seq_scan spike)")
 	}
 
-	// and the join must be auditable: both sides matched a planner and an activity
-	// capture within the window, with a small recorded skew.
+	// and the join must be auditable: with schema as the anchor, the planner and
+	// activity are pulled through the exact schema_ref link (not the time window),
+	// so the source must say so on both sides.
 	if res.Correlation.From.Planner == nil || res.Correlation.To.Planner == nil {
 		t.Fatal("both sides should have matched a planner capture")
 	}
-	if res.Correlation.From.Planner.Source != "window" {
-		t.Errorf("planner match should come from the window join, got %q", res.Correlation.From.Planner.Source)
+	if res.Correlation.From.Planner.Source != "schema_ref" {
+		t.Errorf("planner match should come from the exact schema_ref link, got %q", res.Correlation.From.Planner.Source)
 	}
-	if len(res.Correlation.From.Activity) != 1 {
-		t.Errorf("from side should have matched one activity node, got %d", len(res.Correlation.From.Activity))
+	if len(res.Correlation.From.Activity) != 1 || res.Correlation.From.Activity[0].Source != "schema_ref" {
+		t.Errorf("from side should have one schema_ref-matched activity node, got %+v", res.Correlation.From.Activity)
 	}
 }
 
-// TestBuild_WindowExcludesFarCaptures: a planner row captured well outside the
-// window is NOT silently treated as belonging to the moment. The diff has no
-// planner delta and the correlation notes say so, instead of quietly pairing a
-// stale capture.
-func TestBuild_WindowExcludesFarCaptures(t *testing.T) {
+// TestBuild_SchemaRefJoinIgnoresWindow is the point of the exact link: a planner
+// captured two hours after its schema snapshot — far outside any window — is
+// still the planner for that schema and must be correlated. The old time-window
+// heuristic would have dropped it; the schema_ref join keys on identity, not
+// proximity, so the diff comes back populated with a schema_ref source even
+// though no capture sits anywhere near the anchor timestamp.
+func TestBuild_SchemaRefJoinIgnoresWindow(t *testing.T) {
 	ctx := context.Background()
 	store := openStore(t)
-	t0 := time.Now().Truncate(time.Second).Add(-5 * time.Hour)
-	t1 := t0.Add(2 * time.Hour)
+	t0 := time.Now().Truncate(time.Second).Add(-6 * time.Hour)
+	t1 := t0.Add(3 * time.Hour)
 
 	put(t, store, history.WrapSchema(mkSchema("schema-a", t0, table("users", "id"))))
 	put(t, store, history.WrapSchema(mkSchema("schema-b", t1, table("users", "id", "email"))))
-	// the only planner capture sits an hour off the t1 anchor — outside 30m
-	put(t, store, history.WrapPlanner(mkPlanner("schema-b", "planner-far", t1.Add(time.Hour), 5000)))
+	// each planner sits 2h off its own schema anchor — way outside a 30m window
+	put(t, store, history.WrapPlanner(mkPlanner("schema-a", "planner-a", t0.Add(2*time.Hour), 1000)))
+	put(t, store, history.WrapPlanner(mkPlanner("schema-b", "planner-b", t1.Add(2*time.Hour), 5000)))
 
 	res, err := Build(ctx, store, key(), Options{From: "latest~1", To: "latest", Kind: "schema", Window: 30 * time.Minute})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if res.PlannerDelta != nil {
-		t.Error("a planner capture outside the window must not be correlated")
+	if res.PlannerDelta.IsEmpty() {
+		t.Fatal("the exact schema_ref join must correlate the planner regardless of window")
+	}
+	if res.Correlation.From.Planner == nil || res.Correlation.From.Planner.Source != "schema_ref" {
+		t.Errorf("planner should be matched via schema_ref, got %+v", res.Correlation.From.Planner)
+	}
+}
+
+// TestBuild_WindowExcludesFarCaptures covers the path where the time window still
+// governs: a planner-anchored diff correlates the *other* kind (activity) by
+// capture proximity, since there's no exact link for it. An activity row sitting
+// hours from both planner anchors must not be silently adopted — the diff carries
+// no activity and the notes say so, rather than pairing a stale capture.
+func TestBuild_WindowExcludesFarCaptures(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	t0 := time.Now().Truncate(time.Second).Add(-6 * time.Hour)
+
+	put(t, store, history.WrapSchema(mkSchema("schema-x", t0, table("users", "id"))))
+	put(t, store, history.WrapPlanner(mkPlanner("schema-x", "planner-1", t0.Add(5*time.Minute), 1000)))
+	put(t, store, history.WrapPlanner(mkPlanner("schema-x", "planner-2", t0.Add(2*time.Hour), 5000)))
+	// the only activity capture is hours from either planner anchor — outside 30m
+	put(t, store, history.WrapActivity(mkActivity("schema-x", "activity-far", "primary", t0.Add(5*time.Hour), 100)))
+
+	res, err := Build(ctx, store, key(), Options{From: "latest~1", To: "latest", Kind: "planner", Window: 30 * time.Minute})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(res.ActivityDelta) != 0 {
+		t.Error("an activity capture outside the window must not be correlated")
 	}
 	joined := strings.Join(res.Correlation.Notes, " | ")
-	if !strings.Contains(joined, "no planner capture within") {
-		t.Errorf("correlation should note the missing planner, got: %q", joined)
+	if !strings.Contains(joined, "no activity capture within") {
+		t.Errorf("correlation should note the missing activity, got: %q", joined)
 	}
 }
 
