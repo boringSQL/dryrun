@@ -7,21 +7,25 @@ import (
 	"time"
 )
 
+// 0 means legacy. not hashed.
+const FormatVersion = 1
+
 // DDL-only schema snapshot; sizing/activity live in AnnotatedSchema
 type SchemaSnapshot struct {
-	PgVersion   string          `json:"pg_version"`
-	Database    string          `json:"database"`
-	Timestamp   time.Time       `json:"timestamp"`
-	ContentHash string          `json:"content_hash"`
-	Source      *string         `json:"source,omitempty"`
-	Tables      []Table         `json:"tables"`
-	Enums       []EnumType      `json:"enums"`
-	Domains     []DomainType    `json:"domains"`
-	Composites  []CompositeType `json:"composites"`
-	Views       []View          `json:"views"`
-	Functions   []Function      `json:"functions"`
-	Extensions  []Extension     `json:"extensions"`
-	GUCs        []GucSetting    `json:"gucs"`
+	FormatVersion int             `json:"format_version"`
+	PgVersion     string          `json:"pg_version"`
+	Database      string          `json:"database"`
+	Timestamp     time.Time       `json:"timestamp"`
+	ContentHash   string          `json:"content_hash"`
+	Source        *string         `json:"source,omitempty"`
+	Tables        []Table         `json:"tables"`
+	Enums         []EnumType      `json:"enums"`
+	Domains       []DomainType    `json:"domains"`
+	Composites    []CompositeType `json:"composites"`
+	Views         []View          `json:"views"`
+	Functions     []Function      `json:"functions"`
+	Extensions    []Extension     `json:"extensions"`
+	GUCs          []GucSetting    `json:"gucs"`
 }
 
 type Table struct {
@@ -440,6 +444,7 @@ type IndexActivityEntry struct {
 
 // Persisted planner inputs; schema_ref_hash binds rows to a SchemaSnapshot
 type PlannerStatsSnapshot struct {
+	FormatVersion int       `json:"format_version"`
 	SchemaRefHash string    `json:"schema_ref_hash"`
 	ContentHash   string    `json:"content_hash"`
 	Database      string    `json:"database"`
@@ -455,6 +460,7 @@ type PlannerStatsSnapshot struct {
 
 // Persisted per-node activity counters
 type ActivityStatsSnapshot struct {
+	FormatVersion int                  `json:"format_version"`
 	SchemaRefHash string               `json:"schema_ref_hash"`
 	ContentHash   string               `json:"content_hash"`
 	Node          NodeIdentity         `json:"node"`

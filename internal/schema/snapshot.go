@@ -46,6 +46,8 @@ type (
 
 // Enum values.
 const (
+	FormatVersion = snapshot.FormatVersion
+
 	ConstraintPrimaryKey = snapshot.ConstraintPrimaryKey
 	ConstraintForeignKey = snapshot.ConstraintForeignKey
 	ConstraintUnique     = snapshot.ConstraintUnique
