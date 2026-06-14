@@ -538,3 +538,98 @@ func TestBuild_NodeMissingOnOneSide(t *testing.T) {
 		t.Fatalf("only the primary (present on both sides) should be diffed, got %+v", res.ActivityDelta)
 	}
 }
+
+func qn(name string) snapshot.QualifiedName {
+	return snapshot.QualifiedName{Schema: "public", Name: name}
+}
+
+// plannerWithIndex / activityWithIndex go beyond the bare-table helpers above:
+// they also carry an index entry (orders_pkey) plus an unrelated second table
+// (invoices), which is exactly the shape needed to prove a table filter keeps the
+// table's index rows while still dropping a different table.
+func plannerWithIndex(schemaRef, hash string, ts time.Time, ordersRel float64, idxSize int64, invoicesRel float64) *snapshot.PlannerStatsSnapshot {
+	return &snapshot.PlannerStatsSnapshot{
+		SchemaRefHash: schemaRef, ContentHash: hash, Database: "appdb", Timestamp: ts,
+		Tables: []snapshot.TableSizingEntry{
+			{Table: qn("orders"), Sizing: snapshot.TableSizing{Reltuples: ordersRel, Relpages: 10, TableSize: 81920}},
+			{Table: qn("invoices"), Sizing: snapshot.TableSizing{Reltuples: invoicesRel, Relpages: 2, TableSize: 16384}},
+		},
+		Indexes: []snapshot.IndexSizingEntry{
+			{Table: qn("orders"), Index: "orders_pkey", Sizing: snapshot.IndexSizing{Reltuples: ordersRel, Relpages: 5, Size: idxSize}},
+		},
+	}
+}
+
+func activityWithIndex(schemaRef, hash, node string, ts time.Time, ordersScan, idxScan, invoicesScan int64) *snapshot.ActivityStatsSnapshot {
+	return &snapshot.ActivityStatsSnapshot{
+		SchemaRefHash: schemaRef, ContentHash: hash,
+		Node: snapshot.NodeIdentity{Source: node, PgVersion: "PostgreSQL 17.0", Timestamp: ts},
+		Tables: []snapshot.TableActivityEntry{
+			{Table: qn("orders"), Activity: snapshot.TableActivity{SeqScan: ordersScan, IdxScan: 5}},
+			{Table: qn("invoices"), Activity: snapshot.TableActivity{SeqScan: invoicesScan, IdxScan: 1}},
+		},
+		Indexes: []snapshot.IndexActivityEntry{
+			{Table: qn("orders"), Index: "orders_pkey", Activity: snapshot.IndexActivity{IdxScan: idxScan, IdxTupRead: idxScan * 2}},
+		},
+	}
+}
+
+// TestBuild_TableFilterKeepsIndexRows is the #8 fix in one test: when you drill
+// into a single hot table, you want the *whole* table's story, and an index is
+// part of that story. Before, a table= filter matched rows by name and an index
+// row's name is the index, not the table — so orders_pkey's bloat and idx_scan
+// drift quietly vanished the moment you narrowed to orders, which is the worst
+// time to lose it. The fix threads the owning table onto the index identity, so
+// here orders_pkey must survive the filter carrying both its sizing and its
+// activity drift, while a genuinely-unrelated table (invoices) is correctly
+// dropped. The unfiltered control proves invoices was only ever excluded by the
+// filter and not by some other accident of the fixture.
+func TestBuild_TableFilterKeepsIndexRows(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	t0 := time.Now().Truncate(time.Second).Add(-3 * time.Hour)
+	t1 := t0.Add(2 * time.Hour)
+
+	// identical table shapes at both moments (distinct hashes) so the diff is
+	// driven entirely by stats/activity, not DDL — keeps the index rows the only
+	// thing under test rather than tangled up with schema changes.
+	tbls := []snapshot.Table{table("orders", "id"), table("invoices", "id")}
+	put(t, store, history.WrapSchema(mkSchema("schema-a", t0, tbls...)))
+	put(t, store, history.WrapPlanner(plannerWithIndex("schema-a", "planner-a", t0.Add(time.Minute), 1000, 8192, 100)))
+	put(t, store, history.WrapActivity(activityWithIndex("schema-a", "activity-a", "primary", t0.Add(time.Minute), 10, 3, 1)))
+
+	put(t, store, history.WrapSchema(mkSchema("schema-b", t1, tbls...)))
+	put(t, store, history.WrapPlanner(plannerWithIndex("schema-b", "planner-b", t1.Add(time.Minute), 5000, 81920, 500)))
+	put(t, store, history.WrapActivity(activityWithIndex("schema-b", "activity-b", "primary", t1.Add(time.Minute), 100, 90, 50)))
+
+	// control: with no filter, the unrelated invoices table is present
+	unfiltered, err := Build(ctx, store, key(), Options{From: "latest~1", To: "latest", Kind: "schema"})
+	if err != nil {
+		t.Fatalf("Build (unfiltered): %v", err)
+	}
+	if findObject(unfiltered.Objects, "invoices") == nil {
+		t.Fatal("fixture sanity: invoices should appear without a filter")
+	}
+
+	res, err := Build(ctx, store, key(), Options{From: "latest~1", To: "latest", Kind: "schema", Table: "orders"})
+	if err != nil {
+		t.Fatalf("Build (filtered): %v", err)
+	}
+
+	idx := findObject(res.Objects, "orders_pkey")
+	if idx == nil || idx.Kind != "index" {
+		t.Fatalf("orders_pkey index drift must survive a table=orders filter, got objects %+v", res.Objects)
+	}
+	if len(idx.Sizing) == 0 {
+		t.Error("the index should carry its sizing drift (size grew 10x)")
+	}
+	if len(idx.Activity) == 0 {
+		t.Error("the index should carry its idx_scan drift")
+	}
+	if findObject(res.Objects, "orders") == nil {
+		t.Error("the table itself should still be present")
+	}
+	if findObject(res.Objects, "invoices") != nil {
+		t.Error("an unrelated table must be filtered out")
+	}
+}
