@@ -76,18 +76,6 @@ func (s *Server) handleSnapshotDiff(ctx context.Context, req mcp.CallToolRequest
 	return s.runSnapshotDiff(ctx, opt, argOr(req, "view", "summary"), capArg(req))
 }
 
-// back-compat alias: kind=schema, no live mode
-func (s *Server) handleSchemaDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	opt := snapdiff.Options{
-		From:   getArg(req, "from"),
-		To:     getArg(req, "to"),
-		Kind:   "schema",
-		Schema: getArg(req, "schema"),
-		Table:  getArg(req, "table"),
-	}
-	return s.runSnapshotDiff(ctx, opt, argOr(req, "view", "summary"), capArg(req))
-}
-
 func (s *Server) runSnapshotDiff(ctx context.Context, opt snapdiff.Options, view string, limit int) (*mcp.CallToolResult, error) {
 	s.mu.RLock()
 	hist, key := s.history, s.snapshotKey

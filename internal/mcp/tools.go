@@ -169,18 +169,6 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		s.handleSnapshotDiff,
 	)
 	srv.AddTool(
-		mcp.NewTool("schema_diff",
-			mcp.WithDescription("Deprecated alias for snapshot_diff with kind=schema. Diffs two stored snapshots (no live mode)."),
-			mcp.WithString("from", mcp.Description("Base snapshot: 'latest~N' or a content-hash prefix. Default 'latest~1'.")),
-			mcp.WithString("to", mcp.Description("Target snapshot: 'latest' or a content-hash prefix. Default 'latest'.")),
-			mcp.WithString("schema", mcp.Description("Narrow to one schema.")),
-			mcp.WithString("table", mcp.Description("Narrow to one table.")),
-			mcp.WithString("view", mcp.Enum("summary", "full"), mcp.DefaultString("summary")),
-			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max objects/rows; 0 for all.")),
-		),
-		s.handleSchemaDiff,
-	)
-	srv.AddTool(
 		mcp.NewTool("reload_schema",
 			mcp.WithDescription("Reload schema from history.db or schema.json"),
 		),
