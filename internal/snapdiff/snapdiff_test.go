@@ -40,6 +40,12 @@ func table(name string, cols ...string) snapshot.Table {
 	return snapshot.Table{Schema: "public", Name: name, Columns: cs}
 }
 
+func tableIn(schemaName, name string, cols ...string) snapshot.Table {
+	t := table(name, cols...)
+	t.Schema = schemaName
+	return t
+}
+
 func withIndex(t snapshot.Table, idx string) snapshot.Table {
 	t.Indexes = append(t.Indexes, snapshot.Index{Name: idx, IndexType: "btree", Definition: "CREATE INDEX " + idx})
 	return t
@@ -263,10 +269,130 @@ func TestForView(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if got := res.ForView("summary"); got.SchemaDelta != nil {
+	if got := res.ForView("summary", 0); got.SchemaDelta != nil {
 		t.Error("summary view must omit the raw schema delta")
 	}
-	if got := res.ForView("full"); got.SchemaDelta == nil {
+	if got := res.ForView("full", 0); got.SchemaDelta == nil {
 		t.Error("full view must keep the raw schema delta")
+	}
+}
+
+// threeDrops gives the cap tests a deterministic, easy-to-count diff: a from
+// snapshot with three tables and a to snapshot with none, which a schema diff
+// turns into exactly three dropped-table objects. Three is the smallest count
+// that lets a limit of 1 leave an unambiguous remainder of 2, so every "kept N,
+// omitted M" assertion below has a single correct answer and a failure points
+// straight at the capping math rather than at fixture noise.
+func threeDrops(t *testing.T) *Result {
+	t.Helper()
+	store := openStore(t)
+	t0 := time.Now().Truncate(time.Second).Add(-2 * time.Hour)
+	put(t, store, history.WrapSchema(mkSchema("s-a", t0, table("t1", "id"), table("t2", "id"), table("t3", "id"))))
+	put(t, store, history.WrapSchema(mkSchema("s-b", t0.Add(time.Hour))))
+	res, err := Build(context.Background(), store, key(), Options{From: "latest~1", To: "latest", Kind: "schema"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(res.Objects) != 3 {
+		t.Fatalf("fixture should yield 3 objects, got %d", len(res.Objects))
+	}
+	return res
+}
+
+// TestForView_LimitCapsObjects pins the headline promise of the §6 work: the
+// response size is something the caller controls, not something the database
+// dictates. With a limit of 1 the object list must come back trimmed to a
+// single entry AND admit that it hid the rest (truncated, omitted_objects=2) so
+// an agent never mistakes a capped view for the whole story. The limit=0 case is
+// the escape hatch — "give me everything" — and there the truncation flag has to
+// stay off, otherwise a caller asking for the full set would be told it was
+// clipped when it wasn't.
+func TestForView_LimitCapsObjects(t *testing.T) {
+	res := threeDrops(t)
+
+	capped := res.ForView("summary", 1)
+	if len(capped.Objects) != 1 {
+		t.Fatalf("limit=1 should keep one object, got %d", len(capped.Objects))
+	}
+	if !capped.Truncated || capped.OmittedObjects != 2 {
+		t.Errorf("expected truncated with 2 omitted, got truncated=%v omitted=%d", capped.Truncated, capped.OmittedObjects)
+	}
+
+	all := res.ForView("summary", 0)
+	if len(all.Objects) != 3 || all.Truncated {
+		t.Errorf("limit=0 should keep all and not truncate, got %d objects truncated=%v", len(all.Objects), all.Truncated)
+	}
+}
+
+// TestForView_FullCapsRawRows guards the sneaky payload leak: the summary view
+// is small by construction, but the full view also ships the raw per-row deltas,
+// and those grow with the size of the diff. If the cap only applied to the
+// object list, a giant migration could still return a megabyte of raw changes
+// and quietly blow the context budget the whole feature is supposed to protect.
+// So full view must clip the raw rows to the same limit and report the overflow
+// separately as omitted_rows, and limit=0 must once again mean "all of it".
+func TestForView_FullCapsRawRows(t *testing.T) {
+	res := threeDrops(t)
+
+	full := res.ForView("full", 1)
+	if full.SchemaDelta == nil || len(full.SchemaDelta.Changes) != 1 {
+		t.Fatalf("full view should cap raw changes to 1, got %+v", full.SchemaDelta)
+	}
+	if full.OmittedRows != 2 || !full.Truncated {
+		t.Errorf("expected 2 omitted rows and truncated, got omitted_rows=%d truncated=%v", full.OmittedRows, full.Truncated)
+	}
+
+	allFull := res.ForView("full", 0)
+	if len(allFull.SchemaDelta.Changes) != 3 || allFull.OmittedRows != 0 {
+		t.Errorf("limit=0 should keep all rows, got %d changes omitted_rows=%d", len(allFull.SchemaDelta.Changes), allFull.OmittedRows)
+	}
+}
+
+// TestBuild_FilterBySchema covers the other half of "narrow it down": before you
+// reach for a cap, you should be able to ask the question more precisely. A diff
+// that touches both public and audit, filtered to audit, must come back with
+// only the audit object — and crucially the raw delta has to be scoped too, not
+// just the ranked object list. A filter that trimmed the headline but left the
+// raw rows full would be a filter in name only, and the truncation it's meant to
+// avoid would sneak back in through the delta.
+func TestBuild_FilterBySchema(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	t0 := time.Now().Truncate(time.Second).Add(-2 * time.Hour)
+	put(t, store, history.WrapSchema(mkSchema("s-a", t0,
+		tableIn("public", "users", "id"), tableIn("audit", "log", "id"))))
+	put(t, store, history.WrapSchema(mkSchema("s-b", t0.Add(time.Hour))))
+
+	res, err := Build(ctx, store, key(), Options{From: "latest~1", To: "latest", Kind: "schema", Schema: "audit"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(res.Objects) != 1 || res.Objects[0].Schema != "audit" {
+		t.Fatalf("schema filter should keep only audit objects, got %+v", res.Objects)
+	}
+	for _, c := range res.SchemaDelta.Changes {
+		if c.Object.Schema == nil || *c.Object.Schema != "audit" {
+			t.Errorf("raw delta should be scoped to audit, found %v", c.Object)
+		}
+	}
+}
+
+// TestBuild_FilterByTable is the finest-grained narrowing knob: two tables
+// changed, the user only cares about orders, so orders is the only object that
+// survives. This is the call an agent makes after a broad diff points it at one
+// hot table and it wants to drill in without re-reading everything else.
+func TestBuild_FilterByTable(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	t0 := time.Now().Truncate(time.Second).Add(-2 * time.Hour)
+	put(t, store, history.WrapSchema(mkSchema("s-a", t0, table("orders", "id"), table("invoices", "id"))))
+	put(t, store, history.WrapSchema(mkSchema("s-b", t0.Add(time.Hour))))
+
+	res, err := Build(ctx, store, key(), Options{From: "latest~1", To: "latest", Kind: "schema", Table: "orders"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(res.Objects) != 1 || res.Objects[0].Name != "orders" {
+		t.Fatalf("table filter should keep only orders, got %+v", res.Objects)
 	}
 }
