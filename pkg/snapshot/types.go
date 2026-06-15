@@ -360,17 +360,19 @@ func counterAge(value, reference int64) (int64, bool) {
 
 // Counters and vacuum/analyze timestamps from pg_stat_user_tables
 type TableActivity struct {
-	SeqScan          int64      `json:"seq_scan"`
-	SeqTupRead       int64      `json:"seq_tup_read"`
-	IdxScan          int64      `json:"idx_scan"`
-	IdxTupFetch      int64      `json:"idx_tup_fetch"`
-	NTupIns          int64      `json:"n_tup_ins"`
-	NTupUpd          int64      `json:"n_tup_upd"`
-	NTupDel          int64      `json:"n_tup_del"`
-	NTupHotUpd       int64      `json:"n_tup_hot_upd"`
-	NLiveTup         int64      `json:"n_live_tup"`
-	NDeadTup         int64      `json:"n_dead_tup"`
-	NModSinceAnalyze int64      `json:"n_mod_since_analyze"`
+	SeqScan     int64 `json:"seq_scan"`
+	SeqTupRead  int64 `json:"seq_tup_read"`
+	IdxScan     int64 `json:"idx_scan"`
+	IdxTupFetch int64 `json:"idx_tup_fetch"`
+	NTupIns     int64 `json:"n_tup_ins"`
+	NTupUpd     int64 `json:"n_tup_upd"`
+	NTupDel     int64 `json:"n_tup_del"`
+	NTupHotUpd  int64 `json:"n_tup_hot_upd"`
+	NLiveTup    int64 `json:"n_live_tup"`
+	NDeadTup    int64 `json:"n_dead_tup"`
+	// additive field; omitempty so snapshots taken before it existed stay
+	// hash-compatible (a zero value serializes identically to its absence).
+	NModSinceAnalyze int64      `json:"n_mod_since_analyze,omitempty"`
 	LastVacuum       *time.Time `json:"last_vacuum,omitempty"`
 	LastAutovacuum   *time.Time `json:"last_autovacuum,omitempty"`
 	LastAnalyze      *time.Time `json:"last_analyze,omitempty"`

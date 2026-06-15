@@ -92,39 +92,47 @@ var _ SnapshotStore = (*HTTPStore)(nil)
 // the schema by ref; it is pushed first, so a missing one means predict returns
 // 409, surfaced as ErrOrphanSnapshot.
 func (h *HTTPStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (PutOutcome, error) {
+	// The digest is recomputed from the snapshot we are about to serialize, not
+	// read from the stored ContentHash. predict re-derives the hash from the
+	// posted body, so a stored hash captured by an older binary (before an
+	// additive field existed) would no longer reproduce and the PUT would 422.
+	// Recomputing here keeps digest == hash(body) by construction.
 	switch {
 	case snap.AsSchema() != nil:
 		s := snap.AsSchema()
-		out, err := h.putBlob(ctx, s.ContentHash, mediaTypeSchemaBlob, s)
+		digest := schema.ComputeContentHash(s)
+		out, err := h.putBlob(ctx, digest, mediaTypeSchemaBlob, s)
 		if err != nil {
 			return out, err
 		}
 		body := manifestBody{
-			Schema:  manifestRef{Digest: s.ContentHash},
+			Schema:  manifestRef{Digest: digest},
 			TakenAt: s.Timestamp,
 		}
 		return out, h.putManifest(ctx, key, body)
 	case snap.AsPlanner() != nil:
 		p := snap.AsPlanner()
-		out, err := h.putBlob(ctx, p.ContentHash, mediaTypePlannerBlob, p)
+		digest := schema.ComputePlannerContentHash(p)
+		out, err := h.putBlob(ctx, digest, mediaTypePlannerBlob, p)
 		if err != nil {
 			return out, err
 		}
 		body := manifestBody{
 			Schema:  manifestRef{Digest: p.SchemaRefHash},
-			Planner: &manifestRef{Digest: p.ContentHash},
+			Planner: &manifestRef{Digest: digest},
 			TakenAt: p.Timestamp,
 		}
 		return out, h.putManifest(ctx, key, body)
 	case snap.AsActivity() != nil:
 		a := snap.AsActivity()
-		out, err := h.putBlob(ctx, a.ContentHash, mediaTypeActivityBlob, a)
+		digest := schema.ComputeActivityContentHash(a)
+		out, err := h.putBlob(ctx, digest, mediaTypeActivityBlob, a)
 		if err != nil {
 			return out, err
 		}
 		body := manifestBody{
 			Schema:   manifestRef{Digest: a.SchemaRefHash},
-			Activity: map[string]manifestRef{activityLabel(a): {Digest: a.ContentHash}},
+			Activity: map[string]manifestRef{activityLabel(a): {Digest: digest}},
 			TakenAt:  a.Node.Timestamp,
 		}
 		return out, h.putManifest(ctx, key, body)
