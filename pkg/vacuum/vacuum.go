@@ -44,6 +44,8 @@ type (
 		VacuumCostLimit       int
 		FreezeMaxAge          int64
 		MultixactFreezeMaxAge int64
+		FailsafeAge           int64 // vacuum_failsafe_age; global GUC, no per-table override
+		MultixactFailsafeAge  int64
 	}
 
 	VacuumFinding struct {
@@ -71,9 +73,11 @@ type (
 		XidAge                    int64           `json:"xid_age,omitempty"`
 		FreezeMaxAge              int64           `json:"freeze_max_age,omitempty"`
 		FreezeProgress            float64         `json:"freeze_progress,omitempty"`
+		FailsafeAge               int64           `json:"failsafe_age,omitempty"`
 		MxidAge                   int64           `json:"mxid_age,omitempty"`
 		MultixactFreezeMaxAge     int64           `json:"multixact_freeze_max_age,omitempty"`
 		MultixactFreezeProgress   float64         `json:"multixact_freeze_progress,omitempty"`
+		MultixactFailsafeAge      int64           `json:"multixact_failsafe_age,omitempty"`
 		LastVacuum                *time.Time      `json:"last_vacuum,omitempty"`
 		LastAutovacuum            *time.Time      `json:"last_autovacuum,omitempty"`
 		LastAnalyze               *time.Time      `json:"last_analyze,omitempty"`
@@ -105,6 +109,8 @@ func ParseAutovacuumDefaults(gucs []snapshot.GucSetting) AutovacuumDefaults {
 		VacuumCostLimit:       -1,
 		FreezeMaxAge:          200_000_000,
 		MultixactFreezeMaxAge: 400_000_000,
+		FailsafeAge:           1_600_000_000,
+		MultixactFailsafeAge:  1_600_000_000,
 	}
 
 	for _, g := range gucs {
@@ -142,6 +148,14 @@ func ParseAutovacuumDefaults(gucs []snapshot.GucSetting) AutovacuumDefaults {
 		case "autovacuum_multixact_freeze_max_age":
 			if v, err := strconv.ParseInt(g.Setting, 10, 64); err == nil {
 				d.MultixactFreezeMaxAge = v
+			}
+		case "vacuum_failsafe_age":
+			if v, err := strconv.ParseInt(g.Setting, 10, 64); err == nil {
+				d.FailsafeAge = v
+			}
+		case "vacuum_multixact_failsafe_age":
+			if v, err := strconv.ParseInt(g.Setting, 10, 64); err == nil {
+				d.MultixactFailsafeAge = v
 			}
 		}
 	}
@@ -259,14 +273,14 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 		if age, ok := sizing.FrozenXidAge(a.Planner.DatabaseXid); ok {
 			vh.XidAge = age
 			vh.FreezeMaxAge = freezeMaxAge
+			vh.FailsafeAge = defaults.FailsafeAge
 			if freezeMaxAge > 0 {
 				vh.FreezeProgress = float64(age) / float64(freezeMaxAge)
-				if vh.FreezeProgress >= 0.9 {
-					vh.add(CodeFreezeAgeHigh, SeverityHigh,
-						fmt.Sprintf("relfrozenxid age is %d, %.0f%% of autovacuum_freeze_max_age (%d); "+
-							"anti-wraparound autovacuum is imminent, make sure it can finish",
-							age, vh.FreezeProgress*100, freezeMaxAge))
-				}
+			}
+			if sev := freezeSeverity(age, freezeMaxAge, defaults.FailsafeAge); sev != "" {
+				vh.add(CodeFreezeAgeHigh, sev,
+					freezeMessage("relfrozenxid", "autovacuum_freeze_max_age", "vacuum_failsafe_age",
+						age, freezeMaxAge, defaults.FailsafeAge))
 			}
 		}
 
@@ -279,14 +293,14 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 		if age, ok := sizing.MinMxidAge(a.Planner.DatabaseMxid); ok {
 			vh.MxidAge = age
 			vh.MultixactFreezeMaxAge = mxidFreezeMaxAge
+			vh.MultixactFailsafeAge = defaults.MultixactFailsafeAge
 			if mxidFreezeMaxAge > 0 {
 				vh.MultixactFreezeProgress = float64(age) / float64(mxidFreezeMaxAge)
-				if vh.MultixactFreezeProgress >= 0.9 {
-					vh.add(CodeMxidAgeHigh, SeverityHigh,
-						fmt.Sprintf("relminmxid age is %d, %.0f%% of autovacuum_multixact_freeze_max_age (%d); "+
-							"anti-wraparound autovacuum is imminent, make sure it can finish",
-							age, vh.MultixactFreezeProgress*100, mxidFreezeMaxAge))
-				}
+			}
+			if sev := freezeSeverity(age, mxidFreezeMaxAge, defaults.MultixactFailsafeAge); sev != "" {
+				vh.add(CodeMxidAgeHigh, sev,
+					freezeMessage("relminmxid", "autovacuum_multixact_freeze_max_age", "vacuum_multixact_failsafe_age",
+						age, mxidFreezeMaxAge, defaults.MultixactFailsafeAge))
 			}
 		}
 
@@ -332,6 +346,31 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 		return results[i].VacuumProgress > results[j].VacuumProgress
 	})
 	return results
+}
+
+// Grade past the escalation points, not the routine freeze_max_age trigger (healthy
+// tables ride to it and reset): >=failsafe high, >=2x freeze_max_age medium, else "".
+func freezeSeverity(age, freezeMaxAge, failsafeAge int64) Severity {
+	switch {
+	case failsafeAge > 0 && age >= failsafeAge:
+		return SeverityHigh
+	case freezeMaxAge > 0 && age >= 2*freezeMaxAge:
+		return SeverityMedium
+	default:
+		return ""
+	}
+}
+
+func freezeMessage(ageName, maxName, failsafeName string, age, maxAge, failsafeAge int64) string {
+	if failsafeAge > 0 && age >= failsafeAge {
+		return fmt.Sprintf("%s age is %d, at or past %s (%d); anti-wraparound VACUUM is in "+
+			"last-resort mode and autovacuum is not keeping up — check for long-running "+
+			"transactions, replication slots holding xmin, or a stuck/disabled autovacuum",
+			ageName, age, failsafeName, failsafeAge)
+	}
+	return fmt.Sprintf("%s age is %d, %.1fx %s (%d) and not being frozen; the anti-wraparound "+
+		"autovacuum isn't keeping up",
+		ageName, age, float64(age)/float64(maxAge), maxName, maxAge)
 }
 
 // Shared with audit so both sides recommend the same numbers.
