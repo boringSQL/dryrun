@@ -1,9 +1,11 @@
-package schema
+package vacuum
 
 import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
 func TestParseAutovacuumDefaults_NoGUCs(t *testing.T) {
@@ -29,7 +31,7 @@ func TestParseAutovacuumDefaults_NoGUCs(t *testing.T) {
 }
 
 func TestParseAutovacuumDefaults_CustomGUCs(t *testing.T) {
-	gucs := []GucSetting{
+	gucs := []snapshot.GucSetting{
 		{Name: "autovacuum", Setting: "off"},
 		{Name: "autovacuum_vacuum_threshold", Setting: "100"},
 		{Name: "autovacuum_vacuum_scale_factor", Setting: "0.05"},
@@ -53,7 +55,7 @@ func TestParseAutovacuumDefaults_CustomGUCs(t *testing.T) {
 }
 
 func TestParseAutovacuumDefaults_InvalidValues(t *testing.T) {
-	d := ParseAutovacuumDefaults([]GucSetting{
+	d := ParseAutovacuumDefaults([]snapshot.GucSetting{
 		{Name: "autovacuum_vacuum_threshold", Setting: "not_a_number"},
 		{Name: "autovacuum_vacuum_scale_factor", Setting: "bad"},
 	})
@@ -64,21 +66,21 @@ func TestParseAutovacuumDefaults_InvalidValues(t *testing.T) {
 
 // Builds an AnnotatedSchema with one table whose DDL + sizing + (optional) activity
 // are wired up. Reloptions live on the Table; sizing on Planner; dead tuples on Activity.
-func vacuumFixture(name string, reltuples float64, deadTup int64, reloptions []string) *AnnotatedSchema {
-	t := Table{Schema: "public", Name: name, Reloptions: reloptions}
-	return &AnnotatedSchema{
-		Schema: &SchemaSnapshot{
+func vacuumFixture(name string, reltuples float64, deadTup int64, reloptions []string) *snapshot.AnnotatedSchema {
+	t := snapshot.Table{Schema: "public", Name: name, Reloptions: reloptions}
+	return &snapshot.AnnotatedSchema{
+		Schema: &snapshot.SchemaSnapshot{
 			PgVersion: "PostgreSQL 17.0", Database: "test",
 			Timestamp: time.Now().UTC(), ContentHash: "test",
-			Tables: []Table{t},
+			Tables: []snapshot.Table{t},
 		},
-		Planner: &PlannerStatsSnapshot{Tables: []TableSizingEntry{
-			{Table: t.Qual(), Sizing: TableSizing{Reltuples: reltuples}},
+		Planner: &snapshot.PlannerStatsSnapshot{Tables: []snapshot.TableSizingEntry{
+			{Table: t.Qual(), Sizing: snapshot.TableSizing{Reltuples: reltuples}},
 		}},
-		Merged: &MergedActivity{Nodes: []NodeActivity{{
-			Node: NodeIdentity{Source: "primary"},
-			Tables: []TableActivityEntry{
-				{Table: t.Qual(), Activity: TableActivity{NDeadTup: deadTup}},
+		Merged: &snapshot.MergedActivity{Nodes: []snapshot.NodeActivity{{
+			Node: snapshot.NodeIdentity{Source: "primary"},
+			Tables: []snapshot.TableActivityEntry{
+				{Table: t.Qual(), Activity: snapshot.TableActivity{NDeadTup: deadTup}},
 			},
 		}}},
 	}
@@ -96,8 +98,8 @@ func TestAnalyzeVacuumHealth_SmallTableSkipped(t *testing.T) {
 // Without sizing, we have no Reltuples and can't decide whether the table
 // warrants tuning. The implementation must return zero rather than guess.
 func TestAnalyzeVacuumHealth_NoSizingSkipped(t *testing.T) {
-	a := &AnnotatedSchema{
-		Schema: &SchemaSnapshot{Tables: []Table{{Schema: "public", Name: "no_sizing"}}},
+	a := &snapshot.AnnotatedSchema{
+		Schema: &snapshot.SchemaSnapshot{Tables: []snapshot.Table{{Schema: "public", Name: "no_sizing"}}},
 	}
 	if got := AnalyzeVacuumHealth(a); len(got) != 0 {
 		t.Errorf("expected 0 results when planner sizing is absent, got %d", len(got))
@@ -229,8 +231,6 @@ func TestAnalyzeVacuumHealth_HighTriggerThreshold(t *testing.T) {
 // reference. We exercise the simple case, the wraparound (modular) case, and
 // the two "not applicable" sentinels so callers can trust the bool.
 func TestFrozenXidAge(t *testing.T) {
-	const mod = int64(1) << 32
-
 	cases := []struct {
 		name        string
 		frozen      int64
@@ -242,14 +242,14 @@ func TestFrozenXidAge(t *testing.T) {
 		{name: "freshly frozen, tiny age", frozen: 500_000, databaseXid: 500_050, wantAge: 50, wantOK: true},
 		// databaseXid wrapped past 2^32 (epoch bumped): current32 = 100, frozen at
 		// 4_000_000_000, so age = (100 - 4000000000) mod 2^32 = 294_967_396.
-		{name: "wraparound: current already past 2^32", frozen: 4_000_000_000, databaseXid: mod + 100, wantAge: 294_967_396, wantOK: true},
+		{name: "wraparound: current already past 2^32", frozen: 4_000_000_000, databaseXid: (int64(1) << 32) + 100, wantAge: 294_967_396, wantOK: true},
 		{name: "no frozen xid (partitioned parent)", frozen: 0, databaseXid: 12_345, wantAge: 0, wantOK: false},
 		{name: "no reference point", frozen: 999, databaseXid: 0, wantAge: 0, wantOK: false},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			s := TableSizing{RelfrozenXid: c.frozen}
+			s := snapshot.TableSizing{RelfrozenXid: c.frozen}
 			age, ok := s.FrozenXidAge(c.databaseXid)
 			if ok != c.wantOK {
 				t.Fatalf("ok=%v want %v", ok, c.wantOK)

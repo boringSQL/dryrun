@@ -7,6 +7,7 @@ import (
 
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/lint"
+	"github.com/boringsql/dryrun/pkg/vacuum"
 )
 
 func testSnap() *schema.SchemaSnapshot {
@@ -271,7 +272,7 @@ func TestDuplicateIndexes_Branching(t *testing.T) {
 // Sanity-checks that SuggestedVacuumKnobs returns a sensible scale factor for a 10M row table.
 // (The DDL fix that used to be exercised here moved to the MCP vacuum_health path.)
 func TestSuggestedVacuumKnobs_LargeTable(t *testing.T) {
-	vacSF, _, _, _ := schema.SuggestedVacuumKnobs(10_000_000)
+	vacSF, _, _, _ := vacuum.SuggestedVacuumKnobs(10_000_000)
 	if vacSF <= 0 || vacSF > 0.1 {
 		t.Errorf("expected scale factor in (0, 0.1] for 10M rows, got %v", vacSF)
 	}

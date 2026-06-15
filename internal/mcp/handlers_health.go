@@ -8,6 +8,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/vacuum"
 )
 
 func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -33,7 +34,7 @@ func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mc
 func staleKey(e schema.StaleStatsEntry) (string, string)   { return e.Schema, e.Table }
 func unusedKey(e schema.UnusedIndexEntry) (string, string) { return e.Schema, e.Table }
 func bloatKey(e schema.BloatedIndexEntry) (string, string) { return e.Schema, e.Table }
-func vacuumKey(e schema.VacuumHealth) (string, string)     { return e.Schema, e.Table }
+func vacuumKey(e vacuum.VacuumHealth) (string, string)     { return e.Schema, e.Table }
 func anomalyKey(m map[string]any) (string, string) {
 	s, _ := m["schema"].(string)
 	t, _ := m["table"].(string)
@@ -222,7 +223,7 @@ func (s *Server) handleVacuumHealth(_ context.Context, req mcp.CallToolRequest) 
 
 	schemaF := schemaArg(req)
 	tableF := getArg(req, "table")
-	results := filterByQual(schema.AnalyzeVacuumHealth(a), schemaF, tableF, vacuumKey)
+	results := filterByQual(vacuum.AnalyzeVacuumHealth(a), schemaF, tableF, vacuumKey)
 	if len(results) == 0 {
 		return textResult(s.wrapText("No vacuum health concerns found.", "")), nil
 	}
