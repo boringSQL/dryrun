@@ -261,71 +261,88 @@ func TestFrozenXidAge(t *testing.T) {
 	}
 }
 
-// A table whose relfrozenxid age has reached ~95% of autovacuum_freeze_max_age
-// must surface an anti-wraparound recommendation and populate the freeze fields.
+// A relfrozenxid age past vacuum_failsafe_age (default 1.6B) means anti-wraparound
+// VACUUM is in last-resort mode — a high finding. Reaching freeze_max_age (the
+// routine trigger) alone must NOT fire; that's covered by WraparoundQuiet.
 func TestAnalyzeVacuumHealth_WraparoundImminent(t *testing.T) {
 	a := vacuumFixture("aging", 1_000_000, 0, nil)
-	// default freeze_max_age is 200M; put the frozen xid ~190M behind the ref.
-	a.Planner.DatabaseXid = 200_000_000
-	a.Planner.Tables[0].Sizing.RelfrozenXid = 10_000_000 // age = 190M = 95%
+	// default failsafe is 1.6B; put the frozen xid 1.7B behind the ref.
+	a.Planner.DatabaseXid = 1_710_000_000
+	a.Planner.Tables[0].Sizing.RelfrozenXid = 10_000_000 // age = 1.7B, past failsafe
 
 	results := AnalyzeVacuumHealth(a)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
 	vh := results[0]
-	if vh.XidAge != 190_000_000 {
-		t.Errorf("XidAge=%d want 190000000", vh.XidAge)
+	if vh.XidAge != 1_700_000_000 {
+		t.Errorf("XidAge=%d want 1700000000", vh.XidAge)
 	}
 	if vh.FreezeMaxAge != 200_000_000 {
 		t.Errorf("FreezeMaxAge=%d want 200000000", vh.FreezeMaxAge)
 	}
-	if vh.FreezeProgress < 0.94 || vh.FreezeProgress > 0.96 {
-		t.Errorf("FreezeProgress=%f want ~0.95", vh.FreezeProgress)
+	if vh.FailsafeAge != 1_600_000_000 {
+		t.Errorf("FailsafeAge=%d want 1600000000", vh.FailsafeAge)
 	}
-	hasRec := false
-	for _, r := range vh.Recommendations {
-		if strings.Contains(r, "anti-wraparound") {
-			hasRec = true
-		}
-	}
-	if !hasRec {
-		t.Errorf("expected anti-wraparound recommendation, got %v", vh.Recommendations)
+	if !hasFreezeFinding(vh, CodeFreezeAgeHigh, SeverityHigh, "last-resort") {
+		t.Errorf("expected high relfrozenxid last-resort finding, got %+v", vh.Findings)
 	}
 }
 
-// Multixact wraparound mirrors the xid path: relminmxid age at ~95% of
-// autovacuum_multixact_freeze_max_age (default 400M) must surface a
-// recommendation naming relminmxid and populate the multixact freeze fields.
+// Multixact wraparound mirrors the xid path: relminmxid age past
+// vacuum_multixact_failsafe_age (1.6B) surfaces a high finding naming relminmxid.
 func TestAnalyzeVacuumHealth_MultixactWraparoundImminent(t *testing.T) {
 	a := vacuumFixture("aging_mxid", 1_000_000, 0, nil)
-	a.Planner.DatabaseMxid = 400_000_000
-	a.Planner.Tables[0].Sizing.RelminMxid = 20_000_000 // age = 380M = 95%
+	a.Planner.DatabaseMxid = 1_700_000_000
+	a.Planner.Tables[0].Sizing.RelminMxid = 20_000_000 // age = 1.68B, past failsafe
 
 	vh := AnalyzeVacuumHealth(a)[0]
-	if vh.MxidAge != 380_000_000 {
-		t.Errorf("MxidAge=%d want 380000000", vh.MxidAge)
+	if vh.MxidAge != 1_680_000_000 {
+		t.Errorf("MxidAge=%d want 1680000000", vh.MxidAge)
 	}
 	if vh.MultixactFreezeMaxAge != 400_000_000 {
 		t.Errorf("MultixactFreezeMaxAge=%d want 400000000", vh.MultixactFreezeMaxAge)
 	}
-	if vh.MultixactFreezeProgress < 0.94 || vh.MultixactFreezeProgress > 0.96 {
-		t.Errorf("MultixactFreezeProgress=%f want ~0.95", vh.MultixactFreezeProgress)
+	if vh.MultixactFailsafeAge != 1_600_000_000 {
+		t.Errorf("MultixactFailsafeAge=%d want 1600000000", vh.MultixactFailsafeAge)
 	}
-	hasRec := false
-	for _, r := range vh.Recommendations {
-		if strings.Contains(r, "relminmxid") && strings.Contains(r, "anti-wraparound") {
-			hasRec = true
-		}
-	}
-	if !hasRec {
-		t.Errorf("expected multixact anti-wraparound recommendation, got %v", vh.Recommendations)
+	if !hasFreezeFinding(vh, CodeMxidAgeHigh, SeverityHigh, "relminmxid") {
+		t.Errorf("expected high relminmxid last-resort finding, got %+v", vh.Findings)
 	}
 }
 
-// Healthy frozen-xid age (well under freeze_max_age) and the partitioned-parent
-// case (relfrozenxid 0) must NOT raise a wraparound recommendation, and the
-// partitioned case must leave the freeze fields zeroed.
+func hasFreezeFinding(vh VacuumHealth, code VacuumCode, sev Severity, substr string) bool {
+	for _, f := range vh.Findings {
+		if f.Code == code && f.Severity == sev && strings.Contains(f.Message, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// A relfrozenxid age between the routine trigger and 2x it is normal sawtooth and
+// must NOT fire; at/over 2x freeze_max_age (falling behind) it's a medium finding.
+func TestAnalyzeVacuumHealth_FreezeBandMedium(t *testing.T) {
+	// 250M = 1.25x freeze_max_age: routine, no finding.
+	a := vacuumFixture("riding", 1_000_000, 0, nil)
+	a.Planner.DatabaseXid = 260_000_000
+	a.Planner.Tables[0].Sizing.RelfrozenXid = 10_000_000 // age = 250M
+	if hasFreezeFinding(AnalyzeVacuumHealth(a)[0], CodeFreezeAgeHigh, SeverityMedium, "") {
+		t.Errorf("did not expect a freeze finding at 1.25x freeze_max_age")
+	}
+
+	// 450M = 2.25x freeze_max_age: overshot the trigger, falling behind → medium.
+	b := vacuumFixture("behind", 1_000_000, 0, nil)
+	b.Planner.DatabaseXid = 460_000_000
+	b.Planner.Tables[0].Sizing.RelfrozenXid = 10_000_000 // age = 450M
+	if !hasFreezeFinding(AnalyzeVacuumHealth(b)[0], CodeFreezeAgeHigh, SeverityMedium, "isn't keeping up") {
+		t.Errorf("expected a medium freeze finding at 2.25x freeze_max_age")
+	}
+}
+
+// Healthy frozen-xid age (within the routine sawtooth, under 2x freeze_max_age) and
+// the partitioned-parent case (relfrozenxid 0) must NOT raise a freeze finding, and
+// the partitioned case must leave the freeze fields zeroed.
 func TestAnalyzeVacuumHealth_WraparoundQuiet(t *testing.T) {
 	a := vacuumFixture("young", 1_000_000, 0, nil)
 	a.Planner.DatabaseXid = 200_000_000
