@@ -179,6 +179,44 @@ type BloatedIndexEntry struct {
 	IndexType     string  `json:"index_type"`
 }
 
+type BloatedTableEntry struct {
+	Schema        string  `json:"schema"`
+	Table         string  `json:"table"`
+	BloatRatio    float64 `json:"bloat_ratio"`
+	ActualPages   int64   `json:"actual_pages"`
+	ExpectedPages int64   `json:"expected_pages"`
+	ActualSize    int64   `json:"actual_size_bytes"`
+}
+
+func DetectBloatedTables(a *AnnotatedSchema, threshold float64) []BloatedTableEntry {
+	if a == nil || a.Schema == nil {
+		return nil
+	}
+	var entries []BloatedTableEntry
+	for i := range a.Schema.Tables {
+		t := &a.Schema.Tables[i]
+		qual := t.Qual()
+		b := a.TableBloatFor(qual)
+		if b == nil || b.BloatRatio <= threshold {
+			continue
+		}
+		sz := a.SizingFor(qual)
+		var sizeBytes int64
+		if sz != nil {
+			sizeBytes = sz.TableSize
+		}
+		entries = append(entries, BloatedTableEntry{
+			Schema: t.Schema, Table: t.Name,
+			BloatRatio: b.BloatRatio, ActualPages: b.ActualPages,
+			ExpectedPages: b.ExpectedPages, ActualSize: sizeBytes,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].BloatRatio > entries[j].BloatRatio
+	})
+	return entries
+}
+
 func DetectBloatedIndexes(a *AnnotatedSchema, threshold float64) []BloatedIndexEntry {
 	if a == nil || a.Schema == nil {
 		return nil

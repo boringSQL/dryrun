@@ -23,6 +23,8 @@ func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return s.handleDetectAnomalies(ctx, req)
 	case "bloated_indexes":
 		return s.handleDetectBloatedIndexes(ctx, req)
+	case "bloated_tables":
+		return s.handleDetectBloatedTables(ctx, req)
 	case "all":
 		return s.handleDetectAll(ctx, req)
 	default:
@@ -31,9 +33,10 @@ func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mc
 }
 
 // schema/table extractors for filterByQual
-func staleKey(e schema.StaleStatsEntry) (string, string)   { return e.Schema, e.Table }
-func unusedKey(e schema.UnusedIndexEntry) (string, string) { return e.Schema, e.Table }
-func bloatKey(e schema.BloatedIndexEntry) (string, string) { return e.Schema, e.Table }
+func staleKey(e schema.StaleStatsEntry) (string, string)      { return e.Schema, e.Table }
+func unusedKey(e schema.UnusedIndexEntry) (string, string)    { return e.Schema, e.Table }
+func bloatKey(e schema.BloatedIndexEntry) (string, string)    { return e.Schema, e.Table }
+func bloatTableKey(e schema.BloatedTableEntry) (string, string) { return e.Schema, e.Table }
 func vacuumKey(e vacuum.VacuumHealth) (string, string)     { return e.Schema, e.Table }
 func anomalyKey(m map[string]any) (string, string) {
 	s, _ := m["schema"].(string)
@@ -82,6 +85,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	staleEntries := filterByQual(schema.DetectStaleStats(a, int64(7)), schemaF, tableF, staleKey)
 	unusedEntries := filterByQual(schema.DetectUnusedIndexes(a), schemaF, tableF, unusedKey)
 	bloatEntries := filterByQual(schema.DetectBloatedIndexes(a, threshold), schemaF, tableF, bloatKey)
+	bloatTableEntries := filterByQual(schema.DetectBloatedTables(a, threshold), schemaF, tableF, bloatTableKey)
 	anomalies := filterByQual(buildAnomalies(a), schemaF, tableF, anomalyKey)
 
 	staleKept, staleOmitted := capStaleStats(staleEntries, max)
@@ -90,6 +94,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 		"unused_indexes":  entryBlock(unusedEntries, max),
 		"anomalies":       entryBlock(anomalies, max),
 		"bloated_indexes": entryBlock(bloatEntries, max),
+		"bloated_tables":  entryBlock(bloatTableEntries, max),
 	}
 
 	hint := ""
@@ -104,7 +109,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 
 	// point next at the truncated categories while trancating
 	var next []NextCall
-	for _, k := range []string{"stale_stats", "unused_indexes", "anomalies", "bloated_indexes"} {
+	for _, k := range []string{"stale_stats", "unused_indexes", "anomalies", "bloated_indexes", "bloated_tables"} {
 		if block, ok := wrapper[k].(map[string]any); ok && block["truncated"] == true {
 			next = append(next, narrowNext(k, schemaF, tableF)...)
 		}
@@ -198,6 +203,22 @@ func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolR
 		return textResult("No bloated indexes detected."), nil
 	}
 	return cappedKindResult(s, "bloated_indexes", entries, limitArg(req), schemaF, tableF), nil
+}
+
+func (s *Server) handleDetectBloatedTables(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	a, err := s.getAnnotated()
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+
+	schemaF := schemaArg(req)
+	tableF := getArg(req, "table")
+	threshold := getFloatArg(req, "threshold", 4.0)
+	entries := filterByQual(schema.DetectBloatedTables(a, threshold), schemaF, tableF, bloatTableKey)
+	if len(entries) == 0 {
+		return textResult("No bloated tables detected."), nil
+	}
+	return cappedKindResult(s, "bloated_tables", entries, limitArg(req), schemaF, tableF), nil
 }
 
 func cappedKindResult[T any](s *Server, kind string, entries []T, max int, schemaF, tableF string) *mcp.CallToolResult {
