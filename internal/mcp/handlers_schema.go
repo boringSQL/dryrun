@@ -154,6 +154,7 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 
 			result := map[string]any{}
 
+			bloat := a.TableBloatFor(qual)
 			switch detail {
 			case "full":
 				raw, err := json.Marshal(t)
@@ -164,11 +165,17 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 				if sizing != nil {
 					result["stats"] = sizing
 				}
+				if bloat != nil {
+					result["bloat"] = bloat
+				}
 			case "stats":
 				result["schema"] = t.Schema
 				result["name"] = t.Name
 				if sizing != nil {
 					result["stats"] = sizing
+				}
+				if bloat != nil {
+					result["bloat"] = bloat
 				}
 				if act := a.PrimaryActivity(qual); act != nil {
 					result["activity"] = act

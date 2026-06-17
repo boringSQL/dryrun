@@ -28,6 +28,7 @@ const (
 	CodeAutovacuumDisabled     VacuumCode = "autovacuum_disabled"
 	CodeDefaultKnobsLargeTable VacuumCode = "default_knobs_large_table"
 	CodeHighDeadTupleRatio     VacuumCode = "high_dead_tuple_ratio"
+	CodeHighBloat              VacuumCode = "high_bloat"
 	CodeVacuumThresholdHigh    VacuumCode = "vacuum_threshold_too_high"
 	CodeFreezeAgeHigh          VacuumCode = "freeze_age_high"
 	CodeMxidAgeHigh            VacuumCode = "mxid_age_high"
@@ -69,8 +70,9 @@ type (
 		EffectiveAnalyzeScale     float64         `json:"effective_analyze_scale_factor"`
 		AnalyzeTriggerAt          float64         `json:"analyze_trigger_at"`
 		AnalyzeProgress           float64         `json:"analyze_progress"`
-		AutovacuumEnabled         bool            `json:"autovacuum_enabled"`
-		XidAge                    int64           `json:"xid_age,omitempty"`
+		AutovacuumEnabled         bool                     `json:"autovacuum_enabled"`
+		Bloat                     *snapshot.BloatEstimate  `json:"bloat,omitempty"`
+		XidAge                    int64                    `json:"xid_age,omitempty"`
 		FreezeMaxAge              int64           `json:"freeze_max_age,omitempty"`
 		FreezeProgress            float64         `json:"freeze_progress,omitempty"`
 		FailsafeAge               int64           `json:"failsafe_age,omitempty"`
@@ -183,6 +185,7 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 		t := &a.Schema.Tables[i]
 		qual := t.Qual()
 		sizing := a.SizingFor(qual)
+		bloat := a.TableBloatFor(qual)
 		activity := a.PrimaryActivity(qual)
 		if sizing == nil || sizing.Reltuples < 10_000 {
 			continue
@@ -261,6 +264,7 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 			AnalyzeTriggerAt:          analyzeTrigger,
 			AnalyzeProgress:           analyzeProgress,
 			AutovacuumEnabled:         avEnabled,
+			Bloat:                     bloat,
 		}
 		// anti-wraparound: age(relfrozenxid) vs the (possibly overridden) freeze_max_age.
 		// ok=false (partitioned parents, pre-feature snapshots) skips freeze analysis.
@@ -337,6 +341,16 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 			vh.add(CodeVacuumThresholdHigh, SeverityMedium,
 				fmt.Sprintf("vacuum won't trigger until %dk dead tuples. Threshold is very high",
 					int64(triggerAt)/1000))
+		}
+		if bloat != nil && bloat.BloatRatio >= 4.0 {
+			sev := SeverityMedium
+			if bloat.BloatRatio >= 10.0 {
+				sev = SeverityHigh
+			}
+			vh.add(CodeHighBloat, sev,
+				fmt.Sprintf("table is %.1fx bloated: %d actual pages vs %d expected; "+
+					"autovacuum cannot reclaim this — consider VACUUM FULL or pg_repack",
+					bloat.BloatRatio, bloat.ActualPages, bloat.ExpectedPages))
 		}
 
 		results = append(results, vh)

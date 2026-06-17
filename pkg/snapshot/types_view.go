@@ -31,6 +31,19 @@ func (a *AnnotatedSchema) SizingFor(q QualifiedName) *TableSizing {
 	return nil
 }
 
+// TableBloatFor returns the bloat estimate for the table computed at snapshot time, or nil.
+func (a *AnnotatedSchema) TableBloatFor(q QualifiedName) *BloatEstimate {
+	if a == nil || a.Planner == nil {
+		return nil
+	}
+	for i := range a.Planner.Tables {
+		if a.Planner.Tables[i].Table == q {
+			return a.Planner.Tables[i].Bloat
+		}
+	}
+	return nil
+}
+
 func (a *AnnotatedSchema) IndexSizingFor(table QualifiedName, index string) *IndexSizing {
 	if a == nil || a.Planner == nil {
 		return nil
