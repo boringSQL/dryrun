@@ -292,7 +292,8 @@ func resolveProfileConfig(name string, profile *ProfileConfig, projectRoot strin
 		}
 		rp.SchemaFile = &p
 	}
-	did := name
+	// profile name must not leak into the stream key; unset falls back to project id
+	did := string(projectID)
 	if profile.DatabaseID != nil && *profile.DatabaseID != "" {
 		did = *profile.DatabaseID
 	}

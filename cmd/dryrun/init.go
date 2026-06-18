@@ -62,6 +62,10 @@ func (c pgxCapturer) IsStandby(ctx context.Context) (bool, error) {
 	return schema.FetchIsStandby(ctx, c.tx)
 }
 
+func (c pgxCapturer) CurrentDatabase(ctx context.Context) (string, error) {
+	return schema.FetchCurrentDatabase(ctx, c.tx)
+}
+
 func (c pgxCapturer) Introspect(ctx context.Context) (*schema.SchemaSnapshot, error) {
 	return schema.IntrospectSchema(ctx, c.tx)
 }
@@ -97,10 +101,6 @@ func initCmd() *cobra.Command {
 				configPath = args[0]
 			}
 
-			if err := scaffoldConfig(configPath); err != nil {
-				return err
-			}
-
 			dataDir, err := history.DefaultDataDir()
 			if err != nil {
 				return err
@@ -110,6 +110,9 @@ func initCmd() *cobra.Command {
 			}
 
 			if flagDB == "" {
+				if err := scaffoldConfig(configPath, ""); err != nil {
+					return err
+				}
 				fmt.Fprintf(os.Stderr, "Run 'dryrun --db <url> init' to capture a schema snapshot\n")
 				return nil
 			}
@@ -125,6 +128,15 @@ func initCmd() *cobra.Command {
 				return err
 			}
 			defer cap.Close(ctx)
+
+			// bake the real db name so the first capture's key matches later ones
+			dbName, err := cap.CurrentDatabase(ctx)
+			if err != nil {
+				return fmt.Errorf("query current database: %w", err)
+			}
+			if err := scaffoldConfig(configPath, dbName); err != nil {
+				return err
+			}
 
 			store, err := openHistoryStore("")
 			if err != nil {
@@ -309,7 +321,8 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 	return snap, planner, activity, masked, nil
 }
 
-func scaffoldConfig(configPath string) error {
+// dbName, when set, is baked as the profile's database_id; empty leaves it commented
+func scaffoldConfig(configPath, dbName string) error {
 	if _, err := os.Stat(configPath); err == nil {
 		fmt.Fprintf(os.Stderr, "%s already exists, skipping\n", configPath)
 		return nil
@@ -322,6 +335,12 @@ func scaffoldConfig(configPath string) error {
 		return err
 	}
 	profileName := filepath.Base(cwd)
+
+	databaseLine := `# database_id = "auth"   # the Postgres database name; defaults to the project id`
+	if dbName != "" {
+		databaseLine = fmt.Sprintf("database_id = %q   # the Postgres database name (from current_database())", dbName)
+	}
+
 	content := fmt.Sprintf(`[project]
 id = %q
 
@@ -332,7 +351,7 @@ profile = %q
 
 [profiles.%s]
 schema_file = ".dryrun/schema.json"
-# database_id = %q   # defaults to profile name; override to e.g. "auth", "billing"
+%s
 # masks_file = "data-masking-policy.yml"   # PII policy shared with fixturize; auto-discovered if omitted
 # mask_policies = ["pii"]                  # optional; default masks every column listed for this database
 
@@ -341,7 +360,7 @@ schema_file = ".dryrun/schema.json"
 
 # [conventions]
 # See: https://boringsql.com/dryrun/docs/dryrun-toml
-`, profileName, profileName, profileName, profileName)
+`, profileName, profileName, profileName, databaseLine)
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 		return err
 	}

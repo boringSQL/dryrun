@@ -45,7 +45,7 @@ db_url = "${PROD_AUTH_DATABASE_URL}"
 database_id = "auth"                  # set when a project has multiple databases
 ```
 
-`database_id` defaults to the profile name. Override it when you want the snapshot stream named differently from the profile (e.g. profile `prod-auth` → stream `auth`).
+`database_id` is the snapshot stream id. `dryrun init --db` bakes the real `current_database()` here when it scaffolds the profile; a profile that leaves it unset falls back to the project id (the profile name never becomes the stream id). Set it explicitly when one project tracks several databases (e.g. `auth`, `billing`).
 
 Pick one with `--profile`, or set a default:
 

@@ -190,3 +190,9 @@ func FetchIsStandby(ctx context.Context, pool Querier) (bool, error) {
 	err := pool.QueryRow(ctx, "SELECT pg_catalog.pg_is_in_recovery()").Scan(&b)
 	return b, err
 }
+
+func FetchCurrentDatabase(ctx context.Context, pool Querier) (string, error) {
+	var db string
+	err := pool.QueryRow(ctx, "SELECT current_database()").Scan(&db)
+	return db, err
+}
