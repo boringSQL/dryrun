@@ -190,7 +190,7 @@ func TestEstimateTableBloat_NormalTable(t *testing.T) {
 		{Name: "id", TypeName: "integer"},
 		{Name: "created_at", TypeName: "timestamptz"},
 	}}
-	est, ok := EstimateTableBloat(sz, table)
+	est, ok := EstimateTableBloat(sz, table, nil)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -214,12 +214,46 @@ func TestEstimateTableBloat_BloatedTable(t *testing.T) {
 
 	sz := snapshot.TableSizing{Relpages: expected * 5, Reltuples: 100000}
 	table := snapshot.Table{Columns: []snapshot.Column{{Name: "id", TypeName: "integer"}}}
-	est, ok := EstimateTableBloat(sz, table)
+	est, ok := EstimateTableBloat(sz, table, nil)
 	if !ok {
 		t.Fatal("expected ok")
 	}
 	if est.BloatRatio < 4.5 || est.BloatRatio > 5.5 {
 		t.Errorf("expected bloat ratio ~5.0, got %.2f", est.BloatRatio)
+	}
+}
+
+// Measured avg_width corrects the text false positive: a table sized for ~650B rows reads
+// as ~6x bloated under the fixed 32B text width, but ~1.0 once real widths are supplied.
+func TestEstimateTableBloat_AvgWidthCorrectsTextFalsePositive(t *testing.T) {
+	realWidth := 4 + 650 // id + a text body that lives inline
+	usable := float64(pageSize-pageHeaderSize) * heapFillfactor
+	expected := int64(math.Ceil(100000.0 / (usable / float64(heapTupleOverhead+realWidth))))
+
+	sz := snapshot.TableSizing{Relpages: expected, Reltuples: 100000}
+	table := snapshot.Table{Columns: []snapshot.Column{
+		{Name: "id", TypeName: "integer"},
+		{Name: "body", TypeName: "text"},
+	}}
+
+	declared, _ := EstimateTableBloat(sz, table, nil)
+	if declared.BloatRatio < 5 {
+		t.Fatalf("declared-width estimate should over-report (got %.2f)", declared.BloatRatio)
+	}
+	measured, ok := EstimateTableBloat(sz, table, map[string]int{"id": 4, "body": 650})
+	if !ok || measured.BloatRatio < 0.9 || measured.BloatRatio > 1.1 {
+		t.Errorf("measured-width ratio = %.2f, want ~1.0", measured.BloatRatio)
+	}
+}
+
+// A TOASTed column (avg_width past the threshold) counts as an 18B pointer, not its full
+// width, so it doesn't over-state expected pages.
+func TestHeapColWidth_TOASTCap(t *testing.T) {
+	if got := heapColWidth(50000); got != toastPointerWidth {
+		t.Errorf("TOASTed width = %d, want %d", got, toastPointerWidth)
+	}
+	if got := heapColWidth(120); got != 120 {
+		t.Errorf("inline width = %d, want 120", got)
 	}
 }
 
@@ -232,11 +266,11 @@ func TestEstimateTableBloat_FillfactorReloption(t *testing.T) {
 	}
 	sz := snapshot.TableSizing{Relpages: 1000, Reltuples: 100000}
 
-	withFF, ok := EstimateTableBloat(sz, table)
+	withFF, ok := EstimateTableBloat(sz, table, nil)
 	if !ok {
 		t.Fatal("expected ok")
 	}
-	plain, _ := EstimateTableBloat(sz, snapshot.Table{Columns: table.Columns})
+	plain, _ := EstimateTableBloat(sz, snapshot.Table{Columns: table.Columns}, nil)
 	if !(withFF.BloatRatio < plain.BloatRatio) {
 		t.Errorf("fillfactor=50 should lower bloat ratio: ff=%.2f plain=%.2f", withFF.BloatRatio, plain.BloatRatio)
 	}
@@ -250,7 +284,7 @@ func TestEstimateTableBloat_DegenerateSizing(t *testing.T) {
 		{Relpages: 10, Reltuples: 0},
 		{Relpages: 0, Reltuples: 1000},
 	} {
-		if _, ok := EstimateTableBloat(sz, table); ok {
+		if _, ok := EstimateTableBloat(sz, table, nil); ok {
 			t.Errorf("expected false for %+v", sz)
 		}
 	}
@@ -322,10 +356,10 @@ func TestEstimateIndexBloat_IncludeColumns(t *testing.T) {
 func TestEstimateTableBloat_FillfactorFallback(t *testing.T) {
 	cols := []snapshot.Column{{Name: "id", TypeName: "integer"}}
 	sz := snapshot.TableSizing{Relpages: 1000, Reltuples: 100000}
-	plain, _ := EstimateTableBloat(sz, snapshot.Table{Columns: cols})
+	plain, _ := EstimateTableBloat(sz, snapshot.Table{Columns: cols}, nil)
 
 	for _, opt := range []string{"fillfactor=0", "fillfactor=200", "fillfactor=abc", "autovacuum_enabled=false"} {
-		est, ok := EstimateTableBloat(sz, snapshot.Table{Columns: cols, Reloptions: []string{opt}})
+		est, ok := EstimateTableBloat(sz, snapshot.Table{Columns: cols, Reloptions: []string{opt}}, nil)
 		if !ok {
 			t.Fatalf("expected ok for reloption %q", opt)
 		}
