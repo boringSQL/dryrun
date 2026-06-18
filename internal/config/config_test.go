@@ -173,9 +173,10 @@ id = "demo"`)
 	}
 }
 
-// TestProfileDatabaseIDRoundTrip: TOML parsing for the new database_id
-// field on profiles. When set, ResolveProfile must surface it verbatim;
-// when omitted, it must fall back to the profile name (Rust parity).
+// TestProfileDatabaseIDRoundTrip: TOML parsing for the database_id field on
+// profiles. When set, ResolveProfile must surface it verbatim; when omitted,
+// it must fall back to the project id (not the profile name) so a profile name
+// never leaks into the stream key.
 func TestProfileDatabaseIDRoundTrip(t *testing.T) {
 	toml := `
 [project]
@@ -207,8 +208,8 @@ db_url = "postgres://dev/x"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rp.DatabaseID == nil || *rp.DatabaseID != "dev" {
-		t.Errorf("dev DatabaseID (fallback): got %v, want dev", rp.DatabaseID)
+	if rp.DatabaseID == nil || *rp.DatabaseID != "demo" {
+		t.Errorf("dev DatabaseID (fallback to project id): got %v, want demo", rp.DatabaseID)
 	}
 }
 
