@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -465,7 +466,12 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 		have[s.ContentHash] = struct{}{}
 	}
 
-	for _, s := range srcList {
+	// stores list newest-first; push oldest-first so remote history fills in chronological order
+	ordered := make([]history.SnapshotSummary, len(srcList))
+	copy(ordered, srcList)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Timestamp.Before(ordered[j].Timestamp) })
+
+	for _, s := range ordered {
 		if _, ok := have[s.ContentHash]; ok {
 			counts.UpToDate++
 			continue
