@@ -188,6 +188,22 @@ func TestAnalyzeVacuumHealth_LargeTableRecommendation(t *testing.T) {
 	}
 }
 
+// A partitioned parent has no heap of its own — autovacuum runs on the leaf
+// partitions, and the parent's reltuples is the aggregate across them. Even when that
+// aggregate is large and on default knobs, the parent must be skipped (the leaves are
+// analyzed as their own tables); flagging it is misleading noise.
+func TestAnalyzeVacuumHealth_PartitionedParentSkipped(t *testing.T) {
+	a := vacuumFixture("part_parent", 70_000_000, 0, nil)
+	a.Schema.Tables[0].PartitionInfo = &snapshot.PartitionInfo{
+		Strategy: snapshot.PartitionRange,
+		Key:      "id",
+		Children: []snapshot.PartitionChild{{}},
+	}
+	if got := AnalyzeVacuumHealth(a); len(got) != 0 {
+		t.Errorf("expected 0 results for a partitioned parent, got %d: %+v", len(got), got)
+	}
+}
+
 // Dead-tuple ratio > 10% triggers a separate recommendation — the message starts
 // with "high dead tuple".
 func TestAnalyzeVacuumHealth_HighDeadTupleRatio(t *testing.T) {

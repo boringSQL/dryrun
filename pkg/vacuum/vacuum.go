@@ -56,40 +56,40 @@ type (
 	}
 
 	VacuumHealth struct {
-		Schema                    string          `json:"schema"`
-		Table                     string          `json:"table"`
-		Reltuples                 float64         `json:"reltuples"`
-		DeadTuples                int64           `json:"dead_tuples"`
-		ModSinceAnalyze           int64           `json:"mod_since_analyze"`
-		VacuumTriggerAt           float64         `json:"vacuum_trigger_at"`
-		VacuumProgress            float64         `json:"vacuum_progress"`
-		HasOverrides              bool            `json:"has_overrides"`
-		EffectiveThreshold        int64           `json:"effective_threshold"`
-		EffectiveScale            float64         `json:"effective_scale_factor"`
-		EffectiveAnalyzeThreshold int64           `json:"effective_analyze_threshold"`
-		EffectiveAnalyzeScale     float64         `json:"effective_analyze_scale_factor"`
-		AnalyzeTriggerAt          float64         `json:"analyze_trigger_at"`
-		AnalyzeProgress           float64         `json:"analyze_progress"`
-		AutovacuumEnabled         bool                     `json:"autovacuum_enabled"`
-		Bloat                     *snapshot.BloatEstimate  `json:"bloat,omitempty"`
-		XidAge                    int64                    `json:"xid_age,omitempty"`
-		FreezeMaxAge              int64           `json:"freeze_max_age,omitempty"`
-		FreezeProgress            float64         `json:"freeze_progress,omitempty"`
-		FailsafeAge               int64           `json:"failsafe_age,omitempty"`
-		MxidAge                   int64           `json:"mxid_age,omitempty"`
-		MultixactFreezeMaxAge     int64           `json:"multixact_freeze_max_age,omitempty"`
-		MultixactFreezeProgress   float64         `json:"multixact_freeze_progress,omitempty"`
-		MultixactFailsafeAge      int64           `json:"multixact_failsafe_age,omitempty"`
-		LastVacuum                *time.Time      `json:"last_vacuum,omitempty"`
-		LastAutovacuum            *time.Time      `json:"last_autovacuum,omitempty"`
-		LastAnalyze               *time.Time      `json:"last_analyze,omitempty"`
-		LastAutoanalyze           *time.Time      `json:"last_autoanalyze,omitempty"`
-		VacuumCount               int64           `json:"vacuum_count"`
-		AutovacuumCount           int64           `json:"autovacuum_count"`
-		AnalyzeCount              int64           `json:"analyze_count"`
-		AutoanalyzeCount          int64           `json:"autoanalyze_count"`
-		Findings                  []VacuumFinding `json:"findings,omitempty"`
-		Recommendations           []string        `json:"recommendations,omitempty"` // Message of each Finding, in order
+		Schema                    string                  `json:"schema"`
+		Table                     string                  `json:"table"`
+		Reltuples                 float64                 `json:"reltuples"`
+		DeadTuples                int64                   `json:"dead_tuples"`
+		ModSinceAnalyze           int64                   `json:"mod_since_analyze"`
+		VacuumTriggerAt           float64                 `json:"vacuum_trigger_at"`
+		VacuumProgress            float64                 `json:"vacuum_progress"`
+		HasOverrides              bool                    `json:"has_overrides"`
+		EffectiveThreshold        int64                   `json:"effective_threshold"`
+		EffectiveScale            float64                 `json:"effective_scale_factor"`
+		EffectiveAnalyzeThreshold int64                   `json:"effective_analyze_threshold"`
+		EffectiveAnalyzeScale     float64                 `json:"effective_analyze_scale_factor"`
+		AnalyzeTriggerAt          float64                 `json:"analyze_trigger_at"`
+		AnalyzeProgress           float64                 `json:"analyze_progress"`
+		AutovacuumEnabled         bool                    `json:"autovacuum_enabled"`
+		Bloat                     *snapshot.BloatEstimate `json:"bloat,omitempty"`
+		XidAge                    int64                   `json:"xid_age,omitempty"`
+		FreezeMaxAge              int64                   `json:"freeze_max_age,omitempty"`
+		FreezeProgress            float64                 `json:"freeze_progress,omitempty"`
+		FailsafeAge               int64                   `json:"failsafe_age,omitempty"`
+		MxidAge                   int64                   `json:"mxid_age,omitempty"`
+		MultixactFreezeMaxAge     int64                   `json:"multixact_freeze_max_age,omitempty"`
+		MultixactFreezeProgress   float64                 `json:"multixact_freeze_progress,omitempty"`
+		MultixactFailsafeAge      int64                   `json:"multixact_failsafe_age,omitempty"`
+		LastVacuum                *time.Time              `json:"last_vacuum,omitempty"`
+		LastAutovacuum            *time.Time              `json:"last_autovacuum,omitempty"`
+		LastAnalyze               *time.Time              `json:"last_analyze,omitempty"`
+		LastAutoanalyze           *time.Time              `json:"last_autoanalyze,omitempty"`
+		VacuumCount               int64                   `json:"vacuum_count"`
+		AutovacuumCount           int64                   `json:"autovacuum_count"`
+		AnalyzeCount              int64                   `json:"analyze_count"`
+		AutoanalyzeCount          int64                   `json:"autoanalyze_count"`
+		Findings                  []VacuumFinding         `json:"findings,omitempty"`
+		Recommendations           []string                `json:"recommendations,omitempty"` // Message of each Finding, in order
 	}
 )
 
@@ -183,6 +183,11 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 	var results []VacuumHealth
 	for i := range a.Schema.Tables {
 		t := &a.Schema.Tables[i]
+
+		// skip partitioned table as they have no heap of its own
+		if t.PartitionInfo != nil {
+			continue
+		}
 		qual := t.Qual()
 		sizing := a.SizingFor(qual)
 		bloat := a.TableBloatFor(qual)
