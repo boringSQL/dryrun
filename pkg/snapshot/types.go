@@ -119,6 +119,7 @@ type ColumnStats struct {
 	MostCommonFreqs *string  `json:"most_common_freqs,omitempty"`
 	HistogramBounds *string  `json:"histogram_bounds,omitempty"`
 	Correlation     *float64 `json:"correlation,omitempty"`
+	AvgWidth        *int     `json:"avg_width,omitempty"` // pg_stats avg bytes/value; bloat row-width estimate
 }
 
 type PartitionInfo struct {

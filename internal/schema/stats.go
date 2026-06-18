@@ -142,6 +142,7 @@ func fetchPlannerColumnStats(ctx context.Context, pool Querier) ([]ColumnStatsEn
 			&e.Stats.NullFrac, &e.Stats.NDistinct,
 			&e.Stats.MostCommonVals, &e.Stats.MostCommonFreqs,
 			&e.Stats.HistogramBounds, &e.Stats.Correlation,
+			&e.Stats.AvgWidth,
 		)
 		return e, err
 	})

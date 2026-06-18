@@ -51,7 +51,8 @@ SELECT s.schemaname               AS schema_name,
             THEN NULL
             ELSE s.most_common_freqs::text END  AS most_common_freqs,
        s.histogram_bounds::text   AS histogram_bounds,
-       s.correlation::float8      AS correlation
+       s.correlation::float8      AS correlation,
+       s.avg_width::int           AS avg_width
   FROM pg_catalog.pg_stats s
   JOIN pg_catalog.pg_class     c ON c.relname = s.tablename
   JOIN pg_catalog.pg_namespace  n ON n.oid = c.relnamespace AND n.nspname = s.schemaname

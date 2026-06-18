@@ -17,6 +17,9 @@ const (
 	pageHeaderSize    = 24  // PageHeaderData
 	heapTupleOverhead = 28  // MAXALIGN'd tuple header (24) + item pointer (4)
 	heapFillfactor    = 1.0 // heap default; overridden by reloptions
+
+	toastThreshold    = 2000 // ~TOAST_TUPLE_THRESHOLD
+	toastPointerWidth = 18   // varlena TOAST pointer
 )
 
 // Avg byte widths per type for btree tuple sizing
@@ -107,16 +110,20 @@ func EstimateIndexBloat(sizing snapshot.IndexSizing, columns, includeColumns []s
 	}, true
 }
 
-// Wide values get TOASTed out of the heap; summing raw type widths overcounts
-// them, so this under-reports bloat on wide tables rather than over.
-func EstimateTableBloat(sizing snapshot.TableSizing, table snapshot.Table) (snapshot.BloatEstimate, bool) {
+// colWidth is measured avg_width per column; absent columns fall back to declared type width.
+func EstimateTableBloat(sizing snapshot.TableSizing, table snapshot.Table, colWidth map[string]int) (snapshot.BloatEstimate, bool) {
 	if sizing.Reltuples <= 0 || sizing.Relpages <= 0 {
 		return snapshot.BloatEstimate{}, false
 	}
 
 	rowWidth := 0
 	for i := range table.Columns {
-		rowWidth += lookupTypeWidth(table.Columns[i].TypeName)
+		c := &table.Columns[i]
+		if w, ok := colWidth[c.Name]; ok && w > 0 {
+			rowWidth += heapColWidth(w)
+		} else {
+			rowWidth += lookupTypeWidth(c.TypeName)
+		}
 	}
 	if rowWidth == 0 {
 		return snapshot.BloatEstimate{}, false
@@ -160,13 +167,28 @@ func Annotate(planner *snapshot.PlannerStatsSnapshot, sch *snapshot.SchemaSnapsh
 		tables[sch.Tables[i].Qual()] = &sch.Tables[i]
 	}
 
+	// measured column widths per table
+	widths := make(map[snapshot.QualifiedName]map[string]int)
+	for i := range planner.Columns {
+		c := &planner.Columns[i]
+		if c.Stats.AvgWidth == nil {
+			continue
+		}
+		m := widths[c.Table]
+		if m == nil {
+			m = make(map[string]int)
+			widths[c.Table] = m
+		}
+		m[c.Column] = *c.Stats.AvgWidth
+	}
+
 	for i := range planner.Tables {
 		e := &planner.Tables[i]
 		table := tables[e.Table]
 		if table == nil {
 			continue
 		}
-		if est, ok := EstimateTableBloat(e.Sizing, *table); ok {
+		if est, ok := EstimateTableBloat(e.Sizing, *table, widths[e.Table]); ok {
 			e.Bloat = &est
 		}
 	}
@@ -191,6 +213,14 @@ func Annotate(planner *snapshot.PlannerStatsSnapshot, sch *snapshot.SchemaSnapsh
 			e.Bloat = &est
 		}
 	}
+}
+
+// heapColWidth caps a TOASTed value to its in-heap pointer width.
+func heapColWidth(avgWidth int) int {
+	if avgWidth > toastThreshold {
+		return toastPointerWidth
+	}
+	return avgWidth
 }
 
 // lookupTypeWidth returns the estimated byte width for a PostgreSQL type name.
