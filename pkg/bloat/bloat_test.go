@@ -177,6 +177,45 @@ func TestAnnotate_FillsTablesAndBtreeOnly(t *testing.T) {
 	}
 }
 
+// Annotate flags the bloat estimate Approximate for partial and expression
+// indexes (the pgstattuple-free model is unreliable there) and leaves a plain
+// btree estimate trustworthy.
+func TestAnnotate_ApproximateForPartialAndExpression(t *testing.T) {
+	pred := "deleted_at IS NULL"
+	sch := &snapshot.SchemaSnapshot{Tables: []snapshot.Table{{
+		Schema: "public", Name: "t",
+		Columns: []snapshot.Column{
+			{Name: "id", TypeName: "integer"},
+			{Name: "email", TypeName: "text"},
+		},
+		Indexes: []snapshot.Index{
+			{Name: "plain", Columns: []string{"id"}, IndexType: "btree"},
+			{Name: "partial", Columns: []string{"id"}, IndexType: "btree", Predicate: &pred},
+			{Name: "expr", Columns: []string{"email"}, IndexType: "btree", HasExpressions: true},
+		},
+	}}}
+	qual := snapshot.QualifiedName{Schema: "public", Name: "t"}
+	planner := &snapshot.PlannerStatsSnapshot{
+		Indexes: []snapshot.IndexSizingEntry{
+			{Table: qual, Index: "plain", Sizing: snapshot.IndexSizing{Relpages: 1000, Reltuples: 100000}},
+			{Table: qual, Index: "partial", Sizing: snapshot.IndexSizing{Relpages: 1000, Reltuples: 100000}},
+			{Table: qual, Index: "expr", Sizing: snapshot.IndexSizing{Relpages: 1000, Reltuples: 100000}},
+		},
+	}
+
+	Annotate(planner, sch)
+
+	for i, want := range []bool{false, true, true} {
+		b := planner.Indexes[i].Bloat
+		if b == nil {
+			t.Fatalf("index %q: expected a bloat estimate", planner.Indexes[i].Index)
+		}
+		if b.Approximate != want {
+			t.Errorf("index %q: Approximate = %v, want %v", planner.Indexes[i].Index, b.Approximate, want)
+		}
+	}
+}
+
 // Healthy table: actual heap pages match the analytical expectation, so the
 // bloat ratio is ~1.0 and avg_tuple_width is the summed column widths.
 func TestEstimateTableBloat_NormalTable(t *testing.T) {

@@ -97,6 +97,29 @@ func TestContentHash_SensitiveToAddRemoveIndex(t *testing.T) {
 	}
 }
 
+// HasExpressions is a transient capture-time field (json:"-") that feeds the bloat
+// estimator's confidence flag; it must not be part of the schema content hash, or
+// adding it would mint a one-time spurious schema diff for every tracked database.
+func TestContentHash_IgnoresHasExpressions(t *testing.T) {
+	withIdx := baselineSnap()
+	withIdx.Tables[0].Indexes = []Index{{
+		Name:       "users_email_idx",
+		Columns:    []string{"email"},
+		IndexType:  "btree",
+		Definition: "CREATE INDEX users_email_idx ON public.users (lower(email))",
+		IsValid:    true,
+	}}
+	base := ComputeContentHash(withIdx)
+
+	flagged := withIdx
+	flagged.Tables = append([]Table(nil), withIdx.Tables...)
+	flagged.Tables[0].Indexes = append([]Index(nil), withIdx.Tables[0].Indexes...)
+	flagged.Tables[0].Indexes[0].HasExpressions = true
+	if h := ComputeContentHash(flagged); h != base {
+		t.Errorf("content hash changed when HasExpressions toggled; it must be excluded")
+	}
+}
+
 // Changing a primary key (kind or column list) is a DDL change. Sensitivity
 // here guards the most common "promote a candidate key to PK" migration.
 func TestContentHash_SensitiveToPrimaryKeyChange(t *testing.T) {
