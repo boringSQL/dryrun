@@ -109,6 +109,7 @@ type Index struct {
 	IsValid         bool     `json:"is_valid"`
 	IsReady         bool     `json:"is_ready"`
 	BacksConstraint bool     `json:"backs_constraint,omitempty"`
+	HasExpressions  bool     `json:"-"`
 }
 
 // Column-level stats from pg_stats
@@ -427,6 +428,7 @@ type BloatEstimate struct {
 	// index-key width for index entries, heap row width for table entries
 	AvgTupleWidth int   `json:"avg_tuple_width"`
 	SizeBytes     int64 `json:"size_bytes"`
+	Approximate   bool  `json:"approximate,omitempty"`
 }
 
 type ColumnStatsEntry struct {

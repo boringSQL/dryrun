@@ -210,6 +210,7 @@ func Annotate(planner *snapshot.PlannerStatsSnapshot, sch *snapshot.SchemaSnapsh
 			continue
 		}
 		if est, ok := EstimateIndexBloat(e.Sizing, idx.Columns, idx.IncludeColumns, *table, idx.IndexType); ok {
+			est.Approximate = idx.Predicate != nil || idx.HasExpressions
 			e.Bloat = &est
 		}
 	}

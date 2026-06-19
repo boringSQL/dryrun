@@ -162,6 +162,7 @@ SELECT i.indrelid::int4      AS table_oid,
            SELECT 1 FROM pg_catalog.pg_constraint con
             WHERE con.conindid = i.indexrelid
        ) AS backs_constraint,
+       (i.indexprs IS NOT NULL) AS has_expressions,
        -- All column names (key + include)
        (SELECT array_agg(a.attname ORDER BY ord.n)
           FROM unnest(i.indkey) WITH ORDINALITY AS ord(attnum, n)

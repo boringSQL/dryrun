@@ -220,6 +220,7 @@ type (
 		isValid         bool
 		isReady         bool
 		backsConstraint bool
+		hasExpressions  bool
 	}
 
 	rawPartitionInfo struct {
@@ -417,7 +418,7 @@ func fetchIndexes(ctx context.Context, pool Querier) ([]rawIndex, error) {
 			&oid, &ri.name, &ri.indexType,
 			&ri.isUnique, &ri.isPrimary, &ri.predicate,
 			&ri.definition, &nKeyAtts, &ri.isValid, &ri.isReady,
-			&ri.backsConstraint, &allCols,
+			&ri.backsConstraint, &ri.hasExpressions, &allCols,
 		); err != nil {
 			return ri, err
 		}
@@ -652,6 +653,7 @@ func assembleTables(
 			IsValid:         ri.isValid,
 			IsReady:         ri.isReady,
 			BacksConstraint: ri.backsConstraint,
+			HasExpressions:  ri.hasExpressions,
 		})
 	}
 
