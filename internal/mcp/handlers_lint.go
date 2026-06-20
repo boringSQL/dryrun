@@ -8,17 +8,18 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/audit"
 	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
 
-	target := filterSnap(snap, getArg(req, "schema"), getArg(req, "table"))
+	target := filterSnap(a.Schema, getArg(req, "schema"), getArg(req, "table"))
 
 	// fields wins over scope when set
 	var wantConventions, wantAudit bool
@@ -74,7 +75,9 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 	var auditFindingsCount int
 	if wantAudit {
 		auditCfg := audit.DefaultConfig()
-		findings := audit.RunRules(target, &auditCfg)
+		// planner stays unfiltered; bloat rules iterate target.Tables and look up sizing by qual
+		ta := &schema.AnnotatedSchema{Schema: target, Planner: a.Planner, Merged: a.Merged}
+		findings := audit.RunRulesAnnotated(ta, &auditCfg)
 		for _, f := range findings {
 			if f.DDLFix != nil {
 				hasDDLFixes = true

@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/boringsql/dryrun/pkg/bloat"
 	"github.com/boringsql/dryrun/pkg/lint"
 	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
-func runAllRules(snap *snapshot.SchemaSnapshot, config *Config) []lint.Finding {
+func runAllRules(a *snapshot.AnnotatedSchema, config *Config) []lint.Finding {
+	snap := a.Schema
 	var findings []lint.Finding
 	disabled := make(map[string]bool)
 	for _, r := range config.DisabledRules {
@@ -24,7 +26,8 @@ func runAllRules(snap *snapshot.SchemaSnapshot, config *Config) []lint.Finding {
 		{"indexes/redundant", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkRedundantIndexes(s) }},
 		{"indexes/too_many", func(s *snapshot.SchemaSnapshot, c *Config) []lint.Finding { return checkTooManyIndexes(s, c) }},
 		{"indexes/wide_columns", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkWideColumnIndexes(s) }},
-		{"indexes/bloated", func(s *snapshot.SchemaSnapshot, c *Config) []lint.Finding { return checkBloatedIndexes(s, c) }},
+		{"indexes/bloated", func(_ *snapshot.SchemaSnapshot, c *Config) []lint.Finding { return checkBloatedIndexes(a, c) }},
+		{"tables/bloated", func(_ *snapshot.SchemaSnapshot, c *Config) []lint.Finding { return checkBloatedTables(a, c) }},
 		{"fk/type_mismatch", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkFKTypeMismatch(s) }},
 		{"fk/circular", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkCircularFKs(s) }},
 		{"fk/orphan", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkOrphanTables(s) }},
@@ -198,9 +201,61 @@ func checkWideColumnIndexes(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	return findings
 }
 
-// stats-dependent; audit harness only passes DDL — detect/bloated_indexes MCP tool covers the live path
-func checkBloatedIndexes(_ *snapshot.SchemaSnapshot, _ *Config) []lint.Finding {
-	return nil
+// stats-dependent: no findings without planner sizing (DDL-only snapshots)
+func checkBloatedIndexes(a *snapshot.AnnotatedSchema, config *Config) []lint.Finding {
+	if a == nil || a.Schema == nil {
+		return nil
+	}
+	var findings []lint.Finding
+	for i := range a.Schema.Tables {
+		t := &a.Schema.Tables[i]
+		qualified := t.Schema + "." + t.Name
+		for _, idx := range t.Indexes {
+			sz := a.IndexSizingFor(t.Qual(), idx.Name)
+			if sz == nil {
+				continue
+			}
+			est, ok := bloat.EstimateIndexBloat(*sz, idx.Columns, idx.IncludeColumns, *t, idx.IndexType)
+			if !ok || est.BloatRatio <= config.BloatThreshold {
+				continue
+			}
+			approx := ""
+			if idx.Predicate != nil || idx.HasExpressions {
+				approx = " (approximate for expression/partial index)"
+			}
+			findings = append(findings, lint.Finding{
+				Rule: "indexes/bloated", Severity: lint.SeverityWarning,
+				Tables: []string{qualified},
+				Message: fmt.Sprintf("Index '%s' is ~%.1fx larger than expected (%d vs %d pages)%s",
+					idx.Name, est.BloatRatio, est.ActualPages, est.ExpectedPages, approx),
+				Recommendation: fmt.Sprintf("REINDEX INDEX CONCURRENTLY %s to reclaim bloat", idx.Name),
+			})
+		}
+	}
+	return findings
+}
+
+// reads the bloat estimate Annotate computed (it gathers measured column widths)
+func checkBloatedTables(a *snapshot.AnnotatedSchema, config *Config) []lint.Finding {
+	if a == nil || a.Schema == nil {
+		return nil
+	}
+	var findings []lint.Finding
+	for i := range a.Schema.Tables {
+		t := &a.Schema.Tables[i]
+		est := a.TableBloatFor(t.Qual())
+		if est == nil || est.BloatRatio <= config.BloatThreshold {
+			continue
+		}
+		findings = append(findings, lint.Finding{
+			Rule: "tables/bloated", Severity: lint.SeverityWarning,
+			Tables: []string{t.Schema + "." + t.Name},
+			Message: fmt.Sprintf("Table is ~%.1fx larger than expected (%d vs %d pages)",
+				est.BloatRatio, est.ActualPages, est.ExpectedPages),
+			Recommendation: "VACUUM FULL or pg_repack to reclaim space; check for long-running transactions holding back vacuum",
+		})
+	}
+	return findings
 }
 
 func checkFKTypeMismatch(snap *snapshot.SchemaSnapshot) []lint.Finding {
