@@ -7,6 +7,7 @@ import (
 	"github.com/boringsql/dryrun/pkg/bloat"
 	"github.com/boringsql/dryrun/pkg/lint"
 	"github.com/boringsql/dryrun/pkg/snapshot"
+	"github.com/boringsql/dryrun/pkg/vacuum"
 )
 
 func runAllRules(a *snapshot.AnnotatedSchema, config *Config) []lint.Finding {
@@ -36,12 +37,18 @@ func runAllRules(a *snapshot.AnnotatedSchema, config *Config) []lint.Finding {
 		{"naming/reserved", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkReservedWords(s) }},
 		{"naming/id_mismatch", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkIDMismatch(s) }},
 		{"docs/no_comment", func(s *snapshot.SchemaSnapshot, c *Config) []lint.Finding { return checkNoComment(s, c) }},
-		{"vacuum/large_table_defaults", func(s *snapshot.SchemaSnapshot, _ *Config) []lint.Finding { return checkVacuumLargeTableDefaults(s) }},
 	}
 
 	for _, r := range rules {
 		if !disabled[r.id] {
 			findings = append(findings, r.fn(snap, config)...)
+		}
+	}
+
+	// vacuum spans several vacuum/* ids; gate each
+	for _, f := range vacuum.Findings(a) {
+		if !disabled[f.Rule] {
+			findings = append(findings, f)
 		}
 	}
 	return findings
@@ -589,11 +596,6 @@ func sliceEqual(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-// stats-dependent; audit harness only passes DDL — vacuum_health MCP tool covers the live path
-func checkVacuumLargeTableDefaults(_ *snapshot.SchemaSnapshot) []lint.Finding {
-	return nil
 }
 
 func isPrefix(prefix, full []string) bool {
