@@ -16,7 +16,25 @@ func LintSchema(snap *snapshot.SchemaSnapshot, config *Config) Report {
 }
 
 func RunRules(snap *snapshot.SchemaSnapshot, config *Config) []Finding {
-	return suppressOverlapping(runAllRules(snap, config))
+	return suppressOverlapping(GateDisabled(runAllRules(snap, config), config.DisabledRules))
+}
+
+// single disable gate; policy.Apply will replace this
+func GateDisabled(findings []Finding, disabled []string) []Finding {
+	if len(disabled) == 0 {
+		return findings
+	}
+	skip := make(map[string]bool, len(disabled))
+	for _, r := range disabled {
+		skip[r] = true
+	}
+	out := make([]Finding, 0, len(findings))
+	for _, f := range findings {
+		if !skip[f.Rule] {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // Drop lower-severity duplicates when multiple rules hit same table+column

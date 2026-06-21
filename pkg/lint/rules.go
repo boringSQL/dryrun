@@ -97,24 +97,13 @@ func runAllRules(snap *snapshot.SchemaSnapshot, config *Config) []Finding {
 		}
 
 		for _, r := range rules {
-			if !isDisabled(&effectiveConfig, r.name) {
-				r.fn(t, qualified, &effectiveConfig, snap, &violations)
-			}
+			r.fn(t, qualified, &effectiveConfig, snap, &violations)
 		}
 	}
 
 	checkPartitionGUCs(snap, &effectiveConfig, &violations)
 
 	return violations
-}
-
-func isDisabled(config *Config, rule string) bool {
-	for _, r := range config.DisabledRules {
-		if r == rule {
-			return true
-		}
-	}
-	return false
 }
 
 // Guess dominant naming convention from existing tables

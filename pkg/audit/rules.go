@@ -13,10 +13,6 @@ import (
 func runAllRules(a *snapshot.AnnotatedSchema, config *Config) []lint.Finding {
 	snap := a.Schema
 	var findings []lint.Finding
-	disabled := make(map[string]bool)
-	for _, r := range config.DisabledRules {
-		disabled[r] = true
-	}
 
 	type rule struct {
 		id string
@@ -40,18 +36,10 @@ func runAllRules(a *snapshot.AnnotatedSchema, config *Config) []lint.Finding {
 	}
 
 	for _, r := range rules {
-		if !disabled[r.id] {
-			findings = append(findings, r.fn(snap, config)...)
-		}
+		findings = append(findings, r.fn(snap, config)...)
 	}
-
-	// vacuum spans several vacuum/* ids; gate each
-	for _, f := range vacuum.Findings(a) {
-		if !disabled[f.Rule] {
-			findings = append(findings, f)
-		}
-	}
-	return findings
+	findings = append(findings, vacuum.Findings(a)...)
+	return lint.GateDisabled(findings, config.DisabledRules)
 }
 
 var wideTypes = []string{"text", "varchar", "bytea", "jsonb", "json", "xml"}
@@ -239,7 +227,7 @@ func checkBloatedIndexes(a *snapshot.AnnotatedSchema, config *Config) []lint.Fin
 					idx.Name, est.BloatRatio, est.ActualPages, est.ExpectedPages, suffix),
 				Recommendation: fmt.Sprintf("REINDEX INDEX CONCURRENTLY %s to reclaim bloat", idx.Name),
 				Approximate:    approx,
-				Why:            why,
+				ApproximateWhy: why,
 			})
 		}
 	}

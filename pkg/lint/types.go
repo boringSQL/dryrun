@@ -20,8 +20,8 @@ type (
 		DDLFix         *string  `json:"ddl_fix,omitempty"`
 		MinPgVersion   *int     `json:"min_pg_version,omitempty"`
 		// estimate-based finding whose math is a lower bound (expression/partial index)
-		Approximate bool   `json:"approximate,omitempty"`
-		Why         string `json:"why,omitempty"`
+		Approximate    bool   `json:"approximate,omitempty"`
+		ApproximateWhy string `json:"approximate_why,omitempty"`
 	}
 
 	Summary struct {
