@@ -12,7 +12,25 @@ func LintSchema(snap *snapshot.SchemaSnapshot, config *Config) Report {
 	if len(config.DisabledRules) > 0 {
 		configSource = fmt.Sprintf("custom (%d rules disabled)", len(config.DisabledRules))
 	}
-	return NewReport(RunRules(snap, config), len(snap.Tables), configSource)
+	findings := GateMinSeverity(RunRules(snap, config), config.MinSeverity)
+	return NewReport(findings, len(snap.Tables), configSource)
+}
+
+func GateMinSeverity(findings []Finding, min Severity) []Finding {
+	if min == "" {
+		return findings
+	}
+
+	floor := severityRank(min)
+	out := make([]Finding, 0, len(findings))
+
+	for _, f := range findings {
+		if severityRank(f.Severity) >= floor {
+			out = append(out, f)
+		}
+	}
+
+	return out
 }
 
 func RunRules(snap *snapshot.SchemaSnapshot, config *Config) []Finding {

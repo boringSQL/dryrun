@@ -51,7 +51,7 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 	result := map[string]any{}
 
 	if wantConventions {
-		findings := lint.RunRules(target, &s.lintConfig)
+		findings := lint.GateMinSeverity(lint.RunRules(target, &s.lintConfig), s.lintConfig.MinSeverity)
 		report := lint.NewReport(findings, len(target.Tables), "conventions")
 		compact := lint.CompactReportFromReportN(report, 5)
 		if fullMode {
@@ -77,7 +77,7 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 		auditCfg := audit.DefaultConfig()
 		// planner stays unfiltered; bloat rules iterate target.Tables and look up sizing by qual
 		ta := &schema.AnnotatedSchema{Schema: target, Planner: a.Planner, Merged: a.Merged}
-		findings := audit.RunRulesAnnotated(ta, &auditCfg)
+		findings := lint.GateMinSeverity(audit.RunRulesAnnotated(ta, &auditCfg), s.lintConfig.MinSeverity)
 		for _, f := range findings {
 			if f.DDLFix != nil {
 				hasDDLFixes = true

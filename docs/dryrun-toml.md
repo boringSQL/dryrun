@@ -256,7 +256,7 @@ timestamp_type = "timestamptz" # warns about bare timestamp without time zone
 
 ### min_severity
 
-Filter lint output by severity. Default: `warning`.
+Filter lint output by severity. Default: `info` (show everything).
 
 | Value | Shows |
 |-------|-------|

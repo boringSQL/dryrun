@@ -64,6 +64,7 @@ type (
 		RequireTimestamps     *bool                 `toml:"require_timestamps"`
 		TimestampType         *string               `toml:"timestamp_type"`
 		PreferTextOverVarchar *bool                 `toml:"prefer_text_over_varchar"`
+		MinSeverity           *string               `toml:"min_severity"`
 		DisabledRules         *DisabledRulesConfig  `toml:"disabled_rules"`
 		Custom                *CustomPatternsConfig `toml:"custom"`
 	}
@@ -267,6 +268,9 @@ func (c *ProjectConfig) LintConfig() lint.Config {
 	}
 	if conv.PreferTextOverVarchar != nil {
 		cfg.PreferTextOverVarchar = *conv.PreferTextOverVarchar
+	}
+	if conv.MinSeverity != nil {
+		cfg.MinSeverity = lint.Severity(*conv.MinSeverity)
 	}
 	if conv.DisabledRules != nil {
 		cfg.DisabledRules = conv.DisabledRules.Rules
