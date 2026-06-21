@@ -149,13 +149,13 @@ func TestCheckBloatedIndexes_ApproximateFields(t *testing.T) {
 				t.Errorf("Approximate = %v, want %v", f.Approximate, tc.wantApprox)
 			}
 
-			// Why and the Message suffix must move together: both present when
+			// ApproximateWhy and the Message suffix must move together: both present when
 			// approximate, both absent otherwise. They are the same fact in two
 			// shapes and should never disagree.
-			gotWhy := f.Why != ""
+			gotWhy := f.ApproximateWhy != ""
 			gotSuffix := strings.Contains(f.Message, "approximate")
 			if gotWhy != tc.wantApprox {
-				t.Errorf("Why populated = %v, want %v (Why=%q)", gotWhy, tc.wantApprox, f.Why)
+				t.Errorf("ApproximateWhy populated = %v, want %v (ApproximateWhy=%q)", gotWhy, tc.wantApprox, f.ApproximateWhy)
 			}
 			if gotSuffix != tc.wantApprox {
 				t.Errorf("Message approximate-suffix = %v, want %v (Message=%q)", gotSuffix, tc.wantApprox, f.Message)

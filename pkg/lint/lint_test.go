@@ -182,6 +182,83 @@ func TestDisabledRulesSkipped(t *testing.T) {
 	}
 }
 
+func TestGateDisabled(t *testing.T) {
+	// the gate is now the single chokepoint for enable/disable, so it has to
+	// drop by exact rule id regardless of which core produced the finding -
+	// audit rules, naming rules, and the vacuum/* adapter ids all flow here.
+	findings := []Finding{
+		{Rule: "pk/exists", Tables: []string{"public.log"}},
+		{Rule: "tables/bloated", Tables: []string{"public.orders"}},
+		{Rule: "vacuum/high_dead_tuples", Tables: []string{"public.orders"}},
+		{Rule: "vacuum/freeze_age_high", Tables: []string{"public.events"}},
+	}
+
+	tests := []struct {
+		name     string
+		disabled []string
+		wantKept []string
+	}{
+		{
+			name:     "nil disabled keeps everything untouched",
+			disabled: nil,
+			wantKept: []string{"pk/exists", "tables/bloated", "vacuum/high_dead_tuples", "vacuum/freeze_age_high"},
+		},
+		{
+			name:     "drops a single audit rule",
+			disabled: []string{"tables/bloated"},
+			wantKept: []string{"pk/exists", "vacuum/high_dead_tuples", "vacuum/freeze_age_high"},
+		},
+		{
+			name:     "drops a vacuum adapter id",
+			disabled: []string{"vacuum/high_dead_tuples"},
+			wantKept: []string{"pk/exists", "tables/bloated", "vacuum/freeze_age_high"},
+		},
+		{
+			name:     "drops several at once across both cores",
+			disabled: []string{"pk/exists", "vacuum/freeze_age_high"},
+			wantKept: []string{"tables/bloated", "vacuum/high_dead_tuples"},
+		},
+		{
+			name:     "an unknown id is a no-op, never panics",
+			disabled: []string{"does/not_exist"},
+			wantKept: []string{"pk/exists", "tables/bloated", "vacuum/high_dead_tuples", "vacuum/freeze_age_high"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := GateDisabled(findings, tc.disabled)
+
+			var gotRules []string
+			for _, f := range got {
+				gotRules = append(gotRules, f.Rule)
+			}
+			if len(gotRules) != len(tc.wantKept) {
+				t.Fatalf("kept %v, want %v", gotRules, tc.wantKept)
+			}
+			for i, r := range tc.wantKept {
+				if gotRules[i] != r {
+					t.Errorf("kept[%d] = %q, want %q (full: %v)", i, gotRules[i], r, gotRules)
+				}
+			}
+		})
+	}
+}
+
+// the input slice is built fresh per call upstream, but the gate must not
+// mutate or alias it - a disabled finding leaking back in would be silent.
+func TestGateDisabledDoesNotMutateInput(t *testing.T) {
+	findings := []Finding{
+		{Rule: "pk/exists"},
+		{Rule: "tables/bloated"},
+	}
+	_ = GateDisabled(findings, []string{"pk/exists"})
+
+	if len(findings) != 2 || findings[0].Rule != "pk/exists" || findings[1].Rule != "tables/bloated" {
+		t.Errorf("input slice was mutated: %+v", findings)
+	}
+}
+
 func TestPartitionChildSkipped(t *testing.T) {
 	snap := emptySnapshot()
 	idCol := makeCol("id", "bigint")
