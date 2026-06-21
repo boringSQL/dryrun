@@ -47,7 +47,7 @@ var wideTypes = []string{"text", "varchar", "bytea", "jsonb", "json", "xml"}
 func checkDuplicateIndexes(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 		var nonPrimary []snapshot.Index
 		for _, idx := range t.Indexes {
 			if !idx.IsPrimary {
@@ -105,7 +105,7 @@ func checkDuplicateIndexes(snap *snapshot.SchemaSnapshot) []lint.Finding {
 func checkRedundantIndexes(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 		var btree []snapshot.Index
 		for _, idx := range t.Indexes {
 			if !idx.IsPrimary && idx.IndexType == "btree" && idx.Predicate == nil {
@@ -154,7 +154,7 @@ func checkTooManyIndexes(snap *snapshot.SchemaSnapshot, config *Config) []lint.F
 		if len(t.Indexes) > config.MaxIndexesPerTable {
 			findings = append(findings, lint.Finding{
 				Rule: "indexes/too_many", Severity: lint.SeverityInfo,
-				Tables:         []string{t.Schema + "." + t.Name},
+				Tables:         []string{t.Qual().String()},
 				Message:        fmt.Sprintf("Table has %d indexes (threshold: %d) - write amplification risk", len(t.Indexes), config.MaxIndexesPerTable),
 				Recommendation: "Review indexes for unused or redundant ones",
 			})
@@ -166,7 +166,7 @@ func checkTooManyIndexes(snap *snapshot.SchemaSnapshot, config *Config) []lint.F
 func checkWideColumnIndexes(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 		colTypes := make(map[string]string)
 		for _, c := range t.Columns {
 			colTypes[c.Name] = c.TypeName
@@ -204,7 +204,7 @@ func checkBloatedIndexes(a *snapshot.AnnotatedSchema, config *Config) []lint.Fin
 	var findings []lint.Finding
 	for i := range a.Schema.Tables {
 		t := &a.Schema.Tables[i]
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 		for _, idx := range t.Indexes {
 			sz := a.IndexSizingFor(t.Qual(), idx.Name)
 			if sz == nil {
@@ -248,7 +248,7 @@ func checkBloatedTables(a *snapshot.AnnotatedSchema, config *Config) []lint.Find
 		}
 		findings = append(findings, lint.Finding{
 			Rule: "tables/bloated", Severity: lint.SeverityWarning,
-			Tables: []string{t.Schema + "." + t.Name},
+			Tables: []string{t.Qual().String()},
 			Message: fmt.Sprintf("Table is ~%.1fx larger than expected (%d vs %d pages)",
 				est.BloatRatio, est.ActualPages, est.ExpectedPages),
 			Recommendation: "VACUUM FULL or pg_repack to reclaim space; check for long-running transactions holding back vacuum",
@@ -265,7 +265,7 @@ func checkFKTypeMismatch(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	}
 
 	for _, t := range snap.Tables {
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 		colTypes := make(map[string]string)
 		for _, c := range t.Columns {
 			colTypes[c.Name] = c.TypeName
@@ -308,7 +308,7 @@ func checkCircularFKs(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	edges := make(map[string][]string)
 	nodes := make(map[string]bool)
 	for _, t := range snap.Tables {
-		q := t.Schema + "." + t.Name
+		q := t.Qual().String()
 		nodes[q] = true
 		for _, con := range t.Constraints {
 			if con.Kind == snapshot.ConstraintForeignKey && con.FKTable != nil {
@@ -368,7 +368,7 @@ func checkOrphanTables(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	inDeg := make(map[string]int)
 	outDeg := make(map[string]int)
 	for _, t := range snap.Tables {
-		q := t.Schema + "." + t.Name
+		q := t.Qual().String()
 		for _, con := range t.Constraints {
 			if con.Kind == snapshot.ConstraintForeignKey && con.FKTable != nil {
 				outDeg[q]++
@@ -379,7 +379,7 @@ func checkOrphanTables(snap *snapshot.SchemaSnapshot) []lint.Finding {
 
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
-		q := t.Schema + "." + t.Name
+		q := t.Qual().String()
 		if inDeg[q] == 0 && outDeg[q] == 0 {
 			findings = append(findings, lint.Finding{
 				Rule: "fk/orphan", Severity: lint.SeverityInfo,
@@ -395,7 +395,7 @@ func checkOrphanTables(snap *snapshot.SchemaSnapshot) []lint.Finding {
 func checkPKNonSequential(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 		for _, con := range t.Constraints {
 			if con.Kind != snapshot.ConstraintPrimaryKey {
 				continue
@@ -422,7 +422,7 @@ var boolPrefixes = []string{"is_", "has_", "can_", "should_", "was_", "will_"}
 func checkBoolPrefix(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 		for _, col := range t.Columns {
 			norm := strings.ToLower(col.TypeName)
 			if norm != "boolean" && norm != "bool" {
@@ -466,7 +466,7 @@ var reservedWords = map[string]bool{
 func checkReservedWords(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	var findings []lint.Finding
 	for _, t := range snap.Tables {
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 		if reservedWords[strings.ToLower(t.Name)] {
 			findings = append(findings, lint.Finding{
 				Rule: "naming/reserved", Severity: lint.SeverityError,
@@ -497,7 +497,7 @@ func checkIDMismatch(snap *snapshot.SchemaSnapshot) []lint.Finding {
 	refNames := make(map[string][]ref)
 
 	for _, t := range snap.Tables {
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 		for _, con := range t.Constraints {
 			if con.Kind != snapshot.ConstraintForeignKey || con.FKTable == nil || len(con.Columns) != 1 {
 				continue
@@ -542,7 +542,7 @@ func checkNoComment(snap *snapshot.SchemaSnapshot, config *Config) []lint.Findin
 		if len(t.Columns) < config.NoCommentMinColumns {
 			continue
 		}
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 		if t.Comment == nil {
 			findings = append(findings, lint.Finding{
 				Rule: "docs/no_comment", Severity: lint.SeverityInfo,

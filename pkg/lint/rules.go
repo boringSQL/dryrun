@@ -30,7 +30,7 @@ func runAllRules(snap *snapshot.SchemaSnapshot, config *Config) []Finding {
 
 	for i := range snap.Tables {
 		t := &snap.Tables[i]
-		qualified := t.Schema + "." + t.Name
+		qualified := t.Qual().String()
 
 		if partitionChildren[qualified] {
 			continue

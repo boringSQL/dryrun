@@ -32,7 +32,7 @@ func ToFindings(health []VacuumHealth) []lint.Finding {
 	var findings []lint.Finding
 	for i := range health {
 		vh := &health[i]
-		table := vh.Schema + "." + vh.Table
+		table := snapshot.QualifiedName{Schema: vh.Schema, Name: vh.Table}.String()
 		for _, f := range vh.Findings {
 			rule, ok := codeRule[f.Code]
 			if !ok {
