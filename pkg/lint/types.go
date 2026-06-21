@@ -19,6 +19,9 @@ type (
 		ConventionDoc  string   `json:"convention_doc,omitempty"`
 		DDLFix         *string  `json:"ddl_fix,omitempty"`
 		MinPgVersion   *int     `json:"min_pg_version,omitempty"`
+		// estimate-based finding whose math is a lower bound (expression/partial index)
+		Approximate bool   `json:"approximate,omitempty"`
+		Why         string `json:"why,omitempty"`
 	}
 
 	Summary struct {

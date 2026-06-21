@@ -226,16 +226,20 @@ func checkBloatedIndexes(a *snapshot.AnnotatedSchema, config *Config) []lint.Fin
 			if !ok || est.BloatRatio <= config.BloatThreshold {
 				continue
 			}
-			approx := ""
-			if idx.Predicate != nil || idx.HasExpressions {
-				approx = " (approximate for expression/partial index)"
+			approx := idx.Predicate != nil || idx.HasExpressions
+			suffix, why := "", ""
+			if approx {
+				suffix = " (approximate for expression/partial index)"
+				why = "expected-size math omits expression/predicate width; ratio is a lower bound"
 			}
 			findings = append(findings, lint.Finding{
 				Rule: "indexes/bloated", Severity: lint.SeverityWarning,
 				Tables: []string{qualified},
 				Message: fmt.Sprintf("Index '%s' is ~%.1fx larger than expected (%d vs %d pages)%s",
-					idx.Name, est.BloatRatio, est.ActualPages, est.ExpectedPages, approx),
+					idx.Name, est.BloatRatio, est.ActualPages, est.ExpectedPages, suffix),
 				Recommendation: fmt.Sprintf("REINDEX INDEX CONCURRENTLY %s to reclaim bloat", idx.Name),
+				Approximate:    approx,
+				Why:            why,
 			})
 		}
 	}
