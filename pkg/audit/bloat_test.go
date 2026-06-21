@@ -87,29 +87,80 @@ func TestCheckBloatedTables_FlagsHeapBloat(t *testing.T) {
 }
 
 // The estimate for a partial or expression index is unreliable without
-// pgstattuple; the finding must say so out loud.
-func TestCheckBloatedIndexes_MarksExpressionApproximate(t *testing.T) {
-	sch := &schema.SchemaSnapshot{Tables: []schema.Table{{
-		Schema: "public", Name: "t",
-		Columns: []schema.Column{{Name: "email", TypeName: "text"}},
-		Indexes: []schema.Index{
-			{Name: "lower_email", Columns: []string{"email"}, IndexType: "btree", HasExpressions: true},
-		},
-	}}}
+// pgstattuple, so the finding has to advertise that fact in two ways at once:
+// the human-facing Message still carries the "(approximate ...)" suffix, AND
+// the machine-facing Approximate/Why fields now carry the same truth as
+// structured data so lint_schema --why can read it without scraping prose.
+// This table-drives both triggers (expression index, partial index) and the
+// happy path (a plainly-bloated btree that is exact) through one helper.
+func TestCheckBloatedIndexes_ApproximateFields(t *testing.T) {
 	qual := schema.QualifiedName{Schema: "public", Name: "t"}
-	planner := &schema.PlannerStatsSnapshot{
-		Indexes: []schema.IndexSizingEntry{
-			{Table: qual, Index: "lower_email", Sizing: schema.IndexSizing{Relpages: 3000, Reltuples: 100000}},
+
+	// build a single-index snapshot + planner sizing that trips the 4x default
+	// threshold (3000 actual pages against an expected ~163 for an int key).
+	mk := func(idx schema.Index) *schema.AnnotatedSchema {
+		sch := &schema.SchemaSnapshot{Tables: []schema.Table{{
+			Schema: "public", Name: "t",
+			Columns: []schema.Column{{Name: "email", TypeName: "text"}},
+			Indexes: []schema.Index{idx},
+		}}}
+		planner := &schema.PlannerStatsSnapshot{
+			Indexes: []schema.IndexSizingEntry{
+				{Table: qual, Index: idx.Name, Sizing: schema.IndexSizing{Relpages: 3000, Reltuples: 100000}},
+			},
+		}
+		return &schema.AnnotatedSchema{Schema: sch, Planner: planner}
+	}
+
+	predicate := "active"
+
+	cases := []struct {
+		name       string
+		idx        schema.Index
+		wantApprox bool
+	}{
+		{
+			name:       "expression index is approximate",
+			idx:        schema.Index{Name: "lower_email", Columns: []string{"email"}, IndexType: "btree", HasExpressions: true},
+			wantApprox: true,
+		},
+		{
+			name:       "partial index is approximate",
+			idx:        schema.Index{Name: "partial_email", Columns: []string{"email"}, IndexType: "btree", Predicate: &predicate},
+			wantApprox: true,
+		},
+		{
+			name:       "plain btree index is exact",
+			idx:        schema.Index{Name: "plain_email", Columns: []string{"email"}, IndexType: "btree"},
+			wantApprox: false,
 		},
 	}
-	cfg := DefaultConfig()
 
-	findings := checkBloatedIndexes(&schema.AnnotatedSchema{Schema: sch, Planner: planner}, &cfg)
-	if len(findings) != 1 {
-		t.Fatalf("expected 1 finding, got %d", len(findings))
-	}
-	if !strings.Contains(findings[0].Message, "approximate") {
-		t.Errorf("expected the expression index to be flagged approximate, got %q", findings[0].Message)
+	cfg := DefaultConfig()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := checkBloatedIndexes(mk(tc.idx), &cfg)
+			if len(findings) != 1 {
+				t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
+			}
+			f := findings[0]
+
+			if f.Approximate != tc.wantApprox {
+				t.Errorf("Approximate = %v, want %v", f.Approximate, tc.wantApprox)
+			}
+
+			// Why and the Message suffix must move together: both present when
+			// approximate, both absent otherwise. They are the same fact in two
+			// shapes and should never disagree.
+			gotWhy := f.Why != ""
+			gotSuffix := strings.Contains(f.Message, "approximate")
+			if gotWhy != tc.wantApprox {
+				t.Errorf("Why populated = %v, want %v (Why=%q)", gotWhy, tc.wantApprox, f.Why)
+			}
+			if gotSuffix != tc.wantApprox {
+				t.Errorf("Message approximate-suffix = %v, want %v (Message=%q)", gotSuffix, tc.wantApprox, f.Message)
+			}
+		})
 	}
 }
 
