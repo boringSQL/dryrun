@@ -189,9 +189,9 @@ func injectRelationStats(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName
 func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName, tableName string, col Column, s *ColumnStats) error {
 	parts := []string{
 		"'version', $1::int",
-		"'schemaname', $2::name",
-		"'relname', $3::name",
-		"'attname', $4::name",
+		"'schemaname', $2::text",
+		"'relname', $3::text",
+		"'attname', $4::text",
 		"'inherited', false",
 	}
 	args := []any{pgMajor, schemaName, tableName, col.Name}
@@ -212,7 +212,7 @@ func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaNa
 		parts = append(parts, fmt.Sprintf("'most_common_vals', $%d::text", idx))
 		args = append(args, *s.MostCommonVals)
 		idx++
-		parts = append(parts, fmt.Sprintf("'most_common_freqs', $%d::text", idx))
+		parts = append(parts, fmt.Sprintf("'most_common_freqs', $%d::real[]", idx))
 		args = append(args, *s.MostCommonFreqs)
 		idx++
 	}
@@ -247,76 +247,31 @@ func injectColumnStatsLegacy(ctx context.Context, tx pgx.Tx, cm columnMeta, s *C
 		nDistinct = float32(*s.NDistinct)
 	}
 
-	// build slot values; types without equality op (json, xml, ...) can't have MCV or histogram slots
-	type slot struct {
-		kind    int16
-		op      uint32
-		numbers string
-		values  string
-	}
-
-	hasEqOp := cm.eqOpOID != 0
-	slots := [5]slot{}
-
-	if hasEqOp && s.MostCommonVals != nil && s.MostCommonFreqs != nil {
-		slots[0] = slot{kind: 1, op: cm.eqOpOID, numbers: *s.MostCommonFreqs, values: *s.MostCommonVals}
-	}
-	if hasEqOp && s.HistogramBounds != nil {
-		slots[1] = slot{kind: 2, op: cm.eqOpOID, values: *s.HistogramBounds}
-	}
+	// stavalues is anyarray Does not work before PG 18
+	kind3 := int16(0)
+	var correlation any
 	if s.Correlation != nil {
-		slots[2] = slot{kind: 3, numbers: fmt.Sprintf("{%v}", *s.Correlation)}
+		kind3 = 3
+		correlation = fmt.Sprintf("{%v}", *s.Correlation)
 	}
 
-	arrayCast := cm.typeName + "[]"
-	if strings.Contains(cm.typeName, " ") {
-		arrayCast = fmt.Sprintf(`"%s"[]`, cm.typeName)
-	}
-
-	var valueParts []string
-	var args []any
-	argN := 1
-
-	addArg := func(v any) string {
-		placeholder := fmt.Sprintf("$%d", argN)
-		args = append(args, v)
-		argN++
-		return placeholder
-	}
-
-	valueParts = append(valueParts, addArg(cm.relOID), addArg(cm.attNum), "false", addArg(nullFrac), "0", addArg(nDistinct))
-
-	for _, sl := range slots {
-		valueParts = append(valueParts, addArg(sl.kind))
-		valueParts = append(valueParts, addArg(sl.op))
-
-		if sl.numbers != "" {
-			valueParts = append(valueParts, addArg(sl.numbers)+"::real[]")
-		} else {
-			valueParts = append(valueParts, "NULL")
-		}
-
-		if sl.values != "" {
-			valueParts = append(valueParts, addArg(sl.values)+"::"+arrayCast)
-		} else {
-			valueParts = append(valueParts, "NULL")
-		}
-	}
-
-	insertSQL := `INSERT INTO pg_statistic (
+	const insertSQL = `INSERT INTO pg_statistic (
 		starelid, staattnum, stainherit, stanullfrac, stawidth, stadistinct,
-		stakind1, staop1, stanumbers1, stavalues1,
-		stakind2, staop2, stanumbers2, stavalues2,
-		stakind3, staop3, stanumbers3, stavalues3,
-		stakind4, staop4, stanumbers4, stavalues4,
-		stakind5, staop5, stanumbers5, stavalues5
-	) VALUES (` + strings.Join(valueParts, ", ") + ")"
+		stakind1, staop1, stacoll1, stanumbers1, stavalues1,
+		stakind2, staop2, stacoll2, stanumbers2, stavalues2,
+		stakind3, staop3, stacoll3, stanumbers3, stavalues3,
+		stakind4, staop4, stacoll4, stanumbers4, stavalues4,
+		stakind5, staop5, stacoll5, stanumbers5, stavalues5
+	) VALUES ($1, $2, false, $3, 0, $4,
+		0, 0, 0, NULL, NULL,
+		0, 0, 0, NULL, NULL,
+		$5, 0, 0, $6::real[], NULL,
+		0, 0, 0, NULL, NULL,
+		0, 0, 0, NULL, NULL)`
 
-	_, err = tx.Exec(ctx, insertSQL, args...)
-	if err != nil {
+	if _, err := tx.Exec(ctx, insertSQL, cm.relOID, cm.attNum, nullFrac, nDistinct, kind3, correlation); err != nil {
 		return fmt.Errorf("insert pg_statistic: %w", err)
 	}
-
 	return nil
 }
 

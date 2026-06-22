@@ -18,7 +18,7 @@ SELECT a.attname,
 
 -- name: restore-relation-stats-pg18
 SELECT pg_restore_relation_stats(
-    'version', $1::int, 'schemaname', $2::name, 'relname', $3::name,
+    'version', $1::int, 'schemaname', $2::text, 'relname', $3::text,
     'relpages', $4::integer, 'reltuples', $5::real
 )
 
