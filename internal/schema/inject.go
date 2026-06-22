@@ -47,7 +47,9 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 		qual := t.Qual()
 
 		if sz := a.SizingFor(qual); sz != nil {
-			if err := injectRelationStats(ctx, tx, pgMajor, t.Schema, t.Name, sz.Relpages, sz.Reltuples); err != nil {
+			if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
+				return injectRelationStats(ctx, tx, pgMajor, t.Schema, t.Name, sz.Relpages, sz.Reltuples)
+			}); err != nil {
 				result.warn("table %s.%s: %v", t.Schema, t.Name, err)
 			} else {
 				result.TablesUpdated++
@@ -59,7 +61,9 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 			if isz == nil {
 				continue
 			}
-			if err := injectRelationStats(ctx, tx, pgMajor, t.Schema, idx.Name, isz.Relpages, isz.Reltuples); err != nil {
+			if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
+				return injectRelationStats(ctx, tx, pgMajor, t.Schema, idx.Name, isz.Relpages, isz.Reltuples)
+			}); err != nil {
 				result.warn("index %s.%s: %v", t.Schema, idx.Name, err)
 			} else {
 				result.IndexesUpdated++
@@ -73,7 +77,9 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 
 		if pgMajor >= 18 {
 			for _, cs := range colsWithStats {
-				if err := injectColumnStatsPG18(ctx, tx, pgMajor, t.Schema, t.Name, cs.col, cs.stats); err != nil {
+				if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
+					return injectColumnStatsPG18(ctx, tx, pgMajor, t.Schema, t.Name, cs.col, cs.stats)
+				}); err != nil {
 					result.warn("column %s.%s.%s: %v", t.Schema, t.Name, cs.col.Name, err)
 				} else {
 					result.ColumnsUpdated++
@@ -84,8 +90,12 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 			for i, cs := range colsWithStats {
 				names[i] = cs.col
 			}
-			meta, err := batchLookupColumnMeta(ctx, tx, t.Schema, t.Name, names)
-			if err != nil {
+			var meta map[string]columnMeta
+			if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
+				var e error
+				meta, e = batchLookupColumnMeta(ctx, tx, t.Schema, t.Name, names)
+				return e
+			}); err != nil {
 				result.warn("column metadata lookup %s.%s: %v", t.Schema, t.Name, err)
 				continue
 			}
@@ -95,7 +105,9 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 					result.warn("column %s.%s.%s: not found in target database", t.Schema, t.Name, cs.col.Name)
 					continue
 				}
-				if err := injectColumnStatsLegacy(ctx, tx, cm, cs.stats); err != nil {
+				if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
+					return injectColumnStatsLegacy(ctx, tx, cm, cs.stats)
+				}); err != nil {
 					result.warn("column %s.%s.%s: %v", t.Schema, t.Name, cs.col.Name, err)
 				} else {
 					result.ColumnsUpdated++
@@ -115,6 +127,19 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 		"method", result.Method,
 	)
 	return result, nil
+}
+
+// savepoint per injection: one failed Exec else aborts the whole pgx tx (25P02).
+func runSavepoint(ctx context.Context, tx pgx.Tx, fn func(pgx.Tx) error) error {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	if err := fn(sp); err != nil {
+		_ = sp.Rollback(ctx)
+		return err
+	}
+	return sp.Commit(ctx)
 }
 
 type colWithStats struct {
