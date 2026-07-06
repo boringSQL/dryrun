@@ -19,6 +19,8 @@ type (
 		Warnings      []PlanWarning        `json:"warnings"`
 		Execution     *ExecutionStats      `json:"execution,omitempty"`
 		StatsInjected *schema.InjectResult `json:"stats_injected,omitempty"`
+		GucsReplayed  []string             `json:"gucs_replayed,omitempty"`
+		GucsSkipped   []SkippedGuc         `json:"gucs_skipped,omitempty"`
 		PgMustardTips []pgmustard.Tip      `json:"pgmustard_tips,omitempty"`
 		RawPlanJSON   json.RawMessage      `json:"-"`
 	}
@@ -45,16 +47,28 @@ func ExplainQuery(ctx context.Context, pool *pgxpool.Pool, sql string, analyze b
 		explainSQL = fmt.Sprintf("EXPLAIN (FORMAT JSON) %s", sql)
 	}
 
-	var jsonStr string
-	if analyze {
+	replayGUCs := snap != nil && len(snap.GUCs) > 0
+
+	var (
+		jsonStr  string
+		replayed []string
+		skipped  []SkippedGuc
+	)
+	if analyze || replayGUCs {
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("begin transaction: %w", err)
 		}
 		defer tx.Rollback(ctx)
 
+		if replayGUCs {
+			replayed, skipped, err = applyPlannerGUCs(ctx, tx, snap.GUCs)
+			if err != nil {
+				return nil, fmt.Errorf("replay GUCs: %w", err)
+			}
+		}
 		if err := tx.QueryRow(ctx, explainSQL).Scan(&jsonStr); err != nil {
-			return nil, fmt.Errorf("EXPLAIN ANALYZE failed: %w", err)
+			return nil, fmt.Errorf("EXPLAIN failed: %w", err)
 		}
 	} else {
 		if err := pool.QueryRow(ctx, explainSQL).Scan(&jsonStr); err != nil {
@@ -108,6 +122,8 @@ func ExplainQuery(ctx context.Context, pool *pgxpool.Pool, sql string, analyze b
 		EstimatedRows: plan.PlanRows,
 		Warnings:      warnings,
 		Execution:     execution,
+		GucsReplayed:  replayed,
+		GucsSkipped:   skipped,
 		RawPlanJSON:   planArray[0],
 	}, nil
 }

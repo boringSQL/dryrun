@@ -11,7 +11,9 @@ func (g GucSetting) CanonicalValue() string {
 	}
 	n, err := strconv.ParseInt(g.Setting, 10, 64)
 	if err != nil || n < 0 {
-		// negative = sentinel, valid without unit
+		// negative = sentinel, valid without unit; non-integer falls through
+		// bare too, so a float-with-unit GUC (vacuum_cost_delay) would lose
+		// its unit — none is replayed today
 		return g.Setting
 	}
 	unit := *g.Unit

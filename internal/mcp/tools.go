@@ -179,7 +179,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		slog.Debug("registering online-only tools", "tools", "explain_query,check_drift")
 		srv.AddTool(
 			mcp.NewTool("explain_query",
-				mcp.WithDescription("EXPLAIN a query (analyze=true runs EXPLAIN ANALYZE)"),
+				mcp.WithDescription("EXPLAIN a query (analyze=true runs EXPLAIN ANALYZE). Snapshot planner GUCs are replayed via SET LOCAL for plan parity; with analyze=true the query also executes under those settings (e.g. prod work_mem)."),
 				mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
 				mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query).")),
 				mcp.WithBoolean("with_stats", mcp.Description("Inject snapshot stats before EXPLAIN.")),
