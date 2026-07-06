@@ -14,6 +14,7 @@ const FormatVersion = 1
 type SchemaSnapshot struct {
 	FormatVersion int             `json:"format_version"`
 	PgVersion     string          `json:"pg_version"`
+	Flavor        Flavor          `json:"flavor,omitempty"`
 	Database      string          `json:"database"`
 	Timestamp     time.Time       `json:"timestamp"`
 	ContentHash   string          `json:"content_hash"`

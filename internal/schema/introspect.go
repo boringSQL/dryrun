@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -130,6 +131,8 @@ func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error
 		return nil, fmt.Errorf("fetch gucs: %w", err)
 	}
 
+	flavor := detectFlavor(ctx, pool, extensions)
+
 	tables := assembleTables(
 		rawTables,
 		rawColumns,
@@ -146,6 +149,7 @@ func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error
 	snap := &SchemaSnapshot{
 		FormatVersion: FormatVersion,
 		PgVersion:     pgVersion,
+		Flavor:        flavor,
 		Database:      database,
 		Timestamp:     time.Now().UTC(),
 		Tables:        tables,
@@ -540,6 +544,33 @@ func fetchFunctions(ctx context.Context, pool Querier) ([]Function, error) {
 		}
 		return f, nil
 	})
+}
+
+// alloydb_omni* is Omni-only; do NOT broaden to omni_%, managed has an unrelated
+// omni_enable_post_startup_helper GUC that would misclassify it as Omni.
+// Shared as a bare expression so the probe and detectFlavor queries stay in sync.
+const omniMarkerExpr = `EXISTS (
+	SELECT 1 FROM pg_catalog.pg_settings WHERE name LIKE 'alloydb\_omni%'
+)`
+
+// advisory: a probe failure degrades to the fail-safe default, not an error
+func detectFlavor(ctx context.Context, pool Querier, exts []Extension) Flavor {
+	hasColumnar := false
+	for _, e := range exts {
+		if e.Name == "google_columnar_engine" {
+			hasColumnar = true
+			break
+		}
+	}
+
+	var omniMarker bool
+	if hasColumnar {
+		if err := pool.QueryRow(ctx, "SELECT "+omniMarkerExpr).Scan(&omniMarker); err != nil {
+			slog.Warn("omni-marker probe failed, treating AlloyDB as managed", "err", err)
+		}
+	}
+
+	return DetectFlavor(FlavorSignals{HasColumnarEngine: hasColumnar, OmniMarker: omniMarker})
 }
 
 func fetchExtensions(ctx context.Context, pool Querier) ([]Extension, error) {

@@ -26,6 +26,8 @@ type DryRun struct {
 type ProbeResult struct {
 	Version       dryrun.PgVersion `json:"version"`
 	VersionString string           `json:"version_string"`
+	Flavor        Flavor           `json:"flavor"`
+	Capabilities  Capabilities     `json:"capabilities"`
 }
 
 type PrivilegeReport struct {
@@ -69,8 +71,24 @@ func (d *DryRun) Probe(ctx context.Context) (*ProbeResult, error) {
 		return nil, err
 	}
 
-	slog.Info("probed PostgreSQL", "pg_version", version.String())
-	return &ProbeResult{Version: version, VersionString: versionStr}, nil
+	// advisory: a failed flavor probe defaults to postgres, not an error
+	var hasColumnar, omniMarker bool
+	if err := d.pool.QueryRow(ctx,
+		`SELECT
+		   EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'google_columnar_engine'),
+		   `+omniMarkerExpr,
+	).Scan(&hasColumnar, &omniMarker); err != nil {
+		slog.Warn("flavor probe failed, reporting as postgres", "err", err)
+	}
+	flavor := DetectFlavor(FlavorSignals{HasColumnarEngine: hasColumnar, OmniMarker: omniMarker})
+
+	slog.Info("probed PostgreSQL", "pg_version", version.String(), "flavor", flavor)
+	return &ProbeResult{
+		Version:       version,
+		VersionString: versionStr,
+		Flavor:        flavor,
+		Capabilities:  flavor.Capabilities(),
+	}, nil
 }
 
 // Probes access to key system catalogs

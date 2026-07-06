@@ -80,8 +80,13 @@ func probeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("PostgreSQL %s\n", result.Version.String())
+			fmt.Printf("%s %s\n", result.Flavor.Display(), result.Version.String())
 			fmt.Printf("  %s\n", result.VersionString)
+			if result.Flavor != schema.FlavorPostgres {
+				fmt.Printf("  flavor: %s (catalog writable: %t, storage inspectable: %t, config tunable: %t)\n",
+					result.Flavor, result.Capabilities.CatalogWritable,
+					result.Capabilities.StorageInspectable, result.Capabilities.ConfigTunable)
+			}
 
 			report, err := conn.CheckPrivileges(ctx)
 			if err != nil {

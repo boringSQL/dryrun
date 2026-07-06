@@ -25,6 +25,9 @@ type (
 	Volatility            = snapshot.Volatility
 	Extension             = snapshot.Extension
 	GucSetting            = snapshot.GucSetting
+	Flavor                = snapshot.Flavor
+	Capabilities          = snapshot.Capabilities
+	FlavorSignals         = snapshot.FlavorSignals
 	StaleStatsEntry       = snapshot.StaleStatsEntry
 	QualifiedName         = snapshot.QualifiedName
 	TableSizing           = snapshot.TableSizing
@@ -61,6 +64,10 @@ const (
 	VolatilityImmutable = snapshot.VolatilityImmutable
 	VolatilityStable    = snapshot.VolatilityStable
 	VolatilityVolatile  = snapshot.VolatilityVolatile
+
+	FlavorPostgres       = snapshot.FlavorPostgres
+	FlavorAlloyDBOmni    = snapshot.FlavorAlloyDBOmni
+	FlavorAlloyDBManaged = snapshot.FlavorAlloyDBManaged
 )
 
 // Functions.
@@ -69,6 +76,7 @@ var (
 	PartitionStrategyFromPg = snapshot.PartitionStrategyFromPg
 	VolatilityFromPg        = snapshot.VolatilityFromPg
 	DetectStaleStats        = snapshot.DetectStaleStats
+	DetectFlavor            = snapshot.DetectFlavor
 
 	ComputeContentHash         = snapshot.ComputeContentHash
 	ComputePlannerContentHash  = snapshot.ComputePlannerContentHash
