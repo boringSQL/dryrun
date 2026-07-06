@@ -194,6 +194,12 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			),
 			s.handleCheckDrift,
 		)
+		srv.AddTool(
+			mcp.NewTool("columnar_report",
+				mcp.WithDescription("AlloyDB only: columnar-engine state and findings (resident columns, empty store, stale blocks)"),
+			),
+			s.handleColumnarReport,
+		)
 	} else {
 		slog.Info("offline mode: explain_query, check_drift not available")
 	}
