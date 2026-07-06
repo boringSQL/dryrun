@@ -179,6 +179,7 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 		return nil
 	}
 	defaults := ParseAutovacuumDefaults(a.Schema.GUCs)
+	caps := a.Schema.Flavor.Capabilities()
 
 	var results []VacuumHealth
 	for i := range a.Schema.Tables {
@@ -329,12 +330,22 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 				"autovacuum is disabled for this table! This won't end good; you've been warned")
 		}
 		if reltuples >= 1_000_000 && !hasOverrides {
-			vacSF, vacThresh, azSF, azThresh := suggestedVacuumKnobs(reltuples)
-			vh.add(CodeDefaultKnobsLargeTable, SeverityMedium,
-				fmt.Sprintf("large table (%dk rows) using default autovacuum settings; consider: "+
-					"autovacuum_vacuum_scale_factor=%g, autovacuum_vacuum_threshold=%d, "+
-					"autovacuum_analyze_scale_factor=%g, autovacuum_analyze_threshold=%d",
-					int64(reltuples)/1000, vacSF, vacThresh, azSF, azThresh))
+			if caps.AdaptiveAutovacuum {
+				// AlloyDB schedules autovacuum by instance load, so the fixed scale-factor runbook misleads
+				msg := fmt.Sprintf("large table (%dk rows) on default autovacuum settings; %s runs adaptive autovacuum, which schedules by load rather than the fixed scale-factor knobs",
+					int64(reltuples)/1000, a.Schema.Flavor.Display())
+				if !caps.ConfigTunable {
+					msg += ", and those knobs are managed here, not yours to set"
+				}
+				vh.add(CodeDefaultKnobsLargeTable, SeverityInfo, msg)
+			} else {
+				vacSF, vacThresh, azSF, azThresh := suggestedVacuumKnobs(reltuples)
+				vh.add(CodeDefaultKnobsLargeTable, SeverityMedium,
+					fmt.Sprintf("large table (%dk rows) using default autovacuum settings; consider: "+
+						"autovacuum_vacuum_scale_factor=%g, autovacuum_vacuum_threshold=%d, "+
+						"autovacuum_analyze_scale_factor=%g, autovacuum_analyze_threshold=%d",
+						int64(reltuples)/1000, vacSF, vacThresh, azSF, azThresh))
+			}
 		}
 		if reltuples > 0 && float64(deadTuples)/reltuples > 0.10 {
 			vh.add(CodeHighDeadTupleRatio, SeverityMedium,
