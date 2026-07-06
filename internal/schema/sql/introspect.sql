@@ -286,12 +286,19 @@ SELECT name, setting, unit
        'work_mem', 'effective_cache_size', 'random_page_cost',
        'seq_page_cost', 'effective_io_concurrency', 'shared_buffers',
        'maintenance_work_mem', 'default_statistics_target',
-       'enable_partition_pruning', 'enable_partitionwise_join',
-       'enable_partitionwise_aggregate',
+       'cpu_tuple_cost', 'cpu_index_tuple_cost', 'cpu_operator_cost',
+       'hash_mem_multiplier',
+       'max_parallel_workers_per_gather', 'max_parallel_workers',
+       'max_worker_processes', 'parallel_setup_cost',
+       'parallel_tuple_cost', 'min_parallel_table_scan_size',
+       'min_parallel_index_scan_size', 'parallel_leader_participation',
+       'jit', 'jit_above_cost', 'jit_inline_above_cost',
+       'jit_optimize_above_cost',
        'autovacuum', 'autovacuum_vacuum_threshold',
        'autovacuum_vacuum_scale_factor', 'autovacuum_analyze_threshold',
        'autovacuum_analyze_scale_factor', 'autovacuum_vacuum_cost_delay',
        'autovacuum_vacuum_cost_limit', 'autovacuum_freeze_max_age',
        'autovacuum_multixact_freeze_max_age'
  )
+    OR name LIKE 'enable\_%'
  ORDER BY name
