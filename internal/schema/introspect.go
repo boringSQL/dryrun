@@ -573,6 +573,17 @@ func detectFlavor(ctx context.Context, pool Querier, exts []Extension) Flavor {
 	return DetectFlavor(FlavorSignals{HasColumnarEngine: hasColumnar, OmniMarker: omniMarker})
 }
 
+// one-round-trip flavor of a live target, for callers without a fetched snapshot
+func DetectFlavorLive(ctx context.Context, q Querier) (Flavor, error) {
+	var hasColumnar, omniMarker bool
+	if err := q.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'google_columnar_engine'), `+omniMarkerExpr,
+	).Scan(&hasColumnar, &omniMarker); err != nil {
+		return "", err
+	}
+	return DetectFlavor(FlavorSignals{HasColumnarEngine: hasColumnar, OmniMarker: omniMarker}), nil
+}
+
 func fetchExtensions(ctx context.Context, pool Querier) ([]Extension, error) {
 	rows, err := query(ctx, pool, "fetch-extensions")
 	if err != nil {

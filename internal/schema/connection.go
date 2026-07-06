@@ -72,15 +72,10 @@ func (d *DryRun) Probe(ctx context.Context) (*ProbeResult, error) {
 	}
 
 	// advisory: a failed flavor probe defaults to postgres, not an error
-	var hasColumnar, omniMarker bool
-	if err := d.pool.QueryRow(ctx,
-		`SELECT
-		   EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'google_columnar_engine'),
-		   `+omniMarkerExpr,
-	).Scan(&hasColumnar, &omniMarker); err != nil {
+	flavor, err := DetectFlavorLive(ctx, d.pool)
+	if err != nil {
 		slog.Warn("flavor probe failed, reporting as postgres", "err", err)
 	}
-	flavor := DetectFlavor(FlavorSignals{HasColumnarEngine: hasColumnar, OmniMarker: omniMarker})
 
 	slog.Info("probed PostgreSQL", "pg_version", version.String(), "flavor", flavor)
 	return &ProbeResult{

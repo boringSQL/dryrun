@@ -40,6 +40,17 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 	if pgMajor >= 18 {
 		result.Method = "pg_restore_relation_stats"
 	} else {
+		// legacy path writes pg_class/pg_statistic directly; managed AlloyDB
+		// denies that. Skip rather than emit a permission-denied warning per row.
+		flavor, err := DetectFlavorLive(ctx, tx)
+		if err != nil {
+			return nil, fmt.Errorf("detect target flavor: %w", err)
+		}
+		if !flavor.Capabilities().CatalogWritable {
+			result.Method = "skipped"
+			result.warn("stats injection skipped: %s denies direct catalog writes; use a PostgreSQL 18+ target for the pg_restore_*_stats path", flavor.Display())
+			return result, nil
+		}
 		result.Method = "pg_class_update"
 	}
 
