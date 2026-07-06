@@ -86,6 +86,74 @@ func vacuumFixture(name string, reltuples float64, deadTup int64, reloptions []s
 	}
 }
 
+// findingFor pulls the first finding with the given code out of a result set.
+func findingFor(results []VacuumHealth, code VacuumCode) *VacuumFinding {
+	for i := range results {
+		for j := range results[i].Findings {
+			if results[i].Findings[j].Code == code {
+				return &results[i].Findings[j]
+			}
+		}
+	}
+	return nil
+}
+
+// On stock PostgreSQL a large table on default autovacuum settings earns the
+// fixed-knob tuning suggestion at medium severity.
+func TestAnalyzeVacuumHealth_KnobAdvice_Postgres(t *testing.T) {
+	a := vacuumFixture("big", 2_000_000, 5000, nil)
+	f := findingFor(AnalyzeVacuumHealth(a), CodeDefaultKnobsLargeTable)
+	if f == nil {
+		t.Fatal("expected a default-knobs finding on vanilla postgres")
+	}
+	if f.Severity != SeverityMedium {
+		t.Errorf("severity = %q, want medium", f.Severity)
+	}
+	if !strings.Contains(f.Message, "autovacuum_vacuum_scale_factor=") {
+		t.Errorf("postgres advice should suggest the scale-factor knobs, got: %s", f.Message)
+	}
+}
+
+// On AlloyDB Omni the fixed-knob runbook is the wrong advice: adaptive autovacuum
+// schedules by load. Reworded and downgraded to info, but the knobs are still the
+// operator's to set (Omni runs on your own box), so no "managed" caveat.
+func TestAnalyzeVacuumHealth_KnobAdvice_Omni(t *testing.T) {
+	a := vacuumFixture("big", 2_000_000, 5000, nil)
+	a.Schema.Flavor = snapshot.FlavorAlloyDBOmni
+	f := findingFor(AnalyzeVacuumHealth(a), CodeDefaultKnobsLargeTable)
+	if f == nil {
+		t.Fatal("expected a default-knobs finding on Omni")
+	}
+	if f.Severity != SeverityInfo {
+		t.Errorf("severity = %q, want info on adaptive autovacuum", f.Severity)
+	}
+	if !strings.Contains(f.Message, "adaptive autovacuum") {
+		t.Errorf("Omni advice should mention adaptive autovacuum, got: %s", f.Message)
+	}
+	if strings.Contains(f.Message, "autovacuum_vacuum_scale_factor=") {
+		t.Errorf("Omni advice must not push the fixed knobs, got: %s", f.Message)
+	}
+	if strings.Contains(f.Message, "not yours to set") {
+		t.Errorf("Omni knobs are tunable, should not claim otherwise, got: %s", f.Message)
+	}
+}
+
+// Managed AlloyDB adds that the knobs aren't the operator's to set (no ALTER SYSTEM).
+func TestAnalyzeVacuumHealth_KnobAdvice_Managed(t *testing.T) {
+	a := vacuumFixture("big", 2_000_000, 5000, nil)
+	a.Schema.Flavor = snapshot.FlavorAlloyDBManaged
+	f := findingFor(AnalyzeVacuumHealth(a), CodeDefaultKnobsLargeTable)
+	if f == nil {
+		t.Fatal("expected a default-knobs finding on managed AlloyDB")
+	}
+	if f.Severity != SeverityInfo {
+		t.Errorf("severity = %q, want info", f.Severity)
+	}
+	if !strings.Contains(f.Message, "not yours to set") {
+		t.Errorf("managed advice should note the knobs are unmanageable, got: %s", f.Message)
+	}
+}
+
 // Tables under 10k rows aren't worth tuning — autovacuum's defaults are fine,
 // so AnalyzeVacuumHealth skips them entirely.
 func TestAnalyzeVacuumHealth_SmallTableSkipped(t *testing.T) {
