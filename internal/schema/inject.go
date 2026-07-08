@@ -12,11 +12,13 @@ import (
 )
 
 type InjectResult struct {
-	TablesUpdated  int      `json:"tables_updated"`
-	IndexesUpdated int      `json:"indexes_updated"`
-	ColumnsUpdated int      `json:"columns_updated"`
-	Warnings       []string `json:"warnings,omitempty"`
-	Method         string   `json:"method"`
+	TablesUpdated      int      `json:"tables_updated"`
+	IndexesUpdated     int      `json:"indexes_updated"`
+	ColumnsUpdated     int      `json:"columns_updated"`
+	AutovacuumDisabled int      `json:"autovacuum_disabled"`
+	PgRegresqlLoaded   bool     `json:"pg_regresql_loaded"`
+	Warnings           []string `json:"warnings,omitempty"`
+	Method             string   `json:"method"`
 }
 
 func (r *InjectResult) warn(format string, args ...any) {
@@ -54,16 +56,45 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 		result.Method = "pg_class_update"
 	}
 
+	result.PgRegresqlLoaded = probePgRegresql(ctx, tx)
+
+	relStatsInjected := false
 	for _, t := range a.Schema.Tables {
 		qual := t.Qual()
+		sz := a.SizingFor(qual)
+		colsWithStats := collectColumnsWithStats(a, t)
 
-		if sz := a.SizingFor(qual); sz != nil {
+		touched := sz != nil || len(colsWithStats) > 0
+		for _, idx := range t.Indexes {
+			if touched {
+				break
+			}
+			touched = a.IndexSizingFor(qual, idx.Name) != nil
+		}
+
+		// autovacuum would overwrite injected stats; disable before injecting.
+		// partitioned parents reject storage params, and have no stats of their own
+		if touched && t.PartitionInfo == nil {
+			if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
+				return disableAutovacuum(ctx, tx, t.Schema, t.Name)
+			}); err != nil {
+				result.warn("table %s.%s: disable autovacuum: %v", t.Schema, t.Name, err)
+			} else {
+				result.AutovacuumDisabled++
+			}
+		}
+
+		if sz != nil {
+			if sz.Reltuples <= 0 {
+				result.warn("table %s.%s: snapshot reltuples is %g; injected plan will be degenerate", t.Schema, t.Name, sz.Reltuples)
+			}
 			if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
 				return injectRelationStats(ctx, tx, pgMajor, t.Schema, t.Name, sz.Relpages, sz.Reltuples)
 			}); err != nil {
 				result.warn("table %s.%s: %v", t.Schema, t.Name, err)
 			} else {
 				result.TablesUpdated++
+				relStatsInjected = true
 			}
 		}
 
@@ -81,7 +112,6 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 			}
 		}
 
-		colsWithStats := collectColumnsWithStats(a, t)
 		if len(colsWithStats) == 0 {
 			continue
 		}
@@ -127,6 +157,12 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 		}
 	}
 
+	// injected relpages/reltuples get rescaled to the empty relation's physical
+	// size without pg_regresql's hook, collapsing row estimates
+	if relStatsInjected && !result.PgRegresqlLoaded {
+		result.warn("pg_regresql not loaded: injected relpages/reltuples may be ignored (rescaled to physical size); LOAD pg_regresql before EXPLAIN")
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -135,9 +171,25 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 		"tables", result.TablesUpdated,
 		"indexes", result.IndexesUpdated,
 		"columns", result.ColumnsUpdated,
+		"autovacuum_disabled", result.AutovacuumDisabled,
+		"pg_regresql_loaded", result.PgRegresqlLoaded,
 		"method", result.Method,
 	)
 	return result, nil
+}
+
+func disableAutovacuum(ctx context.Context, tx pgx.Tx, schemaName, relName string) error {
+	ident := pgx.Identifier{schemaName, relName}.Sanitize()
+	_, err := tx.Exec(ctx, "ALTER TABLE "+ident+" SET (autovacuum_enabled=false)")
+	return err
+}
+
+func probePgRegresql(ctx context.Context, tx pgx.Tx) bool {
+	var loaded bool
+	if err := tx.QueryRow(ctx, q("probe-pg-regresql")).Scan(&loaded); err != nil {
+		return false
+	}
+	return loaded
 }
 
 // savepoint per injection: one failed Exec else aborts the whole pgx tx (25P02).

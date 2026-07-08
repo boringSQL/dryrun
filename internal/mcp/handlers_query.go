@@ -68,6 +68,16 @@ func (s *Server) handleExplainQuery(ctx context.Context, req mcp.CallToolRequest
 
 	result.StatsInjected = injectResult
 
+	// surface injection tripwires (pg_regresql not loaded, degenerate reltuples)
+	// into plan warnings; StatsInjected.warnings alone never reaches the hint
+	if injectResult != nil {
+		for _, w := range injectResult.Warnings {
+			result.Warnings = append(result.Warnings, query.PlanWarning{
+				Severity: "warning", Message: w, NodeType: "stats_injection",
+			})
+		}
+	}
+
 	if getBoolArg(req, "pgmustard") {
 		addPgmWarn := func(msg string) {
 			result.Warnings = append(result.Warnings, query.PlanWarning{
@@ -92,7 +102,9 @@ func (s *Server) handleExplainQuery(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	hint := ""
-	if len(result.Warnings) > 0 {
+	if injectResult != nil && len(injectResult.Warnings) > 0 {
+		hint = "Stats injection reported warnings; the plan may not reflect production. Check stats_injected.warnings before trusting row estimates."
+	} else if len(result.Warnings) > 0 {
 		hint = "Warnings detected. Use advise for index suggestions and actionable recommendations."
 	}
 	return s.metaJSONResult(result, "", hint, nil), nil

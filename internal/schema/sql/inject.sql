@@ -33,3 +33,9 @@ DELETE FROM pg_statistic
  WHERE starelid = $1
    AND staattnum = $2
    AND NOT stainherit
+
+-- name: probe-pg-regresql
+SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_regresql')
+    OR current_setting('shared_preload_libraries')  LIKE '%pg_regresql%'
+    OR current_setting('session_preload_libraries') LIKE '%pg_regresql%'
+    OR current_setting('local_preload_libraries')   LIKE '%pg_regresql%'
