@@ -109,8 +109,13 @@ func TestAnalyzeVacuumHealth_KnobAdvice_Postgres(t *testing.T) {
 	if f.Severity != SeverityMedium {
 		t.Errorf("severity = %q, want medium", f.Severity)
 	}
-	if !strings.Contains(f.Message, "autovacuum_vacuum_scale_factor=") {
-		t.Errorf("postgres advice should suggest the scale-factor knobs, got: %s", f.Message)
+	// The knobs live in Action as a copy-pasteable statement; Message keeps the why.
+	if !strings.HasPrefix(f.Action, "ALTER TABLE public.big SET (autovacuum_vacuum_scale_factor = ") ||
+		!strings.HasSuffix(f.Action, ";") {
+		t.Errorf("postgres advice should carry the ALTER TABLE statement, got: %s", f.Action)
+	}
+	if !strings.Contains(f.Message, "default autovacuum settings") {
+		t.Errorf("message should keep the prose why, got: %s", f.Message)
 	}
 }
 

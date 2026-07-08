@@ -53,6 +53,9 @@ type (
 		Code     VacuumCode `json:"code"`
 		Severity Severity   `json:"severity"`
 		Message  string     `json:"message"`
+		// Action is the copy-pasteable remedy statement when one exists (e.g. the
+		// ALTER TABLE ... SET (...) for default-knobs); Message stays the prose why.
+		Action string `json:"action,omitempty"`
 	}
 
 	VacuumHealth struct {
@@ -97,6 +100,13 @@ type (
 func (vh *VacuumHealth) add(code VacuumCode, sev Severity, msg string) {
 	vh.Findings = append(vh.Findings, VacuumFinding{Code: code, Severity: sev, Message: msg})
 	vh.Recommendations = append(vh.Recommendations, msg)
+}
+
+// addFix is add plus a copy-pasteable remedy statement; the combined text keeps
+// Recommendations self-contained for plain-text consumers.
+func (vh *VacuumHealth) addFix(code VacuumCode, sev Severity, msg, action string) {
+	vh.Findings = append(vh.Findings, VacuumFinding{Code: code, Severity: sev, Message: msg, Action: action})
+	vh.Recommendations = append(vh.Recommendations, msg+"; "+action)
 }
 
 // Reads autovacuum GUCs, falling back to PG defaults
@@ -340,11 +350,12 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 				vh.add(CodeDefaultKnobsLargeTable, SeverityInfo, msg)
 			} else {
 				vacSF, vacThresh, azSF, azThresh := suggestedVacuumKnobs(reltuples)
-				vh.add(CodeDefaultKnobsLargeTable, SeverityMedium,
-					fmt.Sprintf("large table (%dk rows) using default autovacuum settings; consider: "+
-						"autovacuum_vacuum_scale_factor=%g, autovacuum_vacuum_threshold=%d, "+
-						"autovacuum_analyze_scale_factor=%g, autovacuum_analyze_threshold=%d",
-						int64(reltuples)/1000, vacSF, vacThresh, azSF, azThresh))
+				vh.addFix(CodeDefaultKnobsLargeTable, SeverityMedium,
+					fmt.Sprintf("large table (%dk rows) using default autovacuum settings", int64(reltuples)/1000),
+					fmt.Sprintf("ALTER TABLE %s.%s SET (autovacuum_vacuum_scale_factor = %g, "+
+						"autovacuum_vacuum_threshold = %d, autovacuum_analyze_scale_factor = %g, "+
+						"autovacuum_analyze_threshold = %d);",
+						vh.Schema, vh.Table, vacSF, vacThresh, azSF, azThresh))
 			}
 		}
 		if reltuples > 0 && float64(deadTuples)/reltuples > 0.10 {
