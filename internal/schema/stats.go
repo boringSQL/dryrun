@@ -39,6 +39,10 @@ func CapturePlannerStats(ctx context.Context, pool Querier, schemaRefHash string
 	if err != nil {
 		return nil, fmt.Errorf("fetch column stats: %w", err)
 	}
+	gucs, err := fetchGUCs(ctx, pool)
+	if err != nil {
+		return nil, fmt.Errorf("fetch gucs: %w", err)
+	}
 
 	snap := &PlannerStatsSnapshot{
 		FormatVersion: FormatVersion,
@@ -50,6 +54,7 @@ func CapturePlannerStats(ctx context.Context, pool Querier, schemaRefHash string
 		Tables:        tables,
 		Indexes:       indexes,
 		Columns:       columns,
+		GUCs:          gucs,
 	}
 	snap.ContentHash = ComputePlannerContentHash(snap)
 	return snap, nil

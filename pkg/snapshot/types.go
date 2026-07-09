@@ -463,6 +463,10 @@ type PlannerStatsSnapshot struct {
 	Tables       []TableSizingEntry `json:"tables"`
 	Indexes      []IndexSizingEntry `json:"indexes"`
 	Columns      []ColumnStatsEntry `json:"columns"`
+	// Hashed here, not on the schema: the schema digest only moves on DDL, so a
+	// postgresql.conf change never reaches a reader through it. SchemaSnapshot keeps its
+	// own copy, the values as of that generation.
+	GUCs []GucSetting `json:"gucs,omitempty"`
 }
 
 // Persisted per-node activity counters

@@ -204,18 +204,50 @@ func describeStorageParams(params []StorageParamChange) string {
 	if len(params) == 0 {
 		return "storage parameters changed"
 	}
+	return "storage parameters: " + SummarizeStorageParams(params)
+}
+
+// Also the change's Note, which the feed renders for bodies written before typed params.
+func SummarizeStorageParams(params []StorageParamChange) string {
 	parts := make([]string, len(params))
 	for i, p := range params {
-		switch {
-		case p.From == nil:
-			parts[i] = fmt.Sprintf("%s set %s", p.Name, dflt(p.To))
-		case p.To == nil:
-			parts[i] = fmt.Sprintf("%s reset (was %s)", p.Name, dflt(p.From))
-		default:
-			parts[i] = fmt.Sprintf("%s %s → %s", p.Name, *p.From, *p.To)
+		before, after, origin := StorageParamValues(p)
+		if origin != "" {
+			origin = " (" + origin + ")"
 		}
+		parts[i] = fmt.Sprintf("%s %s → %s%s", p.Name, before, after, origin)
 	}
-	return "storage parameters: " + strings.Join(parts, ", ")
+	return strings.Join(parts, ", ")
+}
+
+// Effective before/after for one param. The side the table does not set falls back to the
+// cluster GUC (or pg's default), which origin names.
+func StorageParamValues(p StorageParamChange) (before, after, origin string) {
+	before, after = "∅", "∅"
+	if p.From != nil {
+		before = *p.From
+	} else if p.Baseline != "" {
+		before = p.Baseline
+	}
+	if p.To != nil {
+		after = *p.To
+	} else if p.Baseline != "" {
+		after = p.Baseline
+	}
+	if p.Baseline == "" || (p.From != nil && p.To != nil) {
+		return before, after, ""
+	}
+	side := "was"
+	if p.To == nil {
+		side = "reset to" // RESET hands the param back to the baseline
+	}
+	switch p.BaselineFrom {
+	case "cluster":
+		return before, after, side + " cluster default"
+	case "pg":
+		return before, after, side + " postgres default"
+	}
+	return before, after, ""
 }
 
 func dflt(p *string) string {

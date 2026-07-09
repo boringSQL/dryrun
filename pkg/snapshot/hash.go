@@ -121,6 +121,11 @@ func ComputePlannerContentHash(p *PlannerStatsSnapshot) string {
 		"indexes":         indexes,
 		"columns":         p.Columns,
 	}
+	// Omitted, not null, when absent: planner docs captured before GUCs moved here keep
+	// their digest.
+	if len(p.GUCs) > 0 {
+		canonical["gucs"] = p.GUCs
+	}
 	b, _ := json.Marshal(canonical)
 	h := sha256.Sum256(b)
 	return fmt.Sprintf("%x", h)

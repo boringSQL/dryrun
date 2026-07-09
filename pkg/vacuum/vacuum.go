@@ -184,11 +184,20 @@ func parseReloptions(reloptions []string) map[string]string {
 	return opts
 }
 
+// Planner GUCs are re-captured every snapshot; the schema's freeze at the last DDL change.
+// Falls back for planner docs captured before the move.
+func freshGUCs(a *snapshot.AnnotatedSchema) []snapshot.GucSetting {
+	if a.Planner != nil && len(a.Planner.GUCs) > 0 {
+		return a.Planner.GUCs
+	}
+	return a.Schema.GUCs
+}
+
 func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 	if a == nil || a.Schema == nil {
 		return nil
 	}
-	defaults := ParseAutovacuumDefaults(a.Schema.GUCs)
+	defaults := ParseAutovacuumDefaults(freshGUCs(a))
 	caps := a.Schema.Flavor.Capabilities()
 
 	var results []VacuumHealth

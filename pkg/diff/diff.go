@@ -102,10 +102,13 @@ type (
 
 	// One ALTER TABLE ... SET (...) usually moves several params, so they ride one
 	// table-grain change rather than one each. nil From = newly set, nil To = RESET.
+	// Baseline is what the unset side resolves to; empty when the param has no default.
 	StorageParamChange struct {
-		Name string  `json:"name"`
-		From *string `json:"from,omitempty"`
-		To   *string `json:"to,omitempty"`
+		Name         string  `json:"name"`
+		From         *string `json:"from,omitempty"`
+		To           *string `json:"to,omitempty"`
+		Baseline     string  `json:"baseline,omitempty"`
+		BaselineFrom string  `json:"baseline_from,omitempty"` // cluster | pg
 	}
 
 	DefaultKind string
@@ -172,7 +175,7 @@ func (t ChangeType) Category() string {
 func DiffSchema(from, to *snapshot.SchemaSnapshot) (*SchemaDelta, error) {
 	var changes []Change
 
-	diffTables(from.Tables, to.Tables, &changes)
+	diffTables(from.Tables, to.Tables, gucMap(from.GUCs), &changes)
 	diffViews(from.Views, to.Views, &changes)
 	diffFunctions(from.Functions, to.Functions, &changes)
 	diffGeneric("enum", from.Enums, to.Enums, func(e snapshot.EnumType) string { return e.Schema + "." + e.Name }, &changes)
@@ -189,7 +192,7 @@ func tableRef(t *snapshot.Table) ObjectRef {
 	return ObjectRef{Kind: "table", Schema: &s, Name: t.Name, OID: t.OID}
 }
 
-func diffTables(from, to []snapshot.Table, changes *[]Change) {
+func diffTables(from, to []snapshot.Table, gucs map[string]string, changes *[]Change) {
 	type key struct{ schema, name string }
 	fromMap := make(map[key]*snapshot.Table, len(from))
 	for i := range from {
@@ -238,14 +241,14 @@ func diffTables(from, to []snapshot.Table, changes *[]Change) {
 	for i := range from {
 		old := &from[i]
 		if nw, ok := paired[old]; ok {
-			diffTableBody(old, nw, changes)
+			diffTableBody(old, nw, gucs, changes)
 		} else {
 			*changes = append(*changes, Change{Type: TableDropped, Object: tableRef(old)})
 		}
 	}
 }
 
-func diffTableBody(old, nw *snapshot.Table, changes *[]Change) {
+func diffTableBody(old, nw *snapshot.Table, gucs map[string]string, changes *[]Change) {
 	ref := tableRef(nw) // nw so a renamed table's body changes attach under the new name
 
 	oldCols := indexBy(old.Columns, func(c snapshot.Column) string { return c.Name })
@@ -301,14 +304,17 @@ func diffTableBody(old, nw *snapshot.Table, changes *[]Change) {
 	if old.RLSEnabled != nw.RLSEnabled {
 		*changes = append(*changes, Change{Type: RLSToggled, Object: ref, RLS: &RLSChange{Enabled: nw.RLSEnabled}})
 	}
-	if params := diffStorageParams(old.Reloptions, nw.Reloptions); len(params) > 0 {
-		*changes = append(*changes, Change{Type: StorageParamsChanged, Object: ref, StorageParam: params})
+	if params := diffStorageParams(old.Reloptions, nw.Reloptions, gucs); len(params) > 0 {
+		*changes = append(*changes, Change{
+			Type: StorageParamsChanged, Object: ref, StorageParam: params,
+			Note: SummarizeStorageParams(params),
+		})
 	}
 }
 
 // diffStorageParams compares two reloptions lists. Sorted by name so one ALTER always
 // yields the same change bytes; pg_class.reloptions is in set-order, which is not identity.
-func diffStorageParams(old, nw []string) []StorageParamChange {
+func diffStorageParams(old, nw []string, gucs map[string]string) []StorageParamChange {
 	oldMap, newMap := parseReloptions(old), parseReloptions(nw)
 
 	var out []StorageParamChange
@@ -324,6 +330,13 @@ func diffStorageParams(old, nw []string) []StorageParamChange {
 			out = append(out, StorageParamChange{Name: name, From: new(from)})
 		}
 	}
+	// Only the side the table doesn't set needs a baseline; a retune names both values.
+	for i := range out {
+		if out[i].From != nil && out[i].To != nil {
+			continue
+		}
+		out[i].Baseline, out[i].BaselineFrom = baselineFor(out[i].Name, gucs)
+	}
 	slices.SortFunc(out, func(a, b StorageParamChange) int { return strings.Compare(a.Name, b.Name) })
 	return out
 }
@@ -334,6 +347,52 @@ func parseReloptions(opts []string) map[string]string {
 		if k, v, ok := strings.Cut(opt, "="); ok {
 			m[k] = v
 		}
+	}
+	return m
+}
+
+// GUC a reloption inherits from when the table sets none; autovacuum_enabled drops the suffix.
+var reloptionGUC = map[string]string{
+	"autovacuum_enabled":                  "autovacuum",
+	"autovacuum_vacuum_threshold":         "autovacuum_vacuum_threshold",
+	"autovacuum_vacuum_scale_factor":      "autovacuum_vacuum_scale_factor",
+	"autovacuum_analyze_threshold":        "autovacuum_analyze_threshold",
+	"autovacuum_analyze_scale_factor":     "autovacuum_analyze_scale_factor",
+	"autovacuum_vacuum_cost_delay":        "autovacuum_vacuum_cost_delay",
+	"autovacuum_vacuum_cost_limit":        "autovacuum_vacuum_cost_limit",
+	"autovacuum_freeze_max_age":           "autovacuum_freeze_max_age",
+	"autovacuum_multixact_freeze_max_age": "autovacuum_multixact_freeze_max_age",
+}
+
+// Fallback when no GUC was captured; wrong on a cluster that tunes these, so the GUC wins.
+var pgDefaultReloption = map[string]string{
+	"autovacuum_enabled":                  "on",
+	"autovacuum_vacuum_threshold":         "50",
+	"autovacuum_vacuum_scale_factor":      "0.2",
+	"autovacuum_analyze_threshold":        "50",
+	"autovacuum_analyze_scale_factor":     "0.1",
+	"autovacuum_freeze_max_age":           "200000000",
+	"autovacuum_multixact_freeze_max_age": "400000000",
+	"fillfactor":                          "100", // heap default; not a GUC
+}
+
+func baselineFor(name string, gucs map[string]string) (value, source string) {
+	base := strings.TrimPrefix(name, "toast.") // toast.autovacuum_* inherits the same GUCs
+	if guc, ok := reloptionGUC[base]; ok {
+		if v, ok := gucs[guc]; ok {
+			return v, "cluster"
+		}
+	}
+	if v, ok := pgDefaultReloption[base]; ok {
+		return v, "pg"
+	}
+	return "", ""
+}
+
+func gucMap(gucs []snapshot.GucSetting) map[string]string {
+	m := make(map[string]string, len(gucs))
+	for _, g := range gucs {
+		m[g.Name] = g.Setting
 	}
 	return m
 }
