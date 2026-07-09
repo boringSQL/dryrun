@@ -11,10 +11,10 @@ import (
 )
 
 // emptySnap builds a minimal-but-valid SchemaSnapshot carrying just the bits the
-// differ keys on: a content hash (so ClassifyDrift can short-circuit on equality)
-// and a timestamp (so the SnapshotDiff envelope has real endpoints). Every test
-// starts from one of these and layers in only the objects it cares about, which
-// keeps each case focused on a single change-vocabulary entry.
+// differ keys on: a content hash (carried through onto the DriftReport) and a
+// timestamp (so the SnapshotDiff envelope has real endpoints). Every test starts
+// from one of these and layers in only the objects it cares about, which keeps each
+// case focused on a single change-vocabulary entry.
 func emptySnap(hash string) *snapshot.SchemaSnapshot {
 	return &snapshot.SchemaSnapshot{
 		PgVersion: "PostgreSQL 17.0", Database: "test",
@@ -432,5 +432,117 @@ func TestRenderConsole_NoChanges(t *testing.T) {
 	RenderConsole(&buf, &SnapshotDiff{Kind: "schema", Schema: delta})
 	if !strings.Contains(buf.String(), "no changes") {
 		t.Errorf("expected 'no changes', got %q", buf.String())
+	}
+}
+
+// tableWithReloptions is the storage-param fixture: one table, whatever reloptions the
+// case needs. pg reports them as "name=value" strings on pg_class.reloptions.
+func tableWithReloptions(reloptions ...string) *snapshot.SchemaSnapshot {
+	s := emptySnap("h")
+	s.Tables = []snapshot.Table{{Schema: "public", Name: "events", Reloptions: reloptions}}
+	return s
+}
+
+// One ALTER TABLE ... SET (...) sets several knobs, and it is one user action; it must
+// produce one table-grain change carrying them all, not one change per knob.
+func TestDiffSchema_StorageParamsSetTogether(t *testing.T) {
+	from := tableWithReloptions()
+	to := tableWithReloptions(
+		"autovacuum_vacuum_threshold=5000",
+		"autovacuum_vacuum_scale_factor=0.007",
+	)
+
+	delta, _ := DiffSchema(from, to)
+	if len(delta.Changes) != 1 {
+		t.Fatalf("want 1 change for one ALTER, got %d", len(delta.Changes))
+	}
+	c := findChange(t, delta.Changes, StorageParamsChanged)
+	if len(c.StorageParam) != 2 {
+		t.Fatalf("want 2 params, got %d", len(c.StorageParam))
+	}
+	// sorted by name, so the change bytes are stable across pg's set-order
+	if c.StorageParam[0].Name != "autovacuum_vacuum_scale_factor" {
+		t.Errorf("params not sorted by name: %v", c.StorageParam[0].Name)
+	}
+	if c.StorageParam[0].From != nil {
+		t.Errorf("newly-set param should have nil From, got %q", *c.StorageParam[0].From)
+	}
+	if c.StorageParam[0].To == nil || *c.StorageParam[0].To != "0.007" {
+		t.Errorf("To not carried: %+v", c.StorageParam[0])
+	}
+}
+
+func TestDiffSchema_StorageParamRetuned(t *testing.T) {
+	from := tableWithReloptions("fillfactor=90")
+	to := tableWithReloptions("fillfactor=70")
+
+	delta, _ := DiffSchema(from, to)
+	c := findChange(t, delta.Changes, StorageParamsChanged)
+	p := c.StorageParam[0]
+	if p.From == nil || *p.From != "90" || p.To == nil || *p.To != "70" {
+		t.Errorf("want 90 -> 70, got %+v", p)
+	}
+}
+
+// ALTER TABLE ... RESET (...) drops the param: To is nil, From carries what it was.
+func TestDiffSchema_StorageParamReset(t *testing.T) {
+	from := tableWithReloptions("autovacuum_enabled=off")
+	to := tableWithReloptions()
+
+	delta, _ := DiffSchema(from, to)
+	c := findChange(t, delta.Changes, StorageParamsChanged)
+	p := c.StorageParam[0]
+	if p.From == nil || *p.From != "off" {
+		t.Errorf("want From=off, got %+v", p)
+	}
+	if p.To != nil {
+		t.Errorf("reset param should have nil To, got %q", *p.To)
+	}
+}
+
+// pg_class.reloptions is in set-order, not identity order. Reordering is not a change.
+func TestDiffSchema_StorageParamOrderIsNotAChange(t *testing.T) {
+	from := tableWithReloptions("fillfactor=70", "autovacuum_enabled=off")
+	to := tableWithReloptions("autovacuum_enabled=off", "fillfactor=70")
+
+	delta, _ := DiffSchema(from, to)
+	if !delta.IsEmpty() {
+		t.Errorf("reordered reloptions reported as a change: %+v", delta.Changes)
+	}
+}
+
+// The regression this whole change exists to prevent: ClassifyDrift used to short-circuit
+// on ContentHash equality, so two snapshots hashed under different format_versions came
+// back "diverged" with an empty change list. Identity must come from the delta.
+func TestClassifyDrift_IdenticalAcrossHashAlgorithms(t *testing.T) {
+	saved := tableWithReloptions("fillfactor=70")
+	saved.FormatVersion = 1
+	saved.ContentHash = snapshot.ComputeStructuralHash(saved)
+
+	live := tableWithReloptions("fillfactor=70")
+	live.FormatVersion = 2
+	live.ContentHash = snapshot.ComputeContentHashV2(live)
+
+	if saved.ContentHash == live.ContentHash {
+		t.Fatal("fixture is not exercising the mismatch; hashes are equal")
+	}
+	report := ClassifyDrift(saved, live)
+	if report.Direction != DriftIdentical {
+		t.Errorf("want identical, got %q with %d changes", report.Direction, len(report.Delta.Changes))
+	}
+}
+
+// A real settings change still reports, and counts as modified rather than added/removed.
+func TestClassifyDrift_StorageParamsCountAsModified(t *testing.T) {
+	saved := tableWithReloptions()
+	live := tableWithReloptions("autovacuum_enabled=off")
+
+	report := ClassifyDrift(saved, live)
+	if report.Direction != DriftDiverged {
+		t.Errorf("want diverged, got %q", report.Direction)
+	}
+	if report.ModifiedCount != 1 || report.AddedCount != 0 || report.RemovedCount != 0 {
+		t.Errorf("want 1 modified, got +%d -%d ~%d",
+			report.AddedCount, report.RemovedCount, report.ModifiedCount)
 	}
 }

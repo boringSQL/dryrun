@@ -302,3 +302,89 @@ func TestActivityContentHash_DifferentiatesNodes(t *testing.T) {
 		t.Errorf("activity hash didn't distinguish replicas")
 	}
 }
+
+// v1 froze reloptions at the last DDL change: a settings-only ALTER hashed identically,
+// so the new body deduped away and vacuum advice kept reading stale storage parameters.
+// v2 covers them; the structural hash still must not.
+func TestContentHashV2_SensitiveToReloptions(t *testing.T) {
+	base := baselineSnap()
+	tuned := baselineSnap()
+	tuned.Tables[0].Reloptions = []string{"autovacuum_vacuum_scale_factor=0.007"}
+
+	if ComputeStructuralHash(tuned) != ComputeStructuralHash(base) {
+		t.Errorf("structural hash moved on a reloptions-only change; it is the DDL identity")
+	}
+	if ComputeContentHashV2(tuned) == ComputeContentHashV2(base) {
+		t.Errorf("v2 hash did not change after setting reloptions")
+	}
+}
+
+// The compatibility promise: a database that sets no storage parameters hashes the same
+// under both, so upgrading the binary never re-hashes it.
+func TestContentHashV2_MatchesStructuralWithoutReloptions(t *testing.T) {
+	snap := baselineSnap()
+	if ComputeContentHashV2(snap) != ComputeStructuralHash(snap) {
+		t.Errorf("v2 hash diverged from structural for a table with no reloptions")
+	}
+
+	// An empty (non-nil) slice must omit the key too, not marshal as [].
+	snap.Tables[0].Reloptions = []string{}
+	if ComputeContentHashV2(snap) != ComputeStructuralHash(snap) {
+		t.Errorf("empty reloptions slice changed the v2 hash")
+	}
+}
+
+// pg_class.reloptions orders by when each option was set, so two tables with the same
+// settings can list them differently. That is not an identity difference.
+func TestContentHashV2_ReloptionsOrderInsensitive(t *testing.T) {
+	a := baselineSnap()
+	a.Tables[0].Reloptions = []string{"autovacuum_vacuum_threshold=5000", "fillfactor=70"}
+	b := baselineSnap()
+	b.Tables[0].Reloptions = []string{"fillfactor=70", "autovacuum_vacuum_threshold=5000"}
+
+	if ComputeContentHashV2(a) != ComputeContentHashV2(b) {
+		t.Errorf("v2 hash depends on reloptions order")
+	}
+}
+
+// Sorting must not reorder the caller's snapshot: the body is serialized after hashing,
+// and reordering it would change the stored bytes.
+func TestContentHashV2_DoesNotMutateReloptions(t *testing.T) {
+	snap := baselineSnap()
+	snap.Tables[0].Reloptions = []string{"fillfactor=70", "autovacuum_vacuum_threshold=5000"}
+	ComputeContentHashV2(snap)
+
+	if snap.Tables[0].Reloptions[0] != "fillfactor=70" {
+		t.Errorf("hashing sorted the caller's reloptions in place: %v", snap.Tables[0].Reloptions)
+	}
+}
+
+// The digest algorithm is a wire contract keyed on the doc's own format_version, not on
+// the build that happens to be reading it: an old body must keep hashing the old way.
+func TestDigestFor_DispatchesOnFormatVersion(t *testing.T) {
+	for _, fv := range []int{0, 1} {
+		snap := baselineSnap()
+		snap.FormatVersion = fv
+		snap.Tables[0].Reloptions = []string{"autovacuum_vacuum_scale_factor=0.007"}
+		if DigestFor(snap) != ComputeStructuralHash(snap) {
+			t.Errorf("format_version %d did not hash structurally", fv)
+		}
+	}
+
+	snap := baselineSnap()
+	snap.FormatVersion = 2
+	snap.Tables[0].Reloptions = []string{"autovacuum_vacuum_scale_factor=0.007"}
+	if DigestFor(snap) != ComputeContentHashV2(snap) {
+		t.Errorf("format_version 2 did not hash with reloptions")
+	}
+}
+
+// ComputeContentHash is what every current writer calls; it must stay the v1 digest until
+// the writers move to DigestFor, or existing stores would silently re-hash.
+func TestContentHash_StillStructural(t *testing.T) {
+	snap := baselineSnap()
+	snap.Tables[0].Reloptions = []string{"autovacuum_vacuum_scale_factor=0.007"}
+	if ComputeContentHash(snap) != ComputeStructuralHash(snap) {
+		t.Errorf("ComputeContentHash changed meaning; existing stores would re-hash")
+	}
+}
