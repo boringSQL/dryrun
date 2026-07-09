@@ -461,3 +461,27 @@ func TestAnalyzeVacuumHealth_WraparoundQuiet(t *testing.T) {
 		t.Errorf("expected zeroed multixact freeze fields for partitioned parent, got %+v", pvh)
 	}
 }
+
+// The planner doc's settings win: it re-hashes every capture, while the schema digest
+// only moves on DDL, so schema GUCs are frozen at the last schema change. A cluster that
+// retunes autovacuum in postgresql.conf must not be graded against last month's values.
+func TestFreshGUCs_PrefersPlanner(t *testing.T) {
+	a := &snapshot.AnnotatedSchema{
+		Schema:  &snapshot.SchemaSnapshot{GUCs: []snapshot.GucSetting{{Name: "autovacuum_vacuum_scale_factor", Setting: "0.2"}}},
+		Planner: &snapshot.PlannerStatsSnapshot{GUCs: []snapshot.GucSetting{{Name: "autovacuum_vacuum_scale_factor", Setting: "0.05"}}},
+	}
+	if got := ParseAutovacuumDefaults(freshGUCs(a)).VacuumScaleFactor; got != 0.05 {
+		t.Errorf("scale factor = %v, want the planner's 0.05", got)
+	}
+}
+
+// Planner docs captured before GUCs moved there carry none; fall back to the schema's.
+func TestFreshGUCs_FallsBackToSchema(t *testing.T) {
+	schemaGUCs := []snapshot.GucSetting{{Name: "autovacuum_vacuum_scale_factor", Setting: "0.2"}}
+	for _, planner := range []*snapshot.PlannerStatsSnapshot{nil, {}, {GUCs: []snapshot.GucSetting{}}} {
+		a := &snapshot.AnnotatedSchema{Schema: &snapshot.SchemaSnapshot{GUCs: schemaGUCs}, Planner: planner}
+		if got := ParseAutovacuumDefaults(freshGUCs(a)).VacuumScaleFactor; got != 0.2 {
+			t.Errorf("planner %+v: scale factor = %v, want the schema's 0.2", planner, got)
+		}
+	}
+}

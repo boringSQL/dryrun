@@ -388,3 +388,35 @@ func TestContentHash_StillStructural(t *testing.T) {
 		t.Errorf("ComputeContentHash changed meaning; existing stores would re-hash")
 	}
 }
+
+// GUCs ride the planner doc because the schema digest only moves on DDL: a
+// postgresql.conf change would never rotate it, freezing the settings a reader sees.
+// The planner doc re-hashes every capture anyway (reltuples move), so this costs no rows.
+func TestPlannerContentHash_SensitiveToGUCs(t *testing.T) {
+	base := &PlannerStatsSnapshot{SchemaRefHash: "abc"}
+	tuned := &PlannerStatsSnapshot{
+		SchemaRefHash: "abc",
+		GUCs:          []GucSetting{{Name: "autovacuum_vacuum_scale_factor", Setting: "0.1"}},
+	}
+	if ComputePlannerContentHash(base) == ComputePlannerContentHash(tuned) {
+		t.Error("planner hash ignored gucs")
+	}
+
+	other := &PlannerStatsSnapshot{
+		SchemaRefHash: "abc",
+		GUCs:          []GucSetting{{Name: "autovacuum_vacuum_scale_factor", Setting: "0.2"}},
+	}
+	if ComputePlannerContentHash(tuned) == ComputePlannerContentHash(other) {
+		t.Error("planner hash ignored a guc value change")
+	}
+}
+
+// The compatibility promise: planner docs captured before GUCs moved here carry none, so
+// they must hash exactly as they did or every historical re-push 422s on digest mismatch.
+func TestPlannerContentHash_OmitsEmptyGUCs(t *testing.T) {
+	noGUCs := &PlannerStatsSnapshot{SchemaRefHash: "abc"}
+	emptyGUCs := &PlannerStatsSnapshot{SchemaRefHash: "abc", GUCs: []GucSetting{}}
+	if ComputePlannerContentHash(noGUCs) != ComputePlannerContentHash(emptyGUCs) {
+		t.Error("an empty gucs slice changed the planner hash")
+	}
+}

@@ -273,8 +273,8 @@ func TestDiffSchema_ColumnTypeWidening(t *testing.T) {
 		from, to string
 		widening bool
 	}{
-		{"int4", "int8", true},  // integer promotion: lossless widening
-		{"int8", "int4", false}, // the reverse is a narrowing, not a widening
+		{"int4", "int8", true},         // integer promotion: lossless widening
+		{"int8", "int4", false},        // the reverse is a narrowing, not a widening
 		{"varchar(50)", "text", true},  // bounded varchar to unbounded text widens
 		{"text", "varchar(50)", false}, // clamping text into varchar(50) does not
 		{"int4", "text", false},        // unrelated families: not a widening
@@ -544,5 +544,88 @@ func TestClassifyDrift_StorageParamsCountAsModified(t *testing.T) {
 	if report.ModifiedCount != 1 || report.AddedCount != 0 || report.RemovedCount != 0 {
 		t.Errorf("want 1 modified, got +%d -%d ~%d",
 			report.AddedCount, report.RemovedCount, report.ModifiedCount)
+	}
+}
+
+// The cloud feed renders ScoredChange.Note and nothing else for a table-level change
+// (changeName has no pointer to read), so the param list has to ride the Note or the
+// card shows only "storage_params_changed" with no diff.
+func TestDiffSchema_StorageParamsCarryNote(t *testing.T) {
+	from := tableWithReloptions("autovacuum_vacuum_scale_factor=0.02")
+	to := tableWithReloptions(
+		"autovacuum_vacuum_scale_factor=0.007",
+		"autovacuum_vacuum_threshold=5000",
+	)
+
+	delta, _ := DiffSchema(from, to)
+	c := findChange(t, delta.Changes, StorageParamsChanged)
+	want := "autovacuum_vacuum_scale_factor 0.02 → 0.007, " +
+		"autovacuum_vacuum_threshold 50 → 5000 (was postgres default)"
+	if c.Note != want {
+		t.Errorf("note:\n got %q\nwant %q", c.Note, want)
+	}
+}
+
+// A param the table never set still had an effective value, inherited from the cluster.
+// Naming it turns "set 0.007" into a real delta. The captured GUC wins over pg's stock
+// default, because a cluster that tunes autovacuum in postgresql.conf would otherwise be
+// shown a before-value it never had.
+func TestDiffSchema_StorageParamBaselineFromClusterGUC(t *testing.T) {
+	from := tableWithReloptions()
+	from.GUCs = []snapshot.GucSetting{{Name: "autovacuum_vacuum_scale_factor", Setting: "0.1"}}
+	to := tableWithReloptions("autovacuum_vacuum_scale_factor=0.007")
+	to.GUCs = from.GUCs
+
+	delta, _ := DiffSchema(from, to)
+	c := findChange(t, delta.Changes, StorageParamsChanged)
+	p := c.StorageParam[0]
+	if p.Baseline != "0.1" || p.BaselineFrom != "cluster" {
+		t.Fatalf("baseline: got %q from %q, want 0.1 from cluster", p.Baseline, p.BaselineFrom)
+	}
+	before, after, origin := StorageParamValues(p)
+	if before != "0.1" || after != "0.007" || origin != "was cluster default" {
+		t.Errorf("values: got %q → %q (%q)", before, after, origin)
+	}
+}
+
+// No GUC captured (older docs) falls back to pg's stock default, and says so.
+func TestDiffSchema_StorageParamBaselineFallsBackToPgDefault(t *testing.T) {
+	delta, _ := DiffSchema(tableWithReloptions(), tableWithReloptions("fillfactor=70"))
+	p := findChange(t, delta.Changes, StorageParamsChanged).StorageParam[0]
+	if p.Baseline != "100" || p.BaselineFrom != "pg" {
+		t.Fatalf("baseline: got %q from %q, want 100 from pg", p.Baseline, p.BaselineFrom)
+	}
+}
+
+// A RESET hands the param back to the baseline; that is the after value, not the before.
+func TestDiffSchema_StorageParamResetShowsBaselineAsAfter(t *testing.T) {
+	delta, _ := DiffSchema(tableWithReloptions("autovacuum_enabled=off"), tableWithReloptions())
+	p := findChange(t, delta.Changes, StorageParamsChanged).StorageParam[0]
+	before, after, origin := StorageParamValues(p)
+	if before != "off" || after != "on" || origin != "reset to postgres default" {
+		t.Errorf("values: got %q → %q (%q)", before, after, origin)
+	}
+}
+
+// A param with no GUC and no known default states only what it can: the new value.
+func TestDiffSchema_StorageParamUnknownHasNoBaseline(t *testing.T) {
+	delta, _ := DiffSchema(tableWithReloptions(), tableWithReloptions("parallel_workers=8"))
+	p := findChange(t, delta.Changes, StorageParamsChanged).StorageParam[0]
+	if p.Baseline != "" {
+		t.Fatalf("invented a baseline for parallel_workers: %q", p.Baseline)
+	}
+	if before, after, origin := StorageParamValues(p); before != "∅" || after != "8" || origin != "" {
+		t.Errorf("values: got %q → %q (%q)", before, after, origin)
+	}
+}
+
+// A retune names both sides itself, so no baseline is resolved or shown.
+func TestDiffSchema_StorageParamRetuneHasNoBaseline(t *testing.T) {
+	delta, _ := DiffSchema(
+		tableWithReloptions("autovacuum_vacuum_scale_factor=0.02"),
+		tableWithReloptions("autovacuum_vacuum_scale_factor=0.007"))
+	p := findChange(t, delta.Changes, StorageParamsChanged).StorageParam[0]
+	if p.Baseline != "" || p.BaselineFrom != "" {
+		t.Errorf("retune resolved a baseline it does not need: %+v", p)
 	}
 }
