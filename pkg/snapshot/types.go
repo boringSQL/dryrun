@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// 0 means legacy. not hashed.
-const FormatVersion = 1
+// 0 means legacy. not hashed. 2 = digest covers reloptions.
+const FormatVersion = 2
 
 // DDL-only schema snapshot; sizing/activity live in AnnotatedSchema
 type SchemaSnapshot struct {

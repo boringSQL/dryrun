@@ -3,6 +3,7 @@ package diff
 import (
 	"fmt"
 	"io"
+	"strings"
 )
 
 // exported so the snapshot_diff correlator can reuse the per-row formatting
@@ -125,6 +126,8 @@ func Describe(c Change) string {
 		return "table renamed"
 	case TableCommentChanged:
 		return "comment changed"
+	case StorageParamsChanged:
+		return describeStorageParams(c.StorageParam)
 	case ColumnAdded:
 		null := "NOT NULL"
 		if c.Column.Nullable != nil && *c.Column.Nullable {
@@ -195,6 +198,24 @@ func Describe(c Change) string {
 		return fmt.Sprintf("%s %s changed", c.Object.Kind, c.Object.Name)
 	}
 	return string(c.Type)
+}
+
+func describeStorageParams(params []StorageParamChange) string {
+	if len(params) == 0 {
+		return "storage parameters changed"
+	}
+	parts := make([]string, len(params))
+	for i, p := range params {
+		switch {
+		case p.From == nil:
+			parts[i] = fmt.Sprintf("%s set %s", p.Name, dflt(p.To))
+		case p.To == nil:
+			parts[i] = fmt.Sprintf("%s reset (was %s)", p.Name, dflt(p.From))
+		default:
+			parts[i] = fmt.Sprintf("%s %s → %s", p.Name, *p.From, *p.To)
+		}
+	}
+	return "storage parameters: " + strings.Join(parts, ", ")
 }
 
 func dflt(p *string) string {

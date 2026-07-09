@@ -22,12 +22,16 @@ type DriftReport struct {
 }
 
 // Direction is raw: added-only=ahead, removed-only=behind. No risk judgment.
+//
+// Identity comes from the delta, not from comparing ContentHash: the two snapshots can
+// be hashed under different format_versions (a saved file predating the settings-aware
+// digest, versus a live capture), and an algorithm mismatch would report every schema as
+// diverged with nothing to show.
 func ClassifyDrift(saved, live *snapshot.SchemaSnapshot) *DriftReport {
-	if saved.ContentHash == live.ContentHash {
+	delta, _ := DiffSchema(saved, live)
+	if delta.IsEmpty() {
 		return &DriftReport{Direction: DriftIdentical, SavedHash: saved.ContentHash, LiveHash: live.ContentHash}
 	}
-
-	delta, _ := DiffSchema(saved, live)
 
 	var added, removed, modified int
 	for _, c := range delta.Changes {

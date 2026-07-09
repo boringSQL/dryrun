@@ -161,7 +161,7 @@ func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error
 		Extensions:    extensions,
 		GUCs:          gucs,
 	}
-	snap.ContentHash = ComputeContentHash(snap)
+	snap.ContentHash = DigestFor(snap)
 	return snap, nil
 }
 

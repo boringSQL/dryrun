@@ -100,7 +100,7 @@ func (h *HTTPStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnapsho
 	switch {
 	case snap.AsSchema() != nil:
 		s := snap.AsSchema()
-		digest := schema.ComputeContentHash(s)
+		digest := schema.DigestFor(s)
 		out, err := h.putBlob(ctx, digest, mediaTypeSchemaBlob, s)
 		if err != nil {
 			return out, err

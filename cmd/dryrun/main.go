@@ -122,7 +122,7 @@ func importCmd() *cobra.Command {
 				return fmt.Errorf("schema file contains no tables or views")
 			}
 
-			snap.ContentHash = schema.ComputeContentHash(snap)
+			snap.ContentHash = schema.DigestFor(snap)
 
 			dataDir, err := history.DefaultDataDir()
 			if err != nil {

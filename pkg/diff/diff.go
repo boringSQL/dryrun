@@ -3,6 +3,8 @@
 package diff
 
 import (
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/boringsql/dryrun/pkg/snapshot"
@@ -37,12 +39,13 @@ type (
 		Type   ChangeType `json:"type"`
 		Object ObjectRef  `json:"object"`
 
-		Column     *ColumnChange     `json:"column,omitempty"`
-		Index      *IndexChange      `json:"index,omitempty"`
-		Constraint *ConstraintChange `json:"constraint,omitempty"`
-		Function   *FunctionChange   `json:"function,omitempty"`
-		RLS        *RLSChange        `json:"rls,omitempty"`
-		Rename     *RenameChange     `json:"rename,omitempty"`
+		Column       *ColumnChange        `json:"column,omitempty"`
+		Index        *IndexChange         `json:"index,omitempty"`
+		Constraint   *ConstraintChange    `json:"constraint,omitempty"`
+		Function     *FunctionChange      `json:"function,omitempty"`
+		RLS          *RLSChange           `json:"rls,omitempty"`
+		Rename       *RenameChange        `json:"rename,omitempty"`
+		StorageParam []StorageParamChange `json:"storage_param,omitempty"`
 
 		Note string `json:"note,omitempty"` // free-text, predictd ignores it
 	}
@@ -97,6 +100,14 @@ type (
 		ToName   string `json:"to_name"`
 	}
 
+	// One ALTER TABLE ... SET (...) usually moves several params, so they ride one
+	// table-grain change rather than one each. nil From = newly set, nil To = RESET.
+	StorageParamChange struct {
+		Name string  `json:"name"`
+		From *string `json:"from,omitempty"`
+		To   *string `json:"to,omitempty"`
+	}
+
 	DefaultKind string
 )
 
@@ -105,6 +116,8 @@ const (
 	TableDropped        ChangeType = "table_dropped"
 	TableRenamed        ChangeType = "table_renamed"
 	TableCommentChanged ChangeType = "table_comment_changed"
+	// reloptions: autovacuum knobs, fillfactor, toast.*, parallel_workers, …
+	StorageParamsChanged ChangeType = "storage_params_changed"
 
 	ColumnAdded          ChangeType = "column_added"
 	ColumnDropped        ChangeType = "column_dropped"
@@ -288,6 +301,41 @@ func diffTableBody(old, nw *snapshot.Table, changes *[]Change) {
 	if old.RLSEnabled != nw.RLSEnabled {
 		*changes = append(*changes, Change{Type: RLSToggled, Object: ref, RLS: &RLSChange{Enabled: nw.RLSEnabled}})
 	}
+	if params := diffStorageParams(old.Reloptions, nw.Reloptions); len(params) > 0 {
+		*changes = append(*changes, Change{Type: StorageParamsChanged, Object: ref, StorageParam: params})
+	}
+}
+
+// diffStorageParams compares two reloptions lists. Sorted by name so one ALTER always
+// yields the same change bytes; pg_class.reloptions is in set-order, which is not identity.
+func diffStorageParams(old, nw []string) []StorageParamChange {
+	oldMap, newMap := parseReloptions(old), parseReloptions(nw)
+
+	var out []StorageParamChange
+	for name, to := range newMap {
+		if from, ok := oldMap[name]; !ok {
+			out = append(out, StorageParamChange{Name: name, To: new(to)})
+		} else if from != to {
+			out = append(out, StorageParamChange{Name: name, From: new(from), To: new(to)})
+		}
+	}
+	for name, from := range oldMap {
+		if _, ok := newMap[name]; !ok {
+			out = append(out, StorageParamChange{Name: name, From: new(from)})
+		}
+	}
+	slices.SortFunc(out, func(a, b StorageParamChange) int { return strings.Compare(a.Name, b.Name) })
+	return out
+}
+
+func parseReloptions(opts []string) map[string]string {
+	m := make(map[string]string, len(opts))
+	for _, opt := range opts {
+		if k, v, ok := strings.Cut(opt, "="); ok {
+			m[k] = v
+		}
+	}
+	return m
 }
 
 func diffIndexes(old, nw []snapshot.Index, ref ObjectRef, changes *[]Change) {
