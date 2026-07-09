@@ -4,13 +4,37 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"slices"
 )
 
+// The digest algorithm is a wire contract: derive it from the doc, not from this build.
+func DigestFor(snap *SchemaSnapshot) string {
+	if snap.FormatVersion >= 2 {
+		return ComputeContentHashV2(snap)
+	}
+	return ComputeStructuralHash(snap)
+}
+
 // SHA-256 over DDL-relevant fields only, runtime stats are stripped
+func ComputeStructuralHash(snap *SchemaSnapshot) string {
+	return hashSchema(snap, false)
+}
+
+// Legacy (format_version <= 1) digest; new call sites want DigestFor.
 func ComputeContentHash(snap *SchemaSnapshot) string {
+	return ComputeStructuralHash(snap)
+}
+
+// Structural + reloptions. v1 hashed a settings-only ALTER identically, so the new body
+// deduped away and vacuum advice kept reading reloptions frozen at the last DDL change.
+func ComputeContentHashV2(snap *SchemaSnapshot) string {
+	return hashSchema(snap, true)
+}
+
+func hashSchema(snap *SchemaSnapshot, withReloptions bool) string {
 	tables := make([]any, len(snap.Tables))
 	for i := range snap.Tables {
-		tables[i] = tableToStructural(&snap.Tables[i])
+		tables[i] = tableToStructural(&snap.Tables[i], withReloptions)
 	}
 
 	canonical := map[string]any{
@@ -29,13 +53,13 @@ func ComputeContentHash(snap *SchemaSnapshot) string {
 	return fmt.Sprintf("%x", h)
 }
 
-func tableToStructural(t *Table) map[string]any {
+func tableToStructural(t *Table, withReloptions bool) map[string]any {
 	cols := make([]map[string]any, len(t.Columns))
 	for i := range t.Columns {
 		cols[i] = columnToStructural(&t.Columns[i])
 	}
 
-	return map[string]any{
+	m := map[string]any{
 		"schema":         t.Schema,
 		"name":           t.Name,
 		"columns":        cols,
@@ -47,6 +71,14 @@ func tableToStructural(t *Table) map[string]any {
 		"triggers":       t.Triggers,
 		"rls_enabled":    t.RLSEnabled,
 	}
+	// Omitted, not null, when empty: a table with no storage params keeps its v1 bytes.
+	// Sort a copy; pg_class.reloptions is in set-order, which is not identity.
+	if withReloptions && len(t.Reloptions) > 0 {
+		opts := slices.Clone(t.Reloptions)
+		slices.Sort(opts)
+		m["reloptions"] = opts
+	}
+	return m
 }
 
 func columnToStructural(c *Column) map[string]any {

@@ -79,6 +79,9 @@ var (
 	DetectFlavor            = snapshot.DetectFlavor
 
 	ComputeContentHash         = snapshot.ComputeContentHash
+	ComputeStructuralHash      = snapshot.ComputeStructuralHash
+	ComputeContentHashV2       = snapshot.ComputeContentHashV2
+	DigestFor                  = snapshot.DigestFor
 	ComputePlannerContentHash  = snapshot.ComputePlannerContentHash
 	ComputeActivityContentHash = snapshot.ComputeActivityContentHash
 )
