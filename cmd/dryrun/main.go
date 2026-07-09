@@ -855,6 +855,8 @@ func mcpServeCmd() *cobra.Command {
 
 			mcpSrv := mcpserver.NewMCPServer("dryrun", buildinfo.Get(),
 				mcpserver.WithInstructions(server.Instructions()),
+				// a handler panic (malformed plan_json, bad SQL) returns a tool error instead of killing stdio
+				mcpserver.WithRecovery(),
 			)
 			server.Register(mcpSrv)
 
