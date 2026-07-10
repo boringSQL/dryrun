@@ -58,6 +58,8 @@ type (
 		Action string `json:"action,omitempty"`
 	}
 
+	// Wire shape (incl. nested types) pinned by the vacuum_health MCP output
+	// schema (generated, additionalProperties:false); non-omitempty = required.
 	VacuumHealth struct {
 		Schema                    string                  `json:"schema"`
 		Table                     string                  `json:"table"`

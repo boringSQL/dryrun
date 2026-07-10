@@ -33,18 +33,18 @@ func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mc
 }
 
 // schema/table extractors for filterByQual
-func staleKey(e schema.StaleStatsEntry) (string, string)      { return e.Schema, e.Table }
-func unusedKey(e schema.UnusedIndexEntry) (string, string)    { return e.Schema, e.Table }
-func bloatKey(e schema.BloatedIndexEntry) (string, string)    { return e.Schema, e.Table }
+func staleKey(e schema.StaleStatsEntry) (string, string)        { return e.Schema, e.Table }
+func unusedKey(e schema.UnusedIndexEntry) (string, string)      { return e.Schema, e.Table }
+func bloatKey(e schema.BloatedIndexEntry) (string, string)      { return e.Schema, e.Table }
 func bloatTableKey(e schema.BloatedTableEntry) (string, string) { return e.Schema, e.Table }
-func vacuumKey(e vacuum.VacuumHealth) (string, string)     { return e.Schema, e.Table }
+func vacuumKey(e vacuum.VacuumHealth) (string, string)          { return e.Schema, e.Table }
 func anomalyKey(m map[string]any) (string, string) {
 	s, _ := m["schema"].(string)
 	t, _ := m["table"].(string)
 	return s, t
 }
 
-// caps never-analyzed and stale independently so it can provide more targetted advice
+// caps never-analyzed and stale independently so it can provide more targeted advice
 func capStaleStats(entries []schema.StaleStatsEntry, max int) (kept []schema.StaleStatsEntry, omitted int) {
 	var never, stale []schema.StaleStatsEntry
 	for _, e := range entries {
@@ -107,7 +107,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 		hint = "Unused indexes add write overhead. Verify index scans across all replicas before dropping."
 	}
 
-	// point next at the truncated categories while trancating
+	// point next at the truncated categories only
 	var next []NextCall
 	for _, k := range []string{"stale_stats", "unused_indexes", "anomalies", "bloated_indexes", "bloated_tables"} {
 		if block, ok := wrapper[k].(map[string]any); ok && block["truncated"] == true {
@@ -135,7 +135,7 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 	tableF := getArg(req, "table")
 	entries := filterByQual(schema.DetectStaleStats(a, int64(7)), schemaF, tableF, staleKey)
 	if len(entries) == 0 {
-		return textResult("No stale statistics detected."), nil
+		return s.emptyKindResult("stale_stats", "No stale statistics detected."), nil
 	}
 
 	total := len(entries)
@@ -149,10 +149,24 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 		}
 	}
 	body := fmt.Sprintf("Stale statistics (%d entries):\n%s", total, strings.Join(lines, "\n"))
+	wrapper := map[string]any{"stale_stats": kept, "count": total}
 	if omitted > 0 {
 		body += fmt.Sprintf("\n\n%d more not shown; narrow with schema=/table= or re-run with limit=0.", omitted)
+		wrapper["truncated"] = true
+		wrapper["omitted"] = omitted
+		s.injectMeta(wrapper,
+			fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), total, omitted),
+			narrowNext("stale_stats", schemaF, tableF))
 	}
-	return textResult(body), nil
+	return structuredTextResult(wrapper, body), nil
+}
+
+// Structured zero-entry result so schema-aware clients see {<kind>: [], count: 0}
+// while thin clients keep the friendly prose.
+func (s *Server) emptyKindResult(kind, text string) *mcp.CallToolResult {
+	wrapper := map[string]any{kind: []any{}, "count": 0}
+	s.injectMeta(wrapper, "", nil)
+	return structuredTextResult(wrapper, text)
 }
 
 func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -165,7 +179,7 @@ func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRe
 	tableF := getArg(req, "table")
 	entries := filterByQual(schema.DetectUnusedIndexes(a), schemaF, tableF, unusedKey)
 	if len(entries) == 0 {
-		return textResult("No unused indexes detected. All indexes have at least one scan recorded."), nil
+		return s.emptyKindResult("unused_indexes", "No unused indexes detected. All indexes have at least one scan recorded."), nil
 	}
 	return cappedKindResult(s, "unused_indexes", entries, limitArg(req), schemaF, tableF), nil
 }
@@ -177,14 +191,14 @@ func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolReques
 	}
 
 	if a.Merged == nil {
-		return textResult("No node statistics available for anomaly detection."), nil
+		return s.emptyKindResult("anomalies", "No node statistics available for anomaly detection."), nil
 	}
 
 	schemaF := schemaArg(req)
 	tableF := getArg(req, "table")
 	anomalies := filterByQual(buildAnomalies(a), schemaF, tableF, anomalyKey)
 	if len(anomalies) == 0 {
-		return textResult("No anomalies detected."), nil
+		return s.emptyKindResult("anomalies", "No anomalies detected."), nil
 	}
 	return cappedKindResult(s, "anomalies", anomalies, limitArg(req), schemaF, tableF), nil
 }
@@ -200,7 +214,7 @@ func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolR
 	threshold := getFloatArg(req, "threshold", 4.0)
 	entries := filterByQual(schema.DetectBloatedIndexes(a, threshold), schemaF, tableF, bloatKey)
 	if len(entries) == 0 {
-		return textResult("No bloated indexes detected."), nil
+		return s.emptyKindResult("bloated_indexes", "No bloated indexes detected."), nil
 	}
 	return cappedKindResult(s, "bloated_indexes", entries, limitArg(req), schemaF, tableF), nil
 }
@@ -216,7 +230,7 @@ func (s *Server) handleDetectBloatedTables(_ context.Context, req mcp.CallToolRe
 	threshold := getFloatArg(req, "threshold", 4.0)
 	entries := filterByQual(schema.DetectBloatedTables(a, threshold), schemaF, tableF, bloatTableKey)
 	if len(entries) == 0 {
-		return textResult("No bloated tables detected."), nil
+		return s.emptyKindResult("bloated_tables", "No bloated tables detected."), nil
 	}
 	return cappedKindResult(s, "bloated_tables", entries, limitArg(req), schemaF, tableF), nil
 }
@@ -246,20 +260,19 @@ func (s *Server) handleVacuumHealth(_ context.Context, req mcp.CallToolRequest) 
 	tableF := getArg(req, "table")
 	results := filterByQual(vacuum.AnalyzeVacuumHealth(a), schemaF, tableF, vacuumKey)
 	if len(results) == 0 {
-		return textResult(s.wrapText("No vacuum health concerns found.", "")), nil
+		return structuredTextResult(
+			vacuumHealthResult{Entries: []vacuum.VacuumHealth{}, Meta: s.newMeta("", nil)},
+			s.wrapText("No vacuum health concerns found.", "")), nil
 	}
 
 	kept, omitted := capItems(results, limitArg(req))
-	wrapper := map[string]any{
-		"vacuum_health": kept,
-		"count":         len(results),
-	}
+	out := vacuumHealthResult{Entries: kept, Count: len(results)}
 	hint := ""
 	if omitted > 0 {
-		wrapper["truncated"] = true
-		wrapper["omitted"] = omitted
+		out.Truncated = true
+		out.Omitted = omitted
 		hint = fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), len(results), omitted)
 	}
-	s.injectMeta(wrapper, hint, nil)
-	return jsonResult(wrapper), nil
+	out.Meta = s.newMeta(hint, nil)
+	return jsonResult(out), nil
 }

@@ -857,6 +857,10 @@ func mcpServeCmd() *cobra.Command {
 				mcpserver.WithInstructions(server.Instructions()),
 				// a handler panic (malformed plan_json, bad SQL) returns a tool error instead of killing stdio
 				mcpserver.WithRecovery(),
+				// declared Enum/Required/type constraints reject bad args before handlers run
+				mcpserver.WithInputSchemaValidation(),
+				// a payload that drifts from its output schema fails here, not in the client
+				mcpserver.WithOutputSchemaValidation(),
 			)
 			server.Register(mcpSrv)
 

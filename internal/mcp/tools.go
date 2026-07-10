@@ -21,6 +21,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			),
 			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max results (default 50, 0 for all).")),
 			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Skip N results.")),
+			mcp.WithOutputSchema[listTablesResult](),
 		),
 		s.handleListTables,
 	)
@@ -38,6 +39,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 				mcp.Items(map[string]any{"type": "string"}),
 				mcp.Description("Whitelist of sections: columns, indexes, constraints, stats, partition_info, column_profiles, comment, policies, triggers, reloptions, rls_enabled."),
 			),
+			mcp.WithRawOutputSchema(describeTableOutputSchema),
 		),
 		s.handleDescribeTable,
 	)
@@ -47,6 +49,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			mcp.WithString("query", mcp.Required(), mcp.Description("Case-insensitive substring.")),
 			mcp.WithNumber("limit", mcp.DefaultNumber(30), mcp.Description("Max results (default 30, 0 for all).")),
 			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Skip N results.")),
+			mcp.WithOutputSchema[searchSchemaResult](),
 		),
 		s.handleSearchSchema,
 	)
@@ -76,7 +79,13 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		mcp.NewTool("analyze_plan",
 			mcp.WithDescription("Analyze an EXPLAIN JSON plan against the schema"),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("The original SQL query text.")),
-			mcp.WithObject("plan_json", mcp.Required(), mcp.Description("EXPLAIN output in JSON format (EXPLAIN (FORMAT JSON)).")),
+			// the handler accepts both the [{"Plan": ...}] array EXPLAIN (FORMAT JSON)
+			// returns and the unwrapped {"Plan": ...} object; the schema must say so
+			// or input validation rejects the array shape
+			mcp.WithAny("plan_json", mcp.Required(),
+				mcp.Description("EXPLAIN output in JSON format (EXPLAIN (FORMAT JSON)): the [{\"Plan\": ...}] array or the unwrapped {\"Plan\": ...} object."),
+				func(schema map[string]any) { schema["type"] = []string{"object", "array"} },
+			),
 			mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
 		),
 		s.handleAnalyzePlan,
@@ -109,6 +118,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("table", mcp.Description("Table filter.")),
+			mcp.WithRawOutputSchema(lintSchemaOutputSchema),
 		),
 		s.handleLintSchema,
 	)
@@ -116,7 +126,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		mcp.NewTool("detect",
 			mcp.WithDescription("Health checks: stale stats, unused/bloated indexes, anomalies"),
 			mcp.WithString("kind",
-				mcp.Enum("stale_stats", "unused_indexes", "anomalies", "bloated_indexes", "all"),
+				mcp.Enum("stale_stats", "unused_indexes", "anomalies", "bloated_indexes", "bloated_tables", "all"),
 				mcp.DefaultString("all"),
 				mcp.Description("Which detection to run (default: all)."),
 			),
@@ -130,6 +140,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 				mcp.DefaultNumber(50),
 				mcp.Description("Max entries per category (default 50, 0=all)."),
 			),
+			mcp.WithRawOutputSchema(detectOutputSchema),
 		),
 		s.handleDetect,
 	)
@@ -142,6 +153,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 				mcp.DefaultNumber(50),
 				mcp.Description("Max entries (default 50, 0=all)."),
 			),
+			mcp.WithOutputSchema[vacuumHealthResult](),
 		),
 		s.handleVacuumHealth,
 	)
@@ -165,6 +177,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 			mcp.WithString("table", mcp.Description("Narrow to one table.")),
 			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max objects (and raw rows in full view); 0 for all. Truncation sets _meta.next to re-run uncapped.")),
 			mcp.WithNumber("window_minutes", mcp.DefaultNumber(30), mcp.Description("Correlation window for matching planner/activity captures to each anchor (default 30).")),
+			mcp.WithRawOutputSchema(snapshotDiffOutputSchema),
 		),
 		s.handleSnapshotDiff,
 	)

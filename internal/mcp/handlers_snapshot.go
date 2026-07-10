@@ -73,7 +73,7 @@ func (s *Server) handleSnapshotDiff(ctx context.Context, req mcp.CallToolRequest
 		Schema: getArg(req, "schema"),
 		Table:  getArg(req, "table"),
 	}
-	return s.runSnapshotDiff(ctx, opt, argOr(req, "view", "summary"), capArg(req))
+	return s.runSnapshotDiff(ctx, opt, argOr(req, "view", "summary"), limitArg(req))
 }
 
 func (s *Server) runSnapshotDiff(ctx context.Context, opt snapdiff.Options, view string, limit int) (*mcp.CallToolResult, error) {
@@ -98,16 +98,6 @@ func (s *Server) runSnapshotDiff(ctx context.Context, opt snapdiff.Options, view
 	payload := res.ForView(view, limit)
 	hint, next := snapshotDiffFollowups(res, opt, view, payload.Truncated)
 	return s.metaJSONResult(payload, "", hint, next), nil
-}
-
-// limit: explicit 0 means all; absent falls back to the default cap.
-func capArg(req mcp.CallToolRequest) int {
-	if v, ok := req.GetArguments()["limit"]; ok {
-		if f, ok := v.(float64); ok && f >= 0 {
-			return int(f)
-		}
-	}
-	return defaultMaxItems
 }
 
 func snapshotDiffFollowups(res *snapdiff.Result, opt snapdiff.Options, view string, truncated bool) (string, []NextCall) {

@@ -19,12 +19,13 @@ var describeTableFields = []string{
 }
 
 type (
-	// Formatted line plus sortable values for list_tables
+	// Formatted line plus the structured entry and sortable values for list_tables
 	tableEntry struct {
-		line string
-		name string
-		rows float64
-		size int64
+		line  string
+		name  string
+		rows  float64
+		size  int64
+		entry tableListEntry
 	}
 )
 
@@ -41,6 +42,7 @@ func (s *Server) handleListTables(_ context.Context, req mcp.CallToolRequest) (*
 		if schemaFilter != "" && t.Schema != schemaFilter {
 			continue
 		}
+		structured := tableListEntry{Schema: t.Schema, Name: t.Name, Comment: t.Comment}
 		line := t.Schema + "." + t.Name
 		var rows float64
 		var size int64
@@ -48,9 +50,17 @@ func (s *Server) handleListTables(_ context.Context, req mcp.CallToolRequest) (*
 		if sizing != nil {
 			rows = sizing.Reltuples
 			size = sizing.TableSize
+			rowsEst := int64(rows)
+			structured.RowsEstimate = &rowsEst
+			structured.SizeBytes = &sizing.TableSize
 			line += fmt.Sprintf(" (~%d rows)", int64(rows))
 		}
 		if t.PartitionInfo != nil {
+			structured.Partitioned = &tablePartitionSummary{
+				Strategy: string(t.PartitionInfo.Strategy),
+				Key:      t.PartitionInfo.Key,
+				Children: len(t.PartitionInfo.Children),
+			}
 			line += fmt.Sprintf(" [partitioned: %s(%s), %d parts]",
 				t.PartitionInfo.Strategy, t.PartitionInfo.Key,
 				len(t.PartitionInfo.Children))
@@ -58,7 +68,7 @@ func (s *Server) handleListTables(_ context.Context, req mcp.CallToolRequest) (*
 		if t.Comment != nil {
 			line += " - " + *t.Comment
 		}
-		entries = append(entries, tableEntry{line: line, name: t.Schema + "." + t.Name, rows: rows, size: size})
+		entries = append(entries, tableEntry{line: line, name: t.Schema + "." + t.Name, rows: rows, size: size, entry: structured})
 	}
 
 	switch getArg(req, "sort") {
@@ -73,21 +83,27 @@ func (s *Server) handleListTables(_ context.Context, req mcp.CallToolRequest) (*
 	total := len(entries)
 
 	if total == 0 {
-		return textResult(s.wrapText("No tables found.", "")), nil
+		return structuredTextResult(
+			listTablesResult{Tables: []tableListEntry{}, Meta: s.newMeta("", nil)},
+			s.wrapText("No tables found.", "")), nil
 	}
 
 	offset := int(getFloatArg(req, "offset", 0))
-	limit := int(getFloatArg(req, "limit", 50))
+	limit := limitArg(req)
 
 	if offset >= total {
-		return textResult(s.wrapText(fmt.Sprintf("%d table(s) total. Offset %d is beyond the end.", total, offset), "")), nil
+		return structuredTextResult(
+			listTablesResult{Tables: []tableListEntry{}, Count: total, Offset: offset, Meta: s.newMeta("", nil)},
+			s.wrapText(fmt.Sprintf("%d table(s) total. Offset %d is beyond the end.", total, offset), "")), nil
 	}
 	end := pageEnd(offset, limit, total)
 	entries = entries[offset:end]
 
 	lines := make([]string, len(entries))
+	page := make([]tableListEntry, len(entries))
 	for i, e := range entries {
 		lines[i] = e.line
+		page[i] = e.entry
 	}
 
 	var body string
@@ -96,7 +112,9 @@ func (s *Server) handleListTables(_ context.Context, req mcp.CallToolRequest) (*
 	} else {
 		body = fmt.Sprintf("Showing %d-%d of %d table(s):\n%s", offset+1, end, total, strings.Join(lines, "\n"))
 	}
-	return textResult(s.wrapText(body, "")), nil
+	return structuredTextResult(
+		listTablesResult{Tables: page, Count: total, Offset: offset, Meta: s.newMeta("", nil)},
+		s.wrapText(body, "")), nil
 }
 
 func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -283,69 +301,89 @@ func (s *Server) handleSearchSchema(_ context.Context, req mcp.CallToolRequest) 
 
 	q := strings.ToLower(getArg(req, "query"))
 	var results []string
+	var matches []searchMatch
+
+	add := func(line string, m searchMatch) {
+		results = append(results, line)
+		matches = append(matches, m)
+	}
 
 	for _, t := range snap.Tables {
 		qualified := t.Schema + "." + t.Name
 		if strings.Contains(strings.ToLower(t.Name), q) {
 			comment := ""
+			detail := ""
 			if t.Comment != nil {
 				comment = " - " + *t.Comment
+				detail = *t.Comment
 			}
-			results = append(results, "TABLE "+qualified+comment)
+			add("TABLE "+qualified+comment, searchMatch{Kind: "table", Object: qualified, Detail: detail})
 		}
 		for _, col := range t.Columns {
 			if strings.Contains(strings.ToLower(col.Name), q) {
-				results = append(results, fmt.Sprintf("COLUMN %s.%s (%s)", qualified, col.Name, col.TypeName))
+				add(fmt.Sprintf("COLUMN %s.%s (%s)", qualified, col.Name, col.TypeName),
+					searchMatch{Kind: "column", Object: qualified + "." + col.Name, Detail: col.TypeName})
 			}
 		}
 		for _, idx := range t.Indexes {
 			if strings.Contains(strings.ToLower(idx.Name), q) || strings.Contains(strings.ToLower(idx.Definition), q) {
-				results = append(results, fmt.Sprintf("INDEX %s: %s", qualified, idx.Definition))
+				add(fmt.Sprintf("INDEX %s: %s", qualified, idx.Definition),
+					searchMatch{Kind: "index", Object: qualified + "." + idx.Name, Detail: idx.Definition})
 			}
 		}
 	}
 	for _, v := range snap.Views {
 		if strings.Contains(strings.ToLower(v.Name), q) {
-			kind := "VIEW"
+			kind, label := "view", "VIEW"
 			if v.IsMaterialized {
-				kind = "MATERIALIZED VIEW"
+				kind, label = "materialized_view", "MATERIALIZED VIEW"
 			}
-			results = append(results, fmt.Sprintf("%s %s.%s", kind, v.Schema, v.Name))
+			add(fmt.Sprintf("%s %s.%s", label, v.Schema, v.Name),
+				searchMatch{Kind: kind, Object: v.Schema + "." + v.Name})
 		}
 	}
 	for _, f := range snap.Functions {
 		if strings.Contains(strings.ToLower(f.Name), q) {
-			results = append(results, fmt.Sprintf("FUNCTION %s.%s(%s)", f.Schema, f.Name, f.IdentityArgs))
+			add(fmt.Sprintf("FUNCTION %s.%s(%s)", f.Schema, f.Name, f.IdentityArgs),
+				searchMatch{Kind: "function", Object: f.Schema + "." + f.Name, Detail: f.IdentityArgs})
 		}
 	}
 	for _, e := range snap.Enums {
 		if strings.Contains(strings.ToLower(e.Name), q) {
-			results = append(results, fmt.Sprintf("ENUM %s.%s: [%s]", e.Schema, e.Name, strings.Join(e.Labels, ", ")))
+			add(fmt.Sprintf("ENUM %s.%s: [%s]", e.Schema, e.Name, strings.Join(e.Labels, ", ")),
+				searchMatch{Kind: "enum", Object: e.Schema + "." + e.Name, Detail: strings.Join(e.Labels, ", ")})
 		}
 	}
 
+	query := getArg(req, "query")
 	total := len(results)
 	if total == 0 {
-		return textResult(s.wrapText(fmt.Sprintf("No matches for '%s'.", getArg(req, "query")), "")), nil
+		return structuredTextResult(
+			searchSchemaResult{Query: query, Matches: []searchMatch{}, Meta: s.newMeta("", nil)},
+			s.wrapText(fmt.Sprintf("No matches for '%s'.", query), "")), nil
 	}
 
 	offset := int(getFloatArg(req, "offset", 0))
-	limit := int(getFloatArg(req, "limit", 30))
+	limit := limitArgOr(req, 30)
 
 	if offset >= total {
-		return textResult(s.wrapText(fmt.Sprintf("%d match(es) for '%s'. Offset %d is beyond the end.", total, getArg(req, "query"), offset), "")), nil
+		return structuredTextResult(
+			searchSchemaResult{Query: query, Matches: []searchMatch{}, Count: total, Offset: offset, Meta: s.newMeta("", nil)},
+			s.wrapText(fmt.Sprintf("%d match(es) for '%s'. Offset %d is beyond the end.", total, query, offset), "")), nil
 	}
 	end := pageEnd(offset, limit, total)
 	shown := results[offset:end]
 
 	var body string
 	if offset == 0 && end == total {
-		body = fmt.Sprintf("%d match(es) for '%s':\n%s", total, getArg(req, "query"), strings.Join(shown, "\n"))
+		body = fmt.Sprintf("%d match(es) for '%s':\n%s", total, query, strings.Join(shown, "\n"))
 	} else {
 		body = fmt.Sprintf("Showing %d-%d of %d match(es) for '%s':\n%s",
-			offset+1, end, total, getArg(req, "query"), strings.Join(shown, "\n"))
+			offset+1, end, total, query, strings.Join(shown, "\n"))
 	}
-	return textResult(s.wrapText(body, "")), nil
+	return structuredTextResult(
+		searchSchemaResult{Query: query, Matches: matches[offset:end], Count: total, Offset: offset, Meta: s.newMeta("", nil)},
+		s.wrapText(body, "")), nil
 }
 
 func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

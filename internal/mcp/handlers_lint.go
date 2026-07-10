@@ -125,12 +125,7 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 		next = []NextCall{{Tool: "lint_schema", Args: args}}
 	}
 	s.injectMeta(result, hint, next)
-
-	data, err := json.Marshal(result)
-	if err != nil {
-		return errResult(fmt.Sprintf("serialization error: %v", err)), nil
-	}
-	return mcp.NewToolResultText(string(data)), nil
+	return jsonResult(result), nil
 }
 
 // summarizeAudit collapses findings to per-rule counts; the full findings

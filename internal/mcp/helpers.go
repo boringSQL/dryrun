@@ -14,9 +14,19 @@ func textResult(text string) *mcp.CallToolResult {
 	return mcp.NewToolResultText(text)
 }
 
+// JSON payloads ride as structuredContent for schema-aware clients; the
+// pretty-printed text stays as the thin-client fallback.
 func jsonResult(v any) *mcp.CallToolResult {
-	data, _ := json.MarshalIndent(v, "", "  ")
-	return mcp.NewToolResultText(string(data))
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return errResult(fmt.Sprintf("serialization error: %v", err))
+	}
+	return mcp.NewToolResultStructured(v, string(data))
+}
+
+// Structured payload with a human-readable text fallback instead of raw JSON.
+func structuredTextResult(v any, text string) *mcp.CallToolResult {
+	return mcp.NewToolResultStructured(v, text)
 }
 
 func errResult(msg string) *mcp.CallToolResult {
@@ -31,11 +41,33 @@ func (s *Server) wrapText(body, hint string) string {
 	return header + body
 }
 
-// NextCall is a pre-validated follow-up tool call surfaced as _meta.next.
-// Hint stays as prose; next is for clients that can chain mechanically.
-type NextCall struct {
-	Tool string         `json:"tool"`
-	Args map[string]any `json:"args"`
+type (
+	// NextCall is a pre-validated follow-up tool call surfaced as _meta.next.
+	// Hint stays as prose; next is for clients that can chain mechanically.
+	NextCall struct {
+		Tool string         `json:"tool"`
+		Args map[string]any `json:"args"`
+	}
+
+	// toolMeta is the typed _meta envelope for tools with generated output
+	// schemas; map-based payloads keep using injectMeta.
+	toolMeta struct {
+		PgVersion string     `json:"pg_version"`
+		Database  string     `json:"database"`
+		Mode      string     `json:"mode"`
+		Hint      string     `json:"hint,omitempty"`
+		Next      []NextCall `json:"next,omitempty"`
+	}
+)
+
+func (s *Server) newMeta(hint string, next []NextCall) *toolMeta {
+	return &toolMeta{
+		PgVersion: s.pgDisplay(),
+		Database:  s.databaseName(),
+		Mode:      s.modeStr(),
+		Hint:      hint,
+		Next:      next,
+	}
 }
 
 func (s *Server) injectMeta(val map[string]any, hint string, next []NextCall) {
@@ -69,11 +101,7 @@ func (s *Server) metaJSONResult(payload any, key, hint string, next []NextCall) 
 		wrapper[key] = raw
 	}
 	s.injectMeta(wrapper, hint, next)
-	out, err := json.MarshalIndent(wrapper, "", "  ")
-	if err != nil {
-		return errResult(fmt.Sprintf("serialization error: %v", err))
-	}
-	return mcp.NewToolResultText(string(out))
+	return jsonResult(wrapper)
 }
 
 const defaultMaxItems = 50
@@ -120,9 +148,19 @@ func filterByQual[T any](items []T, schemaFilter, tableFilter string, key func(T
 	return out
 }
 
-// missing -> defaultMaxItems; 0 -> uncapped.
+// missing -> fallback; explicit 0 -> uncapped (getFloatArg treats 0 as absent,
+// which would silently re-cap the "re-run with limit=0" flow _meta.next emits).
+func limitArgOr(req mcp.CallToolRequest, fallback int) int {
+	if v, ok := req.GetArguments()["limit"]; ok {
+		if f, ok := v.(float64); ok && f >= 0 {
+			return int(f)
+		}
+	}
+	return fallback
+}
+
 func limitArg(req mcp.CallToolRequest) int {
-	return int(getFloatArg(req, "limit", defaultMaxItems))
+	return limitArgOr(req, defaultMaxItems)
 }
 
 // Shallow-copy snap, retaining tables matching filters. Empty filter = no filtering on that axis.
