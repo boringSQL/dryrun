@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -23,10 +24,13 @@ import (
 )
 
 var (
-	flagDB         string
-	flagProfile    string
-	flagConfig     string
-	flagSchemaFile string
+	flagDB              string
+	flagProfile         string
+	flagConfig          string
+	flagSchemaFile      string
+	flagStmtTimeout     time.Duration
+	flagLockTimeout     time.Duration
+	flagIdleTxTimeout   time.Duration
 )
 
 func main() {
@@ -41,6 +45,10 @@ func main() {
 	pf.StringVar(&flagProfile, "profile", "", "config profile name")
 	pf.StringVar(&flagConfig, "config", "", "path to dryrun.toml")
 	pf.StringVar(&flagSchemaFile, "schema-file", os.Getenv("SCHEMA_FILE"), "path to schema JSON file")
+	guards := schema.DefaultSessionGuards()
+	pf.DurationVar(&flagStmtTimeout, "statement-timeout", guards.StatementTimeout, "session statement_timeout (0 disables)")
+	pf.DurationVar(&flagLockTimeout, "lock-timeout", guards.LockTimeout, "session lock_timeout (0 disables)")
+	pf.DurationVar(&flagIdleTxTimeout, "idle-tx-timeout", guards.IdleInTxTimeout, "session idle_in_transaction_session_timeout (0 disables)")
 
 	root.AddCommand(
 		probeCmd(), initCmd(), setupCmd(), importCmd(), dumpSchemaCmd(),
@@ -609,8 +617,12 @@ func connectDBFor(override string) (context.Context, *schema.DryRun, error) {
 		}
 		dbURL = u
 	}
+	guards := schema.DefaultSessionGuards()
+	guards.StatementTimeout = flagStmtTimeout
+	guards.LockTimeout = flagLockTimeout
+	guards.IdleInTxTimeout = flagIdleTxTimeout
 	ctx := context.Background()
-	conn, err := schema.Connect(ctx, dbURL)
+	conn, err := schema.ConnectWithGuards(ctx, dbURL, guards)
 	if err != nil {
 		return nil, nil, err
 	}

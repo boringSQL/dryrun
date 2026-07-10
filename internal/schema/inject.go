@@ -38,6 +38,12 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 	}
 	defer tx.Rollback(ctx)
 
+	// sessions default to read-only (connection guards); injection is the one
+	// sanctioned writer and must opt out before its first query
+	if _, err := tx.Exec(ctx, "SET TRANSACTION READ WRITE"); err != nil {
+		return nil, fmt.Errorf("set transaction read write: %w", err)
+	}
+
 	result := &InjectResult{}
 	if pgMajor >= 18 {
 		result.Method = "pg_restore_relation_stats"

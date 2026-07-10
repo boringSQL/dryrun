@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -19,8 +20,50 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-type DryRun struct {
-	pool *pgxpool.Pool
+type (
+	DryRun struct {
+		pool *pgxpool.Pool
+	}
+
+	// session-level defense: read-only default plus timeouts, applied to every
+	// connection the pool opens. Independent of the capture tx's READ ONLY mode.
+	SessionGuards struct {
+		ReadOnly         bool
+		StatementTimeout time.Duration
+		LockTimeout      time.Duration
+		IdleInTxTimeout  time.Duration
+	}
+)
+
+func DefaultSessionGuards() SessionGuards {
+	return SessionGuards{
+		ReadOnly:         true,
+		StatementTimeout: 30 * time.Second,
+		LockTimeout:      2 * time.Second,
+		IdleInTxTimeout:  10 * time.Second,
+	}
+}
+
+func (g SessionGuards) apply(ctx context.Context, c *pgx.Conn) error {
+	var b strings.Builder
+	if g.ReadOnly {
+		b.WriteString("SET default_transaction_read_only = on;\n")
+	}
+	// zero disables; values are Go durations, not user input, so formatting is safe
+	if g.StatementTimeout > 0 {
+		fmt.Fprintf(&b, "SET statement_timeout = %d;\n", g.StatementTimeout.Milliseconds())
+	}
+	if g.LockTimeout > 0 {
+		fmt.Fprintf(&b, "SET lock_timeout = %d;\n", g.LockTimeout.Milliseconds())
+	}
+	if g.IdleInTxTimeout > 0 {
+		fmt.Fprintf(&b, "SET idle_in_transaction_session_timeout = %d;\n", g.IdleInTxTimeout.Milliseconds())
+	}
+	if b.Len() == 0 {
+		return nil
+	}
+	_, err := c.Exec(ctx, b.String())
+	return err
 }
 
 type ProbeResult struct {
@@ -37,6 +80,10 @@ type PrivilegeReport struct {
 }
 
 func Connect(ctx context.Context, url string) (*DryRun, error) {
+	return ConnectWithGuards(ctx, url, DefaultSessionGuards())
+}
+
+func ConnectWithGuards(ctx context.Context, url string, guards SessionGuards) (*DryRun, error) {
 	config, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, fmt.Errorf("connection failed: %w", err)
@@ -44,6 +91,7 @@ func Connect(ctx context.Context, url string) (*DryRun, error) {
 
 	config.MaxConns = 5
 	config.MaxConnLifetime = 30 * time.Minute
+	config.AfterConnect = guards.apply
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
