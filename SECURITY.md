@@ -49,6 +49,24 @@ as an agent.
   dev database so `EXPLAIN` matches production shape. Never point it at
   production.
 
+Read-only is enforced, not just recommended. Every session DryRun opens
+sets `default_transaction_read_only = on` plus defensive timeouts
+(`statement_timeout` 30s, `lock_timeout` 2s,
+`idle_in_transaction_session_timeout` 10s — tunable via
+`--statement-timeout`, `--lock-timeout`, `--idle-tx-timeout`). The
+prod-reading commands additionally refuse superuser, replication, and
+bypassrls roles before the first capture query; `--allow-privileged` is
+the explicit, loudly-warned escape hatch. Capture itself runs inside a
+`REPEATABLE READ, READ ONLY` transaction (the pg_dump pattern). These
+are independent layers, and the test suite asserts each one: a write
+through the default connection path fails with SQLSTATE `25006`, a
+privileged role is refused, and the session GUCs are actually set.
+
+The one sanctioned writer is `stats apply` (and the MCP
+`explain_query` stats-injection path against a dev database): it opts
+out per-transaction with an explicit `SET TRANSACTION READ WRITE`, so
+the session default stays read-only even on that connection.
+
 Of the prod-reading commands, `init` and `snapshot take` write the
 shared `history.db`. Both apply the masking policy in-process *before*
 anything is written to disk. DryRun does not persist the connection

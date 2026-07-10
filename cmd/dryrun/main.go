@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,6 +29,7 @@ var (
 	flagProfile         string
 	flagConfig          string
 	flagSchemaFile      string
+	flagAllowPrivileged bool
 	flagStmtTimeout     time.Duration
 	flagLockTimeout     time.Duration
 	flagIdleTxTimeout   time.Duration
@@ -45,6 +47,7 @@ func main() {
 	pf.StringVar(&flagProfile, "profile", "", "config profile name")
 	pf.StringVar(&flagConfig, "config", "", "path to dryrun.toml")
 	pf.StringVar(&flagSchemaFile, "schema-file", os.Getenv("SCHEMA_FILE"), "path to schema JSON file")
+	pf.BoolVar(&flagAllowPrivileged, "allow-privileged", false, "permit superuser/replication/bypassrls roles on prod-reading commands (warns)")
 	guards := schema.DefaultSessionGuards()
 	pf.DurationVar(&flagStmtTimeout, "statement-timeout", guards.StatementTimeout, "session statement_timeout (0 disables)")
 	pf.DurationVar(&flagLockTimeout, "lock-timeout", guards.LockTimeout, "session lock_timeout (0 disables)")
@@ -78,7 +81,7 @@ func probeCmd() *cobra.Command {
 		Use:   "probe",
 		Short: "Check PostgreSQL connectivity and privileges",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, conn, err := connectDB()
+			ctx, conn, err := connectDBProd()
 			if err != nil {
 				return err
 			}
@@ -166,7 +169,7 @@ func dumpSchemaCmd() *cobra.Command {
 			if url == "" {
 				url = os.Getenv("SOURCE_DATABASE_URL")
 			}
-			ctx, conn, err := connectDBFor(url)
+			ctx, conn, err := connectDBProdFor(url)
 			if err != nil {
 				return err
 			}
@@ -288,7 +291,7 @@ func driftCmd() *cobra.Command {
 				return fmt.Errorf("cannot load saved schema: %w", err)
 			}
 
-			ctx, conn, err := connectDB()
+			ctx, conn, err := connectDBProd()
 			if err != nil {
 				return err
 			}
@@ -345,7 +348,7 @@ func snapshotCmd() *cobra.Command {
 		Use:   "take",
 		Short: "Take a new snapshot (schema + planner + activity; primary only)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, conn, err := connectDB()
+			_, conn, err := connectDBProd()
 			if err != nil {
 				return err
 			}
@@ -627,6 +630,43 @@ func connectDBFor(override string) (context.Context, *schema.DryRun, error) {
 		return nil, nil, err
 	}
 	return ctx, conn, nil
+}
+
+// prod-reading variant: refuses privileged roles unless --allow-privileged.
+func connectDBProd() (context.Context, *schema.DryRun, error) {
+	return connectDBProdFor("")
+}
+
+func connectDBProdFor(override string) (context.Context, *schema.DryRun, error) {
+	ctx, conn, err := connectDBFor(override)
+	if err != nil {
+		return nil, nil, err
+	}
+	report, err := conn.RoleReport(ctx)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	if err := rolePreflight(report, flagAllowPrivileged); err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	return ctx, conn, nil
+}
+
+// fail closed on privileged roles; --allow-privileged downgrades to a loud warning
+func rolePreflight(report *schema.RoleReport, allowPrivileged bool) error {
+	if !report.Privileged() {
+		return nil
+	}
+	privs := strings.Join(report.Privileges(), ", ")
+	if !allowPrivileged {
+		return fmt.Errorf("role %q is privileged (%s); dryrun refuses to read production with it.\n"+
+			"       Use a read-only role (see dryrun-readonly-role.sql) or pass --allow-privileged",
+			report.Rolname, privs)
+	}
+	slog.Warn("connected with a privileged role", "role", report.Rolname, "privileges", privs)
+	return nil
 }
 
 func short(h string) string {

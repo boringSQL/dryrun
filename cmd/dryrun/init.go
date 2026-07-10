@@ -117,7 +117,7 @@ func initCmd() *cobra.Command {
 				return nil
 			}
 
-			ctx, conn, err := connectDB()
+			ctx, conn, err := connectDBProd()
 			if err != nil {
 				return err
 			}

@@ -65,7 +65,7 @@ hash-prefix operands carry their own kind. Mixing kinds is rejected.`,
 						"       take a snapshot first and diff store-to-store",
 						short(fromTok), fromKind)
 				}
-				lctx, conn, cerr := connectDB()
+				lctx, conn, cerr := connectDBProd()
 				if cerr != nil {
 					return cerr
 				}

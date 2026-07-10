@@ -9,7 +9,6 @@ import (
 
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
-	"github.com/boringsql/dryrun/internal/schema"
 )
 
 func snapshotActivityCmd() *cobra.Command {
@@ -35,8 +34,7 @@ func snapshotActivityCmd() *cobra.Command {
 				return fmt.Errorf("--from <replica-url> or --db is required")
 			}
 
-			ctx := context.Background()
-			conn, err := schema.Connect(ctx, url)
+			ctx, conn, err := connectDBProdFor(url)
 			if err != nil {
 				return err
 			}
