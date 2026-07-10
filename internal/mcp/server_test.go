@@ -26,7 +26,13 @@ func setupOfflineTest(t *testing.T) *client.Client {
 	}
 
 	srv := NewOfflineServer(snap, lint.DefaultConfig())
-	mcpSrv := mcpserver.NewMCPServer("dryrun-test", "0.1.0")
+	// mirror production options (cmd/dryrun mcp-serve) so schema drift between
+	// declared input/output schemas and actual payloads fails here, in tests
+	mcpSrv := mcpserver.NewMCPServer("dryrun-test", "0.1.0",
+		mcpserver.WithRecovery(),
+		mcpserver.WithInputSchemaValidation(),
+		mcpserver.WithOutputSchemaValidation(),
+	)
 	srv.Register(mcpSrv)
 
 	serverReader, clientWriter := io.Pipe()

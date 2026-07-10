@@ -54,6 +54,20 @@ func TestHealthHandlers_OfflineSmoke(t *testing.T) {
 		}
 	})
 
+	t.Run("detect_bloated_tables", func(t *testing.T) {
+		// this kind was missing from the declared enum when input validation
+		// landed, so the validator rejected a working handler path (and the
+		// _meta.next follow-ups the server itself emits for it) — going through
+		// the validated client here is the regression tripwire
+		out := callTool(t, c, "detect", map[string]any{"kind": "bloated_tables"})
+		if out == "" {
+			t.Fatal("empty result")
+		}
+		if strings.Contains(out, "input schema validation failed") {
+			t.Fatalf("declared enum rejects bloated_tables: %s", out)
+		}
+	})
+
 	t.Run("detect_bloated_with_threshold", func(t *testing.T) {
 		out := callTool(t, c, "detect", map[string]any{"kind": "bloated_indexes", "threshold": 2.0})
 		if out == "" {
@@ -62,8 +76,13 @@ func TestHealthHandlers_OfflineSmoke(t *testing.T) {
 	})
 
 	t.Run("detect_invalid_kind", func(t *testing.T) {
+		// with WithInputSchemaValidation enabled, the declared enum rejects the
+		// bogus kind before the handler runs — this is the server-side schema
+		// validation contract (plan item B), so we assert the validator's error
+		// rather than the handler's "unknown detect kind" fallback (which still
+		// guards direct handler calls that bypass the server layer)
 		out := callTool(t, c, "detect", map[string]any{"kind": "bogus"})
-		assertContains(t, out, "unknown detect kind")
+		assertContains(t, out, "input schema validation failed")
 	})
 
 	t.Run("vacuum_health", func(t *testing.T) {

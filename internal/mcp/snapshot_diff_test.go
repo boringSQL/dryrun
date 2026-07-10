@@ -22,17 +22,18 @@ func reqWith(args map[string]any) mcp.CallToolRequest {
 	return req
 }
 
-// capArg exists because limitArg can't say "all". The shared getFloatArg treats
-// any value <= 0 as "unset" and substitutes the fallback, which is fine for the
-// list tools but quietly defeats the §6 contract here: an agent that follows the
-// "re-run with limit=0" hint would silently get the default cap back instead of
-// the full result, and never know it. So snapshot_diff reads the limit itself
-// and these cases nail the contract corner by corner — an explicit 0 is honored
-// as "no cap", a real number passes straight through, and the genuinely-unset
-// paths (absent key, nonsense negative) fall back to the sane default. If
-// someone ever "simplifies" capArg back to limitArg, the explicit-zero case here
-// is the tripwire.
-func TestCapArg(t *testing.T) {
+// limitArg is what makes the "re-run with limit=0" contract real for every
+// capped tool (detect, vacuum_health, snapshot_diff). Historically only
+// snapshot_diff honored it (via a local capArg); the shared helper leaned on
+// getFloatArg, which treats any value <= 0 as "unset" and substitutes the
+// fallback — so an agent that followed the hint (or replayed the limit:0 call
+// _meta.next emits) silently got the default cap back and could loop on the
+// same truncated result forever. These cases nail the contract corner by
+// corner — an explicit 0 is honored as "no cap", a real number passes straight
+// through, and the genuinely-unset paths (absent key, nonsense negative) fall
+// back to the sane default. If someone ever "simplifies" limitArg back to
+// getFloatArg, the explicit-zero case here is the tripwire.
+func TestLimitArg(t *testing.T) {
 	cases := []struct {
 		name string
 		args map[string]any
@@ -45,8 +46,8 @@ func TestCapArg(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := capArg(reqWith(tc.args)); got != tc.want {
-				t.Fatalf("capArg = %d, want %d", got, tc.want)
+			if got := limitArg(reqWith(tc.args)); got != tc.want {
+				t.Fatalf("limitArg = %d, want %d", got, tc.want)
 			}
 		})
 	}
@@ -109,7 +110,7 @@ func schemaWithTables(hash string, ts time.Time, names ...string) *schema.Schema
 
 // TestSnapshotDiff_TruncationEmitsRerun is the end-to-end proof that the pieces
 // are actually wired together, not just individually correct. The unit tests
-// above prove capArg honors zero and rerunUncapped builds the right map, but
+// above prove limitArg honors zero and rerunUncapped builds the right map, but
 // none of that matters if the handler never sets truncated or never attaches the
 // next call to the real response an MCP client parses. So this drives the whole
 // path: seed a store with a three-object diff, call the handler with limit=1,

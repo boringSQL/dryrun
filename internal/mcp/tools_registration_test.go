@@ -115,6 +115,87 @@ func TestToolsRegistration_InputSchemaShape(t *testing.T) {
 	}
 }
 
+// The exploration and finding tools declare output schemas so 2025-06-18+
+// clients can consume structuredContent instead of scraping JSON out of the
+// text blob (PLAN-MCP-upgrade.md steps 4 / B+C). This pins which tools carry
+// one — if a schema is dropped (or a new high-value tool forgets to declare
+// one and gets added to this list), the test fails. Tools outside this list
+// are free to stay text-only.
+func TestToolsRegistration_OutputSchemas(t *testing.T) {
+	c := setupOfflineTest(t)
+
+	list, err := c.ListTools(context.Background(), mcp.ListToolsRequest{})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	wantOutputSchema := map[string]bool{
+		"list_tables":    true,
+		"describe_table": true,
+		"search_schema":  true,
+		"detect":         true,
+		"vacuum_health":  true,
+		"lint_schema":    true,
+		"snapshot_diff":  true,
+	}
+
+	seen := map[string]bool{}
+	for _, tool := range list.Tools {
+		seen[tool.Name] = true
+		if !wantOutputSchema[tool.Name] {
+			continue
+		}
+		if tool.OutputSchema.Type != "object" {
+			t.Errorf("tool %s: outputSchema.type = %q, want \"object\"", tool.Name, tool.OutputSchema.Type)
+		}
+	}
+	for name := range wantOutputSchema {
+		if !seen[name] {
+			t.Errorf("expected tool %q to be registered", name)
+		}
+	}
+}
+
+// A declared output schema is only half the contract — the result must
+// actually carry structuredContent, or schema-aware clients get nothing and
+// output validation silently skips (mcp-go validates only non-nil
+// StructuredContent). This drives the happy path of every schema-carrying tool
+// that works against the offline demo snapshot and asserts the structured
+// payload is present, closing the loophole where a handler quietly regresses
+// to text-only and every other test still passes. snapshot_diff is exercised
+// separately (snapshot_diff_test.go) because it needs a seeded history store.
+func TestToolsRegistration_StructuredContentPresent(t *testing.T) {
+	c := setupOfflineTest(t)
+
+	calls := map[string]map[string]any{
+		"list_tables":    nil,
+		"describe_table": {"table": "users"},
+		"search_schema":  {"query": "users"},
+		"detect":         nil,
+		"vacuum_health":  nil,
+		"lint_schema":    nil,
+	}
+
+	for name, args := range calls {
+		t.Run(name, func(t *testing.T) {
+			var req mcp.CallToolRequest
+			req.Params.Name = name
+			req.Params.Arguments = args
+
+			result, err := c.CallTool(context.Background(), req)
+			if err != nil {
+				t.Fatalf("CallTool(%s): %v", name, err)
+			}
+			if result.IsError {
+				t.Fatalf("CallTool(%s): unexpected error result: %v", name, result.Content)
+			}
+			if result.StructuredContent == nil {
+				t.Errorf("tool %s declares an output schema but returned no structuredContent", name)
+			}
+		})
+	}
+}
+
 // Pins the offline-mode tool surface. If a tool is added or removed from
 // Register, this list must be updated in lockstep — that's the point: it
 // turns "I forgot to wire/unwire X" into a failing test.
