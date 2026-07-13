@@ -449,25 +449,34 @@ type IndexActivityEntry struct {
 	Activity IndexActivity `json:"activity"`
 }
 
-// Persisted planner inputs; schema_ref_hash binds rows to a SchemaSnapshot
-type PlannerStatsSnapshot struct {
-	FormatVersion int       `json:"format_version"`
-	SchemaRefHash string    `json:"schema_ref_hash"`
-	ContentHash   string    `json:"content_hash"`
-	Database      string    `json:"database"`
-	Timestamp     time.Time `json:"timestamp"`
-	// next-xid/next-multixact at capture; reference points for deriving the per-table
-	// ages. volatile, so excluded from ComputePlannerContentHash to preserve dedup.
-	DatabaseXid  int64              `json:"database_xid,omitempty"`
-	DatabaseMxid int64              `json:"database_mxid,omitempty"`
-	Tables       []TableSizingEntry `json:"tables"`
-	Indexes      []IndexSizingEntry `json:"indexes"`
-	Columns      []ColumnStatsEntry `json:"columns"`
-	// Hashed here, not on the schema: the schema digest only moves on DDL, so a
-	// postgresql.conf change never reaches a reader through it. SchemaSnapshot keeps its
-	// own copy, the values as of that generation.
-	GUCs []GucSetting `json:"gucs,omitempty"`
-}
+type (
+	// Persisted planner inputs; schema_ref_hash binds rows to a SchemaSnapshot
+	PlannerStatsSnapshot struct {
+		FormatVersion int       `json:"format_version"`
+		SchemaRefHash string    `json:"schema_ref_hash"`
+		ContentHash   string    `json:"content_hash"`
+		Database      string    `json:"database"`
+		Timestamp     time.Time `json:"timestamp"`
+		// next-xid/next-multixact at capture; reference points for deriving the per-table
+		// ages. volatile, so excluded from ComputePlannerContentHash to preserve dedup.
+		DatabaseXid  int64              `json:"database_xid,omitempty"`
+		DatabaseMxid int64              `json:"database_mxid,omitempty"`
+		Tables       []TableSizingEntry `json:"tables"`
+		Indexes      []IndexSizingEntry `json:"indexes"`
+		Columns      []ColumnStatsEntry `json:"columns"`
+		// Hashed here, not on the schema: the schema digest only moves on DDL, so a
+		// postgresql.conf change never reaches a reader through it. SchemaSnapshot keeps its
+		// own copy, the values as of that generation.
+		GUCs    []GucSetting `json:"gucs,omitempty"`
+		Masking *MaskingInfo `json:"masking,omitempty"`
+	}
+
+	MaskingInfo struct {
+		Applied       bool `json:"applied"` // a policy was in effect
+		ColumnsMasked int  `json:"columns_masked,omitempty"`
+		JSONBStripped bool `json:"jsonb_mcv_stripped"` // always-on capture-time strip, policy-independent
+	}
+)
 
 // Persisted per-node activity counters
 type ActivityStatsSnapshot struct {

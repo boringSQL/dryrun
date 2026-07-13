@@ -307,6 +307,11 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 	}
 	bloat.Annotate(planner, snap)
 	masked := datamask.MaskPlanner(policy, planner)
+	planner.Masking = &schema.MaskingInfo{
+		Applied:       policy != nil,
+		ColumnsMasked: masked,
+		JSONBStripped: true,
+	}
 	if _, err := store.PutPlanner(ctx, key, planner); err != nil {
 		slog.Warn("could not save planner stats", "error", err)
 	}

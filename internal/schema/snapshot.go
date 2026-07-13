@@ -42,6 +42,7 @@ type (
 	IndexActivityEntry    = snapshot.IndexActivityEntry
 	PlannerStatsSnapshot  = snapshot.PlannerStatsSnapshot
 	ActivityStatsSnapshot = snapshot.ActivityStatsSnapshot
+	MaskingInfo           = snapshot.MaskingInfo
 	AnnotatedSchema       = snapshot.AnnotatedSchema
 	MergedActivity        = snapshot.MergedActivity
 	NodeActivity          = snapshot.NodeActivity
