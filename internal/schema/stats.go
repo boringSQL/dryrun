@@ -201,3 +201,10 @@ func FetchCurrentDatabase(ctx context.Context, pool Querier) (string, error) {
 	err := pool.QueryRow(ctx, "SELECT current_database()").Scan(&db)
 	return db, err
 }
+
+// superuser-gated; callers treat failure as unknown. text keeps the uint64 opaque.
+func FetchSystemIdentifier(ctx context.Context, pool Querier) (string, error) {
+	var id string
+	err := pool.QueryRow(ctx, "SELECT system_identifier::text FROM pg_catalog.pg_control_system()").Scan(&id)
+	return id, err
+}

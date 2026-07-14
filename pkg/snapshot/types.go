@@ -10,39 +10,43 @@ import (
 // 0 means legacy. not hashed. 2 = digest covers reloptions.
 const FormatVersion = 2
 
-// DDL-only schema snapshot; sizing/activity live in AnnotatedSchema
-type SchemaSnapshot struct {
-	FormatVersion int             `json:"format_version"`
-	PgVersion     string          `json:"pg_version"`
-	Flavor        Flavor          `json:"flavor,omitempty"`
-	Database      string          `json:"database"`
-	Timestamp     time.Time       `json:"timestamp"`
-	ContentHash   string          `json:"content_hash"`
-	Source        *string         `json:"source,omitempty"`
-	Tables        []Table         `json:"tables"`
-	Enums         []EnumType      `json:"enums"`
-	Domains       []DomainType    `json:"domains"`
-	Composites    []CompositeType `json:"composites"`
-	Views         []View          `json:"views"`
-	Functions     []Function      `json:"functions"`
-	Extensions    []Extension     `json:"extensions"`
-	GUCs          []GucSetting    `json:"gucs"`
-}
+type (
 
-type Table struct {
-	OID           uint32         `json:"oid"`
-	Schema        string         `json:"schema"`
-	Name          string         `json:"name"`
-	Columns       []Column       `json:"columns"`
-	Constraints   []Constraint   `json:"constraints"`
-	Indexes       []Index        `json:"indexes"`
-	Comment       *string        `json:"comment,omitempty"`
-	PartitionInfo *PartitionInfo `json:"partition_info,omitempty"`
-	Policies      []RlsPolicy    `json:"policies"`
-	Triggers      []Trigger      `json:"triggers"`
-	RLSEnabled    bool           `json:"rls_enabled"`
-	Reloptions    []string       `json:"reloptions,omitempty"`
-}
+	// DDL-only schema snapshot; sizing/activity live in AnnotatedSchema
+	SchemaSnapshot struct {
+		FormatVersion    int             `json:"format_version"`
+		PgVersion        string          `json:"pg_version"`
+		Flavor           Flavor          `json:"flavor,omitempty"`
+		Database         string          `json:"database"`
+		SystemIdentifier string          `json:"system_identifier,omitempty"`
+		Timestamp        time.Time       `json:"timestamp"`
+		ContentHash      string          `json:"content_hash"`
+		Source           *string         `json:"source,omitempty"`
+		Tables           []Table         `json:"tables"`
+		Enums            []EnumType      `json:"enums"`
+		Domains          []DomainType    `json:"domains"`
+		Composites       []CompositeType `json:"composites"`
+		Views            []View          `json:"views"`
+		Functions        []Function      `json:"functions"`
+		Extensions       []Extension     `json:"extensions"`
+		GUCs             []GucSetting    `json:"gucs"`
+	}
+
+	Table struct {
+		OID           uint32         `json:"oid"`
+		Schema        string         `json:"schema"`
+		Name          string         `json:"name"`
+		Columns       []Column       `json:"columns"`
+		Constraints   []Constraint   `json:"constraints"`
+		Indexes       []Index        `json:"indexes"`
+		Comment       *string        `json:"comment,omitempty"`
+		PartitionInfo *PartitionInfo `json:"partition_info,omitempty"`
+		Policies      []RlsPolicy    `json:"policies"`
+		Triggers      []Trigger      `json:"triggers"`
+		RLSEnabled    bool           `json:"rls_enabled"`
+		Reloptions    []string       `json:"reloptions,omitempty"`
+	}
+)
 
 func (t *Table) Qual() QualifiedName {
 	return QualifiedName{Schema: t.Schema, Name: t.Name}

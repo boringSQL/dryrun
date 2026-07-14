@@ -38,9 +38,19 @@ type initWriter interface {
 
 // one REPEATABLE READ, READ ONLY tx (as pg_dump uses) for the whole capture:
 // consistent snapshot, no writes, one connection
-type pgxCapturer struct{ tx pgx.Tx }
+type pgxCapturer struct {
+	tx       pgx.Tx
+	systemID string
+}
 
 func newPgxCapturer(ctx context.Context, pool *pgxpool.Pool) (pgxCapturer, error) {
+	// probe on the pool before the tx: a permission error here must not poison capture
+	systemID, err := schema.FetchSystemIdentifier(ctx, pool)
+	if err != nil {
+		slog.Debug("system_identifier unavailable; capturing without cluster id", "error", err)
+		systemID = ""
+	}
+
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
 		AccessMode: pgx.ReadOnly,
@@ -48,7 +58,7 @@ func newPgxCapturer(ctx context.Context, pool *pgxpool.Pool) (pgxCapturer, error
 	if err != nil {
 		return pgxCapturer{}, fmt.Errorf("begin read-only transaction: %w", err)
 	}
-	return pgxCapturer{tx: tx}, nil
+	return pgxCapturer{tx: tx, systemID: systemID}, nil
 }
 
 // read-only, so there is nothing to commit; rollback releases the snapshot
@@ -67,7 +77,12 @@ func (c pgxCapturer) CurrentDatabase(ctx context.Context) (string, error) {
 }
 
 func (c pgxCapturer) Introspect(ctx context.Context) (*schema.SchemaSnapshot, error) {
-	return schema.IntrospectSchema(ctx, c.tx)
+	snap, err := schema.IntrospectSchema(ctx, c.tx)
+	if err != nil {
+		return nil, err
+	}
+	snap.SystemIdentifier = c.systemID
+	return snap, nil
 }
 
 func (c pgxCapturer) CapturePlanner(ctx context.Context, schemaRefHash string) (*schema.PlannerStatsSnapshot, error) {
