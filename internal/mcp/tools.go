@@ -7,9 +7,27 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-// Online-only tools (explain_query, check_drift) are
-// registered only with a live db connection.
+// Register wires the full set: schema-only subset, history tools (snapshot_diff,
+// reload_schema), and live-only tools when a pool is set.
 func (s *Server) Register(srv *mcpserver.MCPServer) {
+	s.registerSchemaTools(srv)
+	s.registerHistoryTools(srv)
+	if s.pool != nil {
+		s.registerLiveTools(srv)
+	} else {
+		slog.Info("offline mode: explain_query, check_drift not available")
+	}
+}
+
+// RegisterOffline wires only the schema-only subset (no history.db, no pool):
+// the surface a hosted endpoint serves per request. Omits snapshot_diff,
+// reload_schema, and the live tools.
+func (s *Server) RegisterOffline(srv *mcpserver.MCPServer) {
+	s.registerSchemaTools(srv)
+}
+
+// registerSchemaTools registers the schema-only subset (no history.db, no pool).
+func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
 		mcp.NewTool("list_tables",
 			mcp.WithDescription("List tables with row estimates, comments, and aggregated node statistics. Use limit/offset to paginate large schemas."),
@@ -157,6 +175,11 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		),
 		s.handleVacuumHealth,
 	)
+}
+
+// registerHistoryTools registers the snapshot-to-snapshot and reload tools that
+// read the local history.db.
+func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
 		mcp.NewTool("snapshot_diff",
 			mcp.WithDescription("What changed between two snapshots: schema DDL plus the correlated planner sizing/stats and activity drift for the same capture window. Snapshot-to-snapshot, read from .dryrun/history.db."),
@@ -187,33 +210,32 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 		),
 		s.handleReloadSchema,
 	)
+}
 
-	if s.pool != nil {
-		slog.Debug("registering online-only tools", "tools", "explain_query,check_drift")
-		srv.AddTool(
-			mcp.NewTool("explain_query",
-				mcp.WithDescription("EXPLAIN a query (analyze=true runs EXPLAIN ANALYZE). Snapshot planner GUCs are replayed via SET LOCAL for plan parity; with analyze=true the query also executes under those settings (e.g. prod work_mem)."),
-				mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
-				mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query).")),
-				mcp.WithBoolean("with_stats", mcp.Description("Inject snapshot stats before EXPLAIN.")),
-				mcp.WithString("node", mcp.Description("Which node's stats to use (multi-node only).")),
-				mcp.WithBoolean("pgmustard", mcp.Description("Submit plan to pgMustard for extra tips.")),
-			),
-			s.handleExplainQuery,
-		)
-		srv.AddTool(
-			mcp.NewTool("check_drift",
-				mcp.WithDescription("Diff live DB against loaded snapshot (ahead/behind/diverged)"),
-			),
-			s.handleCheckDrift,
-		)
-		srv.AddTool(
-			mcp.NewTool("columnar_report",
-				mcp.WithDescription("AlloyDB only: columnar-engine state and findings (resident columns, empty store, stale blocks)"),
-			),
-			s.handleColumnarReport,
-		)
-	} else {
-		slog.Info("offline mode: explain_query, check_drift not available")
-	}
+// registerLiveTools registers the tools that need a live db connection.
+func (s *Server) registerLiveTools(srv *mcpserver.MCPServer) {
+	slog.Debug("registering online-only tools", "tools", "explain_query,check_drift")
+	srv.AddTool(
+		mcp.NewTool("explain_query",
+			mcp.WithDescription("EXPLAIN a query (analyze=true runs EXPLAIN ANALYZE). Snapshot planner GUCs are replayed via SET LOCAL for plan parity; with analyze=true the query also executes under those settings (e.g. prod work_mem)."),
+			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
+			mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query).")),
+			mcp.WithBoolean("with_stats", mcp.Description("Inject snapshot stats before EXPLAIN.")),
+			mcp.WithString("node", mcp.Description("Which node's stats to use (multi-node only).")),
+			mcp.WithBoolean("pgmustard", mcp.Description("Submit plan to pgMustard for extra tips.")),
+		),
+		s.handleExplainQuery,
+	)
+	srv.AddTool(
+		mcp.NewTool("check_drift",
+			mcp.WithDescription("Diff live DB against loaded snapshot (ahead/behind/diverged)"),
+		),
+		s.handleCheckDrift,
+	)
+	srv.AddTool(
+		mcp.NewTool("columnar_report",
+			mcp.WithDescription("AlloyDB only: columnar-engine state and findings (resident columns, empty store, stale blocks)"),
+		),
+		s.handleColumnarReport,
+	)
 }

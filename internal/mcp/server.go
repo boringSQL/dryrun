@@ -44,8 +44,18 @@ func NewServer(pool *pgxpool.Pool, dbURL string, snap *schema.SchemaSnapshot, hi
 
 func NewOfflineServer(snap *schema.SchemaSnapshot, lintCfg lint.Config) *Server {
 	slog.Info("loaded schema from file", "tables", len(snap.Tables), "database", snap.Database)
+	return NewOfflineServerAnnotated(&schema.AnnotatedSchema{Schema: snap}, lintCfg)
+}
+
+// NewOfflineServerAnnotated builds an offline server from a pre-assembled
+// AnnotatedSchema (schema + planner + activity), so a hosted caller can supply
+// the join from blobs instead of a local history.db.
+func NewOfflineServerAnnotated(a *schema.AnnotatedSchema, lintCfg lint.Config) *Server {
+	if a == nil {
+		a = &schema.AnnotatedSchema{}
+	}
 	return &Server{
-		annotated:       &schema.AnnotatedSchema{Schema: snap},
+		annotated:       a,
 		lintConfig:      lintCfg,
 		pgmustardClient: pgmustard.NewClient(""),
 	}
