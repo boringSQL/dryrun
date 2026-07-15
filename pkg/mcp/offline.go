@@ -1,6 +1,5 @@
-// Package mcp is the public entry point to dryrun's offline MCP tool surface for
-// callers outside this module (a hosted MCP-over-HTTP endpoint). It exposes the
-// schema-only path; the live-DB and history-backed tools stay in internal/mcp.
+// Package mcp is dryrun's public offline MCP surface for callers outside this
+// module (a hosted endpoint). Live-DB and history tools stay in internal/mcp.
 package mcp
 
 import (
@@ -11,28 +10,30 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-// Server is dryrun's MCP handler set. Construct it with NewOfflineServer.
-type Server = internalmcp.Server
+// Server exposes only RegisterOffline, so the internal server's pool, history, and
+// live tools never escape the module — a hosted caller cannot wire in a pool.
+type Server struct {
+	inner *internalmcp.Server
+}
 
-// NewOfflineServer builds a server answering from the in-memory AnnotatedSchema
-// (assemble with snapshot.AssembleAnnotated). Register with RegisterOffline, or
-// use BuildOfflineMCPServer for the whole thing.
+// NewOfflineServer builds a server answering from the in-memory AnnotatedSchema.
 func NewOfflineServer(a *snapshot.AnnotatedSchema, lintCfg lint.Config) *Server {
-	return internalmcp.NewOfflineServerAnnotated(a, lintCfg)
+	return &Server{inner: internalmcp.NewOfflineServerAnnotated(a, lintCfg)}
+}
+
+// RegisterOffline registers the schema-only subset (no snapshot_diff, reload_schema, live).
+func (s *Server) RegisterOffline(srv *mcpserver.MCPServer) {
+	s.inner.RegisterOffline(srv)
 }
 
 // BuildOfflineMCPServer returns a ready mark3labs server with the offline subset
-// registered and dryrun's standard handler options. A hosted transport wraps it;
-// build one per request from that request's assembled snapshot.
+// and dryrun's standard handler options; build one per request per snpshot
 func BuildOfflineMCPServer(name, version string, a *snapshot.AnnotatedSchema, lintCfg lint.Config) *mcpserver.MCPServer {
 	s := NewOfflineServer(a, lintCfg)
 	srv := mcpserver.NewMCPServer(name, version,
-		mcpserver.WithInstructions(s.Instructions()),
-		// a handler panic (malformed plan_json, bad SQL) returns a tool error instead of a dead stream
+		mcpserver.WithInstructions(s.inner.Instructions()),
 		mcpserver.WithRecovery(),
-		// declared Enum/Required/type constraints reject bad args before handlers run
 		mcpserver.WithInputSchemaValidation(),
-		// a payload that drifts from its output schema fails here, not in the client
 		mcpserver.WithOutputSchemaValidation(),
 	)
 	s.RegisterOffline(srv)
