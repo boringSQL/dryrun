@@ -44,7 +44,7 @@ func TestRunSnapshotTake_Branches(t *testing.T) {
 			cap := &stubCapturer{Standby: tc.standby}
 			w := &stubWriter{}
 			_, _, _, _, err := runSnapshotTake(context.Background(), cap, w,
-				history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, nil)
+				history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, nil, false)
 
 			if tc.wantErrKind != nil {
 				var derr *dryrun.Error
@@ -110,7 +110,7 @@ func TestRunSnapshotTake_Masking(t *testing.T) {
 			w := &stubWriter{}
 
 			_, _, _, masked, err := runSnapshotTake(context.Background(), cap, w,
-				history.SnapshotKey{ProjectID: "p", DatabaseID: "testdb"}, tc.policy)
+				history.SnapshotKey{ProjectID: "p", DatabaseID: "testdb"}, tc.policy, false)
 			if err != nil {
 				t.Fatalf("runSnapshotTake: %v", err)
 			}

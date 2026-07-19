@@ -30,6 +30,8 @@ type stubCapturer struct {
 	StandbyErr     error
 	IntrospectErr  error
 	PlannerColumns []schema.ColumnStatsEntry
+	SystemID       string
+	Database       string
 }
 
 func (s *stubCapturer) IsStandby(_ context.Context) (bool, error) {
@@ -41,7 +43,11 @@ func (s *stubCapturer) Introspect(_ context.Context) (*schema.SchemaSnapshot, er
 	if s.IntrospectErr != nil {
 		return nil, s.IntrospectErr
 	}
-	return &schema.SchemaSnapshot{ContentHash: "schema-hash-1"}, nil
+	return &schema.SchemaSnapshot{
+		ContentHash:      "schema-hash-1",
+		SystemIdentifier: s.SystemID,
+		Database:         s.Database,
+	}, nil
 }
 
 func (s *stubCapturer) CapturePlanner(_ context.Context, ref string) (*schema.PlannerStatsSnapshot, error) {
@@ -65,11 +71,15 @@ func (s *stubCapturer) CaptureActivity(_ context.Context, ref, src string) (*sch
 type stubWriter struct {
 	SchemaN, PlannerN, ActivityN int
 	Stored                       *schema.SchemaSnapshot
+	GetErr                       error
 	LastActivityRef              string
 	LastPlanner                  *schema.PlannerStatsSnapshot
 }
 
 func (s *stubWriter) GetSchema(_ context.Context, _ history.SnapshotKey, _ history.SnapshotRef) (*schema.SchemaSnapshot, error) {
+	if s.GetErr != nil {
+		return nil, s.GetErr
+	}
 	if s.Stored == nil {
 		return nil, history.ErrSnapshotNotFound
 	}
