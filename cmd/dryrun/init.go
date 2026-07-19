@@ -19,6 +19,7 @@ import (
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/bloat"
+	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
 // init capture surface; kept narrow so tests can stub it.
@@ -104,6 +105,7 @@ func initCmd() *cobra.Command {
 	var (
 		allowReplica bool
 		source       string
+		force        bool
 	)
 
 	cmd := &cobra.Command{
@@ -172,10 +174,12 @@ func initCmd() *cobra.Command {
 				AllowReplica: allowReplica,
 				Source:       source,
 				Policy:       policy,
+				Force:        force,
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&allowReplica, "allow-replica", false, "permit capture on a standby (activity stats only)")
+	cmd.Flags().BoolVar(&force, "force", false, "capture even if the cluster/database identity differs from this project's history")
 	cmd.Flags().StringVar(&source, "source", "", "node label for activity stats (default: hostname)")
 	cmd.Flags().StringVar(&flagMasksFile, "masks-file", "", "path to data-masking-policy.yml")
 	cmd.Flags().StringSliceVar(&flagMaskPolicy, "mask-policy", nil, "masking policy name (repeatable, comma-separated)")
@@ -226,6 +230,7 @@ type initOptions struct {
 	AllowReplica bool
 	Source       string
 	Policy       *masking.Policy
+	Force        bool
 }
 
 // init flow: refuse standbys by default; primary writes all three streams,
@@ -267,7 +272,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		return nil
 	}
 
-	snap, planner, activity, masked, err := runPrimaryCapture(ctx, cap, store, key, source, opts.Policy)
+	snap, planner, activity, masked, err := runPrimaryCapture(ctx, cap, store, key, source, opts.Policy, opts.Force)
 	if err != nil {
 		return err
 	}
@@ -293,7 +298,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 // snapshot take wrapper: gate on standby (refuse, no replica fallback), then
 // delegate to runPrimaryCapture. Kept here so the masking + standby contract
 // lives next to init's; the snapshot take command only handles flag plumbing.
-func runSnapshotTake(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, policy *masking.Policy) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
+func runSnapshotTake(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, policy *masking.Policy, force bool) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
 	standby, err := cap.IsStandby(ctx)
 	if err != nil {
 		return nil, nil, nil, 0, fmt.Errorf("check standby status: %w", err)
@@ -303,14 +308,17 @@ func runSnapshotTake(ctx context.Context, cap initCapturer, store initWriter, ke
 			"`dryrun snapshot take` must run against the primary; "+
 				"use `dryrun snapshot activity --from <url> --label <name>` to capture activity from a replica")
 	}
-	return runPrimaryCapture(ctx, cap, store, key, "primary", policy)
+	return runPrimaryCapture(ctx, cap, store, key, "primary", policy, force)
 }
 
 // schema + planner + activity in one shot; caller is responsible for the standby gate
-func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string, policy *masking.Policy) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
+func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string, policy *masking.Policy, force bool) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
 	snap, err := cap.Introspect(ctx)
 	if err != nil {
 		return nil, nil, nil, 0, err
+	}
+	if err := guardCaptureIdentity(ctx, store, key, snap, force); err != nil {
+		return snap, nil, nil, 0, err
 	}
 	if _, err := store.PutSchema(ctx, key, snap); err != nil {
 		slog.Warn("could not save snapshot", "error", err)
@@ -339,6 +347,33 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 		slog.Warn("could not save activity stats", "error", err)
 	}
 	return snap, planner, activity, masked, nil
+}
+
+// refuse a capture whose cluster/database contradicts this key's history: a stray
+// DATABASE_URL recording a foreign db into the project.
+func guardCaptureIdentity(ctx context.Context, store initWriter, key history.SnapshotKey, snap *schema.SchemaSnapshot, force bool) error {
+	if force {
+		return nil
+	}
+	prior, err := store.GetSchema(ctx, key, history.NewRefLatest())
+	if errors.Is(err, history.ErrSnapshotNotFound) {
+		return nil // no baseline yet
+	}
+	// unreadable prior: refuse rather than wave through unchecked
+	if err != nil {
+		return dryrun.WrapError(dryrun.ErrHistory, "read prior snapshot for identity check", err)
+	}
+	if prior == nil {
+		return nil
+	}
+	reason, conflict := snapshot.IdentityConflict(prior, snap)
+	if !conflict {
+		return nil
+	}
+	return dryrun.NewError(dryrun.ErrIdentityMismatch,
+		fmt.Sprintf("capture does not match this project's snapshot history: %s.\n"+
+			"       The connection may point at the wrong database, or you may be in the wrong project directory.\n"+
+			"       Re-check --db / DATABASE_URL, or pass --force to record it anyway.", reason))
 }
 
 // dbName, when set, is baked as the profile's database_id; empty leaves it commented

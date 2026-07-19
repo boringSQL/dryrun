@@ -14,6 +14,7 @@ const (
 	ErrConfig
 	ErrDatabase
 	ErrReplicaCapture
+	ErrIdentityMismatch
 )
 
 type Error struct {
