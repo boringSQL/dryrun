@@ -464,7 +464,10 @@ func snapshotCmd() *cobra.Command {
 	diffCmd := newDiffCmd(&historyDB)
 	addHistFlag(diffCmd)
 
-	cmd.AddCommand(takeCmd, listCmd, diffCmd, snapshotActivityCmd(),
+	deleteCmd := snapshotDeleteCmd(&historyDB)
+	addHistFlag(deleteCmd)
+
+	cmd.AddCommand(takeCmd, listCmd, diffCmd, deleteCmd, snapshotActivityCmd(),
 		snapshotPushCmd(), snapshotPullCmd())
 	return cmd
 }

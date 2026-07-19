@@ -419,6 +419,249 @@ func (s *Store) LatestSchema(ctx context.Context, key SnapshotKey) (*SnapshotSum
 	return &first, nil
 }
 
+// ResolveSchemaSnapshot maps a content-hash prefix to one schema row.
+// More than one match (prefix collision or content twin) is rejected.
+func (s *Store) ResolveSchemaSnapshot(ctx context.Context, key SnapshotKey, hashPrefix string) (SnapshotSummary, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, db_url_hash, timestamp, content_hash, database_name, project_id, database_id
+		   FROM snapshots
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
+		  ORDER BY timestamp DESC LIMIT 2`,
+		string(key.ProjectID), string(key.DatabaseID), hashPrefix+"%")
+	if err != nil {
+		return SnapshotSummary{}, err
+	}
+	defer rows.Close()
+
+	var (
+		matches []SnapshotSummary
+	)
+	for rows.Next() {
+		ss, serr := scanSchemaSummary(rows)
+		if serr != nil {
+			return SnapshotSummary{}, serr
+		}
+		matches = append(matches, ss)
+	}
+	if err := rows.Err(); err != nil {
+		return SnapshotSummary{}, err
+	}
+	switch len(matches) {
+	case 0:
+		return SnapshotSummary{}, fmt.Errorf("%w (hash %s)", ErrSnapshotNotFound, hashPrefix)
+	case 1:
+		return matches[0], nil
+	default:
+		return SnapshotSummary{}, fmt.Errorf("ambiguous snapshot hash prefix %q (matches multiple snapshots; use a longer prefix or --latest)", hashPrefix)
+	}
+}
+
+// ResolveSnapshot maps a content-hash prefix to one snapshot of any kind
+// (schema, planner, activity), the same set `snapshot list` prints. More than
+// one match across the three tables is rejected so a delete can't be
+// misdirected. The returned summary carries its Kind.
+func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix string) (SnapshotSummary, error) {
+	pid := string(key.ProjectID)
+	did := string(key.DatabaseID)
+	like := hashPrefix + "%"
+
+	var matches []SnapshotSummary
+
+	srows, err := s.db.QueryContext(ctx,
+		`SELECT id, db_url_hash, timestamp, content_hash, database_name, project_id, database_id
+		   FROM snapshots
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
+		  ORDER BY timestamp DESC LIMIT 2`,
+		pid, did, like)
+	if err != nil {
+		return SnapshotSummary{}, err
+	}
+	for srows.Next() {
+		ss, serr := scanSchemaSummary(srows)
+		if serr != nil {
+			srows.Close()
+			return SnapshotSummary{}, serr
+		}
+		matches = append(matches, ss)
+	}
+	if err := srows.Err(); err != nil {
+		srows.Close()
+		return SnapshotSummary{}, err
+	}
+	srows.Close()
+
+	prows, err := s.db.QueryContext(ctx,
+		`SELECT id, schema_ref_hash, content_hash, timestamp
+		   FROM planner_stats
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
+		  ORDER BY timestamp DESC LIMIT 2`,
+		pid, did, like)
+	if err != nil {
+		return SnapshotSummary{}, err
+	}
+	for prows.Next() {
+		var (
+			ss    SnapshotSummary
+			tsStr string
+		)
+		if err := prows.Scan(&ss.ID, &ss.SchemaRefHash, &ss.ContentHash, &tsStr); err != nil {
+			prows.Close()
+			return SnapshotSummary{}, err
+		}
+		ss.Kind = PlannerKind()
+		ss.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
+		matches = append(matches, ss)
+	}
+	if err := prows.Err(); err != nil {
+		prows.Close()
+		return SnapshotSummary{}, err
+	}
+	prows.Close()
+
+	arows, err := s.db.QueryContext(ctx,
+		`SELECT id, schema_ref_hash, content_hash, node_source, timestamp
+		   FROM activity_stats
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
+		  ORDER BY timestamp DESC LIMIT 2`,
+		pid, did, like)
+	if err != nil {
+		return SnapshotSummary{}, err
+	}
+	for arows.Next() {
+		var (
+			ss    SnapshotSummary
+			label string
+			tsStr string
+		)
+		if err := arows.Scan(&ss.ID, &ss.SchemaRefHash, &ss.ContentHash, &label, &tsStr); err != nil {
+			arows.Close()
+			return SnapshotSummary{}, err
+		}
+		ss.Kind = ActivityKind(label)
+		ss.NodeLabel = label
+		ss.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
+		matches = append(matches, ss)
+	}
+	if err := arows.Err(); err != nil {
+		arows.Close()
+		return SnapshotSummary{}, err
+	}
+	arows.Close()
+
+	switch len(matches) {
+	case 0:
+		return SnapshotSummary{}, fmt.Errorf("%w (hash %s)", ErrSnapshotNotFound, hashPrefix)
+	case 1:
+		return matches[0], nil
+	default:
+		return SnapshotSummary{}, fmt.Errorf("ambiguous snapshot hash prefix %q (matches multiple snapshots; use a longer prefix or --latest)", hashPrefix)
+	}
+}
+
+type DeletedSnapshot struct {
+	Snapshot        SnapshotSummary
+	PlannerRemoved  int64
+	ActivityRemoved int64
+	Cascaded        bool // false when a content twin kept the bound stats
+}
+
+// DeleteSnapshot removes one snapshot of any kind. Schema rows cascade to their
+// bound stats (see DeleteSchemaSnapshot); planner/activity rows delete alone.
+func (s *Store) DeleteSnapshot(ctx context.Context, key SnapshotKey, snap SnapshotSummary) (DeletedSnapshot, error) {
+	switch snap.Kind.Tag {
+	case KindSchema:
+		return s.DeleteSchemaSnapshot(ctx, key, snap)
+	case KindPlanner:
+		return s.deleteStatsRow(ctx, key, snap, "planner_stats")
+	case KindActivity:
+		return s.deleteStatsRow(ctx, key, snap, "activity_stats")
+	default:
+		return DeletedSnapshot{}, fmt.Errorf("unknown SnapshotKind tag: %d", snap.Kind.Tag)
+	}
+}
+
+// table is a hardcoded caller-side literal, never user input.
+func (s *Store) deleteStatsRow(ctx context.Context, key SnapshotKey, snap SnapshotSummary, table string) (DeletedSnapshot, error) {
+	pid := string(key.ProjectID)
+	did := string(key.DatabaseID)
+	res, err := s.db.ExecContext(ctx,
+		"DELETE FROM "+table+" WHERE id = ? AND project_id = ? AND database_id = ?",
+		snap.ID, pid, did)
+	if err != nil {
+		return DeletedSnapshot{}, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return DeletedSnapshot{}, fmt.Errorf("%w (id %d)", ErrSnapshotNotFound, snap.ID)
+	}
+	slog.Info("snapshot deleted", "kind", snap.Kind.String(), "hash", snap.ContentHash,
+		"project", pid, "database", did)
+	return DeletedSnapshot{Snapshot: snap}, nil
+}
+
+// DeleteSchemaSnapshot removes one schema row by rowid and, unless a content
+// twin remains, the planner/activity stats bound to it. Atomic.
+func (s *Store) DeleteSchemaSnapshot(ctx context.Context, key SnapshotKey, snap SnapshotSummary) (DeletedSnapshot, error) {
+	pid := string(key.ProjectID)
+	did := string(key.DatabaseID)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return DeletedSnapshot{}, err
+	}
+	defer tx.Rollback()
+
+	// cascade off the hash from the deleted row, not the caller struct
+	var hash string
+	err = tx.QueryRowContext(ctx,
+		`DELETE FROM snapshots WHERE id = ? AND project_id = ? AND database_id = ?
+		 RETURNING content_hash`,
+		snap.ID, pid, did).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DeletedSnapshot{}, fmt.Errorf("%w (id %d)", ErrSnapshotNotFound, snap.ID)
+	}
+	if err != nil {
+		return DeletedSnapshot{}, err
+	}
+
+	out := DeletedSnapshot{Snapshot: snap}
+
+	// a surviving content twin still binds these stats
+	var twins int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM snapshots
+		  WHERE project_id = ? AND database_id = ? AND content_hash = ?`,
+		pid, did, hash).Scan(&twins); err != nil {
+		return DeletedSnapshot{}, err
+	}
+	if twins == 0 {
+		pr, err := tx.ExecContext(ctx,
+			`DELETE FROM planner_stats
+			  WHERE project_id = ? AND database_id = ? AND schema_ref_hash = ?`,
+			pid, did, hash)
+		if err != nil {
+			return DeletedSnapshot{}, err
+		}
+		ar, err := tx.ExecContext(ctx,
+			`DELETE FROM activity_stats
+			  WHERE project_id = ? AND database_id = ? AND schema_ref_hash = ?`,
+			pid, did, hash)
+		if err != nil {
+			return DeletedSnapshot{}, err
+		}
+		out.PlannerRemoved, _ = pr.RowsAffected()
+		out.ActivityRemoved, _ = ar.RowsAffected()
+		out.Cascaded = true
+	}
+
+	if err := tx.Commit(); err != nil {
+		return DeletedSnapshot{}, err
+	}
+	slog.Info("snapshot deleted", "hash", hash, "project", pid, "database", did,
+		"planner_removed", out.PlannerRemoved, "activity_removed", out.ActivityRemoved)
+	return out, nil
+}
+
 func (s *Store) DeleteSchemaBefore(ctx context.Context, key SnapshotKey, cutoff time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM snapshots
