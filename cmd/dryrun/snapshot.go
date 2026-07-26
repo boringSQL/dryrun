@@ -17,6 +17,8 @@ func snapshotActivityCmd() *cobra.Command {
 		label       string
 		allowOrphan bool
 		historyDB   string
+		pushAfter   bool
+		pushRemote  string
 	)
 
 	cmd := &cobra.Command{
@@ -52,16 +54,29 @@ func snapshotActivityCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			return runSnapshotActivity(ctx, cap, store, resolveSnapshotKey(), activityOptions{
+			if err := runSnapshotActivity(ctx, cap, store, resolveSnapshotKey(), activityOptions{
 				Label:       label,
 				AllowOrphan: allowOrphan,
-			})
+			}); err != nil {
+				return err
+			}
+
+			if pushAfter {
+				dst, err := resolveSyncStore("", "", pushRemote)
+				if err != nil {
+					return err
+				}
+				return runSync(ctx, store, dst, false, fullScope(), os.Stdout)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&from, "from", "", "standby connection URL (default: --db)")
 	cmd.Flags().StringVar(&label, "label", "", "node label for the activity row (required)")
 	cmd.Flags().BoolVar(&allowOrphan, "allow-orphan", false, "permit capture without a bound schema snapshot")
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
+	cmd.Flags().BoolVar(&pushAfter, "push", false, "push the snapshot to a remote after capture")
+	cmd.Flags().StringVar(&pushRemote, "remote", "", "configured [[remote]] name (with --push)")
 	return cmd
 }
 
