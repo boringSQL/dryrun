@@ -482,12 +482,35 @@ type (
 	}
 )
 
-// Persisted per-node activity counters
-type ActivityStatsSnapshot struct {
-	FormatVersion int                  `json:"format_version"`
-	SchemaRefHash string               `json:"schema_ref_hash"`
-	ContentHash   string               `json:"content_hash"`
-	Node          NodeIdentity         `json:"node"`
-	Tables        []TableActivityEntry `json:"tables"`
-	Indexes       []IndexActivityEntry `json:"indexes"`
-}
+type (
+	// Persisted per-node activity counters
+	ActivityStatsSnapshot struct {
+		FormatVersion int                  `json:"format_version"`
+		SchemaRefHash string               `json:"schema_ref_hash"`
+		ContentHash   string               `json:"content_hash"`
+		Node          NodeIdentity         `json:"node"`
+		Tables        []TableActivityEntry `json:"tables"`
+		Indexes       []IndexActivityEntry `json:"indexes"`
+	}
+
+	// One qshape cluster: an ORM-collapsed query shape with per-node pg_stat_statements rollup
+	QueryStatsEntry struct {
+		Fingerprint string `json:"fingerprint"`
+		Canonical   string `json:"canonical"`
+		// pg_stat_statements.queryid values collapsed into this fingerprint
+		QueryIDs        []int64 `json:"query_ids,omitempty"`
+		Calls           int64   `json:"calls"`
+		TotalExecTimeMs float64 `json:"total_exec_time_ms,omitempty"`
+		MeanExecTimeMs  float64 `json:"mean_exec_time_ms,omitempty"`
+		Rows            int64   `json:"rows,omitempty"`
+	}
+
+	// Persisted per-node pg_stat_statements rollup, fingerprinted via qshape
+	QueryStatsSnapshot struct {
+		FormatVersion int               `json:"format_version"`
+		SchemaRefHash string            `json:"schema_ref_hash"`
+		ContentHash   string            `json:"content_hash"`
+		Node          NodeIdentity      `json:"node"`
+		Queries       []QueryStatsEntry `json:"queries"`
+	}
+)

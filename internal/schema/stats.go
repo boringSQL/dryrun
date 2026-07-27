@@ -2,10 +2,18 @@ package schema
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/boringsql/qshape"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+var (
+	// not installed, not preloaded, or off search_path; callers should skip, not fail the snapshot
+	ErrQueryStatsUnavailable = errors.New("pg_stat_statements extension not available")
 )
 
 // Sizing + per-column pg_stats; schema_ref ties it back to a DDL snapshot
@@ -86,6 +94,61 @@ func CaptureActivityStats(ctx context.Context, pool Querier, schemaRefHash, sour
 	return snap, nil
 }
 
+// Per-node pg_stat_statements rollup, fingerprinted via qshape; ErrQueryStatsUnavailable if the extension isn't installed
+func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source string) (*QueryStatsSnapshot, error) {
+	var installed bool
+	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).Scan(&installed); err != nil {
+		return nil, fmt.Errorf("check pg_stat_statements: %w", err)
+	}
+	if !installed {
+		return nil, ErrQueryStatsUnavailable
+	}
+
+	node, err := CaptureNodeIdentity(ctx, pool, source)
+	if err != nil {
+		return nil, err
+	}
+	queries, err := fetchQueryStats(ctx, pool)
+	if err != nil {
+		// role/session search_path can differ from the earlier to_regclass check
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && (pgErr.Code == "0A000" || pgErr.Code == "42P01") {
+			return nil, ErrQueryStatsUnavailable
+		}
+		return nil, fmt.Errorf("fetch query stats: %w", err)
+	}
+	clusters, err := qshape.Group(queries)
+	if err != nil {
+		return nil, fmt.Errorf("group query stats: %w", err)
+	}
+
+	entries := make([]QueryStatsEntry, len(clusters))
+	for i, c := range clusters {
+		ids := make([]int64, len(c.Members))
+		for j, m := range c.Members {
+			ids[j] = m.QueryID
+		}
+		entries[i] = QueryStatsEntry{
+			Fingerprint:     c.Fingerprint,
+			Canonical:       c.Canonical,
+			QueryIDs:        ids,
+			Calls:           c.TotalCalls,
+			TotalExecTimeMs: c.TotalExecTimeMs,
+			MeanExecTimeMs:  c.MeanExecTimeMs,
+			Rows:            c.Rows,
+		}
+	}
+
+	snap := &QueryStatsSnapshot{
+		FormatVersion: FormatVersion,
+		SchemaRefHash: schemaRefHash,
+		Node:          *node,
+		Queries:       entries,
+	}
+	snap.ContentHash = ComputeQueryStatsContentHash(snap)
+	return snap, nil
+}
+
 func CaptureNodeIdentity(ctx context.Context, pool Querier, source string) (*NodeIdentity, error) {
 	var (
 		isStandby bool
@@ -149,6 +212,18 @@ func fetchPlannerColumnStats(ctx context.Context, pool Querier) ([]ColumnStatsEn
 			&e.Stats.HistogramBounds, &e.Stats.Correlation,
 			&e.Stats.AvgWidth,
 		)
+		return e, err
+	})
+}
+
+func fetchQueryStats(ctx context.Context, pool Querier) ([]qshape.Query, error) {
+	rows, err := pool.Query(ctx, q("fetch-query-stats"))
+	if err != nil {
+		return nil, err
+	}
+	return scanAll(rows, func(r pgx.Rows) (qshape.Query, error) {
+		var e qshape.Query
+		err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs, &e.MeanExecTimeMs, &e.Rows)
 		return e, err
 	})
 }

@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/boringsql/fixturize v0.7.0
+	github.com/boringsql/qshape v0.2.0
 	github.com/boringsql/queries v1.6.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/klauspost/compress v1.18.6
@@ -43,3 +44,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/boringsql/qshape => ../qshape

@@ -42,6 +42,8 @@ type (
 	IndexActivityEntry    = snapshot.IndexActivityEntry
 	PlannerStatsSnapshot  = snapshot.PlannerStatsSnapshot
 	ActivityStatsSnapshot = snapshot.ActivityStatsSnapshot
+	QueryStatsEntry       = snapshot.QueryStatsEntry
+	QueryStatsSnapshot    = snapshot.QueryStatsSnapshot
 	MaskingInfo           = snapshot.MaskingInfo
 	AnnotatedSchema       = snapshot.AnnotatedSchema
 	MergedActivity        = snapshot.MergedActivity
@@ -79,10 +81,11 @@ var (
 	DetectStaleStats        = snapshot.DetectStaleStats
 	DetectFlavor            = snapshot.DetectFlavor
 
-	ComputeContentHash         = snapshot.ComputeContentHash
-	ComputeStructuralHash      = snapshot.ComputeStructuralHash
-	ComputeContentHashV2       = snapshot.ComputeContentHashV2
-	DigestFor                  = snapshot.DigestFor
-	ComputePlannerContentHash  = snapshot.ComputePlannerContentHash
-	ComputeActivityContentHash = snapshot.ComputeActivityContentHash
+	ComputeContentHash           = snapshot.ComputeContentHash
+	ComputeStructuralHash        = snapshot.ComputeStructuralHash
+	ComputeContentHashV2         = snapshot.ComputeContentHashV2
+	DigestFor                    = snapshot.DigestFor
+	ComputePlannerContentHash    = snapshot.ComputePlannerContentHash
+	ComputeActivityContentHash   = snapshot.ComputeActivityContentHash
+	ComputeQueryStatsContentHash = snapshot.ComputeQueryStatsContentHash
 )
