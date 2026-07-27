@@ -121,23 +121,38 @@ func (s *stubWriter) PutActivity(_ context.Context, _ history.SnapshotKey, a *sc
 // (refused), and replica with --allow-replica. Each case pins exactly which
 // streams land in the store, which is the contract the rest of dryrun
 // (stats apply, reload_schema) depends on.
+//
+// This table also doubles as coverage for the newer query-stats capture path:
+// captureQueryStatsBestEffort is invoked on both non-refused branches (primary,
+// and standby with --allow-replica), and the whole point of that helper is that
+// it is best-effort — neither the documented ErrQueryStatsUnavailable sentinel
+// (pg_stat_statements missing or not preloaded, which is an entirely normal,
+// expected condition on plenty of real databases) nor any other arbitrary error
+// bubbling up from the capture call should ever cause runInitCapture itself to
+// fail. The last two cases below exist specifically to pin that "capture
+// query stats is allowed to fail quietly" contract, since it would be very
+// easy for a future refactor to accidentally start treating it like a hard
+// dependency the way schema/planner/activity capture already are.
 func TestRunInitCapture_Branches(t *testing.T) {
 	cases := []struct {
-		name          string
-		standby       bool
-		allowReplica  bool
-		wantErrKind   *dryrun.ErrorKind
-		wantSchemaN   int
-		wantPlannerN  int
-		wantActivityN int
+		name            string
+		standby         bool
+		allowReplica    bool
+		queryStatsErr   error
+		wantErrKind     *dryrun.ErrorKind
+		wantSchemaN     int
+		wantPlannerN    int
+		wantActivityN   int
+		wantQueryStatsN int
 	}{
 		{
-			name:          "primary writes all three streams",
-			standby:       false,
-			allowReplica:  false,
-			wantSchemaN:   1,
-			wantPlannerN:  1,
-			wantActivityN: 1,
+			name:            "primary writes all three streams",
+			standby:         false,
+			allowReplica:    false,
+			wantSchemaN:     1,
+			wantPlannerN:    1,
+			wantActivityN:   1,
+			wantQueryStatsN: 1,
 		},
 		{
 			name:        "replica without flag refuses",
@@ -145,16 +160,43 @@ func TestRunInitCapture_Branches(t *testing.T) {
 			wantErrKind: ptrKind(dryrun.ErrReplicaCapture),
 		},
 		{
-			name:          "replica with --allow-replica writes activity only",
-			standby:       true,
-			allowReplica:  true,
-			wantActivityN: 1,
+			name:            "replica with --allow-replica writes activity only",
+			standby:         true,
+			allowReplica:    true,
+			wantActivityN:   1,
+			wantQueryStatsN: 1,
+		},
+		{
+			// The sentinel is the expected outcome on any database that hasn't
+			// preloaded pg_stat_statements — this must be a complete non-event
+			// for the rest of the primary capture, not something callers need
+			// to special-case or even notice.
+			name:            "missing pg_stat_statements does not fail primary capture",
+			standby:         false,
+			queryStatsErr:   schema.ErrQueryStatsUnavailable,
+			wantSchemaN:     1,
+			wantPlannerN:    1,
+			wantActivityN:   1,
+			wantQueryStatsN: 1,
+		},
+		{
+			// Deliberately a generic, unrecognized error (not the sentinel) to
+			// prove the best-effort contract isn't just "know about this one
+			// specific error" but genuinely "any capture failure here is
+			// swallowed and logged, never propagated."
+			name:            "arbitrary query-stats capture error does not fail primary capture",
+			standby:         false,
+			queryStatsErr:   errors.New("boom: connection reset mid-query"),
+			wantSchemaN:     1,
+			wantPlannerN:    1,
+			wantActivityN:   1,
+			wantQueryStatsN: 1,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cap := &stubCapturer{Standby: tc.standby}
+			cap := &stubCapturer{Standby: tc.standby, QueryStatsErr: tc.queryStatsErr}
 			w := &stubWriter{}
 			err := runInitCapture(context.Background(), cap, w, history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, t.TempDir(), initOptions{
 				AllowReplica: tc.allowReplica,
@@ -180,8 +222,73 @@ func TestRunInitCapture_Branches(t *testing.T) {
 			if w.ActivityN != tc.wantActivityN {
 				t.Errorf("activity puts=%d want=%d", w.ActivityN, tc.wantActivityN)
 			}
+			if cap.QueryStatsN != tc.wantQueryStatsN {
+				t.Errorf("query stats capture attempts=%d want=%d", cap.QueryStatsN, tc.wantQueryStatsN)
+			}
 		})
 	}
+}
+
+// captureQueryStatsBestEffort has an unusual contract for a capture helper in
+// this file: it swallows almost everything, but not quite everything. This
+// test drives it directly (rather than through the higher-level
+// runInitCapture/runSnapshotTake plumbing) so each branch of that contract is
+// pinned in isolation, independent of whatever the surrounding capture flow
+// happens to be doing at the time:
+//
+//   - a clean capture returns nil and the caller can treat the call as a
+//     no-op from an error-handling perspective;
+//   - schema.ErrQueryStatsUnavailable (pg_stat_statements missing, or present
+//     but not preloaded via shared_preload_libraries) is an expected, common
+//     outcome on real databases and must never surface as an error;
+//   - some other, unrelated capture failure (a network blip, a permissions
+//     problem, whatever) is logged as a warning but likewise must not
+//     surface — the whole point of "best effort" is that query-stats capture
+//     is a nice-to-have layered on top of the snapshot, not a dependency of it;
+//   - but context cancellation/deadline exceeded is different in kind from a
+//     capture-specific failure: it means the *caller* wants to stop, not that
+//     this particular capture step had a problem, so it is the one thing this
+//     helper does NOT swallow and must propagate faithfully.
+func TestCaptureQueryStatsBestEffort(t *testing.T) {
+	t.Run("successful capture returns nil", func(t *testing.T) {
+		cap := &stubCapturer{}
+		if err := captureQueryStatsBestEffort(context.Background(), cap, "schema-hash", "primary"); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if cap.QueryStatsN != 1 {
+			t.Errorf("query stats capture attempts=%d want=1", cap.QueryStatsN)
+		}
+	})
+
+	t.Run("ErrQueryStatsUnavailable is swallowed, not surfaced", func(t *testing.T) {
+		cap := &stubCapturer{QueryStatsErr: schema.ErrQueryStatsUnavailable}
+		if err := captureQueryStatsBestEffort(context.Background(), cap, "schema-hash", "primary"); err != nil {
+			t.Errorf("expected the sentinel to be swallowed, got: %v", err)
+		}
+	})
+
+	t.Run("an arbitrary capture error is logged and swallowed, not surfaced", func(t *testing.T) {
+		cap := &stubCapturer{QueryStatsErr: errors.New("connection reset")}
+		if err := captureQueryStatsBestEffort(context.Background(), cap, "schema-hash", "primary"); err != nil {
+			t.Errorf("expected an ordinary capture error to be swallowed, got: %v", err)
+		}
+	})
+
+	t.Run("context cancellation is the one error that propagates", func(t *testing.T) {
+		cap := &stubCapturer{QueryStatsErr: context.Canceled}
+		err := captureQueryStatsBestEffort(context.Background(), cap, "schema-hash", "primary")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled to propagate, got: %v", err)
+		}
+	})
+
+	t.Run("deadline exceeded also propagates", func(t *testing.T) {
+		cap := &stubCapturer{QueryStatsErr: context.DeadlineExceeded}
+		err := captureQueryStatsBestEffort(context.Background(), cap, "schema-hash", "primary")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("want context.DeadlineExceeded to propagate, got: %v", err)
+		}
+	})
 }
 
 // Confirms that when the standby has a previously-captured schema in the
