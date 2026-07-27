@@ -63,8 +63,8 @@ func TestResolveSchemaSnapshot(t *testing.T) {
 	}
 }
 
-// Deleting a schema snapshot cascades to the planner/activity stats bound to it
-// via schema_ref_hash, and leaves other snapshots untouched.
+// Deleting a schema snapshot cascades to the planner/activity/query stats bound
+// to it via schema_ref_hash, and leaves other snapshots untouched.
 func TestDeleteSchemaSnapshotCascades(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -79,6 +79,9 @@ func TestDeleteSchemaSnapshotCascades(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.PutActivity(ctx, k, activityFixture("drop-me", "a-1", "primary", false)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutQueryStats(ctx, k, queryStatsFixture("drop-me", "q-1", "primary")); err != nil {
 		t.Fatal(err)
 	}
 	// stats bound to the survivor must not be swept up
@@ -97,8 +100,9 @@ func TestDeleteSchemaSnapshotCascades(t *testing.T) {
 	if !res.Cascaded {
 		t.Error("expected cascade with no content twin present")
 	}
-	if res.PlannerRemoved != 1 || res.ActivityRemoved != 1 {
-		t.Errorf("removed planner=%d activity=%d, want 1/1", res.PlannerRemoved, res.ActivityRemoved)
+	if res.PlannerRemoved != 1 || res.ActivityRemoved != 1 || res.QueryStatsRemoved != 1 {
+		t.Errorf("removed planner=%d activity=%d query_stats=%d, want 1/1/1",
+			res.PlannerRemoved, res.ActivityRemoved, res.QueryStatsRemoved)
 	}
 
 	if n := countRows(t, store, "snapshots", k); n != 1 {
@@ -109,6 +113,9 @@ func TestDeleteSchemaSnapshotCascades(t *testing.T) {
 	}
 	if n := countRows(t, store, "activity_stats", k); n != 0 {
 		t.Errorf("activity_stats left = %d, want 0", n)
+	}
+	if n := countRows(t, store, "query_stats", k); n != 0 {
+		t.Errorf("query_stats left = %d, want 0", n)
 	}
 
 	// survivor still resolvable

@@ -36,6 +36,20 @@ func activityFixture(schemaRef, contentHash, source string, standby bool) *schem
 	}
 }
 
+func queryStatsFixture(schemaRef, contentHash, source string) *schema.QueryStatsSnapshot {
+	return &schema.QueryStatsSnapshot{
+		SchemaRefHash: schemaRef,
+		ContentHash:   contentHash,
+		Node: schema.NodeIdentity{
+			Source: source, PgVersion: "PostgreSQL 17.0",
+			Timestamp: time.Now().UTC().Truncate(time.Second),
+		},
+		Queries: []schema.QueryStatsEntry{
+			{Fingerprint: "sha1:abc", Canonical: "SELECT id FROM users WHERE id = $1", Calls: 5},
+		},
+	}
+}
+
 // PutPlanner is idempotent on (schema_ref_hash, content_hash) — re-putting
 // the exact same payload must collapse to a deduped no-op so probe loops
 // running on a cron don't bloat history.db with byte-identical rows.
@@ -142,6 +156,66 @@ func TestPutActivity_AppendsEveryCall(t *testing.T) {
 	}
 	if len(latest) != 1 {
 		t.Errorf("LatestActivity rows = %d, want 1 (per-node collapse)", len(latest))
+	}
+}
+
+// PutQueryStats is append-only, same as activity — every call inserts a row
+// even when content_hash repeats.
+func TestPutQueryStats_AppendsEveryCall(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	k := key("acme", "primary")
+
+	base := time.Now().UTC().Truncate(time.Second)
+	for i := 0; i < 3; i++ {
+		q := queryStatsFixture("sref-A", "qch-1", "primary")
+		q.Node.Timestamp = base.Add(time.Duration(i) * time.Minute)
+		if _, err := store.PutQueryStats(ctx, k, q); err != nil {
+			t.Fatalf("put query stats #%d: %v", i, err)
+		}
+	}
+
+	var count int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM query_stats WHERE project_id = ? AND database_id = ?`,
+		string(k.ProjectID), string(k.DatabaseID),
+	).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("query_stats row count = %d, want 3", count)
+	}
+
+	// GetQueryStats still collapses to one row per node (the most recent).
+	latest, err := store.GetQueryStats(ctx, k, "sref-A")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(latest) != 1 {
+		t.Errorf("GetQueryStats rows = %d, want 1 (per-node collapse)", len(latest))
+	}
+}
+
+func TestGetQueryStats_FiltersBySchemaRefHash(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	k := key("acme", "primary")
+
+	matched := queryStatsFixture("sref-A", "q-1", "primary")
+	drifted := queryStatsFixture("sref-B", "q-2", "replica-x")
+	if _, err := store.PutQueryStats(ctx, k, matched); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutQueryStats(ctx, k, drifted); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := store.GetQueryStats(ctx, k, "sref-A")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Node.Source != "primary" {
+		t.Errorf("GetQueryStats didn't filter by schema_ref: %+v", rows)
 	}
 }
 
