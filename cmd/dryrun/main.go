@@ -389,7 +389,7 @@ func snapshotCmd() *cobra.Command {
 			}
 			fmt.Printf("Activity stats saved: %s (label=primary, %d tables, %d indexes)\n",
 				activity.ContentHash, len(activity.Tables), len(activity.Indexes))
-			if err := captureQueryStatsBestEffort(cmd.Context(), cap, snap.ContentHash, "primary"); err != nil {
+			if err := captureQueryStatsBestEffort(cmd.Context(), cap, store, key, snap.ContentHash, "primary"); err != nil {
 				return err
 			}
 

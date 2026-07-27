@@ -36,6 +36,7 @@ type initWriter interface {
 	PutSchema(ctx context.Context, key history.SnapshotKey, snap *schema.SchemaSnapshot) (history.PutOutcome, error)
 	PutPlanner(ctx context.Context, key history.SnapshotKey, p *schema.PlannerStatsSnapshot) (history.PutOutcome, error)
 	PutActivity(ctx context.Context, key history.SnapshotKey, a *schema.ActivityStatsSnapshot) (history.PutOutcome, error)
+	PutQueryStats(ctx context.Context, key history.SnapshotKey, q *schema.QueryStatsSnapshot) (history.PutOutcome, error)
 }
 
 // one REPEATABLE READ, READ ONLY tx (as pg_dump uses) for the whole capture:
@@ -99,23 +100,27 @@ func (c pgxCapturer) CaptureQueryStats(ctx context.Context, schemaRefHash, sourc
 	return schema.CaptureQueryStats(ctx, c.tx, schemaRefHash, source)
 }
 
-// not stored yet (no history.db column); best-effort so a missing pg_stat_statements
-// never fails a snapshot. Call last: on a real error the shared REPEATABLE READ tx
-// is already aborted, so nothing after this call can use cap. Only ctx cancellation/
-// deadline propagates as a real error; a missing/unpreloaded extension or any other
-// query failure is logged and swallowed.
-func captureQueryStatsBestEffort(ctx context.Context, cap initCapturer, schemaRefHash, source string) error {
+// best-effort, call last: a real capture error aborts the shared REPEATABLE READ tx,
+// so nothing after this call can use cap. Only ctx cancellation/deadline propagates.
+func captureQueryStatsBestEffort(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, schemaRefHash, source string) error {
 	qs, err := cap.CaptureQueryStats(ctx, schemaRefHash, source)
-	if err == nil && qs != nil {
-		fmt.Fprintf(os.Stderr, "  Query stats: %d shapes (node=%s)\n", len(qs.Queries), source)
-		return nil
-	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	if err != nil && !errors.Is(err, schema.ErrQueryStatsUnavailable) {
-		slog.Warn("capture query stats", "source", source, "error", err)
+	if err != nil {
+		if !errors.Is(err, schema.ErrQueryStatsUnavailable) {
+			slog.Warn("capture query stats", "source", source, "error", err)
+		}
+		return nil
 	}
+	if qs == nil {
+		return nil
+	}
+	if _, err := store.PutQueryStats(ctx, key, qs); err != nil {
+		slog.Warn("save query stats", "source", source, "error", err)
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "  Query stats: %d shapes (node=%s)\n", len(qs.Queries), source)
 	return nil
 }
 
@@ -294,7 +299,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 			return fmt.Errorf("save activity stats: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "Replica capture: activity stats only (node=%s)\n", source)
-		return captureQueryStatsBestEffort(ctx, cap, schemaRef, source)
+		return captureQueryStatsBestEffort(ctx, cap, store, key, schemaRef, source)
 	}
 
 	snap, planner, activity, masked, err := runPrimaryCapture(ctx, cap, store, key, source, opts.Policy, opts.Force)
@@ -317,7 +322,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 	}
 	fmt.Fprintf(os.Stderr, "  Activity: node=%s, %d tables, %d indexes\n",
 		source, len(activity.Tables), len(activity.Indexes))
-	return captureQueryStatsBestEffort(ctx, cap, snap.ContentHash, source)
+	return captureQueryStatsBestEffort(ctx, cap, store, key, snap.ContentHash, source)
 }
 
 // snapshot take wrapper: gate on standby (refuse, no replica fallback), then

@@ -61,6 +61,28 @@ func (s *Store) PutActivity(ctx context.Context, key SnapshotKey, a *schema.Acti
 	return PutInserted, nil
 }
 
+// query stats are per-node and append-only, same as activity
+func (s *Store) PutQueryStats(ctx context.Context, key SnapshotKey, q *schema.QueryStatsSnapshot) (PutOutcome, error) {
+	data, err := json.Marshal(q)
+	if err != nil {
+		return PutInserted, fmt.Errorf("cannot serialize query stats: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO query_stats
+		   (project_id, database_id, schema_ref_hash, content_hash, node_source, timestamp, payload_json)
+		   VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		string(key.ProjectID), string(key.DatabaseID),
+		q.SchemaRefHash, q.ContentHash, q.Node.Source,
+		q.Node.Timestamp.Format(time.RFC3339), string(data),
+	)
+	if err != nil {
+		return PutInserted, fmt.Errorf("cannot save query stats: %w", err)
+	}
+	slog.Info("query stats put", "hash", q.ContentHash, "node", q.Node.Source)
+	return PutInserted, nil
+}
+
 func (s *Store) GetPlanner(ctx context.Context, key SnapshotKey, schemaRefHash string) (*schema.PlannerStatsSnapshot, error) {
 	var jsonStr string
 	err := s.db.QueryRowContext(ctx,
@@ -114,6 +136,41 @@ func (s *Store) GetActivity(ctx context.Context, key SnapshotKey, schemaRefHash 
 			return nil, fmt.Errorf("corrupt activity stats JSON: %w", err)
 		}
 		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// latest row per node, joined under the requested schema_ref_hash
+func (s *Store) GetQueryStats(ctx context.Context, key SnapshotKey, schemaRefHash string) ([]schema.QueryStatsSnapshot, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT payload_json FROM query_stats AS q
+		  WHERE project_id = ? AND database_id = ? AND schema_ref_hash = ?
+		    AND timestamp = (
+		      SELECT MAX(timestamp) FROM query_stats
+		       WHERE project_id = q.project_id
+		         AND database_id = q.database_id
+		         AND schema_ref_hash = q.schema_ref_hash
+		         AND node_source = q.node_source
+		    )
+		  ORDER BY node_source`,
+		string(key.ProjectID), string(key.DatabaseID), schemaRefHash,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []schema.QueryStatsSnapshot
+	for rows.Next() {
+		var jsonStr string
+		if err := rows.Scan(&jsonStr); err != nil {
+			return nil, err
+		}
+		var q schema.QueryStatsSnapshot
+		if err := json.Unmarshal([]byte(jsonStr), &q); err != nil {
+			return nil, fmt.Errorf("corrupt query stats JSON: %w", err)
+		}
+		out = append(out, q)
 	}
 	return out, rows.Err()
 }

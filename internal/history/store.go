@@ -232,6 +232,21 @@ func (s *Store) migrate() error {
 			ON activity_stats(project_id, database_id, timestamp DESC);
 		CREATE INDEX IF NOT EXISTS activity_stats_by_schema_ref
 			ON activity_stats(schema_ref_hash, node_source, timestamp DESC);
+
+		CREATE TABLE IF NOT EXISTS query_stats (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id      TEXT,
+			database_id     TEXT,
+			schema_ref_hash TEXT NOT NULL,
+			content_hash    TEXT NOT NULL,
+			node_source     TEXT NOT NULL,
+			timestamp       TEXT NOT NULL,
+			payload_json    TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS query_stats_by_key_taken_at
+			ON query_stats(project_id, database_id, timestamp DESC);
+		CREATE INDEX IF NOT EXISTS query_stats_by_schema_ref
+			ON query_stats(schema_ref_hash, node_source, timestamp DESC);
 	`)
 	if err != nil {
 		return fmt.Errorf("migration failed: %w", err)
@@ -559,10 +574,11 @@ func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix
 }
 
 type DeletedSnapshot struct {
-	Snapshot        SnapshotSummary
-	PlannerRemoved  int64
-	ActivityRemoved int64
-	Cascaded        bool // false when a content twin kept the bound stats
+	Snapshot          SnapshotSummary
+	PlannerRemoved    int64
+	ActivityRemoved   int64
+	QueryStatsRemoved int64
+	Cascaded          bool // false when a content twin kept the bound stats
 }
 
 // DeleteSnapshot removes one snapshot of any kind. Schema rows cascade to their
@@ -649,8 +665,16 @@ func (s *Store) DeleteSchemaSnapshot(ctx context.Context, key SnapshotKey, snap 
 		if err != nil {
 			return DeletedSnapshot{}, err
 		}
+		qr, err := tx.ExecContext(ctx,
+			`DELETE FROM query_stats
+			  WHERE project_id = ? AND database_id = ? AND schema_ref_hash = ?`,
+			pid, did, hash)
+		if err != nil {
+			return DeletedSnapshot{}, err
+		}
 		out.PlannerRemoved, _ = pr.RowsAffected()
 		out.ActivityRemoved, _ = ar.RowsAffected()
+		out.QueryStatsRemoved, _ = qr.RowsAffected()
 		out.Cascaded = true
 	}
 
@@ -658,7 +682,8 @@ func (s *Store) DeleteSchemaSnapshot(ctx context.Context, key SnapshotKey, snap 
 		return DeletedSnapshot{}, err
 	}
 	slog.Info("snapshot deleted", "hash", hash, "project", pid, "database", did,
-		"planner_removed", out.PlannerRemoved, "activity_removed", out.ActivityRemoved)
+		"planner_removed", out.PlannerRemoved, "activity_removed", out.ActivityRemoved,
+		"query_stats_removed", out.QueryStatsRemoved)
 	return out, nil
 }
 
