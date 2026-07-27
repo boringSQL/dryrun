@@ -303,6 +303,55 @@ func TestActivityContentHash_DifferentiatesNodes(t *testing.T) {
 	}
 }
 
+// Same node.source discrimination guarantee as activity stats: two nodes running the
+// same workload must not collide in the dedup index.
+func TestQueryStatsContentHash_DifferentiatesNodes(t *testing.T) {
+	q := &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "replica-1"},
+		Queries:       []QueryStatsEntry{{Fingerprint: "sha1:abc", Calls: 5}},
+	}
+	b := *q
+	b.Node = NodeIdentity{Source: "replica-2"}
+
+	if ComputeQueryStatsContentHash(q) == ComputeQueryStatsContentHash(&b) {
+		t.Errorf("query stats hash didn't distinguish replicas")
+	}
+}
+
+// Canonical and MeanExecTimeMs are derived values, not raw facts, so they must not move
+// the digest — otherwise a qshape normalizer upgrade or float rounding would falsely
+// dedup-bust an unchanged workload.
+func TestQueryStatsContentHash_IgnoresDerivedFields(t *testing.T) {
+	q := &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Queries: []QueryStatsEntry{{
+			Fingerprint:     "sha1:abc",
+			Canonical:       "SELECT id FROM users WHERE id = $1",
+			QueryIDs:        []int64{123},
+			Calls:           10,
+			TotalExecTimeMs: 100,
+			MeanExecTimeMs:  10,
+			Rows:            10,
+		}},
+	}
+	b := *q
+	b.Queries = []QueryStatsEntry{{
+		Fingerprint:     "sha1:abc",
+		Canonical:       "SELECT u.id FROM users u WHERE u.id = $1",
+		QueryIDs:        []int64{123},
+		Calls:           10,
+		TotalExecTimeMs: 100,
+		MeanExecTimeMs:  10.0000001,
+		Rows:            10,
+	}}
+
+	if ComputeQueryStatsContentHash(q) != ComputeQueryStatsContentHash(&b) {
+		t.Errorf("query stats hash moved on a derived-field-only change")
+	}
+}
+
 // v1 froze reloptions at the last DDL change: a settings-only ALTER hashed identically,
 // so the new body deduped away and vacuum advice kept reading stale storage parameters.
 // v2 covers them; the structural hash still must not.

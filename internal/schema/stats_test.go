@@ -2,6 +2,7 @@ package schema
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -67,6 +68,34 @@ func TestCaptureAll_AgainstLiveDB(t *testing.T) {
 	}
 	if activity.Node.PgVersion == "" {
 		t.Errorf("activity.Node.PgVersion is empty; expected version() string")
+	}
+}
+
+// pg_stat_statements may not be preloaded on the test DB; the sentinel is a valid outcome too.
+func TestCaptureQueryStats_AgainstLiveDB(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	snap, err := IntrospectSchema(ctx, pool)
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+
+	qs, err := CaptureQueryStats(ctx, pool, snap.ContentHash, "test-primary")
+	if err != nil {
+		if errors.Is(err, ErrQueryStatsUnavailable) {
+			t.Skip("pg_stat_statements not available on test DB")
+		}
+		t.Fatalf("query stats capture: %v", err)
+	}
+	if qs.SchemaRefHash != snap.ContentHash {
+		t.Errorf("qs.SchemaRefHash=%s want=%s", qs.SchemaRefHash, snap.ContentHash)
+	}
+	if qs.Node.Source != "test-primary" {
+		t.Errorf("qs.Node.Source=%q want=test-primary", qs.Node.Source)
+	}
+	if qs.ContentHash == "" {
+		t.Errorf("qs.ContentHash empty")
 	}
 }
 
