@@ -28,6 +28,7 @@ type initCapturer interface {
 	Introspect(ctx context.Context) (*schema.SchemaSnapshot, error)
 	CapturePlanner(ctx context.Context, schemaRefHash string) (*schema.PlannerStatsSnapshot, error)
 	CaptureActivity(ctx context.Context, schemaRefHash, source string) (*schema.ActivityStatsSnapshot, error)
+	CaptureQueryStats(ctx context.Context, schemaRefHash, source string) (*schema.QueryStatsSnapshot, error)
 }
 
 type initWriter interface {
@@ -92,6 +93,24 @@ func (c pgxCapturer) CapturePlanner(ctx context.Context, schemaRefHash string) (
 
 func (c pgxCapturer) CaptureActivity(ctx context.Context, schemaRefHash, source string) (*schema.ActivityStatsSnapshot, error) {
 	return schema.CaptureActivityStats(ctx, c.tx, schemaRefHash, source)
+}
+
+func (c pgxCapturer) CaptureQueryStats(ctx context.Context, schemaRefHash, source string) (*schema.QueryStatsSnapshot, error) {
+	return schema.CaptureQueryStats(ctx, c.tx, schemaRefHash, source)
+}
+
+// not stored yet (no history.db column); best-effort so a missing pg_stat_statements
+// never fails a snapshot
+func captureQueryStatsBestEffort(ctx context.Context, cap initCapturer, schemaRefHash, source string) {
+	qs, err := cap.CaptureQueryStats(ctx, schemaRefHash, source)
+	if errors.Is(err, schema.ErrQueryStatsUnavailable) {
+		return
+	}
+	if err != nil {
+		slog.Warn("capture query stats", "error", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "  Query stats: %d shapes (node=%s)\n", len(qs.Queries), source)
 }
 
 // init owns the masking flag surface; other subcommands don't mask anything.
@@ -268,6 +287,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		if _, err := store.PutActivity(ctx, key, activity); err != nil {
 			return fmt.Errorf("save activity stats: %w", err)
 		}
+		captureQueryStatsBestEffort(ctx, cap, schemaRef, source)
 		fmt.Fprintf(os.Stderr, "Replica capture: activity stats only (node=%s)\n", source)
 		return nil
 	}
@@ -346,6 +366,8 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 	if _, err := store.PutActivity(ctx, key, activity); err != nil {
 		slog.Warn("could not save activity stats", "error", err)
 	}
+
+	captureQueryStatsBestEffort(ctx, cap, snap.ContentHash, source)
 	return snap, planner, activity, masked, nil
 }
 

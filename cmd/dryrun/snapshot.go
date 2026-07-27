@@ -111,6 +111,7 @@ func runSnapshotActivity(ctx context.Context, cap initCapturer, store initWriter
 	if _, err := store.PutActivity(ctx, key, activity); err != nil {
 		return fmt.Errorf("save activity stats: %w", err)
 	}
+	captureQueryStatsBestEffort(ctx, cap, schemaRef, opts.Label)
 
 	bound := schemaRef
 	if bound == "" {

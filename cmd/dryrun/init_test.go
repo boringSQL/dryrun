@@ -27,8 +27,10 @@ type stubCapturer struct {
 	IntrospectN    int
 	PlannerN       int
 	ActivityN      int
+	QueryStatsN    int
 	StandbyErr     error
 	IntrospectErr  error
+	QueryStatsErr  error
 	PlannerColumns []schema.ColumnStatsEntry
 	SystemID       string
 	Database       string
@@ -64,6 +66,16 @@ func (s *stubCapturer) CaptureActivity(_ context.Context, ref, src string) (*sch
 	a := &schema.ActivityStatsSnapshot{SchemaRefHash: ref, ContentHash: "activity-hash-1"}
 	a.Node.Source = src
 	return a, nil
+}
+
+func (s *stubCapturer) CaptureQueryStats(_ context.Context, ref, src string) (*schema.QueryStatsSnapshot, error) {
+	s.QueryStatsN++
+	if s.QueryStatsErr != nil {
+		return nil, s.QueryStatsErr
+	}
+	q := &schema.QueryStatsSnapshot{SchemaRefHash: ref, ContentHash: "query-stats-hash-1"}
+	q.Node.Source = src
+	return q, nil
 }
 
 // stubWriter counts Put* calls and optionally hands back a stored schema
