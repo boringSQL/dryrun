@@ -730,6 +730,8 @@ func (s *Store) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (
 		return s.PutPlanner(ctx, key, snap.AsPlanner())
 	case snap.AsActivity() != nil:
 		return s.PutActivity(ctx, key, snap.AsActivity())
+	case snap.AsQueryStats() != nil:
+		return s.PutQueryStats(ctx, key, snap.AsQueryStats())
 	}
 	return PutInserted, fmt.Errorf("empty StoredSnapshot")
 }
@@ -754,6 +756,12 @@ func (s *Store) Get(ctx context.Context, key SnapshotKey, kind SnapshotKind, at 
 			return StoredSnapshot{}, err
 		}
 		return WrapActivity(a), nil
+	case KindQuery:
+		q, err := s.getQueryStatsRef(ctx, key, kind.NodeLabel, at)
+		if err != nil {
+			return StoredSnapshot{}, err
+		}
+		return WrapQueryStats(q), nil
 	}
 	return StoredSnapshot{}, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
 }
@@ -766,6 +774,8 @@ func (s *Store) List(ctx context.Context, key SnapshotKey, kind SnapshotKind, rn
 		return s.listPlanner(ctx, key, rng)
 	case KindActivity:
 		return s.listActivity(ctx, key, kind.NodeLabel, rng)
+	case KindQuery:
+		return s.listQueryStats(ctx, key, kind.NodeLabel, rng)
 	}
 	return nil, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
 }

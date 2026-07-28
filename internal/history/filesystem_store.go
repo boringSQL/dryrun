@@ -33,15 +33,19 @@ func NewFilesystemStore(root string) (*FilesystemStore, error) {
 // Rust's dry_run_core::history::Bundle so cross-implementation sync stays
 // byte-compatible.
 type Bundle struct {
-	Schema   *schema.SchemaSnapshot                      `json:"schema"`
-	Planner  *schema.PlannerStatsSnapshot                `json:"planner"`
-	Activity map[string]*schema.ActivityStatsSnapshot    `json:"activity"`
+	Schema   *schema.SchemaSnapshot                   `json:"schema"`
+	Planner  *schema.PlannerStatsSnapshot             `json:"planner"`
+	Activity map[string]*schema.ActivityStatsSnapshot `json:"activity"`
+	Query    map[string]*schema.QueryStatsSnapshot    `json:"query,omitempty"`
 }
 
 var (
 	// putting planner or activity without a matching schema bundle is rejected;
 	// the bundle is keyed by schema_ref_hash and must exist first.
 	ErrOrphanSnapshot = errors.New("no schema bundle matches schema_ref_hash")
+
+	// a store rejects a kind it doesn't (yet) know how to persist
+	ErrKindUnsupported = errors.New("kind not supported by this store")
 )
 
 func (f *FilesystemStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (PutOutcome, error) {
@@ -52,6 +56,8 @@ func (f *FilesystemStore) Put(ctx context.Context, key SnapshotKey, snap StoredS
 		return f.putPlanner(ctx, key, snap.AsPlanner())
 	case snap.AsActivity() != nil:
 		return f.putActivity(ctx, key, snap.AsActivity())
+	case snap.AsQueryStats() != nil:
+		return f.putQueryStats(ctx, key, snap.AsQueryStats())
 	}
 	return PutInserted, fmt.Errorf("empty StoredSnapshot")
 }
@@ -124,6 +130,27 @@ func (f *FilesystemStore) putActivity(_ context.Context, key SnapshotKey, a *sch
 	return PutInserted, nil
 }
 
+func (f *FilesystemStore) putQueryStats(_ context.Context, key SnapshotKey, q *schema.QueryStatsSnapshot) (PutOutcome, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	path, b, err := f.findBundleBySchemaRef(key, q.SchemaRefHash)
+	if err != nil {
+		return PutInserted, err
+	}
+	if b.Query == nil {
+		b.Query = map[string]*schema.QueryStatsSnapshot{}
+	}
+	if existing, ok := b.Query[q.Node.Source]; ok && existing.ContentHash == q.ContentHash {
+		return PutDeduped, nil
+	}
+	b.Query[q.Node.Source] = q
+	if err := writeBundleAtomic(path, b); err != nil {
+		return PutInserted, err
+	}
+	return PutInserted, nil
+}
+
 func (f *FilesystemStore) Get(ctx context.Context, key SnapshotKey, kind SnapshotKind, at SnapshotRef) (StoredSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -152,6 +179,12 @@ func (f *FilesystemStore) Get(ctx context.Context, key SnapshotKey, kind Snapsho
 			return StoredSnapshot{}, err
 		}
 		return WrapActivity(a), nil
+	case KindQuery:
+		q, err := pickQueryStats(bundles, kind.NodeLabel, at)
+		if err != nil {
+			return StoredSnapshot{}, err
+		}
+		return WrapQueryStats(q), nil
 	}
 	return StoredSnapshot{}, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
 }
@@ -210,6 +243,20 @@ func bundleSummaries(b *Bundle, kind SnapshotKind, rng TimeRange) ([]SnapshotSum
 			out = append(out, SnapshotSummary{
 				Kind: ActivityKind(label), Timestamp: a.Node.Timestamp,
 				ContentHash: a.ContentHash, SchemaRefHash: a.SchemaRefHash,
+				NodeLabel: label,
+			})
+		}
+	case KindQuery:
+		for label, q := range b.Query {
+			if kind.NodeLabel != "" && kind.NodeLabel != label {
+				continue
+			}
+			if !inRange(q.Node.Timestamp, rng) {
+				continue
+			}
+			out = append(out, SnapshotSummary{
+				Kind: QueryKind(label), Timestamp: q.Node.Timestamp,
+				ContentHash: q.ContentHash, SchemaRefHash: q.SchemaRefHash,
 				NodeLabel: label,
 			})
 		}
@@ -272,6 +319,22 @@ func (f *FilesystemStore) DeleteBefore(ctx context.Context, key SnapshotKey, kin
 				}
 			}
 			if removed := before - len(b.Activity); removed > 0 {
+				if err := writeBundleAtomic(path, b); err != nil {
+					return n, err
+				}
+				n += int64(removed)
+			}
+		case KindQuery:
+			before := len(b.Query)
+			for label, q := range b.Query {
+				if kind.NodeLabel != "" && kind.NodeLabel != label {
+					continue
+				}
+				if q.Node.Timestamp.Before(cutoff) {
+					delete(b.Query, label)
+				}
+			}
+			if removed := before - len(b.Query); removed > 0 {
 				if err := writeBundleAtomic(path, b); err != nil {
 					return n, err
 				}
@@ -538,6 +601,49 @@ func selectActivity(b *Bundle, nodeLabel string) *schema.ActivityStatsSnapshot {
 	// any node (used when caller didn't pin a label)
 	for _, a := range b.Activity {
 		return a
+	}
+	return nil
+}
+
+func pickQueryStats(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schema.QueryStatsSnapshot, error) {
+	switch at.Kind {
+	case RefLatest:
+		for _, b := range bundles {
+			if q := selectQueryStats(b, nodeLabel); q != nil {
+				return q, nil
+			}
+		}
+		return nil, fmt.Errorf("%w (latest query stats)", ErrSnapshotNotFound)
+	case RefAt:
+		for _, b := range bundles {
+			q := selectQueryStats(b, nodeLabel)
+			if q != nil && !q.Node.Timestamp.After(at.At) {
+				return q, nil
+			}
+		}
+		return nil, fmt.Errorf("%w (query stats at-or-before %s)", ErrSnapshotNotFound, at.At.Format(time.RFC3339))
+	case RefHash:
+		for _, b := range bundles {
+			for label, q := range b.Query {
+				if nodeLabel != "" && nodeLabel != label {
+					continue
+				}
+				if q.ContentHash == at.Hash {
+					return q, nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("%w (query stats hash %s)", ErrSnapshotNotFound, at.Hash)
+	}
+	return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
+}
+
+func selectQueryStats(b *Bundle, nodeLabel string) *schema.QueryStatsSnapshot {
+	if nodeLabel != "" {
+		return b.Query[nodeLabel]
+	}
+	for _, q := range b.Query {
+		return q
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +35,7 @@ type SyncOutcome struct {
 	Schema   KindCounts
 	Planner  KindCounts
 	Activity KindCounts
+	Query    KindCounts
 }
 
 func snapshotPushCmd() *cobra.Command {
@@ -326,6 +328,8 @@ func syncKeys(ctx context.Context, src, dst history.SnapshotStore, keys []histor
 				o.Planner = c
 			case history.KindActivity:
 				o.Activity = c
+			case history.KindQuery:
+				o.Query = c
 			}
 		}
 		out = append(out, o)
@@ -344,6 +348,10 @@ func selectSnapshots(ctx context.Context, src history.SnapshotStore, key history
 	if err != nil {
 		return nil, err
 	}
+	query, err := src.List(ctx, key, history.QueryKind(""), scope.rng)
+	if err != nil {
+		return nil, err
+	}
 	allSchema, err := src.List(ctx, key, history.SchemaKind(), history.TimeRange{})
 	if err != nil {
 		return nil, err
@@ -352,13 +360,17 @@ func selectSnapshots(ctx context.Context, src history.SnapshotStore, key history
 	if scope.latest {
 		planner = newestPerNode(planner)
 		activity = newestPerNode(activity)
+		query = newestPerNode(query)
 	}
 
-	need := make(map[string]struct{}, len(planner)+len(activity))
+	need := make(map[string]struct{}, len(planner)+len(activity)+len(query))
 	for _, s := range planner {
 		need[s.SchemaRefHash] = struct{}{}
 	}
 	for _, s := range activity {
+		need[s.SchemaRefHash] = struct{}{}
+	}
+	for _, s := range query {
 		need[s.SchemaRefHash] = struct{}{}
 	}
 	schema := filterByContentHash(allSchema, need)
@@ -377,6 +389,7 @@ func selectSnapshots(ctx context.Context, src history.SnapshotStore, key history
 		history.KindSchema:   schema,
 		history.KindPlanner:  planner,
 		history.KindActivity: activity,
+		history.KindQuery:    query,
 	}, nil
 }
 
@@ -440,12 +453,13 @@ func unionByContentHash(a, b []history.SnapshotSummary) []history.SnapshotSummar
 	return out
 }
 
-// activity uses an empty NodeLabel so List returns every node's row in one pass.
+// activity/query use an empty NodeLabel so List returns every node's row in one pass.
 func kindOrder() []history.SnapshotKind {
 	return []history.SnapshotKind{
 		history.SchemaKind(),
 		history.PlannerKind(),
 		history.ActivityKind(""),
+		history.QueryKind(""),
 	}
 }
 
@@ -476,13 +490,18 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 			counts.UpToDate++
 			continue
 		}
-		// summary carries the resolved kind (with NodeLabel for activity)
-		// so Get works the same for all three streams.
+		// summary carries the resolved kind (with NodeLabel for activity/query)
+		// so Get works the same for all four streams.
 		stored, err := src.Get(ctx, key, s.Kind, history.NewRefHash(s.ContentHash))
 		if err != nil {
 			return counts, err
 		}
 		if _, err := dst.Put(ctx, key, stored); err != nil {
+			// dst doesn't persist this kind yet (e.g. predict has no query-stats
+			// manifest field): stop syncing this kind, don't fail the whole sync.
+			if errors.Is(err, history.ErrKindUnsupported) {
+				return counts, nil
+			}
 			return counts, err
 		}
 		counts.Copied++
@@ -500,5 +519,6 @@ func printSyncOutcomes(w io.Writer, outs []SyncOutcome) {
 		fmt.Fprintf(w, "  schema:   %d copied, %d up-to-date\n", o.Schema.Copied, o.Schema.UpToDate)
 		fmt.Fprintf(w, "  planner:  %d copied, %d up-to-date\n", o.Planner.Copied, o.Planner.UpToDate)
 		fmt.Fprintf(w, "  activity: %d copied, %d up-to-date\n", o.Activity.Copied, o.Activity.UpToDate)
+		fmt.Fprintf(w, "  query:    %d copied, %d up-to-date\n", o.Query.Copied, o.Query.UpToDate)
 	}
 }

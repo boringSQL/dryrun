@@ -136,6 +136,10 @@ func (h *HTTPStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnapsho
 			TakenAt:  a.Node.Timestamp,
 		}
 		return out, h.putManifest(ctx, key, body)
+	case snap.AsQueryStats() != nil:
+		// predict's manifest has no query-stats field yet; fail distinguishably so
+		// sync can skip this kind for http remotes instead of erroring the whole push.
+		return PutInserted, ErrKindUnsupported
 	}
 	return PutInserted, fmt.Errorf("http store: empty StoredSnapshot")
 }

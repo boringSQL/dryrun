@@ -56,17 +56,21 @@ const (
 	KindSchema SnapshotKindTag = iota
 	KindPlanner
 	KindActivity
+	KindQuery
 )
 
-// Activity rows live per-node; NodeLabel is empty for schema/planner.
+// Activity/query rows live per-node; NodeLabel is empty for schema/planner.
 type SnapshotKind struct {
 	Tag       SnapshotKindTag
 	NodeLabel string
 }
 
-func SchemaKind() SnapshotKind                { return SnapshotKind{Tag: KindSchema} }
-func PlannerKind() SnapshotKind               { return SnapshotKind{Tag: KindPlanner} }
-func ActivityKind(label string) SnapshotKind  { return SnapshotKind{Tag: KindActivity, NodeLabel: label} }
+func SchemaKind() SnapshotKind  { return SnapshotKind{Tag: KindSchema} }
+func PlannerKind() SnapshotKind { return SnapshotKind{Tag: KindPlanner} }
+func ActivityKind(label string) SnapshotKind {
+	return SnapshotKind{Tag: KindActivity, NodeLabel: label}
+}
+func QueryKind(label string) SnapshotKind { return SnapshotKind{Tag: KindQuery, NodeLabel: label} }
 
 func (k SnapshotKind) String() string {
 	switch k.Tag {
@@ -79,16 +83,22 @@ func (k SnapshotKind) String() string {
 			return "activity:" + k.NodeLabel
 		}
 		return "activity"
+	case KindQuery:
+		if k.NodeLabel != "" {
+			return "query:" + k.NodeLabel
+		}
+		return "query"
 	}
 	return fmt.Sprintf("kind(%d)", k.Tag)
 }
 
-// StoredSnapshot is a tagged union over the three concrete snapshot bodies.
-// Exactly one of schema/planner/activity is non-nil for a valid instance.
+// StoredSnapshot is a tagged union over the four concrete snapshot bodies.
+// Exactly one of schema/planner/activity/query is non-nil for a valid instance.
 type StoredSnapshot struct {
 	schema   *schema.SchemaSnapshot
 	planner  *schema.PlannerStatsSnapshot
 	activity *schema.ActivityStatsSnapshot
+	query    *schema.QueryStatsSnapshot
 }
 
 func WrapSchema(s *schema.SchemaSnapshot) StoredSnapshot {
@@ -100,6 +110,9 @@ func WrapPlanner(p *schema.PlannerStatsSnapshot) StoredSnapshot {
 func WrapActivity(a *schema.ActivityStatsSnapshot) StoredSnapshot {
 	return StoredSnapshot{activity: a}
 }
+func WrapQueryStats(q *schema.QueryStatsSnapshot) StoredSnapshot {
+	return StoredSnapshot{query: q}
+}
 
 func (s StoredSnapshot) Kind() SnapshotKind {
 	switch {
@@ -109,6 +122,8 @@ func (s StoredSnapshot) Kind() SnapshotKind {
 		return PlannerKind()
 	case s.activity != nil:
 		return ActivityKind(s.activity.Node.Source)
+	case s.query != nil:
+		return QueryKind(s.query.Node.Source)
 	}
 	return SnapshotKind{}
 }
@@ -121,6 +136,8 @@ func (s StoredSnapshot) Timestamp() time.Time {
 		return s.planner.Timestamp
 	case s.activity != nil:
 		return s.activity.Node.Timestamp
+	case s.query != nil:
+		return s.query.Node.Timestamp
 	}
 	return time.Time{}
 }
@@ -133,12 +150,14 @@ func (s StoredSnapshot) ContentHash() string {
 		return s.planner.ContentHash
 	case s.activity != nil:
 		return s.activity.ContentHash
+	case s.query != nil:
+		return s.query.ContentHash
 	}
 	return ""
 }
 
-// schema bundles join planner/activity via this hash; for schema itself it's
-// the content hash (a schema is its own ref).
+// schema bundles join planner/activity/query via this hash; for schema itself
+// it's the content hash (a schema is its own ref).
 func (s StoredSnapshot) SchemaRefHash() string {
 	switch {
 	case s.schema != nil:
@@ -147,6 +166,8 @@ func (s StoredSnapshot) SchemaRefHash() string {
 		return s.planner.SchemaRefHash
 	case s.activity != nil:
 		return s.activity.SchemaRefHash
+	case s.query != nil:
+		return s.query.SchemaRefHash
 	}
 	return ""
 }
@@ -161,9 +182,10 @@ func (s StoredSnapshot) Database() string {
 	return ""
 }
 
-func (s StoredSnapshot) AsSchema() *schema.SchemaSnapshot           { return s.schema }
-func (s StoredSnapshot) AsPlanner() *schema.PlannerStatsSnapshot    { return s.planner }
-func (s StoredSnapshot) AsActivity() *schema.ActivityStatsSnapshot  { return s.activity }
+func (s StoredSnapshot) AsSchema() *schema.SchemaSnapshot          { return s.schema }
+func (s StoredSnapshot) AsPlanner() *schema.PlannerStatsSnapshot   { return s.planner }
+func (s StoredSnapshot) AsActivity() *schema.ActivityStatsSnapshot { return s.activity }
+func (s StoredSnapshot) AsQueryStats() *schema.QueryStatsSnapshot  { return s.query }
 
 type SnapshotStore interface {
 	Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (PutOutcome, error)

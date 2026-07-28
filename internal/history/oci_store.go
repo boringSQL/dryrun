@@ -98,6 +98,8 @@ func (o *OCIStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot
 		return o.putPlanner(ctx, key, snap.AsPlanner())
 	case snap.AsActivity() != nil:
 		return o.putActivity(ctx, key, snap.AsActivity())
+	case snap.AsQueryStats() != nil:
+		return o.putQueryStats(ctx, key, snap.AsQueryStats())
 	}
 	return PutInserted, fmt.Errorf("empty StoredSnapshot")
 }
@@ -155,6 +157,28 @@ func (o *OCIStore) putActivity(ctx context.Context, key SnapshotKey, a *schema.A
 		return PutDeduped, nil
 	}
 	b.Activity[a.Node.Source] = a
+	return o.pushTagged(ctx, repo, b)
+}
+
+func (o *OCIStore) putQueryStats(ctx context.Context, key SnapshotKey, q *schema.QueryStatsSnapshot) (PutOutcome, error) {
+	repo, err := o.repo(key)
+	if err != nil {
+		return PutInserted, err
+	}
+	b, ok, err := o.findBySchemaRef(ctx, repo, q.SchemaRefHash)
+	if err != nil {
+		return PutInserted, err
+	}
+	if !ok {
+		return PutInserted, ErrOrphanSnapshot
+	}
+	if b.Query == nil {
+		b.Query = map[string]*schema.QueryStatsSnapshot{}
+	}
+	if existing, ok := b.Query[q.Node.Source]; ok && existing.ContentHash == q.ContentHash {
+		return PutDeduped, nil
+	}
+	b.Query[q.Node.Source] = q
 	return o.pushTagged(ctx, repo, b)
 }
 
@@ -365,6 +389,12 @@ func (o *OCIStore) Get(ctx context.Context, key SnapshotKey, kind SnapshotKind, 
 			return StoredSnapshot{}, err
 		}
 		return WrapActivity(a), nil
+	case KindQuery:
+		q, err := pickQueryStats(bundles, kind.NodeLabel, at)
+		if err != nil {
+			return StoredSnapshot{}, err
+		}
+		return WrapQueryStats(q), nil
 	}
 	return StoredSnapshot{}, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
 }

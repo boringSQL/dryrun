@@ -471,6 +471,112 @@ func (s *Store) listActivity(ctx context.Context, key SnapshotKey, nodeLabel str
 	return out, rows.Err()
 }
 
+// getQueryStatsRef resolves a SnapshotRef against query_stats, optionally
+// filtered to a single node_source.
+func (s *Store) getQueryStatsRef(ctx context.Context, key SnapshotKey, nodeLabel string, at SnapshotRef) (*schema.QueryStatsSnapshot, error) {
+	pid := string(key.ProjectID)
+	did := string(key.DatabaseID)
+
+	base := `SELECT payload_json FROM query_stats
+	          WHERE project_id = ? AND database_id = ?`
+	args := []any{pid, did}
+	if nodeLabel != "" {
+		base += " AND node_source = ?"
+		args = append(args, nodeLabel)
+	}
+
+	var (
+		jsonStr string
+		err     error
+		detail  string
+	)
+	switch at.Kind {
+	case RefLatest:
+		detail = "latest query stats"
+		err = s.db.QueryRowContext(ctx, base+" ORDER BY timestamp DESC LIMIT 1", args...).Scan(&jsonStr)
+	case RefAt:
+		detail = fmt.Sprintf("query stats at-or-before %s", at.At.Format(time.RFC3339))
+		args = append(args, at.At.Format(time.RFC3339))
+		err = s.db.QueryRowContext(ctx,
+			base+" AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1",
+			args...).Scan(&jsonStr)
+	case RefHash:
+		detail = "query stats hash " + at.Hash
+		args = append(args, at.Hash+"%")
+		jsonStr, err = scanHashPrefix(ctx, s.db, base+" AND content_hash LIKE ? LIMIT 2", args...)
+	default:
+		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
+	}
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w (%s)", ErrSnapshotNotFound, detail)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var q schema.QueryStatsSnapshot
+	if err := json.Unmarshal([]byte(jsonStr), &q); err != nil {
+		return nil, fmt.Errorf("corrupt query stats JSON: %w", err)
+	}
+	return &q, nil
+}
+
+func (s *Store) listQueryStats(ctx context.Context, key SnapshotKey, nodeLabel string, rng TimeRange) ([]SnapshotSummary, error) {
+	var (
+		sb   strings.Builder
+		args []any
+	)
+	sb.WriteString(`SELECT id, schema_ref_hash, content_hash, node_source, timestamp, project_id, database_id
+	                  FROM query_stats WHERE project_id = ? AND database_id = ?`)
+	args = append(args, string(key.ProjectID), string(key.DatabaseID))
+	if nodeLabel != "" {
+		sb.WriteString(" AND node_source = ?")
+		args = append(args, nodeLabel)
+	}
+	if rng.From != nil {
+		sb.WriteString(" AND timestamp >= ?")
+		args = append(args, rng.From.Format(time.RFC3339))
+	}
+	if rng.To != nil {
+		sb.WriteString(" AND timestamp < ?")
+		args = append(args, rng.To.Format(time.RFC3339))
+	}
+	sb.WriteString(" ORDER BY timestamp DESC")
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []SnapshotSummary
+	for rows.Next() {
+		var (
+			ss    SnapshotSummary
+			tsStr string
+			label string
+			pid   sql.NullString
+			did   sql.NullString
+		)
+		if err := rows.Scan(&ss.ID, &ss.SchemaRefHash, &ss.ContentHash, &label, &tsStr, &pid, &did); err != nil {
+			return nil, err
+		}
+		ss.Kind = QueryKind(label)
+		ss.NodeLabel = label
+		ss.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
+		if pid.Valid {
+			v := pid.String
+			ss.ProjectID = &v
+		}
+		if did.Valid {
+			v := did.String
+			ss.DatabaseID = &v
+		}
+		out = append(out, ss)
+	}
+	return out, rows.Err()
+}
+
 // one row per node, taken at the most recent timestamp per node_source
 func (s *Store) LatestActivity(ctx context.Context, key SnapshotKey) ([]schema.ActivityStatsSnapshot, error) {
 	rows, err := s.db.QueryContext(ctx,
