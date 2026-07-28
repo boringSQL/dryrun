@@ -101,6 +101,12 @@ func TestOCIStoreConformance(t *testing.T) {
 		if _, err := store.Put(ctx, k, WrapActivity(a)); err != nil {
 			t.Fatalf("put activity: %v", err)
 		}
+		// Query stats merge into the same bundle the same way activity does —
+		// same schema_ref_hash lookup, same putQueryStats method on OCIStore.
+		q := queryStatsFixture("sh-merge", "qs-1", "primary")
+		if _, err := store.Put(ctx, k, WrapQueryStats(q)); err != nil {
+			t.Fatalf("put query stats: %v", err)
+		}
 
 		gotP, err := store.Get(ctx, k, PlannerKind(), NewRefHash("pl-1"))
 		if err != nil || gotP.AsPlanner().ContentHash != "pl-1" {
@@ -109,6 +115,10 @@ func TestOCIStoreConformance(t *testing.T) {
 		gotA, err := store.Get(ctx, k, ActivityKind("primary"), NewRefHash("ac-1"))
 		if err != nil || gotA.AsActivity().ContentHash != "ac-1" {
 			t.Errorf("get activity: got %+v err=%v", gotA.AsActivity(), err)
+		}
+		gotQ, err := store.Get(ctx, k, QueryKind("primary"), NewRefHash("qs-1"))
+		if err != nil || gotQ.AsQueryStats() == nil || gotQ.AsQueryStats().ContentHash != "qs-1" {
+			t.Errorf("get query stats: got %+v err=%v", gotQ.AsQueryStats(), err)
 		}
 	})
 

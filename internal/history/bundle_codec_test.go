@@ -14,11 +14,17 @@ import (
 // DecodeBundle structurally unchanged, and the same input must always produce
 // the same bytes. These tests pin that contract down.
 
-// fullBundle assembles a Bundle carrying all three snapshot kinds, with two
-// distinct activity nodes so the map-valued Activity field is exercised with
-// more than one entry — single-entry maps have a way of hiding ordering and
-// key-handling bugs. We reuse the package's existing fixtures so the shapes
-// stay in lockstep with the rest of the store tests.
+// fullBundle assembles a Bundle carrying all four snapshot kinds, with two
+// distinct activity nodes and two distinct query-stats nodes so the map-valued
+// Activity/Query fields are each exercised with more than one entry —
+// single-entry maps have a way of hiding ordering and key-handling bugs. Query
+// was added to Bundle after Schema/Planner/Activity already had this coverage;
+// folding it into the shared fullBundle() fixture (rather than a separate
+// query-only bundle) is deliberate — it's the only way a round-trip test can
+// catch a bug where writing the Query map somehow clobbers a sibling field, or
+// where Query's `omitempty` tag interacts badly with the other fields being
+// present. We reuse the package's existing fixtures so the shapes stay in
+// lockstep with the rest of the store tests.
 func fullBundle() *Bundle {
 	return &Bundle{
 		Schema:  testSnapshot("schema-hash-abc123", "appdb"),
@@ -26,6 +32,10 @@ func fullBundle() *Bundle {
 		Activity: map[string]*schema.ActivityStatsSnapshot{
 			"primary": activityFixture("schema-hash-abc123", "activity-hash-primary", "primary", false),
 			"replica": activityFixture("schema-hash-abc123", "activity-hash-replica", "replica", true),
+		},
+		Query: map[string]*schema.QueryStatsSnapshot{
+			"primary": queryStatsFixture("schema-hash-abc123", "query-hash-primary", "primary"),
+			"replica": queryStatsFixture("schema-hash-abc123", "query-hash-replica", "replica"),
 		},
 	}
 }
@@ -108,6 +118,40 @@ func TestBundleCodec_NilActivityNormalized(t *testing.T) {
 	}
 	if len(decoded.Activity) != 0 {
 		t.Errorf("decoded Activity should be empty, got %d entries", len(decoded.Activity))
+	}
+}
+
+// DecodeBundle deliberately does NOT normalize a nil Query map to an empty
+// one, unlike Activity above. This looks like an inconsistency but isn't: an
+// earlier version of this code did normalize Query the same way, and it broke
+// TestBundleCodec_RoundTrip, because a Bundle that never touches Query (like
+// fullBundle's schema-only sibling below) has Query == nil, and
+// reflect.DeepEqual(nil map, empty-but-non-nil map) is false. The normalization
+// wasn't actually load-bearing — every code path that writes to b.Query
+// (FilesystemStore.putQueryStats, OCIStore.putQueryStats) already nil-checks
+// and initializes the map itself before writing, and every code path that only
+// reads b.Query (range, len, map index) is nil-safe in Go without a check. So
+// removing the normalization was correct, not a shortcut — this test exists to
+// keep it from quietly regressing back in "for consistency" and breaking the
+// round-trip test again.
+func TestBundleCodec_NilQueryStaysNil(t *testing.T) {
+	b := &Bundle{
+		Schema: testSnapshot("schema-only", "appdb"),
+		// Query intentionally left nil, same as Activity would be if we hadn't
+		// asserted the opposite for it above.
+	}
+
+	raw, err := EncodeBundle(b)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := DecodeBundle(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if decoded.Query != nil {
+		t.Errorf("decoded Query = %+v, want nil (Query is not normalized on decode, unlike Activity)", decoded.Query)
 	}
 }
 

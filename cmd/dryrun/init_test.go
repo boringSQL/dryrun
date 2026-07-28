@@ -86,6 +86,7 @@ type stubWriter struct {
 	GetErr                                    error
 	LastActivityRef                           string
 	LastPlanner                               *schema.PlannerStatsSnapshot
+	LastQueryRef                              string
 	PutQueryStatsErr                          error
 }
 
@@ -118,11 +119,12 @@ func (s *stubWriter) PutActivity(_ context.Context, _ history.SnapshotKey, a *sc
 	return history.PutInserted, nil
 }
 
-func (s *stubWriter) PutQueryStats(_ context.Context, _ history.SnapshotKey, _ *schema.QueryStatsSnapshot) (history.PutOutcome, error) {
+func (s *stubWriter) PutQueryStats(_ context.Context, _ history.SnapshotKey, q *schema.QueryStatsSnapshot) (history.PutOutcome, error) {
 	s.QueryStatsN++
 	if s.PutQueryStatsErr != nil {
 		return history.PutInserted, s.PutQueryStatsErr
 	}
+	s.LastQueryRef = q.SchemaRefHash
 	return history.PutInserted, nil
 }
 

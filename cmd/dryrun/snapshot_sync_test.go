@@ -57,6 +57,17 @@ func syncTestActivity(schemaRef, hash, source string, ts time.Time, standby bool
 	}
 }
 
+func syncTestQueryStats(schemaRef, hash, source string, ts time.Time) *schema.QueryStatsSnapshot {
+	return &schema.QueryStatsSnapshot{
+		SchemaRefHash: schemaRef,
+		ContentHash:   hash,
+		Node:          schema.NodeIdentity{Source: source, PgVersion: "PostgreSQL 17.0", Timestamp: ts},
+		Queries: []schema.QueryStatsEntry{
+			{Fingerprint: "sha1:abc", Canonical: "SELECT id FROM users WHERE id = $1", Calls: 5},
+		},
+	}
+}
+
 func openSQLite(t *testing.T) *history.Store {
 	t.Helper()
 	store, err := history.Open(filepath.Join(t.TempDir(), "history.db"))
@@ -80,7 +91,12 @@ func openFS(t *testing.T) *history.FilesystemStore {
 // kind under a single key, points sync at an empty dst, and asserts every
 // row lands as Copied with zero UpToDate. The empty-destination case is
 // where push/pull does its actual work; a 0/0 result here would mean the
-// content-hash diff is silently dropping rows.
+// content-hash diff is silently dropping rows. Query stats are included
+// here as the fourth kind for the same reason schema/planner/activity are:
+// SyncOutcome.Query only exists because syncKeys' switch on kind.Tag got a
+// history.KindQuery case added, and kindOrder() got history.QueryKind("")
+// appended — either omission would leave query stats permanently invisible
+// to `snapshot push`/`pull` while compiling and passing every other test.
 func TestSyncKeysCopiesEverythingToEmptyDst(t *testing.T) {
 	ctx := context.Background()
 	src := openSQLite(t)
@@ -96,6 +112,9 @@ func TestSyncKeysCopiesEverythingToEmptyDst(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := src.PutActivity(ctx, k, syncTestActivity("sh-1", "ac-1", "primary", now, false)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.PutQueryStats(ctx, k, syncTestQueryStats("sh-1", "qs-1", "primary", now)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -115,9 +134,16 @@ func TestSyncKeysCopiesEverythingToEmptyDst(t *testing.T) {
 	want("schema", o.Schema.Copied, 1, 0)
 	want("planner", o.Planner.Copied, 1, 0)
 	want("activity", o.Activity.Copied, 1, 0)
-	if o.Schema.UpToDate+o.Planner.UpToDate+o.Activity.UpToDate != 0 {
-		t.Errorf("expected zero up-to-date on empty dst, got schema=%d planner=%d activity=%d",
-			o.Schema.UpToDate, o.Planner.UpToDate, o.Activity.UpToDate)
+	want("query", o.Query.Copied, 1, 0)
+	if o.Schema.UpToDate+o.Planner.UpToDate+o.Activity.UpToDate+o.Query.UpToDate != 0 {
+		t.Errorf("expected zero up-to-date on empty dst, got schema=%d planner=%d activity=%d query=%d",
+			o.Schema.UpToDate, o.Planner.UpToDate, o.Activity.UpToDate, o.Query.UpToDate)
+	}
+
+	// And the row must genuinely be on dst, not just counted as copied.
+	dstList, err := dst.List(ctx, k, history.QueryKind(""), history.TimeRange{})
+	if err != nil || len(dstList) != 1 || dstList[0].ContentHash != "qs-1" {
+		t.Errorf("dst query stats after sync: got %+v err=%v", dstList, err)
 	}
 }
 
@@ -228,13 +254,73 @@ func TestSyncCopiesActivityPerNodeLabel(t *testing.T) {
 	}
 }
 
-// TestSyncKindOrderIsSchemaPlannerActivity pushes into a FilesystemStore
-// destination, which enforces the orphan rule: any planner/activity put
-// before the matching schema bundle exists will fail. If kindOrder ever
-// regressed (e.g. someone reordered it alphabetically), this test would
-// blow up with ErrOrphanSnapshot. It's the cheapest insurance against
-// that class of refactor mistake.
-func TestSyncKindOrderIsSchemaPlannerActivity(t *testing.T) {
+// TestSyncCopiesQueryStatsPerNodeLabel is TestSyncCopiesActivityPerNodeLabel's
+// twin. Query stats are captured per-node exactly the way activity is (a
+// primary and every replica each run their own pg_stat_statements), and
+// selectSnapshots feeds QueryKind("") into src.List the same way it feeds
+// ActivityKind("") — so this is the same regression guard, just for the newer
+// of the two per-node kinds: an accidental ActivityKind("") reused where
+// QueryKind("") belongs would compile fine (both are SnapshotKind values) and
+// silently sync zero query rows while reporting success.
+func TestSyncCopiesQueryStatsPerNodeLabel(t *testing.T) {
+	ctx := context.Background()
+	src := openSQLite(t)
+	dst := openSQLite(t)
+	k := syncKey("acme", "primary")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, err := src.PutSchema(ctx, k, syncTestSchema("sh-1", "appdb", now.Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dst.PutSchema(ctx, k, syncTestSchema("sh-1", "appdb", now.Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+
+	sources := []string{"primary", "replica-a", "replica-b"}
+	for i, node := range sources {
+		q := syncTestQueryStats("sh-1", "qs-"+node, node, now.Add(time.Duration(i)*time.Minute))
+		if _, err := src.PutQueryStats(ctx, k, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, fullScope())
+	if err != nil {
+		t.Fatalf("syncKeys: %v", err)
+	}
+	if outs[0].Query.Copied != 3 {
+		t.Errorf("query stats copied = %d, want 3", outs[0].Query.Copied)
+	}
+
+	dstList, err := dst.List(ctx, k, history.QueryKind(""), history.TimeRange{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLabels := make([]string, 0, len(dstList))
+	for _, s := range dstList {
+		gotLabels = append(gotLabels, s.NodeLabel)
+	}
+	sort.Strings(gotLabels)
+	want := []string{"primary", "replica-a", "replica-b"}
+	if len(gotLabels) != len(want) {
+		t.Fatalf("dst query stats labels = %v, want %v", gotLabels, want)
+	}
+	for i := range want {
+		if gotLabels[i] != want[i] {
+			t.Errorf("labels[%d] = %q, want %q", i, gotLabels[i], want[i])
+		}
+	}
+}
+
+// TestSyncKindOrderIncludesQuery pushes into a FilesystemStore destination,
+// which enforces the orphan rule: any planner/activity/query put before the
+// matching schema bundle exists will fail. If kindOrder ever regressed (e.g.
+// someone reordered it, or dropped the query entry that was appended after
+// schema/planner/activity already existed), this test would blow up with
+// ErrOrphanSnapshot. It's the cheapest insurance against that class of
+// refactor mistake — renamed from ...IsSchemaPlannerActivity now that a
+// fourth kind is part of the contract it's pinning.
+func TestSyncKindOrderIncludesQuery(t *testing.T) {
 	ctx := context.Background()
 	src := openSQLite(t)
 	dst := openFS(t)
@@ -250,10 +336,82 @@ func TestSyncKindOrderIsSchemaPlannerActivity(t *testing.T) {
 	if _, err := src.PutActivity(ctx, k, syncTestActivity("sh-1", "ac-1", "primary", now, false)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := src.PutQueryStats(ctx, k, syncTestQueryStats("sh-1", "qs-1", "primary", now)); err != nil {
+		t.Fatal(err)
+	}
 
-	if _, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, fullScope()); err != nil {
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, fullScope())
+	if err != nil {
 		t.Fatalf("syncKeys against FilesystemStore dst: %v", err)
 	}
+	if outs[0].Query.Copied != 1 {
+		t.Errorf("query stats copied to FilesystemStore = %d, want 1", outs[0].Query.Copied)
+	}
+}
+
+// TestSyncSkipsQueryStatsWhenDestinationDoesntSupportIt is the sync-layer half
+// of HTTPStore's ErrKindUnsupported contract (the store-layer half lives in
+// internal/history's TestHTTPStorePutQueryStatsUnsupported). A predict/
+// Hindsight remote's manifest has no query-stats field yet, so its Put
+// returns history.ErrKindUnsupported for a query-stats StoredSnapshot. What
+// this test actually pins down is that syncKindList treats that sentinel as
+// "stop copying this one kind" rather than letting it bubble up through
+// syncKeys and fail `snapshot push` outright for a customer who has query
+// stats captured locally — schema/planner/activity must still sync
+// successfully to a remote that doesn't understand query stats yet.
+//
+// There is no real predictd to test against here, so this uses a minimal
+// decorator around a real SQLite Store: every method delegates normally
+// except Put, which returns history.ErrKindUnsupported for query-stats rows
+// specifically — the same shape of failure HTTPStore produces, without
+// standing up an HTTP server to get it.
+func TestSyncSkipsQueryStatsWhenDestinationDoesntSupportIt(t *testing.T) {
+	ctx := context.Background()
+	src := openSQLite(t)
+	dst := &queryUnsupportedStore{Store: openSQLite(t)}
+	k := syncKey("acme", "primary")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, err := src.PutSchema(ctx, k, syncTestSchema("sh-1", "appdb", now.Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.PutPlanner(ctx, k, syncTestPlanner("sh-1", "pl-1", "appdb", now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.PutActivity(ctx, k, syncTestActivity("sh-1", "ac-1", "primary", now, false)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.PutQueryStats(ctx, k, syncTestQueryStats("sh-1", "qs-1", "primary", now)); err != nil {
+		t.Fatal(err)
+	}
+
+	outs, err := syncKeys(ctx, src, dst, []history.SnapshotKey{k}, fullScope())
+	if err != nil {
+		t.Fatalf("syncKeys must not fail just because the destination rejects one kind: %v", err)
+	}
+	o := outs[0]
+	if o.Schema.Copied != 1 || o.Planner.Copied != 1 || o.Activity.Copied != 1 {
+		t.Errorf("other kinds must still sync: schema=%d planner=%d activity=%d, want 1/1/1",
+			o.Schema.Copied, o.Planner.Copied, o.Activity.Copied)
+	}
+	if o.Query.Copied != 0 {
+		t.Errorf("query.Copied = %d, want 0 (the destination never accepted it)", o.Query.Copied)
+	}
+}
+
+// queryUnsupportedStore wraps a real *history.Store and behaves identically
+// to it, except Put on a query-stats StoredSnapshot always fails with
+// history.ErrKindUnsupported — standing in for a predict/Hindsight remote in
+// tests without needing a real HTTP server.
+type queryUnsupportedStore struct {
+	*history.Store
+}
+
+func (q *queryUnsupportedStore) Put(ctx context.Context, key history.SnapshotKey, snap history.StoredSnapshot) (history.PutOutcome, error) {
+	if snap.AsQueryStats() != nil {
+		return history.PutInserted, history.ErrKindUnsupported
+	}
+	return q.Store.Put(ctx, key, snap)
 }
 
 // TestSyncAllUsesListKeys: a push/pull with --all must iterate every key

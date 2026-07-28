@@ -174,10 +174,15 @@ func TestDeleteSchemaSnapshotMissing(t *testing.T) {
 	}
 }
 
-// ResolveSnapshot resolves a hash prefix against any of the three kinds the
+// ResolveSnapshot resolves a hash prefix against any of the four kinds the
 // "snapshot list" surface prints, not just schema. This is the regression the
 // user hit: a planner/activity content hash copied from the listing was
-// rejected because delete only searched the schema table.
+// rejected because delete only searched the schema table. Query stats are
+// the newest of the four kinds and went through the exact same class of
+// bug risk when they were added: ResolveSnapshot's query_stats scan was
+// written as a fifth near-copy of the activity_stats block (later collapsed
+// into the shared nodeStatsHashMatches helper), so a prefix that only exists
+// in query_stats needing to resolve correctly is the direct test of that.
 func TestResolveSnapshotAcrossKinds(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -190,6 +195,9 @@ func TestResolveSnapshotAcrossKinds(t *testing.T) {
 	if _, err := store.PutActivity(ctx, k, activityFixture("5cheema00", "acc1de00", "primary", false)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.PutQueryStats(ctx, k, queryStatsFixture("5cheema00", "qu3rys00", "primary")); err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []struct {
 		prefix   string
@@ -199,6 +207,7 @@ func TestResolveSnapshotAcrossKinds(t *testing.T) {
 		{"5cheem", KindSchema, "5cheema00"},
 		{"p1anne", KindPlanner, "p1annel0"},
 		{"acc1de", KindActivity, "acc1de00"},
+		{"qu3rys", KindQuery, "qu3rys00"},
 	}
 	for _, tc := range cases {
 		got, err := store.ResolveSnapshot(ctx, k, tc.prefix)
@@ -238,8 +247,13 @@ func TestResolveSnapshotAmbiguousAcrossKinds(t *testing.T) {
 	}
 }
 
-// DeleteSnapshot dispatches on the resolved kind: a planner/activity row is
-// removed on its own, leaving the schema snapshot it was bound to intact.
+// DeleteSnapshot dispatches on the resolved kind: a planner/activity/query row
+// is removed on its own, leaving the schema snapshot it was bound to intact.
+// Query stats reuse the same deleteStatsRow(table string) helper planner and
+// activity already used, just with "query_stats" as the table argument — this
+// is the direct test that DeleteSnapshot's KindQuery case is actually wired to
+// that helper (and to the right table) rather than falling through to the
+// "unknown SnapshotKind tag" default.
 func TestDeleteSnapshotStatsKinds(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -250,6 +264,9 @@ func TestDeleteSnapshotStatsKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.PutActivity(ctx, k, activityFixture("keepschema", "dropact", "primary", false)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutQueryStats(ctx, k, queryStatsFixture("keepschema", "dropquery", "primary")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -273,11 +290,22 @@ func TestDeleteSnapshotStatsKinds(t *testing.T) {
 		t.Fatalf("delete activity: %v", err)
 	}
 
+	qs, err := store.ResolveSnapshot(ctx, k, "dropquery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DeleteSnapshot(ctx, k, qs); err != nil {
+		t.Fatalf("delete query stats: %v", err)
+	}
+
 	if n := countRows(t, store, "planner_stats", k); n != 0 {
 		t.Errorf("planner_stats left = %d, want 0", n)
 	}
 	if n := countRows(t, store, "activity_stats", k); n != 0 {
 		t.Errorf("activity_stats left = %d, want 0", n)
+	}
+	if n := countRows(t, store, "query_stats", k); n != 0 {
+		t.Errorf("query_stats left = %d, want 0", n)
 	}
 	if n := countRows(t, store, "snapshots", k); n != 1 {
 		t.Errorf("schema snapshot swept up: snapshots left = %d, want 1", n)

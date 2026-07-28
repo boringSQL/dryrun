@@ -45,10 +45,17 @@ func decodeBundleOnDisk(t *testing.T, path string) Bundle {
 	return b
 }
 
-// TestFilesystemStoreRoundTripPerKind drives a schema + planner + activity
-// snapshot through Put -> Get -> List on FilesystemStore and confirms each
-// surfaces under its own kind. This is the cross-store contract: anything
-// the SQLite Store accepts must come back out of FilesystemStore identical.
+// TestFilesystemStoreRoundTripPerKind drives a schema + planner + activity +
+// query-stats snapshot through Put -> Get -> List on FilesystemStore and
+// confirms each surfaces under its own kind. This is the cross-store
+// contract: anything the SQLite Store accepts must come back out of
+// FilesystemStore identical. Query stats are the newest addition to this
+// contract — Bundle grew a fourth field (Query, a map keyed by node source
+// exactly like Activity), and FilesystemStore.Put/Get gained a putQueryStats
+// method and a KindQuery switch case that lean on the same
+// pickQueryStats/selectQueryStats helpers OCIStore also shares. This test is
+// what proves that plumbing is actually connected end to end through a real
+// on-disk bundle file, not just compiling.
 func TestFilesystemStoreRoundTripPerKind(t *testing.T) {
 	store, _ := testFsStore(t)
 	ctx := context.Background()
@@ -66,6 +73,10 @@ func TestFilesystemStoreRoundTripPerKind(t *testing.T) {
 	if _, err := store.Put(ctx, k, WrapActivity(a)); err != nil {
 		t.Fatalf("put activity: %v", err)
 	}
+	q := queryStatsFixture("sh-1", "qs-1", "primary")
+	if _, err := store.Put(ctx, k, WrapQueryStats(q)); err != nil {
+		t.Fatalf("put query stats: %v", err)
+	}
 
 	gotS, err := store.Get(ctx, k, SchemaKind(), NewRefHash("sh-1"))
 	if err != nil || gotS.AsSchema().ContentHash != "sh-1" {
@@ -79,12 +90,18 @@ func TestFilesystemStoreRoundTripPerKind(t *testing.T) {
 	if err != nil || gotA.AsActivity().ContentHash != "ac-1" {
 		t.Errorf("get activity: got %+v err=%v", gotA.AsActivity(), err)
 	}
+	gotQ, err := store.Get(ctx, k, QueryKind("primary"), NewRefHash("qs-1"))
+	if err != nil || gotQ.AsQueryStats() == nil || gotQ.AsQueryStats().ContentHash != "qs-1" {
+		t.Errorf("get query stats: got %+v err=%v", gotQ.AsQueryStats(), err)
+	}
 
 	sl, _ := store.List(ctx, k, SchemaKind(), TimeRange{})
 	pl, _ := store.List(ctx, k, PlannerKind(), TimeRange{})
 	al, _ := store.List(ctx, k, ActivityKind(""), TimeRange{})
-	if len(sl) != 1 || len(pl) != 1 || len(al) != 1 {
-		t.Errorf("list lengths: schema=%d planner=%d activity=%d, want 1/1/1", len(sl), len(pl), len(al))
+	ql, _ := store.List(ctx, k, QueryKind(""), TimeRange{})
+	if len(sl) != 1 || len(pl) != 1 || len(al) != 1 || len(ql) != 1 {
+		t.Errorf("list lengths: schema=%d planner=%d activity=%d query=%d, want 1/1/1/1",
+			len(sl), len(pl), len(al), len(ql))
 	}
 }
 

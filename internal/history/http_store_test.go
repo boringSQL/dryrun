@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -325,6 +326,42 @@ func TestHTTPStorePushPullRoundTrip(t *testing.T) {
 	}
 	if fake.putBlobs != before {
 		t.Fatalf("second push stored %d new blobs, want 0", fake.putBlobs-before)
+	}
+}
+
+// TestHTTPStorePutQueryStatsUnsupported pins the deliberate half-implemented
+// state of query-stats support on the predict (Hindsight) remote. Unlike
+// FilesystemStore/OCIStore, which fully support query_stats, HTTPStore's wire
+// types (manifestBody/manifestResponse) mirror predict's actual server-side
+// JSON contract in a different repo, and that contract has no query-stats
+// field yet — adding one here without the matching server change would just
+// be dead client code. So HTTPStore.Put must reject a query-stats
+// StoredSnapshot with the ErrKindUnsupported sentinel specifically (not a
+// generic error, and not silently pretending success) — that sentinel is
+// what lets cmd/dryrun's sync layer skip this one kind for http remotes
+// instead of failing an entire `snapshot push --remote hindsight` over it.
+// This test never spins up a fake predict server: the query-stats branch in
+// Put returns before making any HTTP call at all, so a deliberately-invalid
+// token/base URL is enough to prove no network round trip happens as a side
+// effect of hitting this path.
+func TestHTTPStorePutQueryStatsUnsupported(t *testing.T) {
+	store, err := NewHTTPStore(HTTPConfig{BaseURL: "http://unreachable.invalid", Token: "prk_unused"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	key := SnapshotKey{ProjectID: "billing", DatabaseID: "prod"}
+
+	q := queryStatsFixture("sh-1", "qs-1", "primary")
+	out, err := store.Put(ctx, key, WrapQueryStats(q))
+	if !errors.Is(err, ErrKindUnsupported) {
+		t.Fatalf("Put(query stats) error = %v, want ErrKindUnsupported", err)
+	}
+	// The outcome value is not meaningful on an error path, but callers that
+	// forget to check the error (they shouldn't, but "shouldn't" isn't a test)
+	// must not be misled by PutDeduped, which reads as "already there and fine."
+	if out == PutDeduped {
+		t.Error("outcome on the unsupported-kind error path must not be PutDeduped")
 	}
 }
 
