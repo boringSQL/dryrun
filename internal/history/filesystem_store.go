@@ -15,7 +15,7 @@ import (
 )
 
 // FilesystemStore persists each (key, schema) as a zstd-compressed bundle
-// file. Planner/activity rows live inside the matching bundle keyed by
+// file. Planner/activity/query rows live inside the matching bundle keyed by
 // schema_ref_hash; cross-store sync uses this wire format end-to-end.
 type FilesystemStore struct {
 	root string
@@ -361,6 +361,7 @@ func (f *FilesystemStore) ListKinds(ctx context.Context, key SnapshotKey) ([]Sna
 func bundleKinds(bundles []*Bundle) []SnapshotKind {
 	var hasSchema, hasPlanner bool
 	labels := map[string]struct{}{}
+	queryLabels := map[string]struct{}{}
 	for _, b := range bundles {
 		if b.Schema != nil {
 			hasSchema = true
@@ -370,6 +371,9 @@ func bundleKinds(bundles []*Bundle) []SnapshotKind {
 		}
 		for label := range b.Activity {
 			labels[label] = struct{}{}
+		}
+		for label := range b.Query {
+			queryLabels[label] = struct{}{}
 		}
 	}
 
@@ -387,6 +391,14 @@ func bundleKinds(bundles []*Bundle) []SnapshotKind {
 	sort.Strings(sortedLabels)
 	for _, label := range sortedLabels {
 		out = append(out, ActivityKind(label))
+	}
+	sortedQueryLabels := make([]string, 0, len(queryLabels))
+	for label := range queryLabels {
+		sortedQueryLabels = append(sortedQueryLabels, label)
+	}
+	sort.Strings(sortedQueryLabels)
+	for _, label := range sortedQueryLabels {
+		out = append(out, QueryKind(label))
 	}
 	return out
 }

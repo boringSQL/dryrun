@@ -21,8 +21,8 @@ func snapshotDeleteCmd(historyDB *string) *cobra.Command {
 		Use:   "delete [<hash-prefix>]",
 		Short: "Delete one snapshot from the local history",
 		Long: `Delete a single snapshot from the local history.db, identified by any
-content-hash prefix shown in "snapshot list" (schema, planner, or activity).
-Deleting a schema snapshot also removes the planner/activity stats bound to it.
+content-hash prefix shown in "snapshot list" (schema, planner, activity, or query).
+Deleting a schema snapshot also removes the planner/activity/query stats bound to it.
 Targets the local store only, never a remote.
 
   dryrun snapshot delete <hash-prefix>   delete the snapshot matching the prefix
@@ -67,7 +67,7 @@ Targets the local store only, never a remote.
 				target.Timestamp.Format("2006-01-02 15:04:05"),
 				target.Kind.String(), hash, target.Database)
 			if target.Kind.Tag == history.KindSchema {
-				fmt.Println("Planner/activity stats captured with it will be removed too, unless kept by an identical snapshot.")
+				fmt.Println("Planner/activity/query stats captured with it will be removed too, unless kept by an identical snapshot.")
 			}
 
 			if !yes && !confirm("Delete this snapshot?") {
@@ -81,7 +81,7 @@ Targets the local store only, never a remote.
 			}
 			fmt.Printf("Deleted %s snapshot %s", target.Kind.String(), hash)
 			if res.Cascaded {
-				fmt.Printf(" (+%d planner, +%d activity)", res.PlannerRemoved, res.ActivityRemoved)
+				fmt.Printf(" (+%d planner, +%d activity, +%d query)", res.PlannerRemoved, res.ActivityRemoved, res.QueryStatsRemoved)
 			}
 			fmt.Println()
 			return nil

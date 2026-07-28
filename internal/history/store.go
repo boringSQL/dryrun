@@ -18,7 +18,8 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
-// PRAGMA user_version; 1-2 were the rust codebase, need to restart from 3
+// PRAGMA user_version; 1-2 were the rust codebase, need to restart from 3.
+// Purely additive tables (CREATE TABLE IF NOT EXISTS, no rename/drop) don't bump this.
 const HistorySchemaVersion = 3
 
 type (
@@ -471,10 +472,39 @@ func (s *Store) ResolveSchemaSnapshot(ctx context.Context, key SnapshotKey, hash
 	}
 }
 
+// table is a caller-side literal, never user input.
+func (s *Store) nodeStatsHashMatches(ctx context.Context, pid, did, like, table string, mk func(string) SnapshotKind) ([]SnapshotSummary, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, schema_ref_hash, content_hash, node_source, timestamp FROM "+table+
+			" WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ORDER BY timestamp DESC LIMIT 2",
+		pid, did, like)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []SnapshotSummary
+	for rows.Next() {
+		var (
+			ss    SnapshotSummary
+			label string
+			tsStr string
+		)
+		if err := rows.Scan(&ss.ID, &ss.SchemaRefHash, &ss.ContentHash, &label, &tsStr); err != nil {
+			return nil, err
+		}
+		ss.Kind = mk(label)
+		ss.NodeLabel = label
+		ss.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
+		out = append(out, ss)
+	}
+	return out, rows.Err()
+}
+
 // ResolveSnapshot maps a content-hash prefix to one snapshot of any kind
-// (schema, planner, activity), the same set `snapshot list` prints. More than
-// one match across the three tables is rejected so a delete can't be
-// misdirected. The returned summary carries its Kind.
+// (schema, planner, activity, query), the same set `snapshot list` prints.
+// More than one match across the four tables is rejected so a delete can't
+// be misdirected. The returned summary carries its Kind.
 func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix string) (SnapshotSummary, error) {
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
@@ -533,35 +563,17 @@ func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix
 	}
 	prows.Close()
 
-	arows, err := s.db.QueryContext(ctx,
-		`SELECT id, schema_ref_hash, content_hash, node_source, timestamp
-		   FROM activity_stats
-		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
-		  ORDER BY timestamp DESC LIMIT 2`,
-		pid, did, like)
+	amatches, err := s.nodeStatsHashMatches(ctx, pid, did, like, "activity_stats", ActivityKind)
 	if err != nil {
 		return SnapshotSummary{}, err
 	}
-	for arows.Next() {
-		var (
-			ss    SnapshotSummary
-			label string
-			tsStr string
-		)
-		if err := arows.Scan(&ss.ID, &ss.SchemaRefHash, &ss.ContentHash, &label, &tsStr); err != nil {
-			arows.Close()
-			return SnapshotSummary{}, err
-		}
-		ss.Kind = ActivityKind(label)
-		ss.NodeLabel = label
-		ss.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
-		matches = append(matches, ss)
-	}
-	if err := arows.Err(); err != nil {
-		arows.Close()
+	matches = append(matches, amatches...)
+
+	qmatches, err := s.nodeStatsHashMatches(ctx, pid, did, like, "query_stats", QueryKind)
+	if err != nil {
 		return SnapshotSummary{}, err
 	}
-	arows.Close()
+	matches = append(matches, qmatches...)
 
 	switch len(matches) {
 	case 0:
@@ -582,7 +594,7 @@ type DeletedSnapshot struct {
 }
 
 // DeleteSnapshot removes one snapshot of any kind. Schema rows cascade to their
-// bound stats (see DeleteSchemaSnapshot); planner/activity rows delete alone.
+// bound stats (see DeleteSchemaSnapshot); planner/activity/query rows delete alone.
 func (s *Store) DeleteSnapshot(ctx context.Context, key SnapshotKey, snap SnapshotSummary) (DeletedSnapshot, error) {
 	switch snap.Kind.Tag {
 	case KindSchema:
@@ -591,12 +603,14 @@ func (s *Store) DeleteSnapshot(ctx context.Context, key SnapshotKey, snap Snapsh
 		return s.deleteStatsRow(ctx, key, snap, "planner_stats")
 	case KindActivity:
 		return s.deleteStatsRow(ctx, key, snap, "activity_stats")
+	case KindQuery:
+		return s.deleteStatsRow(ctx, key, snap, "query_stats")
 	default:
 		return DeletedSnapshot{}, fmt.Errorf("unknown SnapshotKind tag: %d", snap.Kind.Tag)
 	}
 }
 
-// table is a hardcoded caller-side literal, never user input.
+// table is a caller-side literal, never user input.
 func (s *Store) deleteStatsRow(ctx context.Context, key SnapshotKey, snap SnapshotSummary, table string) (DeletedSnapshot, error) {
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
@@ -616,7 +630,7 @@ func (s *Store) deleteStatsRow(ctx context.Context, key SnapshotKey, snap Snapsh
 }
 
 // DeleteSchemaSnapshot removes one schema row by rowid and, unless a content
-// twin remains, the planner/activity stats bound to it. Atomic.
+// twin remains, the planner/activity/query stats bound to it. Atomic.
 func (s *Store) DeleteSchemaSnapshot(ctx context.Context, key SnapshotKey, snap SnapshotSummary) (DeletedSnapshot, error) {
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
@@ -804,20 +818,26 @@ func (s *Store) DeleteBefore(ctx context.Context, key SnapshotKey, kind Snapshot
 		}
 		return res.RowsAffected()
 	case KindActivity:
-		query := `DELETE FROM activity_stats
-			  WHERE project_id = ? AND database_id = ? AND timestamp < ?`
-		args := []any{string(key.ProjectID), string(key.DatabaseID), cutoff.Format(time.RFC3339)}
-		if kind.NodeLabel != "" {
-			query += " AND node_source = ?"
-			args = append(args, kind.NodeLabel)
-		}
-		res, err := s.db.ExecContext(ctx, query, args...)
-		if err != nil {
-			return 0, err
-		}
-		return res.RowsAffected()
+		return s.deleteNodeStatsBefore(ctx, key, kind.NodeLabel, "activity_stats", cutoff)
+	case KindQuery:
+		return s.deleteNodeStatsBefore(ctx, key, kind.NodeLabel, "query_stats", cutoff)
 	}
 	return 0, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
+}
+
+// table is a caller-side literal, never user input.
+func (s *Store) deleteNodeStatsBefore(ctx context.Context, key SnapshotKey, nodeLabel, table string, cutoff time.Time) (int64, error) {
+	query := "DELETE FROM " + table + " WHERE project_id = ? AND database_id = ? AND timestamp < ?"
+	args := []any{string(key.ProjectID), string(key.DatabaseID), cutoff.Format(time.RFC3339)}
+	if nodeLabel != "" {
+		query += " AND node_source = ?"
+		args = append(args, nodeLabel)
+	}
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error) {
@@ -861,7 +881,27 @@ func (s *Store) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind,
 		}
 		out = append(out, ActivityKind(label))
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	qrows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT node_source FROM query_stats
+		  WHERE project_id = ? AND database_id = ?
+		  ORDER BY node_source`,
+		pid, did)
+	if err != nil {
+		return nil, err
+	}
+	defer qrows.Close()
+	for qrows.Next() {
+		var label string
+		if err := qrows.Scan(&label); err != nil {
+			return nil, err
+		}
+		out = append(out, QueryKind(label))
+	}
+	return out, qrows.Err()
 }
 
 // Maps a content-hash prefix to its kind for the `snapshot diff` same-kind guard.
@@ -870,6 +910,7 @@ func (s *Store) ResolveKind(ctx context.Context, key SnapshotKey, hashPrefix str
 	did := string(key.DatabaseID)
 
 	var matches []SnapshotKind
+	// table is a caller-side literal, never user input.
 	count := func(table string) (int, error) {
 		var n int
 		err := s.db.QueryRowContext(ctx,
@@ -904,6 +945,24 @@ func (s *Store) ResolveKind(ctx context.Context, key SnapshotKey, hashPrefix str
 		matches = append(matches, ActivityKind(label))
 	}
 	if err := rows.Err(); err != nil {
+		return SnapshotKind{}, err
+	}
+	qrows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT node_source FROM query_stats
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?`,
+		pid, did, hashPrefix+"%")
+	if err != nil {
+		return SnapshotKind{}, err
+	}
+	defer qrows.Close()
+	for qrows.Next() {
+		var label string
+		if err := qrows.Scan(&label); err != nil {
+			return SnapshotKind{}, err
+		}
+		matches = append(matches, QueryKind(label))
+	}
+	if err := qrows.Err(); err != nil {
 		return SnapshotKind{}, err
 	}
 

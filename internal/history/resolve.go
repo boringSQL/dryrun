@@ -10,7 +10,7 @@ import (
 
 var latestRefRe = regexp.MustCompile(`^latest(?:~(\d+))?$`)
 
-// schema|planner|activity; activity defaults to the sole node, else errors listing them
+// schema|planner|activity|query; activity/query default to the sole node, else errors listing them
 func (s *Store) ResolveKindFlag(ctx context.Context, key SnapshotKey, kindFlag, nodeFlag string) (SnapshotKind, error) {
 	switch strings.ToLower(kindFlag) {
 	case "", "schema":
@@ -18,33 +18,38 @@ func (s *Store) ResolveKindFlag(ctx context.Context, key SnapshotKey, kindFlag, 
 	case "planner":
 		return PlannerKind(), nil
 	case "activity":
-		return s.resolveActivityKind(ctx, key, nodeFlag)
+		return s.resolveNodeKind(ctx, key, nodeFlag, ActivityKind)
+	case "query":
+		return s.resolveNodeKind(ctx, key, nodeFlag, QueryKind)
 	default:
-		return SnapshotKind{}, fmt.Errorf("unknown kind %q (use schema|planner|activity)", kindFlag)
+		return SnapshotKind{}, fmt.Errorf("unknown kind %q (use schema|planner|activity|query)", kindFlag)
 	}
 }
 
-func (s *Store) resolveActivityKind(ctx context.Context, key SnapshotKey, nodeFlag string) (SnapshotKind, error) {
+// resolveNodeKind picks the sole node for a per-node kind (activity/query), or
+// errors listing the available nodes when there's more than one.
+func (s *Store) resolveNodeKind(ctx context.Context, key SnapshotKey, nodeFlag string, mk func(string) SnapshotKind) (SnapshotKind, error) {
 	if nodeFlag != "" {
-		return ActivityKind(nodeFlag), nil
+		return mk(nodeFlag), nil
 	}
 	kinds, err := s.ListKinds(ctx, key)
 	if err != nil {
 		return SnapshotKind{}, err
 	}
+	tag := mk("").Tag
 	var nodes []string
 	for _, k := range kinds {
-		if k.Tag == KindActivity {
+		if k.Tag == tag {
 			nodes = append(nodes, k.NodeLabel)
 		}
 	}
 	switch len(nodes) {
 	case 0:
-		return SnapshotKind{}, fmt.Errorf("no activity snapshots in history")
+		return SnapshotKind{}, fmt.Errorf("no %s snapshots in history", mk(""))
 	case 1:
-		return ActivityKind(nodes[0]), nil
+		return mk(nodes[0]), nil
 	default:
-		return SnapshotKind{}, fmt.Errorf("multiple activity nodes (%s); pass a node to pick one", strings.Join(nodes, ", "))
+		return SnapshotKind{}, fmt.Errorf("multiple %s nodes (%s); pass a node to pick one", mk(""), strings.Join(nodes, ", "))
 	}
 }
 
