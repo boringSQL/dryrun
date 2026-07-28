@@ -63,7 +63,7 @@ func TestRunSnapshotActivity_Branches(t *testing.T) {
 			cap := &stubCapturer{Standby: tc.standby}
 			w := &stubWriter{Stored: tc.stored}
 
-			err := runSnapshotActivity(context.Background(), cap, w, key, activityOptions{
+			err := runSnapshotActivity(context.Background(), cap, w, key, captureOptions{
 				Label:       "standby-1",
 				AllowOrphan: tc.allowOrphan,
 			})
