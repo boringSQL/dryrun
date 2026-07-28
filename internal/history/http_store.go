@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,9 +35,10 @@ type (
 )
 
 const (
-	mediaTypeSchemaBlob   = "application/vnd.predict.schema+zstd"
-	mediaTypePlannerBlob  = "application/vnd.predict.planner+zstd"
-	mediaTypeActivityBlob = "application/vnd.predict.activity+zstd"
+	mediaTypeSchemaBlob     = "application/vnd.predict.schema+zstd"
+	mediaTypePlannerBlob    = "application/vnd.predict.planner+zstd"
+	mediaTypeActivityBlob   = "application/vnd.predict.activity+zstd"
+	mediaTypeQueryStatsBlob = "application/vnd.predict.query_stats+zstd"
 )
 
 // wire shapes mirror predict's domain/manifest.Body and the flattened
@@ -47,10 +49,11 @@ type (
 	}
 
 	manifestBody struct {
-		Schema   manifestRef            `json:"schema"`
-		Planner  *manifestRef           `json:"planner,omitempty"`
-		Activity map[string]manifestRef `json:"activity,omitempty"`
-		TakenAt  time.Time              `json:"taken_at"`
+		Schema     manifestRef            `json:"schema"`
+		Planner    *manifestRef           `json:"planner,omitempty"`
+		Activity   map[string]manifestRef `json:"activity,omitempty"`
+		QueryStats map[string]manifestRef `json:"query_stats,omitempty"`
+		TakenAt    time.Time              `json:"taken_at"`
 	}
 
 	manifestResponse struct {
@@ -58,6 +61,7 @@ type (
 		Schema         manifestRef            `json:"schema"`
 		Planner        *manifestRef           `json:"planner,omitempty"`
 		Activity       map[string]manifestRef `json:"activity,omitempty"`
+		QueryStats     map[string]manifestRef `json:"query_stats,omitempty"`
 		TakenAt        time.Time              `json:"taken_at"`
 	}
 
@@ -88,9 +92,9 @@ func NewHTTPStore(cfg HTTPConfig) (*HTTPStore, error) {
 
 var _ SnapshotStore = (*HTTPStore)(nil)
 
-// Put uploads the blob, then a manifest referencing it. Planner/activity attach
-// the schema by ref; it is pushed first, so a missing one means predict returns
-// 409, surfaced as ErrOrphanSnapshot.
+// Put uploads the blob, then a manifest referencing it. Planner/activity/query
+// stats attach the schema by ref; it is pushed first, so a missing one means
+// predict returns 409, surfaced as ErrOrphanSnapshot.
 func (h *HTTPStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (PutOutcome, error) {
 	// The digest is recomputed from the snapshot we are about to serialize, not
 	// read from the stored ContentHash. predict re-derives the hash from the
@@ -137,9 +141,26 @@ func (h *HTTPStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnapsho
 		}
 		return out, h.putManifest(ctx, key, body)
 	case snap.AsQueryStats() != nil:
-		// predict's manifest has no query-stats field yet; fail distinguishably so
-		// sync can skip this kind for http remotes instead of erroring the whole push.
-		return PutInserted, ErrKindUnsupported
+		q := snap.AsQueryStats()
+		digest := schema.ComputeQueryStatsContentHash(q)
+		out, err := h.putBlob(ctx, digest, mediaTypeQueryStatsBlob, q)
+		if err != nil {
+			// A predict that predates query_stats answers 415 on the blob PUT;
+			// skip the kind for this remote instead of failing the whole push.
+			if isUnsupportedBlobKindStatus(err) {
+				return out, ErrKindUnsupported
+			}
+			return out, err
+		}
+		body := manifestBody{
+			Schema:     manifestRef{Digest: q.SchemaRefHash},
+			QueryStats: map[string]manifestRef{queryStatsLabel(q): {Digest: digest}},
+			TakenAt:    q.Node.Timestamp,
+		}
+		if err := h.putManifest(ctx, key, body); err != nil {
+			return out, err
+		}
+		return out, nil
 	}
 	return PutInserted, fmt.Errorf("http store: empty StoredSnapshot")
 }
@@ -197,6 +218,15 @@ func activityLabel(a *schema.ActivityStatsSnapshot) string {
 		return *a.Node.Label
 	}
 	return a.Node.Source
+}
+
+// queryStatsLabel mirrors predict's queryStatsNodeLabel: explicit label, else
+// node source.
+func queryStatsLabel(q *schema.QueryStatsSnapshot) string {
+	if q.Node.Label != nil && *q.Node.Label != "" {
+		return *q.Node.Label
+	}
+	return q.Node.Source
 }
 
 func (h *HTTPStore) putManifest(ctx context.Context, key SnapshotKey, body manifestBody) error {
@@ -269,6 +299,12 @@ func (h *HTTPStore) getByHash(ctx context.Context, kind SnapshotKind, hash strin
 			return StoredSnapshot{}, err
 		}
 		return WrapActivity(&a), nil
+	case KindQuery:
+		var q schema.QueryStatsSnapshot
+		if err := decodeSnapshotBlob(raw, &q); err != nil {
+			return StoredSnapshot{}, err
+		}
+		return WrapQueryStats(&q), nil
 	}
 	return StoredSnapshot{}, fmt.Errorf("http store: unknown SnapshotKind tag: %d", kind.Tag)
 }
@@ -342,6 +378,19 @@ func summariesFromManifest(m manifestResponse, kind SnapshotKind, rng TimeRange)
 				ContentHash: ref.Digest, SchemaRefHash: m.Schema.Digest, NodeLabel: label,
 			})
 		}
+	case KindQuery:
+		for label, ref := range m.QueryStats {
+			if kind.NodeLabel != "" && kind.NodeLabel != label {
+				continue
+			}
+			if !inRange(m.TakenAt, rng) {
+				continue
+			}
+			out = append(out, SnapshotSummary{
+				Kind: QueryKind(label), Timestamp: m.TakenAt,
+				ContentHash: ref.Digest, SchemaRefHash: m.Schema.Digest, NodeLabel: label,
+			})
+		}
 	}
 	return out
 }
@@ -385,6 +434,7 @@ func (h *HTTPStore) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotK
 	}
 	var hasSchema, hasPlanner bool
 	labels := map[string]struct{}{}
+	queryLabels := map[string]struct{}{}
 	for _, m := range commits {
 		if m.Schema.Digest != "" {
 			hasSchema = true
@@ -394,6 +444,9 @@ func (h *HTTPStore) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotK
 		}
 		for label := range m.Activity {
 			labels[label] = struct{}{}
+		}
+		for label := range m.QueryStats {
+			queryLabels[label] = struct{}{}
 		}
 	}
 	var out []SnapshotKind
@@ -410,6 +463,15 @@ func (h *HTTPStore) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotK
 	sort.Strings(sorted)
 	for _, label := range sorted {
 		out = append(out, ActivityKind(label))
+	}
+	// Separate label set from activity's: the same label must stay two kinds.
+	sortedQuery := make([]string, 0, len(queryLabels))
+	for label := range queryLabels {
+		sortedQuery = append(sortedQuery, label)
+	}
+	sort.Strings(sortedQuery)
+	for _, label := range sortedQuery {
+		out = append(out, QueryKind(label))
 	}
 	return out, nil
 }
@@ -540,11 +602,33 @@ func drain(resp *http.Response) {
 	_ = resp.Body.Close()
 }
 
+// httpStatusError keeps the status code so callers can branch on it.
+type httpStatusError struct {
+	status int
+	msg    string
+}
+
+func (e *httpStatusError) Error() string { return e.msg }
+
 func httpError(resp *http.Response) error {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	msg := strings.TrimSpace(string(b))
 	if msg == "" {
 		msg = http.StatusText(resp.StatusCode)
 	}
-	return fmt.Errorf("http store: %s %s: %d %s", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, msg)
+	return &httpStatusError{
+		status: resp.StatusCode,
+		msg:    fmt.Sprintf("http store: %s %s: %d %s", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, msg),
+	}
+}
+
+// isUnsupportedBlobKindStatus reports whether err is a 415 from the blob PUT:
+// a predict that predates this kind. Blob-PUT errors only — a manifest-PUT
+// failure past that point is a real error, not version skew.
+func isUnsupportedBlobKindStatus(err error) bool {
+	var se *httpStatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	return se.status == http.StatusUnsupportedMediaType
 }
