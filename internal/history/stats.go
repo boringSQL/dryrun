@@ -177,16 +177,19 @@ func (s *Store) GetQueryStats(ctx context.Context, key SnapshotKey, schemaRefHas
 
 // LatestQueryStats returns the newest snapshot per node_source. Unlike
 // GetQueryStats it is not schema_ref_hash-scoped, so callers still get the
-// latest stats after DDL has moved on.
+// latest stats after DDL has moved on. Ties on timestamp (two pushes for the
+// same node within the same RFC3339 second) are broken by id so a node never
+// contributes more than one row.
 func (s *Store) LatestQueryStats(ctx context.Context, key SnapshotKey) ([]schema.QueryStatsSnapshot, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT payload_json FROM query_stats AS q
 		  WHERE project_id = ? AND database_id = ?
-		    AND timestamp = (
-		      SELECT MAX(timestamp) FROM query_stats
+		    AND id = (
+		      SELECT id FROM query_stats
 		       WHERE project_id = q.project_id
 		         AND database_id = q.database_id
 		         AND node_source = q.node_source
+		       ORDER BY timestamp DESC, id DESC LIMIT 1
 		    )
 		  ORDER BY node_source`,
 		string(key.ProjectID), string(key.DatabaseID),

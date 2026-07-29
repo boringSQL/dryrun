@@ -56,7 +56,8 @@ type (
 	}
 
 	// One pg_stat_statements shape, tagged with its capture node; never merged
-	// across nodes. PctOfTotalExecTime is computed pre-pagination.
+	// across nodes. PctOfTotalExecTime is computed pre-pagination, against
+	// that node's own total exec time — not pooled across nodes.
 	queryStatsEntry struct {
 		Node               string  `json:"node"`
 		CapturedAt         string  `json:"captured_at"`

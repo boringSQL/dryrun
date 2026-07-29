@@ -56,7 +56,7 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 	minCalls := int64(getFloatArg(req, "min_calls", 2))
 
 	var entries []queryStatsEntry
-	var totalExecTime float64
+	nodeExecTime := map[string]float64{}
 	for _, snap := range snaps {
 		capturedAt := snap.Node.Timestamp.Format(time.RFC3339)
 		for _, q := range snap.Queries {
@@ -69,6 +69,10 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 				canonical = canonical[:canonicalTruncateLen]
 				truncated = true
 			}
+			var rowsPerCall float64
+			if q.Calls > 0 {
+				rowsPerCall = float64(q.Rows) / float64(q.Calls)
+			}
 			entries = append(entries, queryStatsEntry{
 				Node:               snap.Node.Source,
 				CapturedAt:         capturedAt,
@@ -80,15 +84,17 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 				TotalExecTimeMs:    q.TotalExecTimeMs,
 				MeanExecTimeMs:     q.MeanExecTimeMs,
 				Rows:               q.Rows,
-				RowsPerCall:        float64(q.Rows) / float64(q.Calls),
+				RowsPerCall:        rowsPerCall,
 			})
-			totalExecTime += q.TotalExecTimeMs
+			nodeExecTime[snap.Node.Source] += q.TotalExecTimeMs
 		}
 	}
 
-	if totalExecTime > 0 {
-		for i := range entries {
-			entries[i].PctOfTotalExecTime = entries[i].TotalExecTimeMs / totalExecTime * 100
+	// denominator is per-node: entries are never merged/averaged across nodes,
+	// so a shared cross-node total would misrepresent each node's own share.
+	for i := range entries {
+		if total := nodeExecTime[entries[i].Node]; total > 0 {
+			entries[i].PctOfTotalExecTime = entries[i].TotalExecTimeMs / total * 100
 		}
 	}
 
