@@ -199,6 +199,8 @@ func kindFromContentType(ct string) (string, bool) {
 		return "planner", true
 	case mediaTypeActivityBlob:
 		return "activity", true
+	case mediaTypeQueryStatsBlob:
+		return "query_stats", true
 	}
 	return "", false
 }
@@ -223,6 +225,12 @@ func recomputeDigest(kind string, raw []byte) string {
 			return ""
 		}
 		return dryrun.ComputeActivityContentHash(&a)
+	case "query_stats":
+		var q dryrun.QueryStatsSnapshot
+		if decodeSnapshotBlob(raw, &q) != nil {
+			return ""
+		}
+		return dryrun.ComputeQueryStatsContentHash(&q)
 	}
 	return ""
 }
@@ -235,17 +243,21 @@ func manifestDigests(b manifestBody) []string {
 	for _, r := range b.Activity {
 		out = append(out, r.Digest)
 	}
+	for _, r := range b.QueryStats {
+		out = append(out, r.Digest)
+	}
 	return out
 }
 
 // computeManifestDigest mirrors predict's ComputeDigest: sha256 over the ref set
-// only (schema + planner + activity), excluding taken_at.
+// only (schema + planner + activity + query stats), excluding taken_at.
 func computeManifestDigest(b manifestBody) string {
 	canon := struct {
-		Schema   manifestRef            `json:"schema"`
-		Planner  *manifestRef           `json:"planner,omitempty"`
-		Activity map[string]manifestRef `json:"activity,omitempty"`
-	}{b.Schema, b.Planner, b.Activity}
+		Schema     manifestRef            `json:"schema"`
+		Planner    *manifestRef           `json:"planner,omitempty"`
+		Activity   map[string]manifestRef `json:"activity,omitempty"`
+		QueryStats map[string]manifestRef `json:"query_stats,omitempty"`
+	}{b.Schema, b.Planner, b.Activity, b.QueryStats}
 	raw, _ := json.Marshal(canon)
 	return sha256Hex(raw)
 }
@@ -261,6 +273,9 @@ func manifestRespJSON(digest string, b manifestBody) map[string]any {
 	}
 	if len(b.Activity) > 0 {
 		m["activity"] = b.Activity
+	}
+	if len(b.QueryStats) > 0 {
+		m["query_stats"] = b.QueryStats
 	}
 	return m
 }
@@ -329,39 +344,188 @@ func TestHTTPStorePushPullRoundTrip(t *testing.T) {
 	}
 }
 
-// TestHTTPStorePutQueryStatsUnsupported pins the deliberate half-implemented
-// state of query-stats support on the predict (Hindsight) remote. Unlike
-// FilesystemStore/OCIStore, which fully support query_stats, HTTPStore's wire
-// types (manifestBody/manifestResponse) mirror predict's actual server-side
-// JSON contract in a different repo, and that contract has no query-stats
-// field yet — adding one here without the matching server change would just
-// be dead client code. So HTTPStore.Put must reject a query-stats
-// StoredSnapshot with the ErrKindUnsupported sentinel specifically (not a
-// generic error, and not silently pretending success) — that sentinel is
-// what lets cmd/dryrun's sync layer skip this one kind for http remotes
-// instead of failing an entire `snapshot push --remote hindsight` over it.
-// This test never spins up a fake predict server: the query-stats branch in
-// Put returns before making any HTTP call at all, so a deliberately-invalid
-// token/base URL is enough to prove no network round trip happens as a side
-// effect of hitting this path.
-func TestHTTPStorePutQueryStatsUnsupported(t *testing.T) {
-	store, err := NewHTTPStore(HTTPConfig{BaseURL: "http://unreachable.invalid", Token: "prk_unused"})
+// TestHTTPStoreQueryStatsPushPullRoundTrip proves query stats now push/pull
+// through the /v1 protocol like every other kind: schema + two query-stats
+// nodes round trip through List/Get with matching content hashes, and
+// schema_ref_hash is reconstructed from the manifest the same way it is for
+// activity. This supersedes the old TestHTTPStorePutQueryStatsUnsupported,
+// which pinned the now-removed "always ErrKindUnsupported" stub.
+func TestHTTPStoreQueryStatsPushPullRoundTrip(t *testing.T) {
+	const token = "prk_test"
+	fake := newFakePredict(token)
+	srv := httptest.NewServer(fake.handler())
+	t.Cleanup(srv.Close)
+
+	store, err := NewHTTPStore(HTTPConfig{BaseURL: srv.URL, Token: token, Client: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
 	key := SnapshotKey{ProjectID: "billing", DatabaseID: "prod"}
 
-	q := queryStatsFixture("sh-1", "qs-1", "primary")
-	out, err := store.Put(ctx, key, WrapQueryStats(q))
-	if !errors.Is(err, ErrKindUnsupported) {
-		t.Fatalf("Put(query stats) error = %v, want ErrKindUnsupported", err)
+	sch := httpTestSchema()
+	q1 := httpTestQueryStats(sch.ContentHash, "node-a")
+	q2 := httpTestQueryStats(sch.ContentHash, "node-b")
+
+	for _, snap := range []StoredSnapshot{WrapSchema(sch), WrapQueryStats(q1), WrapQueryStats(q2)} {
+		if out, err := store.Put(ctx, key, snap); err != nil {
+			t.Fatalf("put %s: %v", snap.Kind(), err)
+		} else if out != PutInserted {
+			t.Fatalf("put %s: want inserted, got %v", snap.Kind(), out)
+		}
 	}
-	// The outcome value is not meaningful on an error path, but callers that
-	// forget to check the error (they shouldn't, but "shouldn't" isn't a test)
-	// must not be misled by PutDeduped, which reads as "already there and fine."
-	if out == PutDeduped {
-		t.Error("outcome on the unsupported-kind error path must not be PutDeduped")
+	if fake.putBlobs != 3 {
+		t.Fatalf("want 3 blobs stored, got %d", fake.putBlobs)
+	}
+
+	assertKindRoundTrips(t, ctx, store, key, QueryKind(""), []string{q1.ContentHash, q2.ContentHash})
+
+	qList, err := store.List(ctx, key, QueryKind(""), TimeRange{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range qList {
+		if s.SchemaRefHash != sch.ContentHash {
+			t.Fatalf("query stats %s: schema_ref %s, want %s", s.ContentHash, s.SchemaRefHash, sch.ContentHash)
+		}
+	}
+
+	// a second push of the same commit dedups every blob.
+	before := fake.putBlobs
+	for _, snap := range []StoredSnapshot{WrapSchema(sch), WrapQueryStats(q1), WrapQueryStats(q2)} {
+		if out, err := store.Put(ctx, key, snap); err != nil {
+			t.Fatalf("re-put %s: %v", snap.Kind(), err)
+		} else if out != PutDeduped {
+			t.Fatalf("re-put %s: want deduped, got %v", snap.Kind(), out)
+		}
+	}
+	if fake.putBlobs != before {
+		t.Fatalf("second push stored %d new blobs, want 0", fake.putBlobs-before)
+	}
+}
+
+// TestHTTPStoreListKindsSeparatesActivityAndQueryLabels guards the ListKinds
+// fix from this round: a node reporting both activity and query stats under
+// the identical label must surface as two distinct SnapshotKind entries, not
+// collapse into one. Sharing a single label set here would silently drop the
+// second kind from sync's work list.
+func TestHTTPStoreListKindsSeparatesActivityAndQueryLabels(t *testing.T) {
+	const token = "prk_test"
+	fake := newFakePredict(token)
+	srv := httptest.NewServer(fake.handler())
+	t.Cleanup(srv.Close)
+
+	store, err := NewHTTPStore(HTTPConfig{BaseURL: srv.URL, Token: token, Client: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	key := SnapshotKey{ProjectID: "billing", DatabaseID: "prod"}
+
+	sch := httpTestSchema()
+	label := "primary"
+	act := &schema.ActivityStatsSnapshot{
+		SchemaRefHash: sch.ContentHash,
+		Node:          schema.NodeIdentity{Source: "10.0.0.1", Label: &label, PgVersion: "17.0", Timestamp: time.Now().UTC().Truncate(time.Second)},
+		Tables:        []schema.TableActivityEntry{},
+		Indexes:       []schema.IndexActivityEntry{},
+	}
+	act.ContentHash = dryrun.ComputeActivityContentHash(act)
+	qs := &schema.QueryStatsSnapshot{
+		SchemaRefHash: sch.ContentHash,
+		Node:          schema.NodeIdentity{Source: "10.0.0.1", Label: &label, PgVersion: "17.0", Timestamp: time.Now().UTC().Truncate(time.Second)},
+	}
+	qs.ContentHash = dryrun.ComputeQueryStatsContentHash(qs)
+
+	for _, snap := range []StoredSnapshot{WrapSchema(sch), WrapActivity(act), WrapQueryStats(qs)} {
+		if _, err := store.Put(ctx, key, snap); err != nil {
+			t.Fatalf("put %s: %v", snap.Kind(), err)
+		}
+	}
+
+	kinds, err := store.ListKinds(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hasActivity, hasQuery bool
+	for _, k := range kinds {
+		if k.Tag == KindActivity && k.NodeLabel == label {
+			hasActivity = true
+		}
+		if k.Tag == KindQuery && k.NodeLabel == label {
+			hasQuery = true
+		}
+	}
+	if !hasActivity || !hasQuery {
+		t.Fatalf("ListKinds = %+v, want both ActivityKind(%q) and QueryKind(%q)", kinds, label, label)
+	}
+}
+
+// TestHTTPStorePutQueryStatsVersionSkew proves a predict server that predates
+// query-stats support degrades gracefully instead of failing the whole push: a
+// 415 on the blob PUT (unrecognized query_stats media type) surfaces as
+// ErrKindUnsupported, exactly like the old hard-coded stub did — so
+// cmd/dryrun's sync layer keeps skipping this kind against an un-upgraded
+// remote rather than aborting `snapshot push` partway through.
+func TestHTTPStorePutQueryStatsVersionSkew(t *testing.T) {
+	q := httpTestQueryStats("sh-1", "primary")
+	key := SnapshotKey{ProjectID: "billing", DatabaseID: "prod"}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /v1/blobs/{digest}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("PUT /v1/blobs/{digest}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnsupportedMediaType)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	store, err := NewHTTPStore(HTTPConfig{BaseURL: srv.URL, Token: "prk_test", Client: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(context.Background(), key, WrapQueryStats(q)); !errors.Is(err, ErrKindUnsupported) {
+		t.Fatalf("Put(query stats) against an old server = %v, want ErrKindUnsupported", err)
+	}
+}
+
+// TestHTTPStorePutQueryStatsManifestErrorNotSwallowed guards the version-skew
+// fix's boundary: a 400 from the manifest PUT is NOT reinterpreted as
+// ErrKindUnsupported, unlike the blob-PUT 415 above. Once the blob PUT has
+// succeeded the server is, by construction, new enough to know the
+// query_stats manifest field too (same binary) — so a manifest-PUT 400 past
+// that point is a real validation failure (bad taken_at, missing schema ref,
+// malformed body) that must reach the caller as a real error, not vanish as a
+// silent "this remote doesn't support it" skip.
+func TestHTTPStorePutQueryStatsManifestErrorNotSwallowed(t *testing.T) {
+	q := httpTestQueryStats("sh-1", "primary")
+	key := SnapshotKey{ProjectID: "billing", DatabaseID: "prod"}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /v1/blobs/{digest}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("PUT /v1/blobs/{digest}", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusCreated, map[string]string{"status": "inserted"})
+	})
+	mux.HandleFunc("PUT /v1/db/{project}/{database}/manifests", func(w http.ResponseWriter, r *http.Request) {
+		// e.g. "manifest must include taken_at" — a real bug, not version skew.
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	store, err := NewHTTPStore(HTTPConfig{BaseURL: srv.URL, Token: "prk_test", Client: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Put(context.Background(), key, WrapQueryStats(q))
+	if err == nil {
+		t.Fatal("Put(query stats) with a rejected manifest = nil error, want a real error")
+	}
+	if errors.Is(err, ErrKindUnsupported) {
+		t.Fatalf("Put(query stats) with a rejected manifest = %v, must NOT be reinterpreted as ErrKindUnsupported", err)
 	}
 }
 
@@ -556,6 +720,18 @@ func httpTestActivity(schemaRef, source string) *schema.ActivityStatsSnapshot {
 	}
 	a.ContentHash = dryrun.ComputeActivityContentHash(a)
 	return a
+}
+
+func httpTestQueryStats(schemaRef, source string) *schema.QueryStatsSnapshot {
+	q := &schema.QueryStatsSnapshot{
+		SchemaRefHash: schemaRef,
+		Node:          schema.NodeIdentity{Source: source, PgVersion: "17.0", Timestamp: time.Now().UTC().Truncate(time.Second)},
+		Queries: []schema.QueryStatsEntry{
+			{Fingerprint: "sha1:abc", Canonical: "SELECT id FROM users WHERE id = $1", Calls: 5},
+		},
+	}
+	q.ContentHash = dryrun.ComputeQueryStatsContentHash(q)
+	return q
 }
 
 // parameterized variants for the multi-take timestamp test: explicit capture

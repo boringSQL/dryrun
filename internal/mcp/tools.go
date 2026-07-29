@@ -210,6 +210,22 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 		),
 		s.handleReloadSchema,
 	)
+	srv.AddTool(
+		mcp.NewTool("list_top_queries",
+			mcp.WithDescription("Captured pg_stat_statements query shapes, ranked by exec time/calls. Read from .dryrun/history.db (dryrun snapshot query-stats or init/take's best-effort capture); each entry is tagged with its reporting node and never averaged across nodes — a primary and a replica are different workloads. Canonical SQL is qshape-normalized/parameterized text, truncated for long queries. Counters are cumulative since the last pg_stat_statements reset, not a recent-activity rate."),
+			mcp.WithString("node", mcp.Description("Filter to one node label. Omit to see all nodes' queries together (each entry still tagged with its own node).")),
+			mcp.WithString("sort",
+				mcp.Enum("total_time", "calls", "mean_time"),
+				mcp.DefaultString("total_time"),
+				mcp.Description("Sort by: 'total_time' (default, total_exec_time_ms), 'calls', or 'mean_time' (mean_exec_time_ms)."),
+			),
+			mcp.WithNumber("min_calls", mcp.DefaultNumber(2), mcp.Description("Skip entries with fewer calls than this (default 2) to filter one-shot noise.")),
+			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max results (default 50, 0 for all).")),
+			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Skip N results.")),
+			mcp.WithOutputSchema[listTopQueriesResult](),
+		),
+		s.handleListTopQueries,
+	)
 }
 
 // registerLiveTools registers the tools that need a live db connection.

@@ -54,6 +54,31 @@ type (
 		Omitted   int                   `json:"omitted,omitempty"`
 		Meta      *toolMeta             `json:"_meta,omitempty"`
 	}
+
+	// One pg_stat_statements shape, tagged with its capture node; never merged
+	// across nodes. PctOfTotalExecTime is computed pre-pagination.
+	queryStatsEntry struct {
+		Node               string  `json:"node"`
+		CapturedAt         string  `json:"captured_at"`
+		SchemaRefHash      string  `json:"schema_ref_hash"`
+		Fingerprint        string  `json:"fingerprint"`
+		Canonical          string  `json:"canonical"`
+		CanonicalTruncated bool    `json:"canonical_truncated,omitempty"`
+		Calls              int64   `json:"calls"`
+		TotalExecTimeMs    float64 `json:"total_exec_time_ms,omitempty"`
+		MeanExecTimeMs     float64 `json:"mean_exec_time_ms,omitempty"`
+		Rows               int64   `json:"rows,omitempty"`
+		RowsPerCall        float64 `json:"rows_per_call,omitempty"`
+		PctOfTotalExecTime float64 `json:"pct_of_total_exec_time,omitempty"`
+	}
+
+	// Count is the pre-paging total (after the min_calls/node filters), Queries the returned page.
+	listTopQueriesResult struct {
+		Queries []queryStatsEntry `json:"queries"`
+		Count   int               `json:"count"`
+		Offset  int               `json:"offset,omitempty"`
+		Meta    *toolMeta         `json:"_meta,omitempty"`
+	}
 )
 
 // Hand-written shallow schemas for tools whose payloads are dynamic maps

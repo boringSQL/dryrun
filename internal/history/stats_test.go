@@ -236,7 +236,7 @@ func TestLatestActivity_OneRowPerNode(t *testing.T) {
 		}
 	}
 	put("primary", "p-1", now.Add(-2*time.Minute))
-	put("primary", "p-2", now)              // newest for primary
+	put("primary", "p-2", now) // newest for primary
 	put("replica-a", "r-1", now.Add(-time.Minute))
 	put("replica-b", "r-1", now.Add(-30*time.Second))
 
