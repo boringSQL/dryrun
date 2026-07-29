@@ -840,6 +840,32 @@ func (s *Store) deleteNodeStatsBefore(ctx context.Context, key SnapshotKey, node
 	return res.RowsAffected()
 }
 
+// Prune drops activity/query rows older than cutoff, keeping the newest row per (node, kind).
+func (s *Store) Prune(ctx context.Context, key SnapshotKey, cutoff time.Time) (int64, error) {
+	var total int64
+	for _, table := range []string{"activity_stats", "query_stats"} {
+		// survivor is the newest per node; timestamps are second-resolution and
+		// pull can insert older rows with higher ids, so id only breaks ties.
+		res, err := s.db.ExecContext(ctx,
+			"DELETE FROM "+table+
+				" WHERE project_id = ? AND database_id = ? AND timestamp < ?"+
+				" AND id NOT IN (SELECT id FROM "+table+" AS keep"+
+				" WHERE project_id = ? AND database_id = ?"+
+				" AND id = (SELECT id FROM "+table+
+				" WHERE project_id = keep.project_id AND database_id = keep.database_id"+
+				" AND node_source = keep.node_source"+
+				" ORDER BY timestamp DESC, id DESC LIMIT 1))",
+			string(key.ProjectID), string(key.DatabaseID), cutoff.Format(time.RFC3339),
+			string(key.ProjectID), string(key.DatabaseID))
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
+}
+
 func (s *Store) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error) {
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)

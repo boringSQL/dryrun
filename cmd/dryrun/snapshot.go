@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -57,7 +58,8 @@ func snapshotActivityCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			if err := runSnapshotActivity(ctx, cap, store, resolveSnapshotKey(), captureOptions{
+			key := resolveSnapshotKey()
+			if err := runSnapshotActivity(ctx, cap, store, key, captureOptions{
 				Label:       label,
 				AllowOrphan: allowOrphan,
 			}); err != nil {
@@ -69,8 +71,11 @@ func snapshotActivityCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return runSync(ctx, store, dst, false, fullScope(), os.Stdout)
+				if err := runSync(ctx, store, dst, false, fullScope(), os.Stdout); err != nil {
+					return err
+				}
 			}
+			maybeAutoPrune(ctx, store, key)
 			return nil
 		},
 	}
@@ -133,7 +138,8 @@ func snapshotQueryStatsCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			if err := runSnapshotQueryStats(ctx, cap, store, resolveSnapshotKey(), captureOptions{
+			key := resolveSnapshotKey()
+			if err := runSnapshotQueryStats(ctx, cap, store, key, captureOptions{
 				Label:       label,
 				AllowOrphan: allowOrphan,
 			}); err != nil {
@@ -145,8 +151,11 @@ func snapshotQueryStatsCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return runSync(ctx, store, dst, false, fullScope(), os.Stdout)
+				if err := runSync(ctx, store, dst, false, fullScope(), os.Stdout); err != nil {
+					return err
+				}
 			}
+			maybeAutoPrune(ctx, store, key)
 			return nil
 		},
 	}
@@ -231,4 +240,33 @@ func runSnapshotActivity(ctx context.Context, cap initCapturer, store initWriter
 	fmt.Fprintf(os.Stderr, "Activity stats captured: label=%s, %d tables, %d indexes (schema=%s)\n",
 		opts.Label, len(activity.Tables), len(activity.Indexes), bound)
 	return nil
+}
+
+// maybeAutoPrune prunes history after a successful capture, per [history] in dryrun.toml.
+func maybeAutoPrune(ctx context.Context, store *history.Store, key history.SnapshotKey) {
+	_, cfg, err := loadProjectConfig()
+	if err != nil || cfg.History == nil || !cfg.History.AutoPrune {
+		return
+	}
+	if cfg.History.MaxAge == "" {
+		fmt.Fprintln(os.Stderr, "warning: [history] auto_prune is set but max_age is empty; skipping prune")
+		return
+	}
+	maxAge, err := parseRelative(cfg.History.MaxAge)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: invalid [history] max_age %q: %v\n", cfg.History.MaxAge, err)
+		return
+	}
+	if maxAge == 0 {
+		fmt.Fprintf(os.Stderr, "warning: [history] max_age %q is zero; skipping prune\n", cfg.History.MaxAge)
+		return
+	}
+	n, err := store.Prune(ctx, key, time.Now().UTC().Add(-maxAge))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: auto-prune failed: %v\n", err)
+		return
+	}
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "Auto-pruned %d history rows older than %s\n", n, cfg.History.MaxAge)
+	}
 }

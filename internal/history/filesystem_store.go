@@ -29,9 +29,7 @@ func NewFilesystemStore(root string) (*FilesystemStore, error) {
 	return &FilesystemStore{root: root}, nil
 }
 
-// Bundle is the on-disk JSON shape. Field names and nullability mirror
-// Rust's dry_run_core::history::Bundle so cross-implementation sync stays
-// byte-compatible.
+// Bundle is the on-disk JSON shape.
 type Bundle struct {
 	Schema   *schema.SchemaSnapshot                   `json:"schema"`
 	Planner  *schema.PlannerStatsSnapshot             `json:"planner"`

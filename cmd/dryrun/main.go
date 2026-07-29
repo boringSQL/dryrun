@@ -398,8 +398,11 @@ func snapshotCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return runSync(cmd.Context(), store, dst, false, fullScope(), os.Stdout)
+				if err := runSync(cmd.Context(), store, dst, false, fullScope(), os.Stdout); err != nil {
+					return err
+				}
 			}
+			maybeAutoPrune(cmd.Context(), store, key)
 			return nil
 		},
 	}

@@ -21,6 +21,13 @@ type (
 		Services     *ServicesConfig          `toml:"services"`
 		RequireMasks *bool                    `toml:"require_masks"`
 		Remotes      []RemoteConfig           `toml:"remote"`
+		History      *HistoryConfig           `toml:"history"`
+	}
+
+	// [history] block; retention for captured activity/query series
+	HistoryConfig struct {
+		MaxAge    string `toml:"max_age"`
+		AutoPrune bool   `toml:"auto_prune"`
 	}
 
 	// [[remote]] block; Ref is the registry base, e.g. ghcr.io/org/dryrun
