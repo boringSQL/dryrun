@@ -44,6 +44,7 @@ type (
 	ActivityStatsSnapshot = snapshot.ActivityStatsSnapshot
 	QueryStatsEntry       = snapshot.QueryStatsEntry
 	QueryStatsMember      = snapshot.QueryStatsMember
+	QueryStatsInfo        = snapshot.QueryStatsInfo
 	QueryStatsSnapshot    = snapshot.QueryStatsSnapshot
 	MaskingInfo           = snapshot.MaskingInfo
 	AnnotatedSchema       = snapshot.AnnotatedSchema

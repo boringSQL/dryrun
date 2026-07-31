@@ -96,8 +96,8 @@ func CaptureActivityStats(ctx context.Context, pool Querier, schemaRefHash, sour
 
 // Per-node pg_stat_statements rollup, fingerprinted via qshape; ErrQueryStatsUnavailable if the extension isn't installed
 func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source string) (*QueryStatsSnapshot, error) {
-	var installed bool
-	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).Scan(&installed); err != nil {
+	var installed, hasInfoView bool
+	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).Scan(&installed, &hasInfoView); err != nil {
 		return nil, fmt.Errorf("check pg_stat_statements: %w", err)
 	}
 	if !installed {
@@ -107,6 +107,13 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	node, err := CaptureNodeIdentity(ctx, pool, source)
 	if err != nil {
 		return nil, err
+	}
+	// bracket the top-500 fetch: pgss isn't MVCC-consistent with its info view,
+	// so only differing before/after values prove a reset mid-capture. Gated on
+	// the probe above: capture runs in one tx, and reading a missing view aborts it.
+	var infoBefore *QueryStatsInfo
+	if hasInfoView {
+		infoBefore = fetchPgssInfo(ctx, pool)
 	}
 	queries, err := fetchQueryStats(ctx, pool)
 	if err != nil {
@@ -144,10 +151,18 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		}
 	}
 
+	var infoAfter *QueryStatsInfo
+	if hasInfoView {
+		infoAfter = fetchPgssInfo(ctx, pool)
+	}
 	snap := &QueryStatsSnapshot{
 		FormatVersion: FormatVersion,
 		SchemaRefHash: schemaRefHash,
 		QshapeVersion: qshape.GroupingVersion,
+		RawRows:       len(queries),
+		PgssMax:       fetchPgssMax(ctx, pool),
+		InfoBefore:    infoBefore,
+		InfoAfter:     infoAfter,
 		Node:          *node,
 		Queries:       entries,
 	}
@@ -220,6 +235,25 @@ func fetchPlannerColumnStats(ctx context.Context, pool Querier) ([]ColumnStatsEn
 		)
 		return e, err
 	})
+}
+
+// pg_stat_statements_info, PG14+. nil on PG13 or any read failure: absent is
+// not zero, or every PG13 row would claim a reset epoch it never had.
+func fetchPgssInfo(ctx context.Context, pool Querier) *QueryStatsInfo {
+	var info QueryStatsInfo
+	if err := pool.QueryRow(ctx, q("fetch-pgss-info")).Scan(&info.StatsReset, &info.Dealloc); err != nil {
+		return nil
+	}
+	return &info
+}
+
+// nil when the GUC has no row or the role can't read it
+func fetchPgssMax(ctx context.Context, pool Querier) *int {
+	var max int
+	if err := pool.QueryRow(ctx, q("fetch-pgss-max")).Scan(&max); err != nil {
+		return nil
+	}
+	return &max
 }
 
 func fetchQueryStats(ctx context.Context, pool Querier) ([]qshape.Query, error) {

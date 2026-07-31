@@ -512,14 +512,31 @@ type (
 		Rows            int64              `json:"rows,omitempty"`
 	}
 
+	// One pg_stat_statements_info read. The view is PG14+; on PG13 the whole
+	// struct is absent (nil), never zero — a zero would invent a reset epoch.
+	QueryStatsInfo struct {
+		StatsReset time.Time `json:"stats_reset"`
+		Dealloc    int64     `json:"dealloc"`
+	}
+
 	// Persisted per-node pg_stat_statements rollup, fingerprinted via qshape
 	QueryStatsSnapshot struct {
 		FormatVersion int    `json:"format_version"`
 		SchemaRefHash string `json:"schema_ref_hash"`
 		ContentHash   string `json:"content_hash"`
 		// qshape.GroupingVersion at capture; 0 for rows predating this field.
-		QshapeVersion int               `json:"qshape_version,omitempty"`
-		Node          NodeIdentity      `json:"node"`
-		Queries       []QueryStatsEntry `json:"queries"`
+		QshapeVersion int `json:"qshape_version,omitempty"`
+		// raw rows the top-500 fetch returned, pre-grouping; len(Queries) can't
+		// say by how much the capture missed.
+		RawRows int `json:"raw_rows,omitempty"`
+		// pg_stat_statements.max at capture — the number that explains a dealloc;
+		// nil when the role can't read it.
+		PgssMax *int `json:"pgss_max,omitempty"`
+		// info view read around the top-500 fetch; pgss isn't MVCC-consistent
+		// with it, so differing values mean the capture straddled a reset.
+		InfoBefore *QueryStatsInfo   `json:"info_before,omitempty"`
+		InfoAfter  *QueryStatsInfo   `json:"info_after,omitempty"`
+		Node       NodeIdentity      `json:"node"`
+		Queries    []QueryStatsEntry `json:"queries"`
 	}
 )
