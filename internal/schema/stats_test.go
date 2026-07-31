@@ -141,3 +141,71 @@ func TestCaptureNodeIdentity_PrimaryFalse(t *testing.T) {
 		t.Errorf("PgVersion empty")
 	}
 }
+
+// The capture side of the raw-row digest: every cluster qshape hands back must
+// arrive with its Members populated from the underlying pg_stat_statements
+// rows. If they were dropped — kept only as the aggregate totals, as the entry
+// carried before — ComputeQueryStatsContentHash would digest an empty row set
+// and every capture on the node would collapse to one content hash, silently
+// deduping the entire history into a single row.
+func TestCaptureQueryStats_PopulatesRawMembers(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	qs, err := CaptureQueryStats(ctx, pool, "fake-ddl-hash", "test-primary")
+	if err != nil {
+		if errors.Is(err, ErrQueryStatsUnavailable) {
+			t.Skip("pg_stat_statements not available on test DB")
+		}
+		t.Fatalf("query stats capture: %v", err)
+	}
+	if len(qs.Queries) == 0 {
+		t.Skip("no qualifying queries in pg_stat_statements on the test DB")
+	}
+
+	for i, e := range qs.Queries {
+		if len(e.Members) == 0 {
+			t.Errorf("Queries[%d] (%s) has no Members; the raw rows the digest needs were dropped",
+				i, e.Fingerprint)
+			continue
+		}
+		// members are the rows as Postgres reported them, so the cluster totals
+		// must be exactly their sum — a mismatch means the two views of the same
+		// capture have diverged
+		var calls, rows int64
+		for _, m := range e.Members {
+			calls += m.Calls
+			rows += m.Rows
+		}
+		if calls != e.Calls {
+			t.Errorf("Queries[%d]: member calls sum to %d, cluster reports %d", i, calls, e.Calls)
+		}
+		if rows != e.Rows {
+			t.Errorf("Queries[%d]: member rows sum to %d, cluster reports %d", i, rows, e.Rows)
+		}
+	}
+}
+
+// The stored ContentHash must be reproducible from the captured payload alone.
+// PutQueryStats trusts it for dedup and HTTPStore recomputes it at push time,
+// so a digest that depended on anything not in the snapshot would 422 on the
+// first push.
+func TestCaptureQueryStats_ContentHashRecomputes(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	qs, err := CaptureQueryStats(ctx, pool, "fake-ddl-hash", "test-primary")
+	if err != nil {
+		if errors.Is(err, ErrQueryStatsUnavailable) {
+			t.Skip("pg_stat_statements not available on test DB")
+		}
+		t.Fatalf("query stats capture: %v", err)
+	}
+
+	// recompute over the same payload, not a second live query: the counters
+	// move under us otherwise and the test would flap on any busy database
+	if got := ComputeQueryStatsContentHash(qs); got != qs.ContentHash {
+		t.Errorf("stored ContentHash %s does not recompute from the payload (got %s)",
+			qs.ContentHash, got)
+	}
+}

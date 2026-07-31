@@ -1,6 +1,9 @@
 package snapshot
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // Baseline snapshot used by hash sensitivity tests below.
 func baselineSnap() *SchemaSnapshot {
@@ -470,5 +473,269 @@ func TestPlannerContentHash_OmitsEmptyGUCs(t *testing.T) {
 	emptyGUCs := &PlannerStatsSnapshot{SchemaRefHash: "abc", GUCs: []GucSetting{}}
 	if ComputePlannerContentHash(noGUCs) != ComputePlannerContentHash(emptyGUCs) {
 		t.Error("an empty gucs slice changed the planner hash")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Query-stats digest: raw pg_stat_statements rows, not qshape's grouping.
+//
+// The digest is computed from QueryStatsEntry.Members — the (queryid, calls,
+// total_exec_time, rows) tuples exactly as Postgres reported them — flattened
+// out of their clusters and sorted by queryid. Everything qshape decides
+// (fingerprint, canonical text, which rows merge, the per-cluster totals that
+// follow from that) is deliberately excluded.
+//
+// The reason is that this digest is an identity, not a checksum: it is the
+// dedup key in query_stats, the have-set key in sync, and the blob digest
+// predict stores. If it moved every time qshape improved its normalizer, an
+// unchanged workload would re-push in full and the old digests would strand on
+// every remote that already held them.
+//
+// The tests below split into two halves that have to hold together: things
+// that MUST NOT move the digest (grouping, ordering, derived text) and things
+// that MUST (any number Postgres actually reported).
+// ---------------------------------------------------------------------------
+
+// Helper: a snapshot carrying exactly the given raw rows, all in one cluster.
+// The cluster's own fingerprint and totals are left deliberately wrong in some
+// callers below, to prove they are not consulted.
+func queryStatsWith(members ...QueryStatsMember) *QueryStatsSnapshot {
+	return &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Queries:       []QueryStatsEntry{{Fingerprint: "sha1:whatever", Members: members}},
+	}
+}
+
+// The property the whole change exists for. An improved qshape normalizer
+// collapses two shapes that used to be separate — an ORM alias variant, say —
+// so the same two pg_stat_statements rows arrive as one cluster instead of
+// two. Postgres reported identical numbers, so the capture is identical, so
+// the digest must be identical. Before this, the merge rewrote every digest in
+// the capture and dedup-busted the entire history.
+func TestQueryStatsContentHash_SurvivesRegrouping(t *testing.T) {
+	rowA := QueryStatsMember{QueryID: 100, Calls: 5, TotalExecTimeMs: 50, Rows: 5}
+	rowB := QueryStatsMember{QueryID: 200, Calls: 7, TotalExecTimeMs: 70, Rows: 7}
+
+	// before: two clusters, each with its own fingerprint and totals
+	split := &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Queries: []QueryStatsEntry{
+			{Fingerprint: "sha1:aaa", Members: []QueryStatsMember{rowA}, Calls: 5, TotalExecTimeMs: 50, Rows: 5},
+			{Fingerprint: "sha1:bbb", Members: []QueryStatsMember{rowB}, Calls: 7, TotalExecTimeMs: 70, Rows: 7},
+		},
+	}
+	// after: one cluster, new fingerprint, summed totals — same raw rows
+	merged := &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Queries: []QueryStatsEntry{
+			{Fingerprint: "sha1:ccc", Members: []QueryStatsMember{rowA, rowB}, Calls: 12, TotalExecTimeMs: 120, Rows: 12},
+		},
+	}
+
+	if ComputeQueryStatsContentHash(split) != ComputeQueryStatsContentHash(merged) {
+		t.Errorf("digest moved when clustering changed but the raw rows did not:\n split  = %s\n merged = %s",
+			ComputeQueryStatsContentHash(split), ComputeQueryStatsContentHash(merged))
+	}
+}
+
+// The mirror image: a normalizer that gets stricter and splits one cluster
+// into two must not move the digest either. Same argument, opposite direction —
+// worth pinning separately because a hash that folded on merge but not on
+// split would pass the test above and still be wrong.
+func TestQueryStatsContentHash_SurvivesSplitting(t *testing.T) {
+	rowA := QueryStatsMember{QueryID: 100, Calls: 5, TotalExecTimeMs: 50, Rows: 5}
+	rowB := QueryStatsMember{QueryID: 200, Calls: 7, TotalExecTimeMs: 70, Rows: 7}
+
+	merged := queryStatsWith(rowA, rowB)
+	split := &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Queries: []QueryStatsEntry{
+			{Fingerprint: "sha1:aaa", Members: []QueryStatsMember{rowA}},
+			{Fingerprint: "sha1:bbb", Members: []QueryStatsMember{rowB}},
+		},
+	}
+
+	if ComputeQueryStatsContentHash(merged) != ComputeQueryStatsContentHash(split) {
+		t.Error("digest moved when one cluster split into two carrying the same rows")
+	}
+}
+
+// Member order inside a cluster is qshape's business and, before qshape v0.3.0,
+// followed pg_stat_statements' untied ORDER BY — equal-timing rows could
+// permute between captures. The digest sorts by queryid precisely so that a
+// permutation is not a change. qshape now sorts too, so this is belt and
+// braces: it keeps the guarantee local rather than borrowed from a dependency.
+func TestQueryStatsContentHash_IgnoresMemberOrder(t *testing.T) {
+	rowA := QueryStatsMember{QueryID: 100, Calls: 5, TotalExecTimeMs: 50}
+	rowB := QueryStatsMember{QueryID: 200, Calls: 7, TotalExecTimeMs: 70}
+
+	if ComputeQueryStatsContentHash(queryStatsWith(rowA, rowB)) !=
+		ComputeQueryStatsContentHash(queryStatsWith(rowB, rowA)) {
+		t.Error("digest moved on member order alone")
+	}
+}
+
+// Cluster order is equally arbitrary: qshape sorts clusters by total exec time,
+// so a workload where two shapes swap places between captures reorders the
+// Queries slice without changing a single number. Flattening before the sort is
+// what makes that invisible.
+func TestQueryStatsContentHash_IgnoresClusterOrder(t *testing.T) {
+	rowA := QueryStatsMember{QueryID: 100, Calls: 5, TotalExecTimeMs: 50}
+	rowB := QueryStatsMember{QueryID: 200, Calls: 7, TotalExecTimeMs: 70}
+
+	first := &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Queries: []QueryStatsEntry{
+			{Fingerprint: "sha1:aaa", Members: []QueryStatsMember{rowA}},
+			{Fingerprint: "sha1:bbb", Members: []QueryStatsMember{rowB}},
+		},
+	}
+	second := &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Queries: []QueryStatsEntry{
+			{Fingerprint: "sha1:bbb", Members: []QueryStatsMember{rowB}},
+			{Fingerprint: "sha1:aaa", Members: []QueryStatsMember{rowA}},
+		},
+	}
+
+	if ComputeQueryStatsContentHash(first) != ComputeQueryStatsContentHash(second) {
+		t.Error("digest moved when clusters were listed in a different order")
+	}
+}
+
+// Counters are the payload. Each one has to bust the digest on its own,
+// otherwise an active workload would dedup into a single history row forever
+// and the whole point of repeated capture disappears. Tested field by field
+// because a digest that tracked calls but silently dropped rows would look
+// healthy on a busy database and lose data on a read-heavy one.
+func TestQueryStatsContentHash_TracksEachCounter(t *testing.T) {
+	base := QueryStatsMember{QueryID: 100, Calls: 5, TotalExecTimeMs: 50, Rows: 5}
+	baseHash := ComputeQueryStatsContentHash(queryStatsWith(base))
+
+	changed := map[string]QueryStatsMember{
+		"calls":           {QueryID: 100, Calls: 6, TotalExecTimeMs: 50, Rows: 5},
+		"total_exec_time": {QueryID: 100, Calls: 5, TotalExecTimeMs: 51, Rows: 5},
+		"rows":            {QueryID: 100, Calls: 5, TotalExecTimeMs: 50, Rows: 6},
+		"queryid":         {QueryID: 101, Calls: 5, TotalExecTimeMs: 50, Rows: 5},
+	}
+	for field, m := range changed {
+		if ComputeQueryStatsContentHash(queryStatsWith(m)) == baseHash {
+			t.Errorf("digest ignored a change to %s", field)
+		}
+	}
+}
+
+// Membership changes are real changes: a query entering or leaving the top 500
+// alters what the capture observed, even if every surviving row is untouched.
+// Dedup must not swallow that, or the capture where a new hot query appeared
+// would never be written.
+func TestQueryStatsContentHash_TracksMembershipChange(t *testing.T) {
+	rowA := QueryStatsMember{QueryID: 100, Calls: 5}
+	rowB := QueryStatsMember{QueryID: 200, Calls: 7}
+
+	one := ComputeQueryStatsContentHash(queryStatsWith(rowA))
+	two := ComputeQueryStatsContentHash(queryStatsWith(rowA, rowB))
+	if one == two {
+		t.Error("digest ignored a row appearing in the capture")
+	}
+}
+
+// Two rows can legitimately share a queryid within one capture only in odd
+// cases, but the sort must stay total regardless, or Go's unstable sort could
+// order them differently between two runs over identical data. Calls is the
+// tiebreak; this pins that a same-queryid pair hashes deterministically.
+func TestQueryStatsContentHash_DeterministicOnDuplicateQueryIDs(t *testing.T) {
+	a := QueryStatsMember{QueryID: 100, Calls: 5}
+	b := QueryStatsMember{QueryID: 100, Calls: 9}
+
+	if ComputeQueryStatsContentHash(queryStatsWith(a, b)) !=
+		ComputeQueryStatsContentHash(queryStatsWith(b, a)) {
+		t.Error("digest is order-dependent when two rows share a queryid")
+	}
+}
+
+// schema_ref_hash binds a capture to the DDL it was taken against. The same
+// workload observed before and after a migration is not the same fact, and
+// GetAnnotated joins on this, so it belongs in the digest.
+func TestQueryStatsContentHash_DifferentiatesSchemaRef(t *testing.T) {
+	q := queryStatsWith(QueryStatsMember{QueryID: 100, Calls: 5})
+	b := *q
+	b.SchemaRefHash = "different-ddl"
+
+	if ComputeQueryStatsContentHash(q) == ComputeQueryStatsContentHash(&b) {
+		t.Error("digest ignored the bound schema_ref_hash")
+	}
+}
+
+// An idle node with no qualifying queries still produces a capture, and two
+// such captures must agree — this is the case where dedup is supposed to fire.
+// nil and empty members are the same fact and must not hash apart.
+func TestQueryStatsContentHash_EmptyCaptureIsStable(t *testing.T) {
+	nilMembers := &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Queries:       []QueryStatsEntry{{Fingerprint: "sha1:aaa"}},
+	}
+	emptyMembers := &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Queries:       []QueryStatsEntry{{Fingerprint: "sha1:aaa", Members: []QueryStatsMember{}}},
+	}
+	noQueries := &QueryStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+	}
+
+	if ComputeQueryStatsContentHash(nilMembers) != ComputeQueryStatsContentHash(emptyMembers) {
+		t.Error("nil and empty member slices hashed differently")
+	}
+	if ComputeQueryStatsContentHash(nilMembers) != ComputeQueryStatsContentHash(noQueries) {
+		t.Error("a cluster with no members did not hash as an empty capture")
+	}
+}
+
+// The wire contract. HTTPStore.Put does not push the stored ContentHash — it
+// recomputes the digest from the blob it is about to serialize, because predict
+// re-derives the hash from the posted body and 422s on a mismatch. That only
+// works if every input to the digest survives a JSON round trip: the moment the
+// raw rows are dropped from the payload (json:"-", or computed capture-side and
+// discarded) the remote sees a different capture than the one we hashed.
+//
+// This is the test that would have caught keeping Members out of the payload,
+// which was the tempting version of this change.
+func TestQueryStatsContentHash_ReproducibleFromPayload(t *testing.T) {
+	original := &QueryStatsSnapshot{
+		FormatVersion: FormatVersion,
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Queries: []QueryStatsEntry{{
+			Fingerprint:     "sha1:abc",
+			Canonical:       "SELECT id FROM users WHERE id = $1",
+			Members:         []QueryStatsMember{{QueryID: 100, Calls: 5, TotalExecTimeMs: 50, Rows: 5}},
+			Calls:           5,
+			TotalExecTimeMs: 50,
+			MeanExecTimeMs:  10,
+			Rows:            5,
+		}},
+	}
+	want := ComputeQueryStatsContentHash(original)
+
+	body, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var received QueryStatsSnapshot
+	if err := json.Unmarshal(body, &received); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got := ComputeQueryStatsContentHash(&received); got != want {
+		t.Errorf("digest not reproducible from the posted body:\n  local  %s\n  remote %s", want, got)
 	}
 }
