@@ -20,7 +20,8 @@ import (
 
 // PRAGMA user_version; 1-2 were the rust codebase, need to restart from 3.
 // Purely additive tables (CREATE TABLE IF NOT EXISTS, no rename/drop) don't bump this.
-const HistorySchemaVersion = 3
+// 4: UNIQUE(project_id, database_id, content_hash) on query_stats
+const HistorySchemaVersion = 4
 
 type (
 	Compat int
@@ -188,6 +189,14 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate() error {
+	// A newer dryrun may have dropped constraints this build still creates, so
+	// touching its schema either fails the open or silently re-imposes them.
+	// Open() classifies it CompatNewer right after this returns.
+	var userVersion int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&userVersion); err == nil && userVersion > HistorySchemaVersion {
+		return nil
+	}
+
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS snapshots (
 			id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -270,6 +279,31 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_snapshots_db_url_hash
 		ON snapshots(db_url_hash, timestamp DESC)`); err != nil {
 		return fmt.Errorf("migration failed (idx_snapshots_db_url_hash): %w", err)
+	}
+
+	// v3 -> v4: pre-constraint DBs can hold duplicate query_stats hashes (an idle
+	// node captured twice). Keep the first observation, matching what
+	// INSERT OR IGNORE does from here on. NULL-keyed rows are skipped: a unique
+	// index treats their keys as distinct, so deduping them would over-delete.
+	if userVersion < HistorySchemaVersion {
+		res, err := s.db.Exec(`DELETE FROM query_stats WHERE id IN (
+			  SELECT id FROM (
+			    SELECT id, ROW_NUMBER() OVER (
+			           PARTITION BY project_id, database_id, content_hash
+			           ORDER BY timestamp ASC, id ASC) AS rn
+			      FROM query_stats
+			     WHERE project_id IS NOT NULL AND database_id IS NOT NULL)
+			   WHERE rn > 1)`)
+		if err != nil {
+			return fmt.Errorf("migration failed (query_stats dedupe): %w", err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			slog.Info("history migration removed duplicate query stats", "rows", n)
+		}
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS query_stats_by_content_key
+		ON query_stats(project_id, database_id, content_hash)`); err != nil {
+		return fmt.Errorf("migration failed (query_stats_by_content_key): %w", err)
 	}
 	return nil
 }

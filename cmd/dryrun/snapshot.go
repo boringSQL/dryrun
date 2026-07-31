@@ -187,13 +187,18 @@ func runSnapshotQueryStats(ctx context.Context, cap initCapturer, store initWrit
 		}
 		return fmt.Errorf("capture query stats: %w", err)
 	}
-	if _, err := store.PutQueryStats(ctx, key, qs); err != nil {
+	outcome, err := store.PutQueryStats(ctx, key, qs)
+	if err != nil {
 		return fmt.Errorf("save query stats: %w", err)
 	}
 
 	bound := schemaRef
 	if bound == "" {
 		bound = "(orphan)"
+	}
+	if outcome == history.PutDeduped {
+		fmt.Fprintf(os.Stderr, "Query stats unchanged: label=%s (schema=%s)\n", opts.Label, bound)
+		return nil
 	}
 	fmt.Fprintf(os.Stderr, "Query stats captured: label=%s, %d shapes (schema=%s)\n",
 		opts.Label, len(qs.Queries), bound)

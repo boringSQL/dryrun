@@ -61,15 +61,16 @@ func (s *Store) PutActivity(ctx context.Context, key SnapshotKey, a *schema.Acti
 	return PutInserted, nil
 }
 
-// query stats are per-node and append-only, same as activity
+// idempotent on (project_id, database_id, content_hash); an idle node
+// re-captured byte-identically collapses to a no-op
 func (s *Store) PutQueryStats(ctx context.Context, key SnapshotKey, q *schema.QueryStatsSnapshot) (PutOutcome, error) {
 	data, err := json.Marshal(q)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot serialize query stats: %w", err)
 	}
 
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO query_stats
+	res, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO query_stats
 		   (project_id, database_id, schema_ref_hash, content_hash, node_source, timestamp, payload_json)
 		   VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		string(key.ProjectID), string(key.DatabaseID),
@@ -78,6 +79,11 @@ func (s *Store) PutQueryStats(ctx context.Context, key SnapshotKey, q *schema.Qu
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save query stats: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		slog.Debug("query stats unchanged, skipping put", "hash", q.ContentHash)
+		return PutDeduped, nil
 	}
 	slog.Info("query stats put", "hash", q.ContentHash, "node", q.Node.Source)
 	return PutInserted, nil

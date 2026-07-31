@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -159,8 +160,8 @@ func TestPutActivity_AppendsEveryCall(t *testing.T) {
 	}
 }
 
-// PutQueryStats is append-only, same as activity — every call inserts a row
-// even when content_hash repeats.
+// PutQueryStats appends every distinct capture; identical content hashes
+// dedup via the UNIQUE constraint.
 func TestPutQueryStats_AppendsEveryCall(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -168,7 +169,7 @@ func TestPutQueryStats_AppendsEveryCall(t *testing.T) {
 
 	base := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 3; i++ {
-		q := queryStatsFixture("sref-A", "qch-1", "primary")
+		q := queryStatsFixture("sref-A", fmt.Sprintf("qch-%d", i), "primary")
 		q.Node.Timestamp = base.Add(time.Duration(i) * time.Minute)
 		if _, err := store.PutQueryStats(ctx, k, q); err != nil {
 			t.Fatalf("put query stats #%d: %v", i, err)
