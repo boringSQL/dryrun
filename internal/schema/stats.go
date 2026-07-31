@@ -147,6 +147,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	snap := &QueryStatsSnapshot{
 		FormatVersion: FormatVersion,
 		SchemaRefHash: schemaRefHash,
+		QshapeVersion: qshape.GroupingVersion,
 		Node:          *node,
 		Queries:       entries,
 	}

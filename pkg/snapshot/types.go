@@ -514,9 +514,11 @@ type (
 
 	// Persisted per-node pg_stat_statements rollup, fingerprinted via qshape
 	QueryStatsSnapshot struct {
-		FormatVersion int               `json:"format_version"`
-		SchemaRefHash string            `json:"schema_ref_hash"`
-		ContentHash   string            `json:"content_hash"`
+		FormatVersion int    `json:"format_version"`
+		SchemaRefHash string `json:"schema_ref_hash"`
+		ContentHash   string `json:"content_hash"`
+		// qshape.GroupingVersion at capture; 0 for rows predating this field.
+		QshapeVersion int               `json:"qshape_version,omitempty"`
 		Node          NodeIdentity      `json:"node"`
 		Queries       []QueryStatsEntry `json:"queries"`
 	}
