@@ -43,6 +43,7 @@ type (
 	PlannerStatsSnapshot  = snapshot.PlannerStatsSnapshot
 	ActivityStatsSnapshot = snapshot.ActivityStatsSnapshot
 	QueryStatsEntry       = snapshot.QueryStatsEntry
+	QueryStatsMember      = snapshot.QueryStatsMember
 	QueryStatsSnapshot    = snapshot.QueryStatsSnapshot
 	MaskingInfo           = snapshot.MaskingInfo
 	AnnotatedSchema       = snapshot.AnnotatedSchema

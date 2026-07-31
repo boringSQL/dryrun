@@ -4,6 +4,8 @@ github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/boringsql/fixturize v0.7.0 h1:qvqYFKgKFsmG9U0OBzrqqBKmOT+eCOKpBO1qGfECoIs=
 github.com/boringsql/fixturize v0.7.0/go.mod h1:ACmNFJBq7a9yar4GYkNBh8sRWDBew/85BYdZCFfS6Vs=
+github.com/boringsql/qshape v0.3.0 h1:iWfeIxB+QzED/PRp2pux3FQP88dWIfvTf7cU/e1UHTI=
+github.com/boringsql/qshape v0.3.0/go.mod h1:Kz+WaTiP8nthD18z33IdgIrdCr1YwJuf8OzGQDtZSXw=
 github.com/boringsql/queries v1.6.1 h1:J/vImXYdisC+tlQNYt45O6CG6RX/MiIDR8j5/k6rQGk=
 github.com/boringsql/queries v1.6.1/go.mod h1:zRQzwzZZ8e9o8PZWTKMxPqxTTg8hGvvinwitEBd0FCQ=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=

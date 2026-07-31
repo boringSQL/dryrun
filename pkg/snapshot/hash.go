@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -158,31 +159,25 @@ func ComputeActivityContentHash(a *ActivityStatsSnapshot) string {
 	return fmt.Sprintf("%x", h)
 }
 
-// Canonical/MeanExecTimeMs are derived; excluded so a qshape upgrade doesn't move the digest.
-type queryStatsStructural struct {
-	Fingerprint     string  `json:"fingerprint"`
-	QueryIDs        []int64 `json:"query_ids,omitempty"`
-	Calls           int64   `json:"calls"`
-	TotalExecTimeMs float64 `json:"total_exec_time_ms,omitempty"`
-	Rows            int64   `json:"rows,omitempty"`
-}
-
-// Per-node query stats; node.source included so two nodes never collide
+// Per-node query stats; node.source included so two nodes never collide.
+// Digested from raw pg_stat_statements rows ordered by queryid, so a qshape
+// upgrade doesn't move the digest.
 func ComputeQueryStatsContentHash(q *QueryStatsSnapshot) string {
-	queries := make([]queryStatsStructural, len(q.Queries))
-	for i, e := range q.Queries {
-		queries[i] = queryStatsStructural{
-			Fingerprint:     e.Fingerprint,
-			QueryIDs:        e.QueryIDs,
-			Calls:           e.Calls,
-			TotalExecTimeMs: e.TotalExecTimeMs,
-			Rows:            e.Rows,
-		}
+	var rows []QueryStatsMember
+	for _, e := range q.Queries {
+		rows = append(rows, e.Members...)
 	}
+	slices.SortFunc(rows, func(a, b QueryStatsMember) int {
+		if a.QueryID != b.QueryID {
+			return cmp.Compare(a.QueryID, b.QueryID)
+		}
+		return cmp.Compare(a.Calls, b.Calls)
+	})
+
 	canonical := map[string]any{
 		"schema_ref_hash": q.SchemaRefHash,
 		"node_source":     q.Node.Source,
-		"queries":         queries,
+		"queries":         rows,
 	}
 	b, _ := json.Marshal(canonical)
 	h := sha256.Sum256(b)

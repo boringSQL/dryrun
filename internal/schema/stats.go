@@ -124,14 +124,19 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 
 	entries := make([]QueryStatsEntry, len(clusters))
 	for i, c := range clusters {
-		ids := make([]int64, len(c.Members))
+		members := make([]QueryStatsMember, len(c.Members))
 		for j, m := range c.Members {
-			ids[j] = m.QueryID
+			members[j] = QueryStatsMember{
+				QueryID:         m.QueryID,
+				Calls:           m.Calls,
+				TotalExecTimeMs: m.TotalExecTimeMs,
+				Rows:            m.Rows,
+			}
 		}
 		entries[i] = QueryStatsEntry{
 			Fingerprint:     c.Fingerprint,
 			Canonical:       c.Canonical,
-			QueryIDs:        ids,
+			Members:         members,
 			Calls:           c.TotalCalls,
 			TotalExecTimeMs: c.TotalExecTimeMs,
 			MeanExecTimeMs:  c.MeanExecTimeMs,

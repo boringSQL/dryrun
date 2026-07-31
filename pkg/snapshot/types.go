@@ -493,16 +493,23 @@ type (
 		Indexes       []IndexActivityEntry `json:"indexes"`
 	}
 
-	// One qshape cluster: an ORM-collapsed query shape with per-node pg_stat_statements rollup
-	QueryStatsEntry struct {
-		Fingerprint string `json:"fingerprint"`
-		Canonical   string `json:"canonical"`
-		// pg_stat_statements.queryid values collapsed into this fingerprint
-		QueryIDs        []int64 `json:"query_ids,omitempty"`
+	// One raw pg_stat_statements row, before qshape grouping; hashed from these.
+	QueryStatsMember struct {
+		QueryID         int64   `json:"queryid"`
 		Calls           int64   `json:"calls"`
 		TotalExecTimeMs float64 `json:"total_exec_time_ms,omitempty"`
-		MeanExecTimeMs  float64 `json:"mean_exec_time_ms,omitempty"`
 		Rows            int64   `json:"rows,omitempty"`
+	}
+
+	// One qshape cluster: an ORM-collapsed query shape with per-node pg_stat_statements rollup
+	QueryStatsEntry struct {
+		Fingerprint     string             `json:"fingerprint"`
+		Canonical       string             `json:"canonical"`
+		Members         []QueryStatsMember `json:"members,omitempty"`
+		Calls           int64              `json:"calls"`
+		TotalExecTimeMs float64            `json:"total_exec_time_ms,omitempty"`
+		MeanExecTimeMs  float64            `json:"mean_exec_time_ms,omitempty"`
+		Rows            int64              `json:"rows,omitempty"`
 	}
 
 	// Persisted per-node pg_stat_statements rollup, fingerprinted via qshape

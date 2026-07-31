@@ -309,7 +309,11 @@ func TestQueryStatsContentHash_DifferentiatesNodes(t *testing.T) {
 	q := &QueryStatsSnapshot{
 		SchemaRefHash: "sref",
 		Node:          NodeIdentity{Source: "replica-1"},
-		Queries:       []QueryStatsEntry{{Fingerprint: "sha1:abc", Calls: 5}},
+		Queries: []QueryStatsEntry{{
+			Fingerprint: "sha1:abc",
+			Members:     []QueryStatsMember{{QueryID: 123, Calls: 5}},
+			Calls:       5,
+		}},
 	}
 	b := *q
 	b.Node = NodeIdentity{Source: "replica-2"}
@@ -319,17 +323,16 @@ func TestQueryStatsContentHash_DifferentiatesNodes(t *testing.T) {
 	}
 }
 
-// Canonical and MeanExecTimeMs are derived values, not raw facts, so they must not move
-// the digest — otherwise a qshape normalizer upgrade or float rounding would falsely
-// dedup-bust an unchanged workload.
+// Derived fields (fingerprint, canonical, cluster totals) must not move the digest.
 func TestQueryStatsContentHash_IgnoresDerivedFields(t *testing.T) {
+	members := []QueryStatsMember{{QueryID: 123, Calls: 10, TotalExecTimeMs: 100, Rows: 10}}
 	q := &QueryStatsSnapshot{
 		SchemaRefHash: "sref",
 		Node:          NodeIdentity{Source: "primary"},
 		Queries: []QueryStatsEntry{{
 			Fingerprint:     "sha1:abc",
 			Canonical:       "SELECT id FROM users WHERE id = $1",
-			QueryIDs:        []int64{123},
+			Members:         members,
 			Calls:           10,
 			TotalExecTimeMs: 100,
 			MeanExecTimeMs:  10,
@@ -338,9 +341,9 @@ func TestQueryStatsContentHash_IgnoresDerivedFields(t *testing.T) {
 	}
 	b := *q
 	b.Queries = []QueryStatsEntry{{
-		Fingerprint:     "sha1:abc",
+		Fingerprint:     "sha1:zzz",
 		Canonical:       "SELECT u.id FROM users u WHERE u.id = $1",
-		QueryIDs:        []int64{123},
+		Members:         members,
 		Calls:           10,
 		TotalExecTimeMs: 100,
 		MeanExecTimeMs:  10.0000001,
