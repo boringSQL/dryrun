@@ -52,7 +52,7 @@ func (s *Store) PutActivity(ctx context.Context, key SnapshotKey, a *schema.Acti
 		   VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		string(key.ProjectID), string(key.DatabaseID),
 		a.SchemaRefHash, a.ContentHash, a.Node.Source,
-		a.Node.Timestamp.Format(time.RFC3339), string(data),
+		a.Node.Timestamp.UTC().Format(time.RFC3339), string(data),
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save activity stats: %w", err)
@@ -74,7 +74,7 @@ func (s *Store) PutQueryStats(ctx context.Context, key SnapshotKey, q *schema.Qu
 		   VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		string(key.ProjectID), string(key.DatabaseID),
 		q.SchemaRefHash, q.ContentHash, q.Node.Source,
-		q.Node.Timestamp.Format(time.RFC3339), string(data),
+		q.Node.Timestamp.UTC().Format(time.RFC3339), string(data),
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save query stats: %w", err)
