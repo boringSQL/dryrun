@@ -3,52 +3,9 @@ package schema
 import (
 	"strings"
 	"testing"
-
-	"github.com/boringsql/qshape"
 )
 
 func strPtr(s string) *string { return &s }
-
-// One nested row per fingerprint is the common case; two rows of the same shape
-// must roll up rather than overwrite, or the caller's subtraction under-counts.
-func TestGroupNestedRollsUpByFingerprint(t *testing.T) {
-	nested := []qshape.Query{
-		{QueryID: 1, Calls: 10, Raw: "SELECT id FROM audit_log WHERE id = $1", TotalExecTimeMs: 100, Rows: 10},
-		{QueryID: 2, Calls: 5, Raw: "SELECT id FROM audit_log WHERE id = $2", TotalExecTimeMs: 50, Rows: 5},
-		{QueryID: 3, Calls: 1, Raw: "SELECT name FROM other WHERE id = $1", TotalExecTimeMs: 7, Rows: 1},
-	}
-	got, err := groupNested(nested)
-	if err != nil {
-		t.Fatalf("groupNested: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("want 2 fingerprints, got %d: %+v", len(got), got)
-	}
-
-	var audit nestedRollup
-	found := false
-	for _, r := range got {
-		if r.calls == 15 {
-			audit, found = r, true
-		}
-	}
-	if !found {
-		t.Fatalf("the two audit_log rows did not roll up into one entry: %+v", got)
-	}
-	if audit.execTimeMs != 150 {
-		t.Errorf("exec time: want 150, got %v", audit.execTimeMs)
-	}
-}
-
-func TestGroupNestedEmptyIsNil(t *testing.T) {
-	got, err := groupNested(nil)
-	if err != nil {
-		t.Fatalf("groupNested: %v", err)
-	}
-	if got != nil {
-		t.Errorf("want nil for no nested rows, got %+v", got)
-	}
-}
 
 func TestCollectIdentifiersSplitsOnNonWordBytes(t *testing.T) {
 	got := map[string]struct{}{}
@@ -121,7 +78,37 @@ func TestUnattributedRequiresTrackTop(t *testing.T) {
 		t.Fatal("want an index when track was captured")
 	}
 	if ix.Unattributed("hidden_table", 100_000) {
-		t.Error("track = 'all' records nested statements, so an unexplained table is not a pgss blind spot")
+		t.Error("an unfiltered track = 'all' capture records nested statements, so an unexplained table is not a pgss blind spot")
+	}
+}
+
+// A toplevel-filtered capture excludes nested statements at fetch time, so
+// track = 'all' no longer rescues the blind spot: the flag fires as under
+// track = 'top'.
+func TestUnattributedFiresWhenToplevelFiltered(t *testing.T) {
+	a := annotatedWith(strPtr("all"), "SELECT 1 FROM visible_table")
+	a.QueryStats[0].ToplevelOnly = true
+	ix := BuildQueryRefIndex(a)
+	if ix == nil {
+		t.Fatal("want an index when track was captured")
+	}
+	if !ix.Unattributed("hidden_table", 100_000) {
+		t.Error("a filtered capture holds top-level statements only; nested work is invisible regardless of track")
+	}
+	// nil track with the filter set is still top-level-only.
+	a.QueryStats[0].PgssTrack = nil
+	if !BuildQueryRefIndex(a).Unattributed("hidden_table", 100_000) {
+		t.Error("the filter, not the track GUC, decides what the capture can see")
+	}
+}
+
+// track = 'none' records nothing, so an unreferenced table proves no blind
+// spot — even on a node new enough to carry the toplevel marker.
+func TestUnattributedSuppressedWhenTrackNone(t *testing.T) {
+	a := annotatedWith(strPtr("none"), "SELECT 1 FROM visible_table")
+	a.QueryStats[0].ToplevelOnly = true
+	if BuildQueryRefIndex(a).Unattributed("hidden_table", 100_000) {
+		t.Error("a node that records nothing is not evidence of the function/trigger blind spot")
 	}
 }
 

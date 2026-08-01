@@ -184,6 +184,20 @@ func TestTrackAllWordingFollowsTheNestedSplit(t *testing.T) {
 	if !strings.Contains(c, "no top-level split") {
 		t.Errorf("say the split is absent: %s", c)
 	}
+
+	// A filtered capture states the new behaviour outright: no double count,
+	// but nested work is invisible even under track = 'all'.
+	filtered := snap("primary", now.Add(-100*time.Hour), now)
+	filtered.PgssTrack = trackPtr("all")
+	filtered.ToplevelOnly = true
+	filtered.Queries = []schema.QueryStatsEntry{{TotalExecTimeMs: 10}}
+	c = trackAllCaveat("primary", filtered)
+	if !strings.Contains(c, "excluded at capture") {
+		t.Errorf("a filtered capture must say nested rows were excluded at capture: %s", c)
+	}
+	if strings.Contains(c, "no top-level split") {
+		t.Errorf("the filter is positive evidence, not an absent split: %s", c)
+	}
 }
 
 // Only the immediately-previous capture is compared, and each moved setting
@@ -211,6 +225,49 @@ func TestChangeCaveatsReportMovedSettings(t *testing.T) {
 		if !strings.Contains(c, "previous capture") {
 			t.Errorf("caveat overpromises its range: %s", c)
 		}
+	}
+}
+
+// A top->all flip between two top-level-only captures moves nothing: 'top' is
+// top-level by pgss itself, a filtered 'all' by the fetch. The caveat must
+// stay silent; it still fires when a flip involves 'none' or an unfiltered
+// 'all'.
+func TestChangeCaveatsSkipsFilteredTrackFlip(t *testing.T) {
+	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
+	from := snap("primary", now.Add(-200*time.Hour), now.Add(-time.Hour))
+	to := snap("primary", now.Add(-200*time.Hour), now)
+	from.PgssTrack, to.PgssTrack = trackPtr("top"), trackPtr("all")
+	from.ToplevelOnly, to.ToplevelOnly = true, true
+
+	if got := changeCaveats("primary", from, to); len(got) != 0 {
+		t.Errorf("a top->all flip between filtered captures changes no recorded set, got %#v", got)
+	}
+
+	// Involving 'none' flips recording on/off and must still warn.
+	to.PgssTrack = trackPtr("none")
+	if got := changeCaveats("primary", from, to); len(matching(got, "track changed")) != 1 {
+		t.Errorf("a top->none flip must warn, got %#v", got)
+	}
+}
+
+// The first filtered capture after a pre-filter one drops nested rows
+// one-time under track = 'all'; under 'top' both eras are top-level-only and
+// the transition is silent.
+func TestChangeCaveatsMarksTheFilterTransition(t *testing.T) {
+	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
+	from := snap("primary", now.Add(-200*time.Hour), now.Add(-time.Hour))
+	to := snap("primary", now.Add(-200*time.Hour), now)
+	from.PgssTrack, to.PgssTrack = trackPtr("all"), trackPtr("all")
+	to.ToplevelOnly = true
+
+	got := changeCaveats("primary", from, to)
+	if len(matching(got, "toplevel filter")) != 1 {
+		t.Fatalf("the filter transition must warn under track = 'all', got %#v", got)
+	}
+
+	from.PgssTrack, to.PgssTrack = trackPtr("top"), trackPtr("top")
+	if got := changeCaveats("primary", from, to); len(got) != 0 {
+		t.Errorf("under track = 'top' the transition changes nothing, got %#v", got)
 	}
 }
 

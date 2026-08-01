@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/boringsql/qshape"
@@ -116,7 +115,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	if hasInfoView {
 		infoBefore = fetchPgssInfo(ctx, pool)
 	}
-	queries, nested, err := fetchQueryStats(ctx, pool, hasToplevel)
+	queries, err := fetchQueryStats(ctx, pool, hasToplevel)
 	if err != nil {
 		// role/session search_path can differ from the earlier to_regclass check
 		var pgErr *pgconn.PgError
@@ -128,10 +127,6 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	clusters, err := qshape.Group(queries)
 	if err != nil {
 		return nil, fmt.Errorf("group query stats: %w", err)
-	}
-	nestedByFp, err := groupNested(nested)
-	if err != nil {
-		return nil, err
 	}
 
 	entries := make([]QueryStatsEntry, len(clusters))
@@ -154,10 +149,6 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 			MeanExecTimeMs:  c.MeanExecTimeMs,
 			Rows:            c.Rows,
 		}
-		if n, ok := nestedByFp[c.Fingerprint]; ok {
-			entries[i].NestedCalls = min(n.calls, c.TotalCalls)
-			entries[i].NestedExecTimeMs = math.Min(n.execTimeMs, c.TotalExecTimeMs)
-		}
 	}
 
 	var infoAfter *QueryStatsInfo
@@ -173,6 +164,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		PgssTrack:     fetchPgssTrack(ctx, pool),
 		InfoBefore:    infoBefore,
 		InfoAfter:     infoAfter,
+		ToplevelOnly:  hasToplevel,
 		Node:          *node,
 		Queries:       entries,
 	}
@@ -274,71 +266,22 @@ func fetchPgssTrack(ctx context.Context, pool Querier) *string {
 	return &track
 }
 
-func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel bool) (all, nested []qshape.Query, err error) {
-	if !hasToplevel {
-		rows, err := pool.Query(ctx, q("fetch-query-stats"))
-		if err != nil {
-			return nil, nil, err
-		}
-		all, err = scanAll(rows, func(r pgx.Rows) (qshape.Query, error) {
-			var e qshape.Query
-			err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs, &e.MeanExecTimeMs, &e.Rows)
-			return e, err
-		})
-		return all, nil, err
+// The toplevel variant filters nested rows in SQL (pgss 1.9+); the plain one
+// is for a pgss without the column (PG13, or < 1.9 after pg_upgrade).
+func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel bool) ([]qshape.Query, error) {
+	name := "fetch-query-stats"
+	if hasToplevel {
+		name = "fetch-query-stats-toplevel"
 	}
-
-	rows, err := pool.Query(ctx, q("fetch-query-stats-toplevel"))
+	rows, err := pool.Query(ctx, q(name))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	type flagged struct {
-		query    qshape.Query
-		toplevel bool
-	}
-	scanned, err := scanAll(rows, func(r pgx.Rows) (flagged, error) {
-		var f flagged
-		err := r.Scan(&f.query.QueryID, &f.query.Calls, &f.query.Raw,
-			&f.query.TotalExecTimeMs, &f.query.MeanExecTimeMs, &f.query.Rows, &f.toplevel)
-		return f, err
+	return scanAll(rows, func(r pgx.Rows) (qshape.Query, error) {
+		var e qshape.Query
+		err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs, &e.MeanExecTimeMs, &e.Rows)
+		return e, err
 	})
-	if err != nil {
-		return nil, nil, err
-	}
-	all = make([]qshape.Query, 0, len(scanned))
-	for _, f := range scanned {
-		all = append(all, f.query)
-		if !f.toplevel {
-			nested = append(nested, f.query)
-		}
-	}
-	return all, nested, nil
-}
-
-type nestedRollup struct {
-	calls      int64
-	execTimeMs float64
-}
-
-func groupNested(nested []qshape.Query) (map[string]nestedRollup, error) {
-	if len(nested) == 0 {
-		return nil, nil
-	}
-	clusters, err := qshape.Group(nested)
-	if err != nil {
-		return nil, fmt.Errorf("group nested query stats: %w", err)
-	}
-	out := make(map[string]nestedRollup, len(clusters))
-	for _, c := range clusters {
-		if c.Fingerprint == "" {
-			continue
-		}
-		r := out[c.Fingerprint]
-		r.calls += c.TotalCalls
-		r.execTimeMs += c.TotalExecTimeMs
-		out[c.Fingerprint] = r
-	}
-	return out, nil
 }
 
 func fetchActivityTables(ctx context.Context, pool Querier) ([]TableActivityEntry, error) {

@@ -89,7 +89,7 @@ func DetectTableFlags(summary *TableSummary, a *AnnotatedSchema, ix *QueryRefInd
 
 type QueryRefIndex struct {
 	identifiers       map[string]struct{}
-	trackIsTop        bool
+	toplevelOnly      bool
 	truncated         bool
 	partitionChildren map[string]struct{}
 }
@@ -101,14 +101,20 @@ func BuildQueryRefIndex(a *AnnotatedSchema) *QueryRefIndex {
 	ix := &QueryRefIndex{
 		identifiers:       map[string]struct{}{},
 		partitionChildren: map[string]struct{}{},
-		trackIsTop:        true,
+		toplevelOnly:      true,
 	}
 	for _, snap := range a.QueryStats {
-		// Every snapshot must state its track. Activity is summed across nodes,
-		// so one capture predating the field (nil) could be hiding track = 'all'
-		// on the node the scans actually came from.
-		if snap.PgssTrack == nil || *snap.PgssTrack != "top" {
-			ix.trackIsTop = false
+		// The blind spot holds only for a capture that records statements and
+		// holds top-level ones only: track = 'top', or a toplevel-filtered
+		// fetch. One node recording nothing (track = 'none'), running an
+		// unfiltered track = 'all', or predating both fields (nil track)
+		// could be hiding the statements where the scans came from.
+		track := ""
+		if snap.PgssTrack != nil {
+			track = *snap.PgssTrack
+		}
+		if track == "none" || (track != "top" && !snap.ToplevelOnly) {
+			ix.toplevelOnly = false
 		}
 		if snap.RawRows >= QueryStatsRowCap {
 			ix.truncated = true
@@ -168,8 +174,8 @@ func (ix *QueryRefIndex) SkipReason() string {
 	if ix.truncated {
 		why = append(why, fmt.Sprintf("the captured statement set is truncated (%d-row cap or evicted entries), so an unreferenced table proves nothing", QueryStatsRowCap))
 	}
-	if !ix.trackIsTop {
-		why = append(why, "a node reports pg_stat_statements.track other than 'top', or never recorded it, so nested statements may be visible after all")
+	if !ix.toplevelOnly {
+		why = append(why, "a node records nothing (track = 'none'), runs another track than 'top' with an unfiltered capture, or never recorded the setting, so the captured statements may not be the whole workload")
 	}
 	if len(ix.identifiers) == 0 {
 		why = append(why, "no statement text was captured, so every table would look unreferenced")
@@ -178,7 +184,7 @@ func (ix *QueryRefIndex) SkipReason() string {
 }
 
 func (ix *QueryRefIndex) Unattributed(table string, totalScans int64) bool {
-	if ix == nil || !ix.trackIsTop || ix.truncated || len(ix.identifiers) == 0 || totalScans < unattributedScanThreshold {
+	if ix == nil || !ix.toplevelOnly || ix.truncated || len(ix.identifiers) == 0 || totalScans < unattributedScanThreshold {
 		return false
 	}
 	lower := strings.ToLower(table)

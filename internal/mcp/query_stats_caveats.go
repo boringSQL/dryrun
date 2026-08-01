@@ -135,18 +135,23 @@ func crossNodeWindowCaveat(latest []schema.QueryStatsSnapshot) string {
 		shortest.node, humanDuration(shortest.d), shortest.from.UTC().Format(time.RFC3339))
 }
 
-// trackAllCaveat reports the pct_of_total_exec_time caveat under track = 'all':
-// the denominator excludes nested time only if the capture carries pgss 1.9's
-// toplevel split.
+// trackAllCaveat qualifies a track = 'all' capture: filtered captures no
+// longer double count; the split-era fields and unfiltered paths (PG13,
+// pre-filter captures) still need the old warnings.
 func trackAllCaveat(node string, snap schema.QueryStatsSnapshot) string {
 	for _, q := range snap.Queries {
 		if q.NestedCalls > 0 || q.NestedExecTimeMs > 0 {
+			// Only captures predating the toplevel filter carry the split.
 			return fmt.Sprintf(
 				"track = 'all' on %s: statements inside functions and triggers are recorded too, and pct_of_total_exec_time is measured against top-level time only (nested_exec_time_ms reports what was excluded) -- but the default ranking sorts on total_exec_time_ms, which still includes nested time, so order and share rest on different bases", node)
 		}
 	}
+	if snap.ToplevelOnly {
+		return fmt.Sprintf(
+			"track = 'all' on %s: nested statements were excluded at capture (toplevel filter), so no time is double counted — but work done inside functions and triggers is invisible here, exactly as under track = 'top'; 'all' now only adds pg_stat_statements entry pressure", node)
+	}
 	return fmt.Sprintf(
-		"track = 'all' on %s but this capture carries no top-level split: either nothing ran nested, or pg_stat_statements predates 1.9 (PG14) — in the latter case nested time is counted both in its own row and in the caller's, so shares are understated", node)
+		"track = 'all' on %s but this capture carries no top-level split: either nothing ran nested, or pg_stat_statements predates 1.9 (PG14), or the capture predates the toplevel filter — in the latter two cases nested time is counted both in its own row and in the caller's, so shares are understated", node)
 }
 
 // changeCaveats reports settings that moved between a node's last two
@@ -154,10 +159,24 @@ func trackAllCaveat(node string, snap schema.QueryStatsSnapshot) string {
 func changeCaveats(node string, from, to schema.QueryStatsSnapshot) []string {
 	var out []string
 
-	if from.PgssTrack != nil && to.PgssTrack != nil && *from.PgssTrack != *to.PgssTrack {
+	// A top<->all flip between two top-level-only captures moves nothing:
+	// track = 'top' is top-level-only by pgss itself, a filtered 'all' by the
+	// fetch. Only flips involving 'none' or an unfiltered 'all' change what
+	// gets recorded.
+	if from.PgssTrack != nil && to.PgssTrack != nil && *from.PgssTrack != *to.PgssTrack &&
+		!(recordsTopLevelOnly(from) && recordsTopLevelOnly(to)) {
 		out = append(out, fmt.Sprintf(
 			"compared with the previous capture of %s: pg_stat_statements.track changed ('%s' at %s -> '%s' at %s), so totals moved because the recording rule moved, not the workload",
 			node, *from.PgssTrack, captureStamp(from), *to.PgssTrack, captureStamp(to)))
+	}
+
+	// The filter transition drops nested rows one-time, and only where they
+	// were recorded — track = 'all'. On 'top' both eras are top-level-only.
+	if from.ToplevelOnly != to.ToplevelOnly &&
+		(trackIs(from, "all") || trackIs(to, "all")) {
+		out = append(out, fmt.Sprintf(
+			"compared with the previous capture of %s: the toplevel filter changed between the captures of %s and %s, so shapes that also ran inside functions or triggers lose their nested rows one-time — totals dropped because the capture rule moved, not the workload",
+			node, captureStamp(from), captureStamp(to)))
 	}
 
 	if from.InfoAfter != nil && to.InfoAfter != nil &&
@@ -182,6 +201,20 @@ func changeCaveats(node string, from, to schema.QueryStatsSnapshot) []string {
 	}
 
 	return out
+}
+
+// recordsTopLevelOnly reports whether a capture's statement set is
+// top-level-only: track = 'top', or a toplevel-filtered fetch. track = 'none'
+// records nothing at all, so it never qualifies.
+func recordsTopLevelOnly(s schema.QueryStatsSnapshot) bool {
+	if trackIs(s, "none") {
+		return false
+	}
+	return s.ToplevelOnly || trackIs(s, "top")
+}
+
+func trackIs(s schema.QueryStatsSnapshot, track string) bool {
+	return s.PgssTrack != nil && *s.PgssTrack == track
 }
 
 // band prefixes each band label and caps the total at maxCaveats.
