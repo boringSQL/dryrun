@@ -142,7 +142,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("detect",
-			mcp.WithDescription("Health checks: stale stats, unused/bloated indexes, anomalies"),
+			mcp.WithDescription("Health checks: stale stats, unused/bloated indexes, anomalies. The anomalies flag 'unattributed_scans' means a table sees heavy scan traffic that no captured statement references while the node runs pg_stat_statements.track = 'top' — statements inside functions and triggers are then never recorded, so that work is invisible to query stats; auto_explain with log_nested_statements, or track = 'all', will show it."),
 			mcp.WithString("kind",
 				mcp.Enum("stale_stats", "unused_indexes", "anomalies", "bloated_indexes", "bloated_tables", "all"),
 				mcp.DefaultString("all"),
@@ -212,7 +212,7 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("list_top_queries",
-			mcp.WithDescription("Captured pg_stat_statements query shapes, ranked by exec time/calls. Read from .dryrun/history.db (dryrun snapshot query-stats or init/take's best-effort capture); each entry is tagged with its reporting node and never averaged across nodes — a primary and a replica are different workloads. Canonical SQL is qshape-normalized/parameterized text, truncated for long queries. Counters are cumulative since the last pg_stat_statements reset, not a recent-activity rate."),
+			mcp.WithDescription("Captured pg_stat_statements query shapes, ranked by exec time/calls. Read from .dryrun/history.db (dryrun snapshot query-stats or init/take's best-effort capture); each entry is tagged with its reporting node and never averaged across nodes — a primary and a replica are different workloads. Canonical SQL is qshape-normalized/parameterized text, truncated for long queries. Counters are cumulative since the last pg_stat_statements reset, not a recent-activity rate. pct_of_total_exec_time is measured against top-level time only: under pg_stat_statements.track = 'all' a statement inside a function or trigger is billed both to its own row and to the calling statement, and nested_exec_time_ms reports the part excluded from that denominator."),
 			mcp.WithString("node", mcp.Description("Filter to one node label. Omit to see all nodes' queries together (each entry still tagged with its own node).")),
 			mcp.WithString("sort",
 				mcp.Enum("total_time", "calls", "mean_time"),

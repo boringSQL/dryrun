@@ -6,6 +6,7 @@ type AnnotatedSchema struct {
 	Schema  *SchemaSnapshot
 	Planner *PlannerStatsSnapshot
 	Merged  *MergedActivity
+	QueryStats []QueryStatsSnapshot
 }
 
 // Activity across nodes for a single SchemaSnapshot; one entry per node

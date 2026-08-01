@@ -2,6 +2,7 @@ package schema
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/boringsql/dryrun/pkg/bloat"
 )
@@ -55,9 +56,14 @@ const (
 	FlagHighSeqIdxRatio TableFlag = "high_seq_idx_ratio"
 	FlagSeqScanOnly     TableFlag = "seq_scan_only"
 	FlagNodeImbalance   TableFlag = "node_imbalance"
+	FlagUnattributedScans TableFlag = "unattributed_scans"
 )
 
-func DetectTableFlags(summary *TableSummary, a *AnnotatedSchema) []TableFlag {
+const unattributedScanThreshold = 100_000
+
+const queryStatsRowCap = 500
+
+func DetectTableFlags(summary *TableSummary, a *AnnotatedSchema, ix *QueryRefIndex) []TableFlag {
 	var flags []TableFlag
 
 	if summary.TotalSeqScan > 100 && summary.TotalIdxScan > 0 {
@@ -73,7 +79,92 @@ func DetectTableFlags(summary *TableSummary, a *AnnotatedSchema) []TableFlag {
 		flags = append(flags, FlagNodeImbalance)
 	}
 
+	if ix.Unattributed(summary.Table, summary.TotalSeqScan+summary.TotalIdxScan) {
+		flags = append(flags, FlagUnattributedScans)
+	}
+
 	return flags
+}
+
+type QueryRefIndex struct {
+	identifiers map[string]struct{}
+	trackIsTop bool
+	truncated bool
+	partitionChildren map[string]struct{}
+}
+
+func BuildQueryRefIndex(a *AnnotatedSchema) *QueryRefIndex {
+	if a == nil || len(a.QueryStats) == 0 {
+		return nil
+	}
+	ix := &QueryRefIndex{
+		identifiers:       map[string]struct{}{},
+		partitionChildren: map[string]struct{}{},
+		trackIsTop:        true,
+	}
+	sawTrack := false
+	for _, snap := range a.QueryStats {
+		if snap.PgssTrack != nil {
+			sawTrack = true
+			if *snap.PgssTrack != "top" {
+				ix.trackIsTop = false
+			}
+		}
+		if snap.RawRows >= queryStatsRowCap {
+			ix.truncated = true
+		}
+		if snap.InfoAfter != nil && snap.InfoAfter.Dealloc > 0 {
+			ix.truncated = true
+		}
+		for _, e := range snap.Queries {
+			collectIdentifiers(e.Canonical, ix.identifiers)
+		}
+	}
+	if !sawTrack {
+		return nil
+	}
+	if a.Schema != nil {
+		for _, t := range a.Schema.Tables {
+			if t.PartitionInfo == nil {
+				continue
+			}
+			for _, c := range t.PartitionInfo.Children {
+				ix.partitionChildren[strings.ToLower(c.Name)] = struct{}{}
+			}
+		}
+	}
+	return ix
+}
+
+func collectIdentifiers(sql string, out map[string]struct{}) {
+	start := -1
+	for i := 0; i <= len(sql); i++ {
+		var c byte
+		if i < len(sql) {
+			c = sql[i]
+		}
+		isWord := c == '_' || c == '$' || (c >= '0' && c <= '9') ||
+			(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		switch {
+		case isWord && start < 0:
+			start = i
+		case !isWord && start >= 0:
+			out[strings.ToLower(sql[start:i])] = struct{}{}
+			start = -1
+		}
+	}
+}
+
+func (ix *QueryRefIndex) Unattributed(table string, totalScans int64) bool {
+	if ix == nil || !ix.trackIsTop || ix.truncated || totalScans < unattributedScanThreshold {
+		return false
+	}
+	lower := strings.ToLower(table)
+	if _, isChild := ix.partitionChildren[lower]; isChild {
+		return false
+	}
+	_, referenced := ix.identifiers[lower]
+	return !referenced
 }
 
 type NodeImbalanceInfo struct {

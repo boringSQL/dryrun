@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/boringsql/qshape"
@@ -96,8 +97,8 @@ func CaptureActivityStats(ctx context.Context, pool Querier, schemaRefHash, sour
 
 // Per-node pg_stat_statements rollup, fingerprinted via qshape; ErrQueryStatsUnavailable if the extension isn't installed
 func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source string) (*QueryStatsSnapshot, error) {
-	var installed, hasInfoView bool
-	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).Scan(&installed, &hasInfoView); err != nil {
+	var installed, hasInfoView, hasToplevel bool
+	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).Scan(&installed, &hasInfoView, &hasToplevel); err != nil {
 		return nil, fmt.Errorf("check pg_stat_statements: %w", err)
 	}
 	if !installed {
@@ -115,7 +116,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	if hasInfoView {
 		infoBefore = fetchPgssInfo(ctx, pool)
 	}
-	queries, err := fetchQueryStats(ctx, pool)
+	queries, nested, err := fetchQueryStats(ctx, pool, hasToplevel)
 	if err != nil {
 		// role/session search_path can differ from the earlier to_regclass check
 		var pgErr *pgconn.PgError
@@ -127,6 +128,10 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	clusters, err := qshape.Group(queries)
 	if err != nil {
 		return nil, fmt.Errorf("group query stats: %w", err)
+	}
+	nestedByFp, err := groupNested(nested)
+	if err != nil {
+		return nil, err
 	}
 
 	entries := make([]QueryStatsEntry, len(clusters))
@@ -149,6 +154,10 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 			MeanExecTimeMs:  c.MeanExecTimeMs,
 			Rows:            c.Rows,
 		}
+		if n, ok := nestedByFp[c.Fingerprint]; ok {
+			entries[i].NestedCalls = min(n.calls, c.TotalCalls)
+			entries[i].NestedExecTimeMs = math.Min(n.execTimeMs, c.TotalExecTimeMs)
+		}
 	}
 
 	var infoAfter *QueryStatsInfo
@@ -161,6 +170,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		QshapeVersion: qshape.GroupingVersion,
 		RawRows:       len(queries),
 		PgssMax:       fetchPgssMax(ctx, pool),
+		PgssTrack:     fetchPgssTrack(ctx, pool),
 		InfoBefore:    infoBefore,
 		InfoAfter:     infoAfter,
 		Node:          *node,
@@ -256,16 +266,79 @@ func fetchPgssMax(ctx context.Context, pool Querier) *int {
 	return &max
 }
 
-func fetchQueryStats(ctx context.Context, pool Querier) ([]qshape.Query, error) {
-	rows, err := pool.Query(ctx, q("fetch-query-stats"))
-	if err != nil {
-		return nil, err
+func fetchPgssTrack(ctx context.Context, pool Querier) *string {
+	var track string
+	if err := pool.QueryRow(ctx, q("fetch-pgss-track")).Scan(&track); err != nil {
+		return nil
 	}
-	return scanAll(rows, func(r pgx.Rows) (qshape.Query, error) {
-		var e qshape.Query
-		err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs, &e.MeanExecTimeMs, &e.Rows)
-		return e, err
+	return &track
+}
+
+func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel bool) (all, nested []qshape.Query, err error) {
+	if !hasToplevel {
+		rows, err := pool.Query(ctx, q("fetch-query-stats"))
+		if err != nil {
+			return nil, nil, err
+		}
+		all, err = scanAll(rows, func(r pgx.Rows) (qshape.Query, error) {
+			var e qshape.Query
+			err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs, &e.MeanExecTimeMs, &e.Rows)
+			return e, err
+		})
+		return all, nil, err
+	}
+
+	rows, err := pool.Query(ctx, q("fetch-query-stats-toplevel"))
+	if err != nil {
+		return nil, nil, err
+	}
+	type flagged struct {
+		query    qshape.Query
+		toplevel bool
+	}
+	scanned, err := scanAll(rows, func(r pgx.Rows) (flagged, error) {
+		var f flagged
+		err := r.Scan(&f.query.QueryID, &f.query.Calls, &f.query.Raw,
+			&f.query.TotalExecTimeMs, &f.query.MeanExecTimeMs, &f.query.Rows, &f.toplevel)
+		return f, err
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+	all = make([]qshape.Query, 0, len(scanned))
+	for _, f := range scanned {
+		all = append(all, f.query)
+		if !f.toplevel {
+			nested = append(nested, f.query)
+		}
+	}
+	return all, nested, nil
+}
+
+type nestedRollup struct {
+	calls      int64
+	execTimeMs float64
+}
+
+func groupNested(nested []qshape.Query) (map[string]nestedRollup, error) {
+	if len(nested) == 0 {
+		return nil, nil
+	}
+	clusters, err := qshape.Group(nested)
+	if err != nil {
+		return nil, fmt.Errorf("group nested query stats: %w", err)
+	}
+	out := make(map[string]nestedRollup, len(clusters))
+	for _, c := range clusters {
+		if c.Fingerprint == "" {
+			continue
+		}
+		r := out[c.Fingerprint]
+		r.calls += c.TotalCalls
+		r.execTimeMs += c.TotalExecTimeMs
+		out[c.Fingerprint] = r
+	}
+	return out, nil
 }
 
 func fetchActivityTables(ctx context.Context, pool Querier) ([]TableActivityEntry, error) {

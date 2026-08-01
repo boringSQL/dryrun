@@ -188,8 +188,9 @@ func buildAnomalies(a *schema.AnnotatedSchema) []map[string]any {
 		return nil
 	}
 	var anomalies []map[string]any
+	refIndex := schema.BuildQueryRefIndex(a)
 	for _, sm := range schema.SummarizeTableStats(a) {
-		flags := schema.DetectTableFlags(&sm, a)
+		flags := schema.DetectTableFlags(&sm, a, refIndex)
 		if len(flags) == 0 {
 			continue
 		}

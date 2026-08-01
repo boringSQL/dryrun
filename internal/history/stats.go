@@ -297,6 +297,12 @@ func (s *Store) GetAnnotated(ctx context.Context, key SnapshotKey, at SnapshotRe
 		}
 		out.Merged = &schema.MergedActivity{Nodes: nodes}
 	}
+
+	qs, err := s.GetQueryStats(ctx, key, snap.ContentHash)
+	if err != nil {
+		return nil, err
+	}
+	out.QueryStats = qs
 	return out, nil
 }
 

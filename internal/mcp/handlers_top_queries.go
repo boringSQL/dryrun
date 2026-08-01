@@ -15,6 +15,16 @@ import (
 // canonicalTruncateLen caps the SQL text embedded per entry.
 const canonicalTruncateLen = 300
 
+func topLevelExecTime(e schema.QueryStatsEntry) float64 {
+	if e.NestedExecTimeMs <= 0 {
+		return e.TotalExecTimeMs
+	}
+	if e.NestedExecTimeMs >= e.TotalExecTimeMs {
+		return 0
+	}
+	return e.TotalExecTimeMs - e.NestedExecTimeMs
+}
+
 // snapshot-to-store only; MCP has no live pg_stat_statements connection.
 func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	s.mu.RLock()
@@ -85,16 +95,17 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 				MeanExecTimeMs:     q.MeanExecTimeMs,
 				Rows:               q.Rows,
 				RowsPerCall:        rowsPerCall,
+				NestedExecTimeMs:   q.NestedExecTimeMs,
+				TopLevelExecTimeMs: topLevelExecTime(q),
 			})
-			nodeExecTime[snap.Node.Source] += q.TotalExecTimeMs
+			nodeExecTime[snap.Node.Source] += topLevelExecTime(q)
 		}
 	}
 
-	// denominator is per-node: entries are never merged/averaged across nodes,
 	// so a shared cross-node total would misrepresent each node's own share.
 	for i := range entries {
 		if total := nodeExecTime[entries[i].Node]; total > 0 {
-			entries[i].PctOfTotalExecTime = entries[i].TotalExecTimeMs / total * 100
+			entries[i].PctOfTotalExecTime = entries[i].TopLevelExecTimeMs / total * 100
 		}
 	}
 

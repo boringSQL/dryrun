@@ -510,6 +510,8 @@ type (
 		TotalExecTimeMs float64            `json:"total_exec_time_ms,omitempty"`
 		MeanExecTimeMs  float64            `json:"mean_exec_time_ms,omitempty"`
 		Rows            int64              `json:"rows,omitempty"`
+		NestedCalls      int64   `json:"nested_calls,omitempty"`
+		NestedExecTimeMs float64 `json:"nested_exec_time_ms,omitempty"`
 	}
 
 	// One pg_stat_statements_info read. The view is PG14+; on PG13 the whole
@@ -532,6 +534,7 @@ type (
 		// pg_stat_statements.max at capture — the number that explains a dealloc;
 		// nil when the role can't read it.
 		PgssMax *int `json:"pgss_max,omitempty"`
+		PgssTrack *string `json:"pgss_track,omitempty"`
 		// info view read around the top-500 fetch; pgss isn't MVCC-consistent
 		// with it, so differing values mean the capture straddled a reset.
 		InfoBefore *QueryStatsInfo   `json:"info_before,omitempty"`
