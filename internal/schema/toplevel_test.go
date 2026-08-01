@@ -147,7 +147,7 @@ func TestUnattributedFlagsOnlyUnreferencedBusyTables(t *testing.T) {
 // mentions this table" stops being evidence and the flag must stand down.
 func TestUnattributedSuppressedWhenStatementSetTruncated(t *testing.T) {
 	capped := annotatedWith(strPtr("top"), "SELECT 1 FROM visible_table")
-	capped.QueryStats[0].RawRows = queryStatsRowCap
+	capped.QueryStats[0].RawRows = QueryStatsRowCap
 	if BuildQueryRefIndex(capped).Unattributed("hidden_table", unattributedScanThreshold) {
 		t.Error("hitting the row cap means the statement set is incomplete")
 	}

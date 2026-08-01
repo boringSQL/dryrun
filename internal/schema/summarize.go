@@ -61,7 +61,7 @@ const (
 
 const unattributedScanThreshold = 100_000
 
-const queryStatsRowCap = 500
+const QueryStatsRowCap = 500
 
 func DetectTableFlags(summary *TableSummary, a *AnnotatedSchema, ix *QueryRefIndex) []TableFlag {
 	var flags []TableFlag
@@ -115,7 +115,7 @@ func BuildQueryRefIndex(a *AnnotatedSchema) *QueryRefIndex {
 				ix.trackIsTop = false
 			}
 		}
-		if snap.RawRows >= queryStatsRowCap {
+		if snap.RawRows >= QueryStatsRowCap {
 			ix.truncated = true
 		}
 		if snap.InfoAfter != nil && snap.InfoAfter.Dealloc > 0 {

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -63,6 +64,14 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 		snaps = matched
 	}
 
+	// Caveats are best-effort: a failure here must not fail the tool.
+	previous, err := hist.PreviousQueryStats(ctx, key)
+	if err != nil {
+		slog.Debug("previous query stats unavailable; comparability caveats skipped", "error", err)
+		previous = nil
+	}
+	hint := joinCaveats(queryStatsCaveats(snaps, previous))
+
 	minCalls := int64(getFloatArg(req, "min_calls", 2))
 
 	var entries []queryStatsEntry
@@ -121,15 +130,15 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 	total := len(entries)
 	if total == 0 {
 		return structuredTextResult(
-			listTopQueriesResult{Queries: []queryStatsEntry{}, Meta: s.newMeta("", nil)},
-			s.wrapText(fmt.Sprintf("No queries with >= %d calls.", minCalls), "")), nil
+			listTopQueriesResult{Queries: []queryStatsEntry{}, Meta: s.newMeta(hint, nil)},
+			s.wrapText(fmt.Sprintf("No queries with >= %d calls.", minCalls), hint)), nil
 	}
 	offset := int(getFloatArg(req, "offset", 0))
 	limit := limitArg(req)
 	if offset >= total {
 		return structuredTextResult(
-			listTopQueriesResult{Queries: []queryStatsEntry{}, Count: total, Offset: offset, Meta: s.newMeta("", nil)},
-			s.wrapText(fmt.Sprintf("%d querie(s) total. Offset %d is beyond the end.", total, offset), "")), nil
+			listTopQueriesResult{Queries: []queryStatsEntry{}, Count: total, Offset: offset, Meta: s.newMeta(hint, nil)},
+			s.wrapText(fmt.Sprintf("%d querie(s) total. Offset %d is beyond the end.", total, offset), hint)), nil
 	}
 	end := pageEnd(offset, limit, total)
 	page := entries[offset:end]
@@ -146,6 +155,6 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 		body = fmt.Sprintf("Showing %d-%d of %d querie(s):\n%s", offset+1, end, total, strings.Join(lines, "\n"))
 	}
 	return structuredTextResult(
-		listTopQueriesResult{Queries: page, Count: total, Offset: offset, Meta: s.newMeta("", nil)},
-		s.wrapText(body, "")), nil
+		listTopQueriesResult{Queries: page, Count: total, Offset: offset, Meta: s.newMeta(hint, nil)},
+		s.wrapText(body, hint)), nil
 }

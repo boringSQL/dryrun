@@ -246,6 +246,42 @@ func (s *Store) LatestQueryStats(ctx context.Context, key SnapshotKey) ([]schema
 	return out, rows.Err()
 }
 
+// PreviousQueryStats returns the second-newest snapshot per node_source, the
+// capture LatestQueryStats supersedes. Nodes with only one capture are absent.
+func (s *Store) PreviousQueryStats(ctx context.Context, key SnapshotKey) ([]schema.QueryStatsSnapshot, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT payload_json FROM query_stats AS q
+		  WHERE project_id = ? AND database_id = ?
+		    AND id = (
+		      SELECT id FROM query_stats
+		       WHERE project_id = q.project_id
+		         AND database_id = q.database_id
+		         AND node_source = q.node_source
+		       ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET 1
+		    )
+		  ORDER BY node_source`,
+		string(key.ProjectID), string(key.DatabaseID),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []schema.QueryStatsSnapshot
+	for rows.Next() {
+		var jsonStr string
+		if err := rows.Scan(&jsonStr); err != nil {
+			return nil, err
+		}
+		var q schema.QueryStatsSnapshot
+		if err := json.Unmarshal([]byte(jsonStr), &q); err != nil {
+			return nil, fmt.Errorf("corrupt query stats JSON: %w", err)
+		}
+		out = append(out, q)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) LatestPlanner(ctx context.Context, key SnapshotKey) (*schema.PlannerStatsSnapshot, error) {
 	var jsonStr string
 	err := s.db.QueryRowContext(ctx,
