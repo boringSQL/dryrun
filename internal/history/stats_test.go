@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"testing"
 	"time"
 
@@ -37,7 +38,14 @@ func activityFixture(schemaRef, contentHash, source string, standby bool) *schem
 	}
 }
 
+// PutQueryStats recomputes the digest from the raw members, so the caller's
+// contentHash is only a label: fold it into a member queryid, otherwise every
+// fixture hashes alike and the unique index collapses them into one row.
 func queryStatsFixture(schemaRef, contentHash, source string) *schema.QueryStatsSnapshot {
+	h := fnv.New64a()
+	h.Write([]byte(contentHash))
+	queryID := int64(h.Sum64() >> 1)
+
 	return &schema.QueryStatsSnapshot{
 		SchemaRefHash: schemaRef,
 		ContentHash:   contentHash,
@@ -45,9 +53,12 @@ func queryStatsFixture(schemaRef, contentHash, source string) *schema.QueryStats
 			Source: source, PgVersion: "PostgreSQL 17.0",
 			Timestamp: time.Now().UTC().Truncate(time.Second),
 		},
-		Queries: []schema.QueryStatsEntry{
-			{Fingerprint: "sha1:abc", Canonical: "SELECT id FROM users WHERE id = $1", Calls: 5},
-		},
+		Queries: []schema.QueryStatsEntry{{
+			Fingerprint: "sha1:abc",
+			Canonical:   "SELECT id FROM users WHERE id = $1",
+			Members:     []schema.QueryStatsMember{{QueryID: queryID, Calls: 5}},
+			Calls:       5,
+		}},
 	}
 }
 

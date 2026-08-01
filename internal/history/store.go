@@ -300,6 +300,20 @@ func (s *Store) migrate() error {
 		if n, _ := res.RowsAffected(); n > 0 {
 			slog.Info("history migration removed duplicate query stats", "rows", n)
 		}
+
+		// Pre-members rows can't be rehashed and would collide on push; drop
+		// them. Empty captures survive; json_valid guards corrupt payloads.
+		res, err = s.db.Exec(`DELETE FROM query_stats
+			 WHERE json_valid(payload_json)
+			   AND EXISTS (SELECT 1 FROM json_each(payload_json, '$.queries') e
+			                WHERE json_type(e.value) = 'object'
+			                  AND json_type(e.value, '$.members') IS NULL)`)
+		if err != nil {
+			return fmt.Errorf("migration failed (query_stats pre-members): %w", err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			slog.Info("history migration removed pre-members query stats", "rows", n)
+		}
 	}
 	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS query_stats_by_content_key
 		ON query_stats(project_id, database_id, content_hash)`); err != nil {

@@ -496,13 +496,19 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 		if err != nil {
 			return counts, err
 		}
-		if _, err := dst.Put(ctx, key, stored); err != nil {
+		outcome, err := dst.Put(ctx, key, stored)
+		if err != nil {
 			// dst doesn't persist this kind yet (e.g. predict has no query-stats
 			// manifest field): stop syncing this kind, don't fail the whole sync.
 			if errors.Is(err, history.ErrKindUnsupported) {
 				return counts, nil
 			}
 			return counts, err
+		}
+		// only an insert is a copy; dedup isn't
+		if outcome == history.PutDeduped {
+			counts.UpToDate++
+			continue
 		}
 		counts.Copied++
 	}

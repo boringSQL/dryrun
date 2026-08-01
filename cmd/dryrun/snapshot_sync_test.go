@@ -62,9 +62,14 @@ func syncTestQueryStats(schemaRef, hash, source string, ts time.Time) *schema.Qu
 		SchemaRefHash: schemaRef,
 		ContentHash:   hash,
 		Node:          schema.NodeIdentity{Source: source, PgVersion: "PostgreSQL 17.0", Timestamp: ts},
-		Queries: []schema.QueryStatsEntry{
-			{Fingerprint: "sha1:abc", Canonical: "SELECT id FROM users WHERE id = $1", Calls: 5},
-		},
+		Queries: []schema.QueryStatsEntry{{
+			Fingerprint: "sha1:abc",
+			Canonical:   "SELECT id FROM users WHERE id = $1",
+			// the store refuses payloads with no members: they digest as empty
+			// captures and collide under the unique index
+			Members: []schema.QueryStatsMember{{QueryID: 42, Calls: 5}},
+			Calls:   5,
+		}},
 	}
 }
 

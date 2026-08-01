@@ -63,7 +63,31 @@ func (s *Store) PutActivity(ctx context.Context, key SnapshotKey, a *schema.Acti
 
 // idempotent on (project_id, database_id, content_hash); an idle node
 // re-captured byte-identically collapses to a no-op
+func hasQueryMembers(q *schema.QueryStatsSnapshot) bool {
+	for _, e := range q.Queries {
+		if len(e.Members) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) PutQueryStats(ctx context.Context, key SnapshotKey, q *schema.QueryStatsSnapshot) (PutOutcome, error) {
+	// Pre-Members payloads all digest alike; reject them (pull path only,
+	// the migration clears local ones).
+	if len(q.Queries) > 0 && !hasQueryMembers(q) {
+		return PutInserted, fmt.Errorf(
+			"query stats payload predates the raw-row digest (no members) and cannot be hashed; recapture it")
+	}
+	// Derive a missing hash; keep a mismatched one (sync compares it against
+	// the remote digest) and just warn.
+	switch recomputed := schema.ComputeQueryStatsContentHash(q); {
+	case q.ContentHash == "":
+		q.ContentHash = recomputed
+	case q.ContentHash != recomputed:
+		slog.Warn("query stats content hash does not match its payload",
+			"stored", q.ContentHash, "recomputed", recomputed, "node", q.Node.Source)
+	}
 	data, err := json.Marshal(q)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot serialize query stats: %w", err)

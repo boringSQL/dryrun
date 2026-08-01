@@ -167,11 +167,19 @@ func ComputeQueryStatsContentHash(q *QueryStatsSnapshot) string {
 	for _, e := range q.Queries {
 		rows = append(rows, e.Members...)
 	}
+	// sort on the full tuple: queryid alone isn't unique, and an unstable
+	// order would move the digest for identical content
 	slices.SortFunc(rows, func(a, b QueryStatsMember) int {
 		if a.QueryID != b.QueryID {
 			return cmp.Compare(a.QueryID, b.QueryID)
 		}
-		return cmp.Compare(a.Calls, b.Calls)
+		if a.Calls != b.Calls {
+			return cmp.Compare(a.Calls, b.Calls)
+		}
+		if a.TotalExecTimeMs != b.TotalExecTimeMs {
+			return cmp.Compare(a.TotalExecTimeMs, b.TotalExecTimeMs)
+		}
+		return cmp.Compare(a.Rows, b.Rows)
 	})
 
 	canonical := map[string]any{
