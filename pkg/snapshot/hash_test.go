@@ -739,3 +739,92 @@ func TestQueryStatsContentHash_ReproducibleFromPayload(t *testing.T) {
 		t.Errorf("digest not reproducible from the posted body:\n  local  %s\n  remote %s", want, got)
 	}
 }
+
+// Temp blocks are content: a capture whose statements spilled differently is a different
+// read, and the digest has to say so or a dedup would drop it. Absent (an older CLI, a
+// pgss read that did not collect them) must leave the digest exactly as it was, or every
+// stored blob's digest moves the day the field lands.
+func TestQueryStatsContentHashCoversTempBlocks(t *testing.T) {
+	n := func(v int64) *int64 { return &v }
+	base := queryStatsWith(QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3})
+	baseDigest := ComputeQueryStatsContentHash(base)
+
+	// Captured from the build before the temp-block fields existed. Anything that moves
+	// this rewrites the digest of every already-stored blob.
+	const preTempBlocks = "4d0278345588c74f401a22f8a36ccc30adcd229846647e9cfa617698354529c7"
+	if baseDigest != preTempBlocks {
+		t.Fatalf("a capture with no temp blocks must hash exactly as it did before the field existed:\n  got  %s\n  want %s", baseDigest, preTempBlocks)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		member QueryStatsMember
+	}{
+		{"read", QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, TempBlksRead: n(64)}},
+		{"written", QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, TempBlksWritten: n(64)}},
+		// Zero is a real reading — this statement ran and spilled nothing — and must not
+		// collapse onto the nil digest, which is the whole reason these are pointers.
+		{"explicit zero read", QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, TempBlksRead: n(0)}},
+		{"explicit zero written", QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, TempBlksWritten: n(0)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if ComputeQueryStatsContentHash(queryStatsWith(tc.member)) == baseDigest {
+				t.Fatal("temp blocks do not affect the digest; a differing capture would dedup away")
+			}
+		})
+	}
+
+	// The two counters are distinct content, not one number under two names.
+	read := queryStatsWith(QueryStatsMember{QueryID: 1, Calls: 10, TempBlksRead: n(64)})
+	written := queryStatsWith(QueryStatsMember{QueryID: 1, Calls: 10, TempBlksWritten: n(64)})
+	if ComputeQueryStatsContentHash(read) == ComputeQueryStatsContentHash(written) {
+		t.Fatal("read and written temp blocks hash alike; one of them is missing from the digest")
+	}
+}
+
+// Members identical in every other counter must still sort deterministically, or the
+// digest moves between captures of identical content.
+func TestQueryStatsContentHashIsStableAcrossMemberOrder(t *testing.T) {
+	n := func(v int64) *int64 { return &v }
+	for _, tc := range []struct {
+		name string
+		a, b QueryStatsMember
+	}{
+		{
+			"both known",
+			QueryStatsMember{QueryID: 1, Calls: 10, TempBlksRead: n(1)},
+			QueryStatsMember{QueryID: 1, Calls: 10, TempBlksRead: n(2)},
+		},
+		// One member read the counters and the other did not, which is how a mixed
+		// capture arrives. Ordering unknown against known is the branch that decides it.
+		{
+			"read unknown against known",
+			QueryStatsMember{QueryID: 1, Calls: 10},
+			QueryStatsMember{QueryID: 1, Calls: 10, TempBlksRead: n(2)},
+		},
+		{
+			"written unknown against known, read tied",
+			QueryStatsMember{QueryID: 1, Calls: 10, TempBlksRead: n(1)},
+			QueryStatsMember{QueryID: 1, Calls: 10, TempBlksRead: n(1), TempBlksWritten: n(2)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if ComputeQueryStatsContentHash(queryStatsWith(tc.a, tc.b)) != ComputeQueryStatsContentHash(queryStatsWith(tc.b, tc.a)) {
+				t.Fatal("member order moves the digest")
+			}
+		})
+	}
+}
+
+// The cluster-level temp sums are derived from the members, so they must not move the
+// digest: two decodes of the same rows differ only in what qshape computed from them.
+func TestQueryStatsContentHashIgnoresClusterTempSums(t *testing.T) {
+	n := func(v int64) *int64 { return &v }
+	base := queryStatsWith(QueryStatsMember{QueryID: 1, Calls: 10, TempBlksRead: n(64)})
+	derived := queryStatsWith(QueryStatsMember{QueryID: 1, Calls: 10, TempBlksRead: n(64)})
+	derived.Queries[0].TempBlksRead = n(64)
+	derived.Queries[0].TempBlksWritten = n(8)
+	if ComputeQueryStatsContentHash(base) != ComputeQueryStatsContentHash(derived) {
+		t.Fatal("a cluster-level sum moved the digest; only the raw members are content")
+	}
+}

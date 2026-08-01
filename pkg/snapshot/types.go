@@ -494,6 +494,8 @@ type (
 	}
 
 	// One raw pg_stat_statements row, before qshape grouping; hashed from these.
+	// Every field here must also appear in ComputeQueryStatsContentHash's comparator:
+	// the sort is unstable, so a field it doesn't order can move the digest.
 	QueryStatsMember struct {
 		QueryID         int64   `json:"queryid"`
 		Calls           int64   `json:"calls"`

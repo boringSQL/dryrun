@@ -117,9 +117,11 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	}
 	queries, err := fetchQueryStats(ctx, pool, hasToplevel)
 	if err != nil {
-		// role/session search_path can differ from the earlier to_regclass check
+		// role/session search_path can differ from the earlier to_regclass check.
+		// 42703: pgss left at 1.7 by pg_upgrade has no total_exec_time, so the
+		// projection itself fails — skip query stats rather than kill the snapshot.
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && (pgErr.Code == "0A000" || pgErr.Code == "42P01") {
+		if errors.As(err, &pgErr) && (pgErr.Code == "0A000" || pgErr.Code == "42P01" || pgErr.Code == "42703") {
 			return nil, ErrQueryStatsUnavailable
 		}
 		return nil, fmt.Errorf("fetch query stats: %w", err)
