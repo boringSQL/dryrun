@@ -159,6 +159,19 @@ func ComputeActivityContentHash(a *ActivityStatsSnapshot) string {
 	return fmt.Sprintf("%x", h)
 }
 
+// cmpOptional orders an optional counter, with unknown sorting before any value.
+func cmpOptional(a, b *int64) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return -1
+	case b == nil:
+		return 1
+	}
+	return cmp.Compare(*a, *b)
+}
+
 // Per-node query stats; node.source included so two nodes never collide.
 // Digested from raw pg_stat_statements rows ordered by queryid, so a qshape
 // upgrade doesn't move the digest.
@@ -179,7 +192,16 @@ func ComputeQueryStatsContentHash(q *QueryStatsSnapshot) string {
 		if a.TotalExecTimeMs != b.TotalExecTimeMs {
 			return cmp.Compare(a.TotalExecTimeMs, b.TotalExecTimeMs)
 		}
-		return cmp.Compare(a.Rows, b.Rows)
+		if a.Rows != b.Rows {
+			return cmp.Compare(a.Rows, b.Rows)
+		}
+		// Temp blocks break the remaining ties. Two members identical in every other
+		// counter but differing here would otherwise sort unstably, and an unstable
+		// order moves the digest for identical content.
+		if c := cmpOptional(a.TempBlksRead, b.TempBlksRead); c != 0 {
+			return c
+		}
+		return cmpOptional(a.TempBlksWritten, b.TempBlksWritten)
 	})
 
 	canonical := map[string]any{

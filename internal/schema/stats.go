@@ -138,6 +138,8 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 				Calls:           m.Calls,
 				TotalExecTimeMs: m.TotalExecTimeMs,
 				Rows:            m.Rows,
+				TempBlksRead:    m.TempBlksRead,
+				TempBlksWritten: m.TempBlksWritten,
 			}
 		}
 		entries[i] = QueryStatsEntry{
@@ -148,6 +150,8 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 			TotalExecTimeMs: c.TotalExecTimeMs,
 			MeanExecTimeMs:  c.MeanExecTimeMs,
 			Rows:            c.Rows,
+			TempBlksRead:    c.TempBlksRead,
+			TempBlksWritten: c.TempBlksWritten,
 		}
 	}
 
@@ -162,6 +166,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		RawRows:       len(queries),
 		PgssMax:       fetchPgssMax(ctx, pool),
 		PgssTrack:     fetchPgssTrack(ctx, pool),
+		BlockSize:     fetchBlockSize(ctx, pool),
 		InfoBefore:    infoBefore,
 		InfoAfter:     infoAfter,
 		ToplevelOnly:  hasToplevel,
@@ -258,6 +263,17 @@ func fetchPgssMax(ctx context.Context, pool Querier) *int {
 	return &max
 }
 
+// block_size is a preset GUC every role can read, so nil here means the query itself
+// failed — effectively never. A consumer treats nil as unknown and renders temp blocks as
+// blocks rather than assuming 8192 and being silently 2x out on a cluster built otherwise.
+func fetchBlockSize(ctx context.Context, pool Querier) *int {
+	var size int
+	if err := pool.QueryRow(ctx, q("fetch-block-size")).Scan(&size); err != nil {
+		return nil
+	}
+	return &size
+}
+
 func fetchPgssTrack(ctx context.Context, pool Querier) *string {
 	var track string
 	if err := pool.QueryRow(ctx, q("fetch-pgss-track")).Scan(&track); err != nil {
@@ -279,7 +295,8 @@ func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel bool) ([]qsh
 	}
 	return scanAll(rows, func(r pgx.Rows) (qshape.Query, error) {
 		var e qshape.Query
-		err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs, &e.MeanExecTimeMs, &e.Rows)
+		err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs, &e.MeanExecTimeMs, &e.Rows,
+			&e.TempBlksRead, &e.TempBlksWritten)
 		return e, err
 	})
 }

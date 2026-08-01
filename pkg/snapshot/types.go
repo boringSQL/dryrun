@@ -499,6 +499,12 @@ type (
 		Calls           int64   `json:"calls"`
 		TotalExecTimeMs float64 `json:"total_exec_time_ms,omitempty"`
 		Rows            int64   `json:"rows,omitempty"`
+		// Temp blocks: the sorts and hashes that spilled out of work_mem. Always
+		// available (no track_io_timing gate), unlike the shared_blk_* timings.
+		// Pointers, and omitted when nil, so a blob written before these existed stays
+		// byte-identical and reads as unknown rather than as "spilled nothing".
+		TempBlksRead    *int64 `json:"temp_blks_read,omitempty"`
+		TempBlksWritten *int64 `json:"temp_blks_written,omitempty"`
 	}
 
 	// One qshape cluster: an ORM-collapsed query shape with per-node pg_stat_statements rollup
@@ -510,6 +516,9 @@ type (
 		TotalExecTimeMs float64            `json:"total_exec_time_ms,omitempty"`
 		MeanExecTimeMs  float64            `json:"mean_exec_time_ms,omitempty"`
 		Rows            int64              `json:"rows,omitempty"`
+		// Summed over Members, nil unless every member carried them.
+		TempBlksRead    *int64 `json:"temp_blks_read,omitempty"`
+		TempBlksWritten *int64 `json:"temp_blks_written,omitempty"`
 		// Only captures predating the toplevel filter populate these.
 		NestedCalls      int64   `json:"nested_calls,omitempty"`
 		NestedExecTimeMs float64 `json:"nested_exec_time_ms,omitempty"`
@@ -536,6 +545,10 @@ type (
 		// nil when the role can't read it.
 		PgssMax   *int    `json:"pgss_max,omitempty"`
 		PgssTrack *string `json:"pgss_track,omitempty"`
+		// block_size, which is what turns the temp-block counts into bytes. A
+		// compile-time GUC, almost always 8192; nil when the role could not read it,
+		// and a consumer then reports blocks rather than assuming.
+		BlockSize *int `json:"block_size,omitempty"`
 		// true when the fetch filtered on pgss's toplevel flag (1.9+, PG14+);
 		// absent means unfiltered (pre-filter captures and pgss < 1.9).
 		ToplevelOnly bool `json:"toplevel_only,omitempty"`
