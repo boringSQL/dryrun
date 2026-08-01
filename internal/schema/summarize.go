@@ -53,9 +53,9 @@ func SummarizeTableStats(a *AnnotatedSchema) []TableSummary {
 type TableFlag string
 
 const (
-	FlagHighSeqIdxRatio TableFlag = "high_seq_idx_ratio"
-	FlagSeqScanOnly     TableFlag = "seq_scan_only"
-	FlagNodeImbalance   TableFlag = "node_imbalance"
+	FlagHighSeqIdxRatio   TableFlag = "high_seq_idx_ratio"
+	FlagSeqScanOnly       TableFlag = "seq_scan_only"
+	FlagNodeImbalance     TableFlag = "node_imbalance"
 	FlagUnattributedScans TableFlag = "unattributed_scans"
 )
 
@@ -87,9 +87,9 @@ func DetectTableFlags(summary *TableSummary, a *AnnotatedSchema, ix *QueryRefInd
 }
 
 type QueryRefIndex struct {
-	identifiers map[string]struct{}
-	trackIsTop bool
-	truncated bool
+	identifiers       map[string]struct{}
+	trackIsTop        bool
+	truncated         bool
 	partitionChildren map[string]struct{}
 }
 
@@ -104,7 +104,12 @@ func BuildQueryRefIndex(a *AnnotatedSchema) *QueryRefIndex {
 	}
 	sawTrack := false
 	for _, snap := range a.QueryStats {
-		if snap.PgssTrack != nil {
+		// Every snapshot must state its track. Activity is summed across nodes,
+		// so one capture predating the field (nil) could be hiding track = 'all'
+		// on the node the scans actually came from.
+		if snap.PgssTrack == nil {
+			ix.trackIsTop = false
+		} else {
 			sawTrack = true
 			if *snap.PgssTrack != "top" {
 				ix.trackIsTop = false

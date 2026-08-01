@@ -503,15 +503,15 @@ type (
 
 	// One qshape cluster: an ORM-collapsed query shape with per-node pg_stat_statements rollup
 	QueryStatsEntry struct {
-		Fingerprint     string             `json:"fingerprint"`
-		Canonical       string             `json:"canonical"`
-		Members         []QueryStatsMember `json:"members,omitempty"`
-		Calls           int64              `json:"calls"`
-		TotalExecTimeMs float64            `json:"total_exec_time_ms,omitempty"`
-		MeanExecTimeMs  float64            `json:"mean_exec_time_ms,omitempty"`
-		Rows            int64              `json:"rows,omitempty"`
-		NestedCalls      int64   `json:"nested_calls,omitempty"`
-		NestedExecTimeMs float64 `json:"nested_exec_time_ms,omitempty"`
+		Fingerprint      string             `json:"fingerprint"`
+		Canonical        string             `json:"canonical"`
+		Members          []QueryStatsMember `json:"members,omitempty"`
+		Calls            int64              `json:"calls"`
+		TotalExecTimeMs  float64            `json:"total_exec_time_ms,omitempty"`
+		MeanExecTimeMs   float64            `json:"mean_exec_time_ms,omitempty"`
+		Rows             int64              `json:"rows,omitempty"`
+		NestedCalls      int64              `json:"nested_calls,omitempty"`
+		NestedExecTimeMs float64            `json:"nested_exec_time_ms,omitempty"`
 	}
 
 	// One pg_stat_statements_info read. The view is PG14+; on PG13 the whole
@@ -533,7 +533,7 @@ type (
 		RawRows int `json:"raw_rows,omitempty"`
 		// pg_stat_statements.max at capture — the number that explains a dealloc;
 		// nil when the role can't read it.
-		PgssMax *int `json:"pgss_max,omitempty"`
+		PgssMax   *int    `json:"pgss_max,omitempty"`
 		PgssTrack *string `json:"pgss_track,omitempty"`
 		// info view read around the top-500 fetch; pgss isn't MVCC-consistent
 		// with it, so differing values mean the capture straddled a reset.

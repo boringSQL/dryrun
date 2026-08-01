@@ -71,7 +71,7 @@ type (
 		Rows               int64   `json:"rows,omitempty"`
 		RowsPerCall        float64 `json:"rows_per_call,omitempty"`
 		PctOfTotalExecTime float64 `json:"pct_of_total_exec_time,omitempty"`
-		NestedExecTimeMs float64 `json:"nested_exec_time_ms,omitempty"`
+		NestedExecTimeMs   float64 `json:"nested_exec_time_ms,omitempty"`
 		TopLevelExecTimeMs float64 `json:"toplevel_exec_time_ms,omitempty"`
 	}
 

@@ -3,9 +3,9 @@ package snapshot
 // Not persisted: in-memory join of one SchemaSnapshot, one PlannerStatsSnapshot
 // and N ActivityStatsSnapshot rows sharing the same schema_ref_hash
 type AnnotatedSchema struct {
-	Schema  *SchemaSnapshot
-	Planner *PlannerStatsSnapshot
-	Merged  *MergedActivity
+	Schema     *SchemaSnapshot
+	Planner    *PlannerStatsSnapshot
+	Merged     *MergedActivity
 	QueryStats []QueryStatsSnapshot
 }
 
