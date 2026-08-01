@@ -183,13 +183,18 @@ func filterSnap(snap *schema.SchemaSnapshot, schemaFilter, tableFilter string) *
 	return &out
 }
 
-func buildAnomalies(a *schema.AnnotatedSchema) []map[string]any {
+// Second return: why unattributed_scans was not evaluated, "" when it was.
+func buildAnomalies(a *schema.AnnotatedSchema) ([]map[string]any, string) {
 	if a == nil || a.Merged == nil {
-		return nil
+		return nil, ""
 	}
 	var anomalies []map[string]any
 	refIndex := schema.BuildQueryRefIndex(a)
+	worthChecking := false
 	for _, sm := range schema.SummarizeTableStats(a) {
+		if schema.ScansWorthAttributing(sm.TotalSeqScan + sm.TotalIdxScan) {
+			worthChecking = true
+		}
 		flags := schema.DetectTableFlags(&sm, a, refIndex)
 		if len(flags) == 0 {
 			continue
@@ -210,7 +215,15 @@ func buildAnomalies(a *schema.AnnotatedSchema) []map[string]any {
 		sj, _ := anomalies[j]["total_seq_scan"].(int64)
 		return si > sj
 	})
-	return anomalies
+
+	// Silent when no table was busy enough to test; the reason would be noise.
+	note := ""
+	if worthChecking {
+		if r := refIndex.SkipReason(); r != "" {
+			note = "unattributed_scans not evaluated: " + r + "."
+		}
+	}
+	return anomalies, note
 }
 
 type (

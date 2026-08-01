@@ -86,7 +86,8 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	unusedEntries := filterByQual(schema.DetectUnusedIndexes(a), schemaF, tableF, unusedKey)
 	bloatEntries := filterByQual(schema.DetectBloatedIndexes(a, threshold), schemaF, tableF, bloatKey)
 	bloatTableEntries := filterByQual(schema.DetectBloatedTables(a, threshold), schemaF, tableF, bloatTableKey)
-	anomalies := filterByQual(buildAnomalies(a), schemaF, tableF, anomalyKey)
+	rawAnomalies, anomalyNote := buildAnomalies(a)
+	anomalies := filterByQual(rawAnomalies, schemaF, tableF, anomalyKey)
 
 	staleKept, staleOmitted := capStaleStats(staleEntries, max)
 	wrapper := map[string]any{
@@ -106,6 +107,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	case len(unusedEntries) > 0:
 		hint = "Unused indexes add write overhead. Verify index scans across all replicas before dropping."
 	}
+	hint = joinHints(hint, anomalyNote)
 
 	// point next at the truncated categories only
 	var next []NextCall
@@ -162,11 +164,25 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 }
 
 // Structured zero-entry result so schema-aware clients see {<kind>: [], count: 0}
-// while thin clients keep the friendly prose.
-func (s *Server) emptyKindResult(kind, text string) *mcp.CallToolResult {
+// while thin clients keep the friendly prose; notes also reach _meta.hint.
+func (s *Server) emptyKindResult(kind, text string, notes ...string) *mcp.CallToolResult {
 	wrapper := map[string]any{kind: []any{}, "count": 0}
-	s.injectMeta(wrapper, "", nil)
+	hint := joinHints(notes...)
+	s.injectMeta(wrapper, hint, nil)
+	if hint != "" {
+		text = joinHints(text, hint)
+	}
 	return structuredTextResult(wrapper, text)
+}
+
+func joinHints(parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, " ")
 }
 
 func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -196,11 +212,12 @@ func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolReques
 
 	schemaF := schemaArg(req)
 	tableF := getArg(req, "table")
-	anomalies := filterByQual(buildAnomalies(a), schemaF, tableF, anomalyKey)
+	rawAnomalies, anomalyNote := buildAnomalies(a)
+	anomalies := filterByQual(rawAnomalies, schemaF, tableF, anomalyKey)
 	if len(anomalies) == 0 {
-		return s.emptyKindResult("anomalies", "No anomalies detected."), nil
+		return s.emptyKindResult("anomalies", "No anomalies detected.", anomalyNote), nil
 	}
-	return cappedKindResult(s, "anomalies", anomalies, limitArg(req), schemaF, tableF), nil
+	return cappedKindResult(s, "anomalies", anomalies, limitArg(req), schemaF, tableF, anomalyNote), nil
 }
 
 func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -235,17 +252,23 @@ func (s *Server) handleDetectBloatedTables(_ context.Context, req mcp.CallToolRe
 	return cappedKindResult(s, "bloated_tables", entries, limitArg(req), schemaF, tableF), nil
 }
 
-func cappedKindResult[T any](s *Server, kind string, entries []T, max int, schemaF, tableF string) *mcp.CallToolResult {
+func cappedKindResult[T any](s *Server, kind string, entries []T, max int, schemaF, tableF string, notes ...string) *mcp.CallToolResult {
 	kept, omitted := capItems(entries, max)
 	wrapper := map[string]any{
 		kind:    kept,
 		"count": len(entries),
 	}
+	var hint string
+	var next []NextCall
 	if omitted > 0 {
 		wrapper["truncated"] = true
 		wrapper["omitted"] = omitted
-		hint := fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), len(entries), omitted)
-		s.injectMeta(wrapper, hint, narrowNext(kind, schemaF, tableF))
+		hint = fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), len(entries), omitted)
+		next = narrowNext(kind, schemaF, tableF)
+	}
+	hint = joinHints(append([]string{hint}, notes...)...)
+	if hint != "" || len(next) > 0 {
+		s.injectMeta(wrapper, hint, next)
 	}
 	return jsonResult(wrapper)
 }

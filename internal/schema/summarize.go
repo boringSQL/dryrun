@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -102,18 +103,12 @@ func BuildQueryRefIndex(a *AnnotatedSchema) *QueryRefIndex {
 		partitionChildren: map[string]struct{}{},
 		trackIsTop:        true,
 	}
-	sawTrack := false
 	for _, snap := range a.QueryStats {
 		// Every snapshot must state its track. Activity is summed across nodes,
 		// so one capture predating the field (nil) could be hiding track = 'all'
 		// on the node the scans actually came from.
-		if snap.PgssTrack == nil {
+		if snap.PgssTrack == nil || *snap.PgssTrack != "top" {
 			ix.trackIsTop = false
-		} else {
-			sawTrack = true
-			if *snap.PgssTrack != "top" {
-				ix.trackIsTop = false
-			}
 		}
 		if snap.RawRows >= QueryStatsRowCap {
 			ix.truncated = true
@@ -124,9 +119,6 @@ func BuildQueryRefIndex(a *AnnotatedSchema) *QueryRefIndex {
 		for _, e := range snap.Queries {
 			collectIdentifiers(e.Canonical, ix.identifiers)
 		}
-	}
-	if !sawTrack {
-		return nil
 	}
 	if a.Schema != nil {
 		for _, t := range a.Schema.Tables {
@@ -160,8 +152,33 @@ func collectIdentifiers(sql string, out map[string]struct{}) {
 	}
 }
 
+// ScansWorthAttributing reports whether a table is busy enough for the
+// unattributed check to have an opinion.
+func ScansWorthAttributing(totalScans int64) bool {
+	return totalScans >= unattributedScanThreshold
+}
+
+// SkipReason lists every reason the unattributed-scan check could not run;
+// "" when it did. All reasons, since fixing one still leaves the flag absent.
+func (ix *QueryRefIndex) SkipReason() string {
+	if ix == nil {
+		return "no query stats are captured"
+	}
+	var why []string
+	if ix.truncated {
+		why = append(why, fmt.Sprintf("the captured statement set is truncated (%d-row cap or evicted entries), so an unreferenced table proves nothing", QueryStatsRowCap))
+	}
+	if !ix.trackIsTop {
+		why = append(why, "a node reports pg_stat_statements.track other than 'top', or never recorded it, so nested statements may be visible after all")
+	}
+	if len(ix.identifiers) == 0 {
+		why = append(why, "no statement text was captured, so every table would look unreferenced")
+	}
+	return strings.Join(why, "; ")
+}
+
 func (ix *QueryRefIndex) Unattributed(table string, totalScans int64) bool {
-	if ix == nil || !ix.trackIsTop || ix.truncated || totalScans < unattributedScanThreshold {
+	if ix == nil || !ix.trackIsTop || ix.truncated || len(ix.identifiers) == 0 || totalScans < unattributedScanThreshold {
 		return false
 	}
 	lower := strings.ToLower(table)

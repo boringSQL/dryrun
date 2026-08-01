@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/boringsql/qshape"
@@ -93,11 +94,18 @@ func annotatedWith(track *string, canonicals ...string) *AnnotatedSchema {
 	}
 }
 
-// The flag exists to explain scans that pg_stat_statements structurally cannot
-// show. Without the setting there is no such explanation, so no flag.
-func TestBuildQueryRefIndexNilWithoutTrack(t *testing.T) {
-	if ix := BuildQueryRefIndex(annotatedWith(nil, "SELECT 1 FROM t")); ix != nil {
-		t.Errorf("want nil index when pgss_track was not captured, got %+v", ix)
+// An unknown track must never be treated as 'top'. Old history DBs, pulled
+// payloads from an older producer, and an unreadable GUC all reach nil.
+func TestUnknownTrackIsNotTreatedAsTop(t *testing.T) {
+	ix := BuildQueryRefIndex(annotatedWith(nil, "SELECT 1 FROM t"))
+	if ix == nil {
+		t.Fatal("stats were captured; the index must exist to report why it stood down")
+	}
+	if ix.Unattributed("hidden_table", unattributedScanThreshold) {
+		t.Error("an unrecorded track must not be treated as 'top'")
+	}
+	if r := ix.SkipReason(); !strings.Contains(r, "track") {
+		t.Errorf("skip reason should name the track, got %q", r)
 	}
 	if ix := BuildQueryRefIndex(&AnnotatedSchema{}); ix != nil {
 		t.Errorf("want nil index with no query stats at all, got %+v", ix)

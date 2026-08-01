@@ -220,7 +220,7 @@ func TestBuildAnomalies_HottestFirst(t *testing.T) {
 		}}},
 	}
 
-	anomalies := buildAnomalies(a)
+	anomalies, _ := buildAnomalies(a)
 	if len(anomalies) != 2 {
 		t.Fatalf("expected both seq-scan-only tables flagged, got %d: %v", len(anomalies), anomalies)
 	}
