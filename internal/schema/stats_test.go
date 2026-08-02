@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/boringsql/qshape"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -207,5 +208,37 @@ func TestCaptureQueryStats_ContentHashRecomputes(t *testing.T) {
 	if got := ComputeQueryStatsContentHash(qs); got != qs.ContentHash {
 		t.Errorf("stored ContentHash %s does not recompute from the payload (got %s)",
 			qs.ContentHash, got)
+	}
+}
+
+// track_io_timing is off by default, and with it off pg_stat_statements reports 0 for the
+// two block timings. Storing that 0 would make a statement that never waited on disk
+// indistinguishable from one nobody measured, so it is dropped to unknown at the fetch.
+func TestStripUntimed(t *testing.T) {
+	ms := func(v float64) *float64 { return &v }
+	measured := qshape.Query{
+		QueryID:              1,
+		SharedBlkReadTimeMs:  ms(0),
+		SharedBlkWriteTimeMs: ms(4),
+		SharedBlksRead:       func(v int64) *int64 { return &v }(9),
+	}
+
+	off := stripUntimed(measured, false)
+	if off.SharedBlkReadTimeMs != nil || off.SharedBlkWriteTimeMs != nil {
+		t.Fatalf("timings survive track_io_timing = off: %v %v", off.SharedBlkReadTimeMs, off.SharedBlkWriteTimeMs)
+	}
+	// The COUNTERS have no config gate; dropping them too would lose real data.
+	if off.SharedBlksRead == nil || *off.SharedBlksRead != 9 {
+		t.Fatal("shared block counters must survive: they do not depend on track_io_timing")
+	}
+
+	// Unknown (the GUC read failed) is not off: the timings survive, and the capture's
+	// NULL track_io_timing is what marks them uncertain.
+	on := stripUntimed(measured, true)
+	if on.SharedBlkReadTimeMs == nil || *on.SharedBlkReadTimeMs != 0 {
+		t.Fatal("an explicit 0 with timing ON is a measurement and must survive")
+	}
+	if on.SharedBlkWriteTimeMs == nil || *on.SharedBlkWriteTimeMs != 4 {
+		t.Fatal("write timing lost")
 	}
 }

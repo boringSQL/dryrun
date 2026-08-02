@@ -828,3 +828,54 @@ func TestQueryStatsContentHashIgnoresClusterTempSums(t *testing.T) {
 		t.Fatal("a cluster-level sum moved the digest; only the raw members are content")
 	}
 }
+
+// The shared-block fields are inside the digest, so each must be a tiebreaker in the
+// comparator: the sort is unstable, and a field it does not order can move the digest of
+// identical content. The two timings and stddev are the ones added last.
+func TestQueryStatsContentHashCoversBlockTimings(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	base := queryStatsWith(QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3})
+	baseDigest := ComputeQueryStatsContentHash(base)
+
+	for _, tc := range []struct {
+		name   string
+		member QueryStatsMember
+	}{
+		{"read time", QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, SharedBlkReadTimeMs: f(12.5)}},
+		{"write time", QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, SharedBlkWriteTimeMs: f(12.5)}},
+		{"stddev", QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, StddevExecTimeMs: f(3)}},
+		// An explicit 0 is a reading: with track_io_timing ON, a statement that never
+		// waited on a block genuinely spent 0 ms there, and a statement executed once
+		// genuinely has no deviation. Neither may collapse onto the nil digest.
+		{"explicit zero read time", QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, SharedBlkReadTimeMs: f(0)}},
+		{"explicit zero stddev", QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, StddevExecTimeMs: f(0)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if ComputeQueryStatsContentHash(queryStatsWith(tc.member)) == baseDigest {
+				t.Fatal("field does not affect the digest; a differing capture would dedup away")
+			}
+		})
+	}
+
+	// Two members alike in every ordered counter but one timing must still hash the same
+	// whichever order they arrive in. This is the property the tiebreakers exist for.
+	for _, tie := range []struct {
+		name string
+		a, b QueryStatsMember
+	}{
+		{"read time",
+			QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, SharedBlkReadTimeMs: f(1)},
+			QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, SharedBlkReadTimeMs: f(2)}},
+		// stddev is the LAST comparator arm, so it is the one whose absence would be silent.
+		{"stddev",
+			QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, StddevExecTimeMs: f(1)},
+			QueryStatsMember{QueryID: 1, Calls: 10, TotalExecTimeMs: 5, Rows: 3, StddevExecTimeMs: f(2)}},
+	} {
+		t.Run("order/"+tie.name, func(t *testing.T) {
+			if ComputeQueryStatsContentHash(queryStatsWith(tie.a, tie.b)) !=
+				ComputeQueryStatsContentHash(queryStatsWith(tie.b, tie.a)) {
+				t.Fatal("member order moves the digest; the field is not breaking the tie")
+			}
+		})
+	}
+}
