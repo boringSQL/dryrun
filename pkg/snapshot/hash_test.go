@@ -338,7 +338,6 @@ func TestQueryStatsContentHash_IgnoresDerivedFields(t *testing.T) {
 			Members:         members,
 			Calls:           10,
 			TotalExecTimeMs: 100,
-			MeanExecTimeMs:  10,
 			Rows:            10,
 		}},
 	}
@@ -349,7 +348,6 @@ func TestQueryStatsContentHash_IgnoresDerivedFields(t *testing.T) {
 		Members:         members,
 		Calls:           10,
 		TotalExecTimeMs: 100,
-		MeanExecTimeMs:  10.0000001,
 		Rows:            10,
 	}}
 
@@ -720,7 +718,6 @@ func TestQueryStatsContentHash_ReproducibleFromPayload(t *testing.T) {
 			Members:         []QueryStatsMember{{QueryID: 100, Calls: 5, TotalExecTimeMs: 50, Rows: 5}},
 			Calls:           5,
 			TotalExecTimeMs: 50,
-			MeanExecTimeMs:  10,
 			Rows:            5,
 		}},
 	}
