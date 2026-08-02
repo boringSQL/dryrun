@@ -128,7 +128,8 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		}
 		return nil, fmt.Errorf("fetch query stats: %w", err)
 	}
-	clusters, err := qshape.Group(queries)
+	// The whitelist admits COPY; keep only its literal-free forms.
+	clusters, err := qshape.Group(dropUnsafeCopy(queries))
 	if err != nil {
 		return nil, fmt.Errorf("group query stats: %w", err)
 	}
@@ -160,7 +161,6 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 			Members:         members,
 			Calls:           c.TotalCalls,
 			TotalExecTimeMs: c.TotalExecTimeMs,
-			MeanExecTimeMs:  c.MeanExecTimeMs,
 			Rows:            c.Rows,
 			TempBlksRead:    c.TempBlksRead,
 			TempBlksWritten: c.TempBlksWritten,
@@ -314,7 +314,7 @@ func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel, renamedBlkT
 	timed := ioTiming == nil || *ioTiming
 	return scanAll(rows, func(r pgx.Rows) (qshape.Query, error) {
 		var e qshape.Query
-		err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs, &e.MeanExecTimeMs,
+		err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs,
 			&e.StddevExecTimeMs, &e.Rows,
 			&e.TempBlksRead, &e.TempBlksWritten,
 			&e.SharedBlksHit, &e.SharedBlksRead, &e.SharedBlksDirtied, &e.SharedBlksWritten,

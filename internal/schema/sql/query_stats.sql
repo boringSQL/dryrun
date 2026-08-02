@@ -11,7 +11,7 @@ SELECT to_regclass('pg_stat_statements') IS NOT NULL
 
 -- name: fetch-query-stats
 SELECT s.queryid, s.calls, s.query,
-       s.total_exec_time, s.mean_exec_time, s.stddev_exec_time, s.rows,
+       s.total_exec_time, s.stddev_exec_time, s.rows,
        -- temp blocks: the sorts and hashes that spilled out of work_mem. Present in
        -- every pg_stat_statements version we support, with no configuration gate,
        -- unlike the shared block TIMINGS that need track_io_timing.
@@ -22,8 +22,9 @@ SELECT s.queryid, s.calls, s.query,
  WHERE s.dbid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
    AND s.queryid IS NOT NULL
    AND s.query <> '<insufficient privilege>'
-   -- utility-statement literals aren't $N-substituted; whitelist DML instead of blacklisting
-   AND s.query ~* '^\s*(with|select|insert|update|delete|merge|table|values)\M'
+   -- utility-statement literals aren't $N-substituted; whitelist DML instead of blacklisting.
+   -- COPY admitted for bulk-load visibility; dropUnsafeCopy keeps only literal-free forms.
+   AND s.query ~* '^\s*(with|select|insert|update|delete|merge|table|values|copy)\M'
  ORDER BY s.total_exec_time DESC
  LIMIT 500
 
@@ -34,7 +35,7 @@ SELECT s.queryid, s.calls, s.query,
 -- nested rows out of the top 500. Consequence: function/trigger work is
 -- invisible even under track = 'all', exactly as under track = 'top'.
 SELECT s.queryid, s.calls, s.query,
-       s.total_exec_time, s.mean_exec_time, s.stddev_exec_time, s.rows,
+       s.total_exec_time, s.stddev_exec_time, s.rows,
        -- temp blocks: the sorts and hashes that spilled out of work_mem. Present in
        -- every pg_stat_statements version we support, with no configuration gate,
        -- unlike the shared block TIMINGS that need track_io_timing.
@@ -46,8 +47,9 @@ SELECT s.queryid, s.calls, s.query,
    AND s.queryid IS NOT NULL
    AND s.query <> '<insufficient privilege>'
    AND s.toplevel
-   -- utility-statement literals aren't $N-substituted; whitelist DML instead of blacklisting
-   AND s.query ~* '^\s*(with|select|insert|update|delete|merge|table|values)\M'
+   -- utility-statement literals aren't $N-substituted; whitelist DML instead of blacklisting.
+   -- COPY admitted for bulk-load visibility; dropUnsafeCopy keeps only literal-free forms.
+   AND s.query ~* '^\s*(with|select|insert|update|delete|merge|table|values|copy)\M'
  ORDER BY s.total_exec_time DESC
  LIMIT 500
 

@@ -523,8 +523,9 @@ type (
 		Members         []QueryStatsMember `json:"members,omitempty"`
 		Calls           int64              `json:"calls"`
 		TotalExecTimeMs float64            `json:"total_exec_time_ms,omitempty"`
-		MeanExecTimeMs  float64            `json:"mean_exec_time_ms,omitempty"`
 		Rows            int64              `json:"rows,omitempty"`
+		// No mean: mean_exec_time averages since pg_stat_statements' own reset, not
+		// any window the reader is looking at; derive from TotalExecTimeMs/Calls.
 		// Summed over Members, nil unless every member carried them.
 		TempBlksRead    *int64 `json:"temp_blks_read,omitempty"`
 		TempBlksWritten *int64 `json:"temp_blks_written,omitempty"`

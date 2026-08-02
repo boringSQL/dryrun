@@ -89,8 +89,11 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 				truncated = true
 			}
 			var rowsPerCall float64
+			// Newer captures no longer carry mean_exec_time; derive it.
+			var meanExecMs float64
 			if q.Calls > 0 {
 				rowsPerCall = float64(q.Rows) / float64(q.Calls)
+				meanExecMs = q.TotalExecTimeMs / float64(q.Calls)
 			}
 			entries = append(entries, queryStatsEntry{
 				Node:               snap.Node.Source,
@@ -101,7 +104,7 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 				CanonicalTruncated: truncated,
 				Calls:              q.Calls,
 				TotalExecTimeMs:    q.TotalExecTimeMs,
-				MeanExecTimeMs:     q.MeanExecTimeMs,
+				MeanExecTimeMs:     meanExecMs,
 				Rows:               q.Rows,
 				RowsPerCall:        rowsPerCall,
 				NestedExecTimeMs:   q.NestedExecTimeMs,
