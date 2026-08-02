@@ -159,6 +159,18 @@ func ComputeActivityContentHash(a *ActivityStatsSnapshot) string {
 	return fmt.Sprintf("%x", h)
 }
 
+func cmpOptionalFloat(a, b *float64) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return -1
+	case b == nil:
+		return 1
+	}
+	return cmp.Compare(*a, *b)
+}
+
 // cmpOptional orders an optional counter, with unknown sorting before any value.
 func cmpOptional(a, b *int64) int {
 	switch {
@@ -201,7 +213,28 @@ func ComputeQueryStatsContentHash(q *QueryStatsSnapshot) string {
 		if c := cmpOptional(a.TempBlksRead, b.TempBlksRead); c != 0 {
 			return c
 		}
-		return cmpOptional(a.TempBlksWritten, b.TempBlksWritten)
+		if c := cmpOptional(a.TempBlksWritten, b.TempBlksWritten); c != 0 {
+			return c
+		}
+		if c := cmpOptional(a.SharedBlksHit, b.SharedBlksHit); c != 0 {
+			return c
+		}
+		if c := cmpOptional(a.SharedBlksRead, b.SharedBlksRead); c != 0 {
+			return c
+		}
+		if c := cmpOptional(a.SharedBlksDirtied, b.SharedBlksDirtied); c != 0 {
+			return c
+		}
+		if c := cmpOptional(a.SharedBlksWritten, b.SharedBlksWritten); c != 0 {
+			return c
+		}
+		if c := cmpOptionalFloat(a.SharedBlkReadTimeMs, b.SharedBlkReadTimeMs); c != 0 {
+			return c
+		}
+		if c := cmpOptionalFloat(a.SharedBlkWriteTimeMs, b.SharedBlkWriteTimeMs); c != 0 {
+			return c
+		}
+		return cmpOptionalFloat(a.StddevExecTimeMs, b.StddevExecTimeMs)
 	})
 
 	canonical := map[string]any{

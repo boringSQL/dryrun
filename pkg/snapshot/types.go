@@ -502,11 +502,18 @@ type (
 		TotalExecTimeMs float64 `json:"total_exec_time_ms,omitempty"`
 		Rows            int64   `json:"rows,omitempty"`
 		// Temp blocks: the sorts and hashes that spilled out of work_mem. Always
-		// available (no track_io_timing gate), unlike the shared_blk_* timings.
+		// available (no track_io_timing gate), unlike the shared block TIMINGS.
 		// Pointers, and omitted when nil, so a blob written before these existed stays
 		// byte-identical and reads as unknown rather than as "spilled nothing".
-		TempBlksRead    *int64 `json:"temp_blks_read,omitempty"`
-		TempBlksWritten *int64 `json:"temp_blks_written,omitempty"`
+		TempBlksRead         *int64   `json:"temp_blks_read,omitempty"`
+		TempBlksWritten      *int64   `json:"temp_blks_written,omitempty"`
+		SharedBlksHit        *int64   `json:"shared_blks_hit,omitempty"`
+		SharedBlksRead       *int64   `json:"shared_blks_read,omitempty"`
+		SharedBlksDirtied    *int64   `json:"shared_blks_dirtied,omitempty"`
+		SharedBlksWritten    *int64   `json:"shared_blks_written,omitempty"`
+		SharedBlkReadTimeMs  *float64 `json:"shared_blk_read_time_ms,omitempty"`
+		SharedBlkWriteTimeMs *float64 `json:"shared_blk_write_time_ms,omitempty"`
+		StddevExecTimeMs     *float64 `json:"stddev_exec_time_ms,omitempty"`
 	}
 
 	// One qshape cluster: an ORM-collapsed query shape with per-node pg_stat_statements rollup
@@ -545,8 +552,9 @@ type (
 		RawRows int `json:"raw_rows,omitempty"`
 		// pg_stat_statements.max at capture — the number that explains a dealloc;
 		// nil when the role can't read it.
-		PgssMax   *int    `json:"pgss_max,omitempty"`
-		PgssTrack *string `json:"pgss_track,omitempty"`
+		PgssMax       *int    `json:"pgss_max,omitempty"`
+		PgssTrack     *string `json:"pgss_track,omitempty"`
+		TrackIOTiming *bool   `json:"track_io_timing,omitempty"`
 		// block_size, which is what turns the temp-block counts into bytes. A
 		// compile-time GUC, almost always 8192; nil when the role could not read it,
 		// and a consumer then reports blocks rather than assuming.

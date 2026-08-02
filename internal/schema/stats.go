@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/boringsql/qshape"
@@ -96,8 +97,8 @@ func CaptureActivityStats(ctx context.Context, pool Querier, schemaRefHash, sour
 
 // Per-node pg_stat_statements rollup, fingerprinted via qshape; ErrQueryStatsUnavailable if the extension isn't installed
 func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source string) (*QueryStatsSnapshot, error) {
-	var installed, hasInfoView, hasToplevel bool
-	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).Scan(&installed, &hasInfoView, &hasToplevel); err != nil {
+	var installed, hasInfoView, hasToplevel, renamedBlkTime bool
+	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).Scan(&installed, &hasInfoView, &hasToplevel, &renamedBlkTime); err != nil {
 		return nil, fmt.Errorf("check pg_stat_statements: %w", err)
 	}
 	if !installed {
@@ -115,7 +116,8 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	if hasInfoView {
 		infoBefore = fetchPgssInfo(ctx, pool)
 	}
-	queries, err := fetchQueryStats(ctx, pool, hasToplevel)
+	ioTiming := fetchTrackIOTiming(ctx, pool)
+	queries, err := fetchQueryStats(ctx, pool, hasToplevel, renamedBlkTime, ioTiming)
 	if err != nil {
 		// role/session search_path can differ from the earlier to_regclass check.
 		// 42703: pgss left at 1.7 by pg_upgrade has no total_exec_time, so the
@@ -135,13 +137,21 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	for i, c := range clusters {
 		members := make([]QueryStatsMember, len(c.Members))
 		for j, m := range c.Members {
+			stddev := m.StddevExecTimeMs
 			members[j] = QueryStatsMember{
-				QueryID:         m.QueryID,
-				Calls:           m.Calls,
-				TotalExecTimeMs: m.TotalExecTimeMs,
-				Rows:            m.Rows,
-				TempBlksRead:    m.TempBlksRead,
-				TempBlksWritten: m.TempBlksWritten,
+				QueryID:              m.QueryID,
+				Calls:                m.Calls,
+				TotalExecTimeMs:      m.TotalExecTimeMs,
+				StddevExecTimeMs:     &stddev,
+				Rows:                 m.Rows,
+				TempBlksRead:         m.TempBlksRead,
+				TempBlksWritten:      m.TempBlksWritten,
+				SharedBlksHit:        m.SharedBlksHit,
+				SharedBlksRead:       m.SharedBlksRead,
+				SharedBlksDirtied:    m.SharedBlksDirtied,
+				SharedBlksWritten:    m.SharedBlksWritten,
+				SharedBlkReadTimeMs:  m.SharedBlkReadTimeMs,
+				SharedBlkWriteTimeMs: m.SharedBlkWriteTimeMs,
 			}
 		}
 		entries[i] = QueryStatsEntry{
@@ -168,6 +178,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		RawRows:       len(queries),
 		PgssMax:       fetchPgssMax(ctx, pool),
 		PgssTrack:     fetchPgssTrack(ctx, pool),
+		TrackIOTiming: ioTiming,
 		BlockSize:     fetchBlockSize(ctx, pool),
 		InfoBefore:    infoBefore,
 		InfoAfter:     infoAfter,
@@ -286,21 +297,45 @@ func fetchPgssTrack(ctx context.Context, pool Querier) *string {
 
 // The toplevel variant filters nested rows in SQL (pgss 1.9+); the plain one
 // is for a pgss without the column (PG13, or < 1.9 after pg_upgrade).
-func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel bool) ([]qshape.Query, error) {
+func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel, renamedBlkTime bool, ioTiming *bool) ([]qshape.Query, error) {
 	name := "fetch-query-stats"
 	if hasToplevel {
 		name = "fetch-query-stats-toplevel"
 	}
-	rows, err := pool.Query(ctx, q(name))
+	readCol, writeCol := "blk_read_time", "blk_write_time"
+	if renamedBlkTime {
+		readCol, writeCol = "shared_blk_read_time", "shared_blk_write_time"
+	}
+	sql := strings.NewReplacer("__READ_TIME__", readCol, "__WRITE_TIME__", writeCol).Replace(q(name))
+	rows, err := pool.Query(ctx, sql)
 	if err != nil {
 		return nil, err
 	}
+	timed := ioTiming == nil || *ioTiming
 	return scanAll(rows, func(r pgx.Rows) (qshape.Query, error) {
 		var e qshape.Query
-		err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs, &e.MeanExecTimeMs, &e.Rows,
-			&e.TempBlksRead, &e.TempBlksWritten)
-		return e, err
+		err := r.Scan(&e.QueryID, &e.Calls, &e.Raw, &e.TotalExecTimeMs, &e.MeanExecTimeMs,
+			&e.StddevExecTimeMs, &e.Rows,
+			&e.TempBlksRead, &e.TempBlksWritten,
+			&e.SharedBlksHit, &e.SharedBlksRead, &e.SharedBlksDirtied, &e.SharedBlksWritten,
+			&e.SharedBlkReadTimeMs, &e.SharedBlkWriteTimeMs)
+		return stripUntimed(e, timed), err
 	})
+}
+
+func stripUntimed(e qshape.Query, timed bool) qshape.Query {
+	if !timed {
+		e.SharedBlkReadTimeMs, e.SharedBlkWriteTimeMs = nil, nil
+	}
+	return e
+}
+
+func fetchTrackIOTiming(ctx context.Context, pool Querier) *bool {
+	var on bool
+	if err := pool.QueryRow(ctx, q("fetch-track-io-timing")).Scan(&on); err != nil {
+		return nil
+	}
+	return &on
 }
 
 func fetchActivityTables(ctx context.Context, pool Querier) ([]TableActivityEntry, error) {
