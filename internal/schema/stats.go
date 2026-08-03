@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -84,12 +85,20 @@ func CaptureActivityStats(ctx context.Context, pool Querier, schemaRefHash, sour
 		return nil, fmt.Errorf("fetch activity indexes: %w", err)
 	}
 
+	// Unlike query stats (an optional extension), these are core catalogs — always
+	// present, PUBLIC-readable — so they run inline. A real error still aborts the
+	// shared tx; see the caveat at the CaptureQueryStats call site (cmd/dryrun/init.go).
+	slots, slotsOK := fetchReplicationSlots(ctx, pool)
 	snap := &ActivityStatsSnapshot{
-		FormatVersion: FormatVersion,
-		SchemaRefHash: schemaRefHash,
-		Node:          *node,
-		Tables:        tables,
-		Indexes:       indexes,
+		FormatVersion:          FormatVersion,
+		SchemaRefHash:          schemaRefHash,
+		Node:                   *node,
+		Tables:                 tables,
+		Indexes:                indexes,
+		Database:               fetchDatabaseActivity(ctx, pool),
+		ReplicationSlots:       slots,
+		ReplicationSlotsReadOK: &slotsOK,
+		Checkpointer:           fetchCheckpointerActivity(ctx, pool),
 	}
 	snap.ContentHash = ComputeActivityContentHash(snap)
 	return snap, nil
@@ -373,6 +382,75 @@ func fetchActivityIndexes(ctx context.Context, pool Querier) ([]IndexActivityEnt
 		)
 		return e, err
 	})
+}
+
+// Best-effort like the two below: nil on any error rather than failing the snapshot.
+// Debug, not Warn — an unprivileged role would otherwise spam every capture.
+func fetchDatabaseActivity(ctx context.Context, pool Querier) *DatabaseActivity {
+	var d DatabaseActivity
+	if err := pool.QueryRow(ctx, q("fetch-database-stats")).Scan(
+		&d.Deadlocks, &d.TempFiles, &d.TempBytes, &d.XactCommit, &d.XactRollback,
+		&d.BlksHit, &d.BlksRead, &d.Conflicts, &d.ChecksumFailures, &d.StatsReset,
+	); err != nil {
+		slog.Debug("pg_stat_database unavailable; capturing without it", "error", err)
+		return nil
+	}
+	return &d
+}
+
+// wal_status/safe_wal_size (PG13+) are probed once, the same probe-then-branch shape
+// fetchQueryStats uses. ok=false only on read failure — a genuine "no slots" result is
+// ok=true with a nil slice, distinct from "never checked".
+func fetchReplicationSlots(ctx context.Context, pool Querier) ([]ReplicationSlotActivity, bool) {
+	var hasWalStatus bool
+	if err := pool.QueryRow(ctx, q("fetch-has-wal-status")).Scan(&hasWalStatus); err != nil {
+		slog.Debug("replication slots unavailable; capturing without them", "error", err)
+		return nil, false
+	}
+
+	name := "fetch-replication-slots-no-wal-status"
+	if hasWalStatus {
+		name = "fetch-replication-slots"
+	}
+	rows, err := pool.Query(ctx, q(name))
+	if err != nil {
+		slog.Debug("replication slots unavailable; capturing without them", "error", err)
+		return nil, false
+	}
+
+	slots, err := scanAll(rows, func(r pgx.Rows) (ReplicationSlotActivity, error) {
+		var s ReplicationSlotActivity
+		if hasWalStatus {
+			return s, r.Scan(&s.SlotName, &s.SlotType, &s.Active, &s.WalStatus, &s.SafeWalSize)
+		}
+		return s, r.Scan(&s.SlotName, &s.SlotType, &s.Active)
+	})
+	if err != nil {
+		slog.Debug("replication slots unavailable; capturing without them", "error", err)
+		return nil, false
+	}
+	return slots, true
+}
+
+// pg_stat_checkpointer (PG17+) with pg_stat_bgwriter fallback; the renamed counters
+// are normalized to one shape, View records which answered.
+func fetchCheckpointerActivity(ctx context.Context, pool Querier) *CheckpointerActivity {
+	var hasCheckpointer bool
+	if err := pool.QueryRow(ctx, q("fetch-has-pg-stat-checkpointer")).Scan(&hasCheckpointer); err != nil {
+		slog.Debug("checkpointer stats unavailable; capturing without them", "error", err)
+		return nil
+	}
+	c := &CheckpointerActivity{View: "pg_stat_bgwriter"}
+	name := "fetch-checkpointer-stats-legacy"
+	if hasCheckpointer {
+		c.View = "pg_stat_checkpointer"
+		name = "fetch-checkpointer-stats-pg17"
+	}
+	if err := pool.QueryRow(ctx, q(name)).Scan(&c.CheckpointsTimed, &c.CheckpointsReq, &c.StatsReset); err != nil {
+		slog.Debug("checkpointer stats unavailable; capturing without them", "error", err)
+		return nil
+	}
+	return c
 }
 
 func FetchIsStandby(ctx context.Context, pool Querier) (bool, error) {

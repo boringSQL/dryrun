@@ -53,6 +53,8 @@ dryrun --profile replica3 snapshot activity \
 
 `--label` is required and identifies the node in `describe_table` and `detect`. `snapshot activity` refuses to run on the primary. Each row captures `pg_stat_user_tables`, `pg_stat_user_indexes`, and `stats_reset` for the node, then joins to the latest schema by `schema_ref_hash`. Use `--allow-orphan` when activity arrives before any schema snapshot exists; orphan rows are stored but not reattached when a matching schema lands later.
 
+Each activity row also carries three database-scoped, best-effort sections, independent of any table: `pg_stat_database` counters for the connected database (deadlocks, temp spill, commit/rollback volume, buffer hit ratio, conflicts, checksum failures), `pg_replication_slots` (per-slot activity and WAL retention risk, PG13+ fields nullable on 13-), and checkpoint counters normalized from `pg_stat_checkpointer` (PG17+) or `pg_stat_bgwriter` (older). All three are CLUSTER facts riding a per-node, per-database document — a multi-database cluster reports identical checkpoint counters once per tracked database, and a standby's own replication-slot list is normally empty (its slots, if any, live on the primary). A read failure on any of the three leaves it absent on the wire, never a substitute zero.
+
 Activity dumps are small (single-digit MB) and safe for cron. See [Automating collection](#automating-collection).
 
 ## Aggregation rules

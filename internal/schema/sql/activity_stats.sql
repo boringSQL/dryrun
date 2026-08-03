@@ -39,3 +39,43 @@ SELECT s.schemaname                       AS schema_name,
 -- pg_stat_replication is primary-side; pg_is_in_recovery() distinguishes role
 SELECT pg_catalog.pg_is_in_recovery() AS is_standby,
        version()                       AS pg_version
+
+-- name: fetch-database-stats
+SELECT d.deadlocks,
+       d.temp_files,
+       d.temp_bytes,
+       d.xact_commit,
+       d.xact_rollback,
+       d.blks_hit,
+       d.blks_read,
+       d.conflicts,
+       d.checksum_failures,
+       d.stats_reset
+  FROM pg_catalog.pg_stat_database d
+ WHERE d.datname = current_database()
+
+-- name: fetch-has-wal-status
+-- wal_status/safe_wal_size are PG13+; a pre-13 primary has neither column.
+SELECT current_setting('server_version_num')::int >= 130000
+
+-- name: fetch-replication-slots
+SELECT slot_name, slot_type, active, wal_status, safe_wal_size
+  FROM pg_catalog.pg_replication_slots
+ ORDER BY slot_name
+
+-- name: fetch-replication-slots-no-wal-status
+SELECT slot_name, slot_type, active
+  FROM pg_catalog.pg_replication_slots
+ ORDER BY slot_name
+
+-- name: fetch-has-pg-stat-checkpointer
+-- PG17 split checkpoint counters out of pg_stat_bgwriter into their own view.
+SELECT to_regclass('pg_catalog.pg_stat_checkpointer') IS NOT NULL
+
+-- name: fetch-checkpointer-stats-pg17
+SELECT num_timed, num_requested, stats_reset
+  FROM pg_catalog.pg_stat_checkpointer
+
+-- name: fetch-checkpointer-stats-legacy
+SELECT checkpoints_timed, checkpoints_req, stats_reset
+  FROM pg_catalog.pg_stat_bgwriter

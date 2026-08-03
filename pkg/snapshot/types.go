@@ -402,6 +402,43 @@ type IndexActivity struct {
 	IdxTupFetch int64 `json:"idx_tup_fetch"`
 }
 
+// pg_stat_database counters for current_database(). Nil means the read failed or was
+// never attempted, not a real zero. These are cluster facts riding a per-node,
+// per-database doc: repeated once per database, and a standby's slot list is normally
+// empty. ChecksumFailures is PG12+ (this repo's floor), so no version probe.
+type DatabaseActivity struct {
+	Deadlocks        int64      `json:"deadlocks"`
+	TempFiles        int64      `json:"temp_files"`
+	TempBytes        int64      `json:"temp_bytes"`
+	XactCommit       int64      `json:"xact_commit"`
+	XactRollback     int64      `json:"xact_rollback"`
+	BlksHit          int64      `json:"blks_hit"`
+	BlksRead         int64      `json:"blks_read"`
+	Conflicts        int64      `json:"conflicts"`
+	ChecksumFailures *int64     `json:"checksum_failures,omitempty"`
+	StatsReset       *time.Time `json:"stats_reset,omitempty"`
+}
+
+// One row of pg_replication_slots: an inactive/lost slot pins WAL until the disk fills.
+// WalStatus is nil pre-PG13 (no such column); SafeWalSize is also nil under the default
+// max_slot_wal_keep_size = -1, so nil is the modal case, not "couldn't check".
+type ReplicationSlotActivity struct {
+	SlotName    string  `json:"slot_name"`
+	SlotType    string  `json:"slot_type"`
+	Active      bool    `json:"active"`
+	WalStatus   *string `json:"wal_status,omitempty"`
+	SafeWalSize *int64  `json:"safe_wal_size,omitempty"`
+}
+
+// Checkpoint counters; PG17 moved them from pg_stat_bgwriter to pg_stat_checkpointer
+// under renamed columns, so View records which catalog answered.
+type CheckpointerActivity struct {
+	CheckpointsTimed int64      `json:"checkpoints_timed"`
+	CheckpointsReq   int64      `json:"checkpoints_req"`
+	View             string     `json:"view"`
+	StatsReset       *time.Time `json:"stats_reset,omitempty"`
+}
+
 // Identifies the node that produced an ActivityStatsSnapshot
 type NodeIdentity struct {
 	Source    string    `json:"source"`
@@ -491,6 +528,15 @@ type (
 		Node          NodeIdentity         `json:"node"`
 		Tables        []TableActivityEntry `json:"tables"`
 		Indexes       []IndexActivityEntry `json:"indexes"`
+		// Database-scoped, best-effort: nil/empty on read failure rather than failing
+		// the whole capture; omitempty keeps absence distinct from a real zero.
+		Database *DatabaseActivity `json:"database,omitempty"`
+		// omitempty drops a len==0 slice nil or not, so ReadOK carries "checked, zero
+		// slots" vs "never checked". Never set ReplicationSlots without ReadOK=true —
+		// ComputeActivityContentHash hashes them as a pair.
+		ReplicationSlots       []ReplicationSlotActivity `json:"replication_slots,omitempty"`
+		ReplicationSlotsReadOK *bool                     `json:"replication_slots_read_ok,omitempty"`
+		Checkpointer           *CheckpointerActivity     `json:"checkpointer,omitempty"`
 	}
 
 	// One raw pg_stat_statements row, before qshape grouping; hashed from these.

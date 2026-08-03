@@ -146,13 +146,34 @@ type (
 	}
 )
 
-// Per-node activity; node.source included so two nodes never collide
+// Per-node activity; node.source included so two nodes never collide. The database-
+// scoped fields join the canonical map only when present — an unconditional key would
+// hash "database": null (etc.) into digests computed by CLIs predating them and move
+// every historical digest (TestActivityContentHash_OmitsAbsentFieldsSoOldDigestsSurvive).
+// Deploy cloud before any CLI carrying this, per CLAUDE.md's wire-addition rule.
+// Consequence: blks_hit/checkpoints_timed advance nearly every capture, so docs stop
+// deduping once these populate — intended.
 func ComputeActivityContentHash(a *ActivityStatsSnapshot) string {
 	canonical := map[string]any{
 		"schema_ref_hash": a.SchemaRefHash,
 		"node_source":     a.Node.Source,
 		"tables":          a.Tables,
 		"indexes":         a.Indexes,
+	}
+	if a.Database != nil {
+		canonical["database"] = a.Database
+	}
+	// Gated on ReadOK: "checked, zero slots" is content, distinct from "never checked".
+	// The slice is hashed only when non-empty — omitempty drops an empty slice from the
+	// wire, so hashing it would break digest reproducibility after a decode round-trip.
+	if a.ReplicationSlotsReadOK != nil {
+		canonical["replication_slots_read_ok"] = *a.ReplicationSlotsReadOK
+		if len(a.ReplicationSlots) > 0 {
+			canonical["replication_slots"] = a.ReplicationSlots
+		}
+	}
+	if a.Checkpointer != nil {
+		canonical["checkpointer"] = a.Checkpointer
 	}
 	b, _ := json.Marshal(canonical)
 	h := sha256.Sum256(b)
