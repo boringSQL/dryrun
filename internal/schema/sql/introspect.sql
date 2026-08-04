@@ -73,7 +73,12 @@ SELECT con.conrelid::int4     AS table_oid,
     ON d.objoid = con.oid AND d.objsubid = 0
  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
    AND n.nspname NOT LIKE 'pg_temp_%'
-   AND NOT con.conislocal = false
+   -- keep local constraints plus a partition's own copy of an inherited
+   -- constraint (parent on a different conrelid); skip same-relation clnes
+   AND (con.conislocal
+        OR (con.conparentid <> 0
+            AND con.conrelid <> (SELECT p.conrelid FROM pg_catalog.pg_constraint p
+                                  WHERE p.oid = con.conparentid)))
  ORDER BY con.conrelid, con.conname
 
 -- name: fetch-table-comments
