@@ -31,6 +31,15 @@ func query(ctx context.Context, pool Querier, name string) (pgx.Rows, error) {
 	return pool.Query(ctx, q(name))
 }
 
+// serverNow returns the DB server's clock, avoiding client-clock skew
+func serverNow(ctx context.Context, pool Querier) (time.Time, error) {
+	var now time.Time
+	if err := pool.QueryRow(ctx, "SELECT now()").Scan(&now); err != nil {
+		return time.Time{}, fmt.Errorf("query server clock: %w", err)
+	}
+	return now.UTC(), nil
+}
+
 //go:embed sql/*.sql
 var sqlFS embed.FS
 
@@ -57,6 +66,11 @@ func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error
 	var database string
 	if err := pool.QueryRow(ctx, "SELECT current_database()").Scan(&database); err != nil {
 		return nil, fmt.Errorf("query current database: %w", err)
+	}
+
+	takenAt, err := serverNow(ctx, pool)
+	if err != nil {
+		return nil, err
 	}
 
 	// table-centric
@@ -151,7 +165,7 @@ func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error
 		PgVersion:     pgVersion,
 		Flavor:        flavor,
 		Database:      database,
-		Timestamp:     time.Now().UTC(),
+		Timestamp:     takenAt,
 		Tables:        tables,
 		Enums:         enums,
 		Domains:       domains,

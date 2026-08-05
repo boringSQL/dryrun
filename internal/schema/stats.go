@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/boringsql/qshape"
 	"github.com/jackc/pgx/v5"
@@ -37,6 +36,11 @@ func CapturePlannerStats(ctx context.Context, pool Querier, schemaRefHash string
 		return nil, fmt.Errorf("query reference counters: %w", err)
 	}
 
+	takenAt, err := serverNow(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+
 	tables, err := fetchPlannerTableSizing(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("fetch table sizing: %w", err)
@@ -58,7 +62,7 @@ func CapturePlannerStats(ctx context.Context, pool Querier, schemaRefHash string
 		FormatVersion: FormatVersion,
 		SchemaRefHash: schemaRefHash,
 		Database:      database,
-		Timestamp:     time.Now().UTC(),
+		Timestamp:     takenAt,
 		DatabaseXid:   databaseXid,
 		DatabaseMxid:  databaseMxid,
 		Tables:        tables,
@@ -207,11 +211,15 @@ func CaptureNodeIdentity(ctx context.Context, pool Querier, source string) (*Nod
 	if err := pool.QueryRow(ctx, q("fetch-node-identity")).Scan(&isStandby, &pgVersion); err != nil {
 		return nil, fmt.Errorf("fetch node identity: %w", err)
 	}
+	takenAt, err := serverNow(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
 	return &NodeIdentity{
 		Source:    source,
 		IsStandby: isStandby,
 		PgVersion: pgVersion,
-		Timestamp: time.Now().UTC(),
+		Timestamp: takenAt,
 	}, nil
 }
 
