@@ -602,10 +602,14 @@ type (
 		PgssMax       *int    `json:"pgss_max,omitempty"`
 		PgssTrack     *string `json:"pgss_track,omitempty"`
 		TrackIOTiming *bool   `json:"track_io_timing,omitempty"`
+		// pg_stat_statements.track_planning (1.8+); nis is absent
+		PgssTrackPlanning *bool `json:"pgss_track_planning,omitempty"`
 		// block_size, which is what turns the temp-block counts into bytes. A
 		// compile-time GUC, almost always 8192; nil when the role could not read it,
 		// and a consumer then reports blocks rather than assuming.
 		BlockSize *int `json:"block_size,omitempty"`
+		// caps the query text pgss/pg_stat_activity store; longer queries truncate.
+		TrackActivityQuerySize *int `json:"track_activity_query_size,omitempty"`
 		// true when the fetch filtered on pgss's toplevel flag (1.9+, PG14+);
 		// absent means unfiltered (pre-filter captures and pgss < 1.9).
 		ToplevelOnly bool `json:"toplevel_only,omitempty"`

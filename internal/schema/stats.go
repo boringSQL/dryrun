@@ -185,19 +185,21 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		infoAfter = fetchPgssInfo(ctx, pool)
 	}
 	snap := &QueryStatsSnapshot{
-		FormatVersion: FormatVersion,
-		SchemaRefHash: schemaRefHash,
-		QshapeVersion: qshape.GroupingVersion,
-		RawRows:       len(queries),
-		PgssMax:       fetchPgssMax(ctx, pool),
-		PgssTrack:     fetchPgssTrack(ctx, pool),
-		TrackIOTiming: ioTiming,
-		BlockSize:     fetchBlockSize(ctx, pool),
-		InfoBefore:    infoBefore,
-		InfoAfter:     infoAfter,
-		ToplevelOnly:  hasToplevel,
-		Node:          *node,
-		Queries:       entries,
+		FormatVersion:          FormatVersion,
+		SchemaRefHash:          schemaRefHash,
+		QshapeVersion:          qshape.GroupingVersion,
+		RawRows:                len(queries),
+		PgssMax:                fetchPgssMax(ctx, pool),
+		PgssTrack:              fetchPgssTrack(ctx, pool),
+		PgssTrackPlanning:      fetchPgssTrackPlanning(ctx, pool),
+		TrackIOTiming:          ioTiming,
+		BlockSize:              fetchBlockSize(ctx, pool),
+		TrackActivityQuerySize: fetchTrackActivityQuerySize(ctx, pool),
+		InfoBefore:             infoBefore,
+		InfoAfter:              infoAfter,
+		ToplevelOnly:           hasToplevel,
+		Node:                   *node,
+		Queries:                entries,
 	}
 	snap.ContentHash = ComputeQueryStatsContentHash(snap)
 	return snap, nil
@@ -353,6 +355,22 @@ func fetchTrackIOTiming(ctx context.Context, pool Querier) *bool {
 		return nil
 	}
 	return &on
+}
+
+func fetchPgssTrackPlanning(ctx context.Context, pool Querier) *bool {
+	var on bool
+	if err := pool.QueryRow(ctx, q("fetch-pgss-track-planning")).Scan(&on); err != nil {
+		return nil
+	}
+	return &on
+}
+
+func fetchTrackActivityQuerySize(ctx context.Context, pool Querier) *int {
+	var size int
+	if err := pool.QueryRow(ctx, q("fetch-track-activity-query-size")).Scan(&size); err != nil {
+		return nil
+	}
+	return &size
 }
 
 func fetchActivityTables(ctx context.Context, pool Querier) ([]TableActivityEntry, error) {

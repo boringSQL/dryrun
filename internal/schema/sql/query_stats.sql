@@ -74,3 +74,10 @@ SELECT current_setting('block_size')::int
 
 -- name: fetch-track-io-timing
 SELECT setting = 'on' FROM pg_catalog.pg_settings WHERE name = 'track_io_timing'
+
+-- name: fetch-pgss-track-planning
+-- pgss 1.8+; a missing row means the GUC is absent, not off
+SELECT setting = 'on' FROM pg_catalog.pg_settings WHERE name = 'pg_stat_statements.track_planning'
+
+-- name: fetch-track-activity-query-size
+SELECT setting::int FROM pg_catalog.pg_settings WHERE name = 'track_activity_query_size'
