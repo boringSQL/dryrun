@@ -115,6 +115,8 @@ type Index struct {
 	IsReady         bool     `json:"is_ready"`
 	BacksConstraint bool     `json:"backs_constraint,omitempty"`
 	HasExpressions  bool     `json:"-"`
+	// Physical partition-child indexes backing this partitioned parent.
+	Children []IndexPartitionChild `json:"children,omitempty"`
 }
 
 // Column-level stats from pg_stats
@@ -159,6 +161,13 @@ type PartitionChild struct {
 	Schema string `json:"schema"`
 	Name   string `json:"name"`
 	Bound  string `json:"bound"`
+}
+
+// One physical partition-level index inherited from a partitioned parent index.
+type IndexPartitionChild struct {
+	Schema string `json:"schema"`
+	Table  string `json:"table"`
+	Index  string `json:"index"`
 }
 
 type RlsPolicy struct {

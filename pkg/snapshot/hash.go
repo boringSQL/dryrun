@@ -59,13 +59,17 @@ func tableToStructural(t *Table, withReloptions bool) map[string]any {
 	for i := range t.Columns {
 		cols[i] = columnToStructural(&t.Columns[i])
 	}
+	indexes := make([]indexStructural, len(t.Indexes))
+	for i := range t.Indexes {
+		indexes[i] = indexToStructural(&t.Indexes[i])
+	}
 
 	m := map[string]any{
 		"schema":         t.Schema,
 		"name":           t.Name,
 		"columns":        cols,
 		"constraints":    t.Constraints,
-		"indexes":        t.Indexes,
+		"indexes":        indexes,
 		"comment":        t.Comment,
 		"partition_info": t.PartitionInfo,
 		"policies":       t.Policies,
@@ -93,6 +97,39 @@ func columnToStructural(c *Column) map[string]any {
 		"comment":           c.Comment,
 		"statistics_target": c.StatisticsTarget,
 		"generated":         c.Generated,
+	}
+}
+
+// Index minus Children, which changes as partitions are created/dropped and
+// would otherwise move every partitioned index's table digest. Field order
+// mirrors Index so tables without partitioned indexes hash identically.
+type indexStructural struct {
+	Name            string   `json:"name"`
+	Columns         []string `json:"columns"`
+	IncludeColumns  []string `json:"include_columns"`
+	IndexType       string   `json:"index_type"`
+	IsUnique        bool     `json:"is_unique"`
+	IsPrimary       bool     `json:"is_primary"`
+	Predicate       *string  `json:"predicate,omitempty"`
+	Definition      string   `json:"definition"`
+	IsValid         bool     `json:"is_valid"`
+	IsReady         bool     `json:"is_ready"`
+	BacksConstraint bool     `json:"backs_constraint,omitempty"`
+}
+
+func indexToStructural(idx *Index) indexStructural {
+	return indexStructural{
+		Name:            idx.Name,
+		Columns:         idx.Columns,
+		IncludeColumns:  idx.IncludeColumns,
+		IndexType:       idx.IndexType,
+		IsUnique:        idx.IsUnique,
+		IsPrimary:       idx.IsPrimary,
+		Predicate:       idx.Predicate,
+		Definition:      idx.Definition,
+		IsValid:         idx.IsValid,
+		IsReady:         idx.IsReady,
+		BacksConstraint: idx.BacksConstraint,
 	}
 }
 

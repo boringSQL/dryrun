@@ -106,6 +106,10 @@ func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error
 	if err != nil {
 		return nil, fmt.Errorf("fetch partition children: %w", err)
 	}
+	rawPartitionIndexChildren, err := fetchPartitionIndexChildren(ctx, pool)
+	if err != nil {
+		return nil, fmt.Errorf("fetch partition index children: %w", err)
+	}
 	rawPolicies, err := fetchPolicies(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("fetch policies: %w", err)
@@ -156,6 +160,7 @@ func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error
 		rawIndexes,
 		rawPartitions,
 		rawPartitionChildren,
+		rawPartitionIndexChildren,
 		rawPolicies,
 		rawTriggers,
 	)
@@ -227,6 +232,7 @@ type (
 
 	rawIndex struct {
 		tableOID        uint32
+		oid             uint32
 		name            string
 		columns         []string
 		includeColumns  []string
@@ -252,6 +258,13 @@ type (
 		schema    string
 		name      string
 		bound     string
+	}
+
+	rawPartitionIndexChild struct {
+		parentIndexOID uint32
+		schema         string
+		table          string
+		index          string
 	}
 
 	rawPolicy struct {
@@ -427,20 +440,22 @@ func fetchIndexes(ctx context.Context, pool Querier) ([]rawIndex, error) {
 	}
 	return scanAll(rows, func(r pgx.Rows) (rawIndex, error) {
 		var (
-			oid      int32
+			tableOID int32
+			indexOID int32
 			ri       rawIndex
 			nKeyAtts int16
 			allCols  []string
 		)
 		if err := r.Scan(
-			&oid, &ri.name, &ri.indexType,
+			&tableOID, &indexOID, &ri.name, &ri.indexType,
 			&ri.isUnique, &ri.isPrimary, &ri.predicate,
 			&ri.definition, &nKeyAtts, &ri.isValid, &ri.isReady,
 			&ri.backsConstraint, &ri.hasExpressions, &allCols,
 		); err != nil {
 			return ri, err
 		}
-		ri.tableOID = uint32(oid)
+		ri.tableOID = uint32(tableOID)
+		ri.oid = uint32(indexOID)
 		n := int(nKeyAtts)
 		if n > 0 && n <= len(allCols) {
 			ri.columns = allCols[:n]
@@ -483,6 +498,22 @@ func fetchPartitionChildren(ctx context.Context, pool Querier) ([]rawPartitionCh
 			pc.bound = *bound
 		}
 		return pc, nil
+	})
+}
+
+func fetchPartitionIndexChildren(ctx context.Context, pool Querier) ([]rawPartitionIndexChild, error) {
+	rows, err := query(ctx, pool, "fetch-partition-index-children")
+	if err != nil {
+		return nil, err
+	}
+	return scanAll(rows, func(r pgx.Rows) (rawPartitionIndexChild, error) {
+		var oid int32
+		var pic rawPartitionIndexChild
+		if err := r.Scan(&oid, &pic.schema, &pic.table, &pic.index); err != nil {
+			return pic, err
+		}
+		pic.parentIndexOID = uint32(oid)
+		return pic, nil
 	})
 }
 
@@ -638,6 +669,7 @@ func assembleTables(
 	rawIndexes []rawIndex,
 	rawPartitions []rawPartitionInfo,
 	rawPartitionChildren []rawPartitionChild,
+	rawPartitionIndexChildren []rawPartitionIndexChild,
 	rawPolicies []rawPolicy,
 	rawTriggers []rawTrigger,
 ) []Table {
@@ -694,6 +726,15 @@ func assembleTables(
 		}
 	}
 
+	indexChildrenByParentOID := make(map[uint32][]IndexPartitionChild)
+	for _, pic := range rawPartitionIndexChildren {
+		indexChildrenByParentOID[pic.parentIndexOID] = append(indexChildrenByParentOID[pic.parentIndexOID], IndexPartitionChild{
+			Schema: pic.schema,
+			Table:  pic.table,
+			Index:  pic.index,
+		})
+	}
+
 	// Indexes
 	indexesByOID := make(map[uint32][]Index)
 	for _, ri := range rawIndexes {
@@ -710,6 +751,7 @@ func assembleTables(
 			IsReady:         ri.isReady,
 			BacksConstraint: ri.backsConstraint,
 			HasExpressions:  ri.hasExpressions,
+			Children:        indexChildrenByParentOID[ri.oid],
 		})
 	}
 

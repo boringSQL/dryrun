@@ -14,6 +14,7 @@ type (
 	PartitionInfo            = snapshot.PartitionInfo
 	PartitionStrategy        = snapshot.PartitionStrategy
 	PartitionChild           = snapshot.PartitionChild
+	IndexPartitionChild      = snapshot.IndexPartitionChild
 	RlsPolicy                = snapshot.RlsPolicy
 	Trigger                  = snapshot.Trigger
 	EnumType                 = snapshot.EnumType
@@ -86,6 +87,7 @@ var (
 	VolatilityFromPg        = snapshot.VolatilityFromPg
 	DetectStaleStats        = snapshot.DetectStaleStats
 	DetectFlavor            = snapshot.DetectFlavor
+	RollUpPartitionActivity = snapshot.RollUpPartitionActivity
 
 	ComputeContentHash           = snapshot.ComputeContentHash
 	ComputeStructuralHash        = snapshot.ComputeStructuralHash

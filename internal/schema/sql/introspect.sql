@@ -153,6 +153,7 @@ SELECT n.nspname   AS schema_name,
 
 -- name: fetch-indexes
 SELECT i.indrelid::int4      AS table_oid,
+       i.indexrelid::int4    AS index_oid,
        ci.relname             AS index_name,
        am.amname              AS index_type,
        i.indisunique          AS is_unique,
@@ -205,6 +206,20 @@ SELECT inh.inhparent::int4     AS parent_oid,
    AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
    AND n.nspname NOT LIKE 'pg_temp_%'
  ORDER BY inh.inhparent, c.relname
+
+-- name: fetch-partition-index-children
+SELECT inh.inhparent::int4     AS parent_index_oid,
+       n.nspname                AS schema_name,
+       ct.relname                AS table_name,
+       ci.relname                AS index_name
+  FROM pg_catalog.pg_inherits inh
+  JOIN pg_catalog.pg_class ci ON ci.oid = inh.inhrelid
+  JOIN pg_catalog.pg_index pgi ON pgi.indexrelid = ci.oid
+  JOIN pg_catalog.pg_class ct ON ct.oid = pgi.indrelid
+  JOIN pg_catalog.pg_namespace n ON n.oid = ct.relnamespace
+ WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+   AND n.nspname NOT LIKE 'pg_temp_%'
+ ORDER BY inh.inhparent, ci.relname
 
 -- name: fetch-policies
 SELECT pol.polrelid::int4    AS table_oid,

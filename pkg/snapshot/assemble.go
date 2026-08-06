@@ -9,10 +9,11 @@ func AssembleAnnotated(schema *SchemaSnapshot, planner *PlannerStatsSnapshot, ac
 	if len(acts) > 0 {
 		nodes := make([]NodeActivity, len(acts))
 		for i := range acts {
+			tables, indexes := RollUpPartitionActivity(schema, acts[i].Tables, acts[i].Indexes)
 			nodes[i] = NodeActivity{
 				Node:    acts[i].Node,
-				Tables:  acts[i].Tables,
-				Indexes: acts[i].Indexes,
+				Tables:  tables,
+				Indexes: indexes,
 			}
 		}
 		out.Merged = &MergedActivity{Nodes: nodes}

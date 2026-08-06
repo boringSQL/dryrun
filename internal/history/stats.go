@@ -325,10 +325,11 @@ func (s *Store) GetAnnotated(ctx context.Context, key SnapshotKey, at SnapshotRe
 	if len(acts) > 0 {
 		nodes := make([]schema.NodeActivity, len(acts))
 		for i := range acts {
+			tables, indexes := schema.RollUpPartitionActivity(snap, acts[i].Tables, acts[i].Indexes)
 			nodes[i] = schema.NodeActivity{
 				Node:    acts[i].Node,
-				Tables:  acts[i].Tables,
-				Indexes: acts[i].Indexes,
+				Tables:  tables,
+				Indexes: indexes,
 			}
 		}
 		out.Merged = &schema.MergedActivity{Nodes: nodes}
