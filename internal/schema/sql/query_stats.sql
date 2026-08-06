@@ -24,7 +24,9 @@ SELECT s.queryid, s.calls, s.query,
    AND s.query <> '<insufficient privilege>'
    -- utility-statement literals aren't $N-substituted; whitelist DML instead of blacklisting.
    -- COPY admitted for bulk-load visibility; dropUnsafeCopy keeps only literal-free forms.
-   AND s.query ~* '^\s*(with|select|insert|update|delete|merge|table|values|copy)\M'
+   -- Leading `-- comment` lines (sqlc-style annotations) stripped before matching.
+   AND regexp_replace(s.query, '^(\s*--[^\n]*\n)*\s*', '')
+         ~* '^(with|select|insert|update|delete|merge|table|values|copy)\M'
  ORDER BY s.total_exec_time DESC
  LIMIT 500
 
@@ -49,7 +51,9 @@ SELECT s.queryid, s.calls, s.query,
    AND s.toplevel
    -- utility-statement literals aren't $N-substituted; whitelist DML instead of blacklisting.
    -- COPY admitted for bulk-load visibility; dropUnsafeCopy keeps only literal-free forms.
-   AND s.query ~* '^\s*(with|select|insert|update|delete|merge|table|values|copy)\M'
+   -- Leading `-- comment` lines (sqlc-style annotations) stripped before matching.
+   AND regexp_replace(s.query, '^(\s*--[^\n]*\n)*\s*', '')
+         ~* '^(with|select|insert|update|delete|merge|table|values|copy)\M'
  ORDER BY s.total_exec_time DESC
  LIMIT 500
 

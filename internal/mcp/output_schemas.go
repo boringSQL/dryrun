@@ -55,24 +55,35 @@ type (
 		Meta      *toolMeta             `json:"_meta,omitempty"`
 	}
 
+	// Key-only observation of a withheld tag key (deny-listed or literal-shaped value).
+	dynamicTagKey struct {
+		Key                  string `json:"key"`
+		ValueCardinalitySeen int    `json:"value_cardinality_seen"`
+	}
+
 	// One pg_stat_statements shape, tagged with its capture node; never merged
 	// across nodes. PctOfTotalExecTime is computed pre-pagination, against
 	// that node's own total exec time — not pooled across nodes.
+	// Owners/RegresqlMeta/DynamicTagKeys come from the query's leading comment via
+	// qshape's tag policy; RegresqlMeta is unscreened free text, not a vetted label.
 	queryStatsEntry struct {
-		Node               string  `json:"node"`
-		CapturedAt         string  `json:"captured_at"`
-		SchemaRefHash      string  `json:"schema_ref_hash"`
-		Fingerprint        string  `json:"fingerprint"`
-		Canonical          string  `json:"canonical"`
-		CanonicalTruncated bool    `json:"canonical_truncated,omitempty"`
-		Calls              int64   `json:"calls"`
-		TotalExecTimeMs    float64 `json:"total_exec_time_ms,omitempty"`
-		MeanExecTimeMs     float64 `json:"mean_exec_time_ms,omitempty"`
-		Rows               int64   `json:"rows,omitempty"`
-		RowsPerCall        float64 `json:"rows_per_call,omitempty"`
-		PctOfTotalExecTime float64 `json:"pct_of_total_exec_time,omitempty"`
-		NestedExecTimeMs   float64 `json:"nested_exec_time_ms,omitempty"`
-		TopLevelExecTimeMs float64 `json:"toplevel_exec_time_ms,omitempty"`
+		Node               string            `json:"node"`
+		CapturedAt         string            `json:"captured_at"`
+		SchemaRefHash      string            `json:"schema_ref_hash"`
+		Fingerprint        string            `json:"fingerprint"`
+		Canonical          string            `json:"canonical"`
+		CanonicalTruncated bool              `json:"canonical_truncated,omitempty"`
+		Calls              int64             `json:"calls"`
+		TotalExecTimeMs    float64           `json:"total_exec_time_ms,omitempty"`
+		MeanExecTimeMs     float64           `json:"mean_exec_time_ms,omitempty"`
+		Rows               int64             `json:"rows,omitempty"`
+		RowsPerCall        float64           `json:"rows_per_call,omitempty"`
+		PctOfTotalExecTime float64           `json:"pct_of_total_exec_time,omitempty"`
+		NestedExecTimeMs   float64           `json:"nested_exec_time_ms,omitempty"`
+		TopLevelExecTimeMs float64           `json:"toplevel_exec_time_ms,omitempty"`
+		Owners             map[string]string `json:"owners,omitempty"`
+		RegresqlMeta       map[string]string `json:"regresql_meta,omitempty"`
+		DynamicTagKeys     []dynamicTagKey   `json:"dynamic_tag_keys,omitempty"`
 	}
 
 	// Count is the pre-paging total (after the min_calls/node filters), Queries the returned page.

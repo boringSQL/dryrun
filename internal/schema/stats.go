@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/boringsql/qshape"
+	"github.com/boringsql/qshape/tags"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -142,7 +143,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		return nil, fmt.Errorf("fetch query stats: %w", err)
 	}
 	// The whitelist admits COPY; keep only its literal-free forms.
-	clusters, err := qshape.Group(dropUnsafeCopy(queries))
+	clusters, err := qshape.GroupWithPolicy(dropUnsafeCopy(queries), tags.DefaultPolicy())
 	if err != nil {
 		return nil, fmt.Errorf("group query stats: %w", err)
 	}
@@ -168,6 +169,16 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 				SharedBlkWriteTimeMs: m.SharedBlkWriteTimeMs,
 			}
 		}
+		var dynamicTagKeys []DynamicTagKeyObservation
+		if len(c.DynamicTagKeys) > 0 {
+			dynamicTagKeys = make([]DynamicTagKeyObservation, len(c.DynamicTagKeys))
+			for j, d := range c.DynamicTagKeys {
+				dynamicTagKeys[j] = DynamicTagKeyObservation{
+					Key:                  d.Key,
+					ValueCardinalitySeen: d.ValueCardinalitySeen,
+				}
+			}
+		}
 		entries[i] = QueryStatsEntry{
 			Fingerprint:     c.Fingerprint,
 			Canonical:       c.Canonical,
@@ -177,6 +188,9 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 			Rows:            c.Rows,
 			TempBlksRead:    c.TempBlksRead,
 			TempBlksWritten: c.TempBlksWritten,
+			Owners:          c.Owners,
+			RegresqlMeta:    c.RegresqlMeta,
+			DynamicTagKeys:  dynamicTagKeys,
 		}
 	}
 

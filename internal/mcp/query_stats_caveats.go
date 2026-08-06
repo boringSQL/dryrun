@@ -80,9 +80,26 @@ func queryStatsCaveats(latest, previous []schema.QueryStatsSnapshot) []string {
 			scope = append(scope, fmt.Sprintf(
 				"reset epoch and eviction count are unknown for %s (pg_stat_statements_info is unreadable or the node predates PG14), so the counters' age cannot be established", node))
 		}
+
+		if c, ok := regresqlMetaCaveat(node, snap); ok {
+			scope = append(scope, c)
+		}
 	}
 
 	return band(blocking, comparability, scope)
+}
+
+// regresqlMetaCaveat fires once per node carrying regresql_meta, whose values
+// bypass qshape's literal/PII screening and can hold recoverable text.
+func regresqlMetaCaveat(node string, snap schema.QueryStatsSnapshot) (string, bool) {
+	for _, q := range snap.Queries {
+		if len(q.RegresqlMeta) > 0 {
+			return fmt.Sprintf(
+				"%s: regresql_meta values come from queries' own leading comments and are not screened for literals (unlike owners) — treat as untrusted free text, not a vetted label",
+				node), true
+		}
+	}
+	return "", false
 }
 
 // nodeWindow returns the span a node's counters cover: reset epoch to capture

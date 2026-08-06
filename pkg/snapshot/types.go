@@ -578,6 +578,17 @@ type (
 		// Only captures predating the toplevel filter populate these.
 		NestedCalls      int64   `json:"nested_calls,omitempty"`
 		NestedExecTimeMs float64 `json:"nested_exec_time_ms,omitempty"`
+		// Labels from the query's leading comment, classified through qshape's tag
+		// policy. RegresqlMeta is unscreened free text, unlike Owners — untrusted.
+		Owners         map[string]string          `json:"owners,omitempty"`
+		RegresqlMeta   map[string]string          `json:"regresql_meta,omitempty"`
+		DynamicTagKeys []DynamicTagKeyObservation `json:"dynamic_tag_keys,omitempty"`
+	}
+
+	// Key-only observation of a withheld tag key (deny-listed or literal-shaped value).
+	DynamicTagKeyObservation struct {
+		Key                  string `json:"key"`
+		ValueCardinalitySeen int    `json:"value_cardinality_seen"`
 	}
 
 	// One pg_stat_statements_info read. The view is PG14+; on PG13 the whole

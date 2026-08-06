@@ -21,10 +21,21 @@ func dropUnsafeCopy(queries []qshape.Query) []qshape.Query {
 	return out
 }
 
-// isCopy avoids parsing non-COPY statements. It must catch everything the capture
-// whitelist's `^\s*copy` admits, so the trim matches Postgres' `\s` (\v, \f included).
+// isCopy avoids parsing non-COPY statements. It must match the capture whitelist,
+// so it trims Postgres' `\s` and skips leading `-- comment` lines the same way.
 func isCopy(sql string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimLeftFunc(sql, unicode.IsSpace)), "copy")
+	for {
+		sql = strings.TrimLeftFunc(sql, unicode.IsSpace)
+		if !strings.HasPrefix(sql, "--") {
+			break
+		}
+		nl := strings.IndexByte(sql, '\n')
+		if nl < 0 {
+			return false // all comment, no statement to match
+		}
+		sql = sql[nl+1:]
+	}
+	return strings.HasPrefix(strings.ToLower(sql), "copy")
 }
 
 // copyIsLiteralFree keeps only STDIN/STDOUT COPY: anything else (filename, PROGRAM,

@@ -95,6 +95,13 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 				rowsPerCall = float64(q.Rows) / float64(q.Calls)
 				meanExecMs = q.TotalExecTimeMs / float64(q.Calls)
 			}
+			var dynamicTagKeys []dynamicTagKey
+			if len(q.DynamicTagKeys) > 0 {
+				dynamicTagKeys = make([]dynamicTagKey, len(q.DynamicTagKeys))
+				for i, d := range q.DynamicTagKeys {
+					dynamicTagKeys[i] = dynamicTagKey{Key: d.Key, ValueCardinalitySeen: d.ValueCardinalitySeen}
+				}
+			}
 			entries = append(entries, queryStatsEntry{
 				Node:               snap.Node.Source,
 				CapturedAt:         capturedAt,
@@ -109,6 +116,9 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 				RowsPerCall:        rowsPerCall,
 				NestedExecTimeMs:   q.NestedExecTimeMs,
 				TopLevelExecTimeMs: topLevelExecTime(q),
+				Owners:             q.Owners,
+				RegresqlMeta:       q.RegresqlMeta,
+				DynamicTagKeys:     dynamicTagKeys,
 			})
 			nodeExecTime[snap.Node.Source] += topLevelExecTime(q)
 		}
