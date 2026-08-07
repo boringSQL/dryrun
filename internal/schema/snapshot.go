@@ -88,6 +88,7 @@ var (
 	DetectStaleStats        = snapshot.DetectStaleStats
 	DetectFlavor            = snapshot.DetectFlavor
 	RollUpPartitionActivity = snapshot.RollUpPartitionActivity
+	RollUpPartitionSizing   = snapshot.RollUpPartitionSizing
 
 	ComputeContentHash           = snapshot.ComputeContentHash
 	ComputeStructuralHash        = snapshot.ComputeStructuralHash

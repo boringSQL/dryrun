@@ -313,7 +313,7 @@ func (s *Store) GetAnnotated(ctx context.Context, key SnapshotKey, at SnapshotRe
 	out := &schema.AnnotatedSchema{Schema: snap}
 
 	if planner, err := s.GetPlanner(ctx, key, snap.ContentHash); err == nil {
-		out.Planner = planner
+		out.Planner = schema.RollUpPartitionSizing(snap, planner)
 	} else if !errors.Is(err, ErrSnapshotNotFound) {
 		return nil, err
 	}
