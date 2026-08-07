@@ -3,6 +3,7 @@ package snapdiff
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/boringsql/dryrun/internal/history"
@@ -159,11 +160,13 @@ func assembleMoment(ctx context.Context, store *history.Store, key history.Snaps
 		return m
 	}
 
-	// non-schema anchor: schema exact via ref; other kind by window
+	// non-schema anchor: schema exact via ref; other kind by window.
 	if ref := anchor.SchemaRefHash(); ref != "" {
-		if got, err := store.Get(ctx, key, history.SchemaKind(), history.NewRefHash(ref)); err == nil {
-			m.schema = got.AsSchema()
-			m.schemaMatch = &MatchInfo{Hash: got.ContentHash(), TakenAt: got.Timestamp(), Source: "schema_ref"}
+		if got, err := store.GetSchemaByExactHash(ctx, key, ref); err == nil {
+			m.schema = got
+			m.schemaMatch = &MatchInfo{Hash: got.ContentHash, TakenAt: got.Timestamp, Source: "schema_ref"}
+		} else {
+			slog.Debug("activity rollup unavailable: schema_ref not resolved", "schema_ref_hash", ref, "err", err)
 		}
 	}
 
@@ -206,15 +209,22 @@ func assembleMoment(ctx context.Context, store *history.Store, key history.Snaps
 	return m
 }
 
-// only nodes captured on both sides
+// only nodes captured on both sides; rolled up all-or-nothing per pair so a
+// partitioned parent never appears on one side and reads as zero on the other
 func diffActivityByNode(from, to *moment) []NodeActivityDelta {
+	rollUp := from.schema != nil && to.schema != nil
+
 	var out []NodeActivityDelta
 	for node, a := range from.activity {
 		b, ok := to.activity[node]
 		if !ok {
 			continue
 		}
-		d, err := diff.DiffActivity(a, b)
+		fromA, toA := a, b
+		if rollUp {
+			fromA, toA = snapshot.RollUpActivitySnapshot(a, from.schema), snapshot.RollUpActivitySnapshot(b, to.schema)
+		}
+		d, err := diff.DiffActivity(fromA, toA)
 		if err != nil || d.IsEmpty() {
 			continue
 		}

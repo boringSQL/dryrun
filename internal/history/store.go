@@ -439,6 +439,37 @@ func (s *Store) GetSchema(ctx context.Context, key SnapshotKey, at SnapshotRef) 
 	return &snap, nil
 }
 
+// GetSchemaByExactHash resolves a full content hash from an internal join
+// (e.g. schema_ref_hash). No prefix matching; on content twins it picks the
+// newest row.
+func (s *Store) GetSchemaByExactHash(ctx context.Context, key SnapshotKey, hash string) (*schema.SchemaSnapshot, error) {
+	if hash == "" {
+		return nil, fmt.Errorf("%w (empty schema hash)", ErrSnapshotNotFound)
+	}
+	pid := string(key.ProjectID)
+	did := string(key.DatabaseID)
+
+	var jsonStr string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT snapshot_json FROM snapshots
+		  WHERE project_id = ? AND database_id = ? AND content_hash = ?
+		  ORDER BY timestamp DESC LIMIT 1`,
+		pid, did, hash,
+	).Scan(&jsonStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w (hash %s)", ErrSnapshotNotFound, hash)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var snap schema.SchemaSnapshot
+	if err := json.Unmarshal([]byte(jsonStr), &snap); err != nil {
+		return nil, fmt.Errorf("corrupt snapshot JSON: %w", err)
+	}
+	return &snap, nil
+}
+
 func (s *Store) ListSchema(ctx context.Context, key SnapshotKey, rng TimeRange) ([]SnapshotSummary, error) {
 	var (
 		sb   strings.Builder

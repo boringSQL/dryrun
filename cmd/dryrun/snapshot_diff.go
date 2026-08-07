@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/boringsql/dryrun/internal/history"
+	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/diff"
 )
 
@@ -74,7 +77,7 @@ hash-prefix operands carry their own kind. Mixing kinds is rejected.`,
 				if lerr != nil {
 					return lerr
 				}
-				env, berr := buildSnapshotDiff(fromKind, fromSnap, history.WrapSchema(live))
+				env, berr := buildSnapshotDiff(ctx, store, key, fromKind, fromSnap, history.WrapSchema(live))
 				if berr != nil {
 					return berr
 				}
@@ -95,7 +98,7 @@ hash-prefix operands carry their own kind. Mixing kinds is rejected.`,
 				return err
 			}
 
-			env, err := buildSnapshotDiff(fromKind, fromSnap, toSnap)
+			env, err := buildSnapshotDiff(ctx, store, key, fromKind, fromSnap, toSnap)
 			if err != nil {
 				return err
 			}
@@ -154,7 +157,7 @@ func diffOperands(args []string, fromHash, toHash string, latest, live bool) (fr
 	return ops[0], ops[1], false, nil
 }
 
-func buildSnapshotDiff(kind history.SnapshotKind, from, to history.StoredSnapshot) (*diff.SnapshotDiff, error) {
+func buildSnapshotDiff(ctx context.Context, store *history.Store, key history.SnapshotKey, kind history.SnapshotKind, from, to history.StoredSnapshot) (*diff.SnapshotDiff, error) {
 	env := &diff.SnapshotDiff{
 		FromHash:    from.ContentHash(),
 		ToHash:      to.ContentHash(),
@@ -175,7 +178,8 @@ func buildSnapshotDiff(kind history.SnapshotKind, from, to history.StoredSnapsho
 		}
 		env.Kind, env.Planner = "planner", d
 	case history.KindActivity:
-		d, err := diff.DiffActivity(from.AsActivity(), to.AsActivity())
+		fromActivity, toActivity := rollUpActivityPairForDiff(ctx, store, key, from.AsActivity(), to.AsActivity())
+		d, err := diff.DiffActivity(fromActivity, toActivity)
 		if err != nil {
 			return nil, err
 		}
@@ -184,6 +188,29 @@ func buildSnapshotDiff(kind history.SnapshotKind, from, to history.StoredSnapsho
 		return nil, fmt.Errorf("unsupported diff kind %s (schema|planner|activity only; query diff not implemented yet)", kind)
 	}
 	return env, nil
+}
+
+// All-or-nothing: rolling up only one side would make DiffActivity read the
+// other's absent partitioned parents as zero, fabricating huge deltas.
+func rollUpActivityPairForDiff(ctx context.Context, store *history.Store, key history.SnapshotKey, from, to *schema.ActivityStatsSnapshot) (*schema.ActivityStatsSnapshot, *schema.ActivityStatsSnapshot) {
+	fromSchema, fromOK := resolveActivitySchema(ctx, store, key, from)
+	toSchema, toOK := resolveActivitySchema(ctx, store, key, to)
+	if !fromOK || !toOK {
+		return from, to
+	}
+	return schema.RollUpActivitySnapshot(from, fromSchema), schema.RollUpActivitySnapshot(to, toSchema)
+}
+
+func resolveActivitySchema(ctx context.Context, store *history.Store, key history.SnapshotKey, a *schema.ActivityStatsSnapshot) (*schema.SchemaSnapshot, bool) {
+	if a == nil || a.SchemaRefHash == "" {
+		return nil, false
+	}
+	snap, err := store.GetSchemaByExactHash(ctx, key, a.SchemaRefHash)
+	if err != nil {
+		slog.Debug("activity rollup skipped: schema not resolved", "schema_ref_hash", a.SchemaRefHash, "err", err)
+		return nil, false
+	}
+	return snap, true
 }
 
 func emitDiff(env *diff.SnapshotDiff, jsonDiff, prettyDiff bool, minPct float64) error {

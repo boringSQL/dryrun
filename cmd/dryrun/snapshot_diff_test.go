@@ -337,11 +337,14 @@ func TestStoreGetByHashPrefix(t *testing.T) {
 // a JSON consumer can tell schema from planner from activity.
 func TestBuildSnapshotDiff(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
+	ctx := context.Background()
+	store := openSQLite(t)
+	key := syncKey("acme", "primary")
 
 	t.Run("schema fills the schema slot", func(t *testing.T) {
 		from := history.WrapSchema(syncTestSchema("schema-a", "appdb", now.Add(-time.Hour)))
 		to := history.WrapSchema(syncTestSchema("schema-b", "appdb", now))
-		env, err := buildSnapshotDiff(history.SchemaKind(), from, to)
+		env, err := buildSnapshotDiff(ctx, store, key, history.SchemaKind(), from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -359,7 +362,7 @@ func TestBuildSnapshotDiff(t *testing.T) {
 	t.Run("planner fills the planner slot", func(t *testing.T) {
 		from := history.WrapPlanner(syncTestPlanner("sh", "planner-a", "appdb", now.Add(-time.Hour)))
 		to := history.WrapPlanner(syncTestPlanner("sh", "planner-b", "appdb", now))
-		env, err := buildSnapshotDiff(history.PlannerKind(), from, to)
+		env, err := buildSnapshotDiff(ctx, store, key, history.PlannerKind(), from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -374,7 +377,7 @@ func TestBuildSnapshotDiff(t *testing.T) {
 	t.Run("activity fills the activity slot", func(t *testing.T) {
 		from := history.WrapActivity(syncTestActivity("sh", "activity-a", "primary", now.Add(-time.Hour), false))
 		to := history.WrapActivity(syncTestActivity("sh", "activity-b", "primary", now, false))
-		env, err := buildSnapshotDiff(history.ActivityKind("primary"), from, to)
+		env, err := buildSnapshotDiff(ctx, store, key, history.ActivityKind("primary"), from, to)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

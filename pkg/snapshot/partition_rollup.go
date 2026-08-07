@@ -119,6 +119,8 @@ func partitionSubtreeDepth(q QualifiedName, byQual map[QualifiedName]*Table, mem
 	return depth
 }
 
+// vacuum/analyze counts are not summed: a parent tracks its own, and folding
+// in children's would misattribute them
 func addTableActivity(dst *TableActivity, src TableActivity) {
 	dst.SeqScan += src.SeqScan
 	dst.SeqTupRead += src.SeqTupRead
@@ -137,4 +139,17 @@ func addIndexActivity(dst *IndexActivity, src IndexActivity) {
 	dst.IdxScan += src.IdxScan
 	dst.IdxTupRead += src.IdxTupRead
 	dst.IdxTupFetch += src.IdxTupFetch
+}
+
+// RollUpActivitySnapshot returns a copy of a with partition-child activity
+// rolled up (see RollUpPartitionActivity); nil inputs return a unchanged.
+func RollUpActivitySnapshot(a *ActivityStatsSnapshot, schema *SchemaSnapshot) *ActivityStatsSnapshot {
+	if a == nil || schema == nil {
+		return a
+	}
+	tables, indexes := RollUpPartitionActivity(schema, a.Tables, a.Indexes)
+	cp := *a
+	cp.Tables = tables
+	cp.Indexes = indexes
+	return &cp
 }
