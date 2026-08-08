@@ -28,7 +28,7 @@ type initCapturer interface {
 	Introspect(ctx context.Context) (*schema.SchemaSnapshot, error)
 	CapturePlanner(ctx context.Context, schemaRefHash string) (*schema.PlannerStatsSnapshot, error)
 	CaptureActivity(ctx context.Context, schemaRefHash, source string) (*schema.ActivityStatsSnapshot, error)
-	CaptureQueryStats(ctx context.Context, schemaRefHash, source string) (*schema.QueryStatsSnapshot, error)
+	CaptureQueryStats(ctx context.Context, schemaRefHash, source string, rowCap int) (*schema.QueryStatsSnapshot, error)
 }
 
 type initWriter interface {
@@ -96,14 +96,14 @@ func (c pgxCapturer) CaptureActivity(ctx context.Context, schemaRefHash, source 
 	return schema.CaptureActivityStats(ctx, c.tx, schemaRefHash, source)
 }
 
-func (c pgxCapturer) CaptureQueryStats(ctx context.Context, schemaRefHash, source string) (*schema.QueryStatsSnapshot, error) {
-	return schema.CaptureQueryStats(ctx, c.tx, schemaRefHash, source)
+func (c pgxCapturer) CaptureQueryStats(ctx context.Context, schemaRefHash, source string, rowCap int) (*schema.QueryStatsSnapshot, error) {
+	return schema.CaptureQueryStats(ctx, c.tx, schemaRefHash, source, rowCap)
 }
 
 // best-effort, call last: a real capture error aborts the shared REPEATABLE READ tx,
 // so nothing after this call can use cap. Only ctx cancellation/deadline propagates.
-func captureQueryStatsBestEffort(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, schemaRefHash, source string) error {
-	qs, err := cap.CaptureQueryStats(ctx, schemaRefHash, source)
+func captureQueryStatsBestEffort(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, schemaRefHash, source string, rowCap int) error {
+	qs, err := cap.CaptureQueryStats(ctx, schemaRefHash, source, rowCap)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
@@ -163,6 +163,10 @@ func initCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "Run 'dryrun --db <url> init' to capture a schema snapshot\n")
 				return nil
 			}
+			rowCap, err := resolveQueryStatsRowCap()
+			if err != nil {
+				return err
+			}
 
 			ctx, conn, err := connectDBProd()
 			if err != nil {
@@ -205,6 +209,7 @@ func initCmd() *cobra.Command {
 				Source:       source,
 				Policy:       policy,
 				Force:        force,
+				RowCap:       rowCap,
 			})
 		},
 	}
@@ -261,6 +266,7 @@ type initOptions struct {
 	Source       string
 	Policy       *masking.Policy
 	Force        bool
+	RowCap       int
 }
 
 // init flow: refuse standbys by default; primary writes all three streams,
@@ -299,7 +305,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 			return fmt.Errorf("save activity stats: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "Replica capture: activity stats only (node=%s)\n", source)
-		return captureQueryStatsBestEffort(ctx, cap, store, key, schemaRef, source)
+		return captureQueryStatsBestEffort(ctx, cap, store, key, schemaRef, source, opts.RowCap)
 	}
 
 	snap, planner, activity, masked, err := runPrimaryCapture(ctx, cap, store, key, source, opts.Policy, opts.Force)
@@ -322,7 +328,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 	}
 	fmt.Fprintf(os.Stderr, "  Activity: node=%s, %d tables, %d indexes\n",
 		source, len(activity.Tables), len(activity.Indexes))
-	return captureQueryStatsBestEffort(ctx, cap, store, key, snap.ContentHash, source)
+	return captureQueryStatsBestEffort(ctx, cap, store, key, snap.ContentHash, source, opts.RowCap)
 }
 
 // snapshot take wrapper: gate on standby (refuse, no replica fallback), then
@@ -443,6 +449,9 @@ schema_file = ".dryrun/schema.json"
 
 # [profiles.dev]
 # db_url = "${DATABASE_URL}"
+
+# [query_stats]
+# row_cap = 500   # max pg_stat_statements rows to capture; overridable with --query-stats-limit
 
 # [conventions]
 # See: https://boringsql.com/dryrun/docs/dryrun-toml

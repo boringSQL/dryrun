@@ -34,6 +34,7 @@ type stubCapturer struct {
 	PlannerColumns []schema.ColumnStatsEntry
 	SystemID       string
 	Database       string
+	LastRowCap     int
 }
 
 func (s *stubCapturer) IsStandby(_ context.Context) (bool, error) {
@@ -68,8 +69,9 @@ func (s *stubCapturer) CaptureActivity(_ context.Context, ref, src string) (*sch
 	return a, nil
 }
 
-func (s *stubCapturer) CaptureQueryStats(_ context.Context, ref, src string) (*schema.QueryStatsSnapshot, error) {
+func (s *stubCapturer) CaptureQueryStats(_ context.Context, ref, src string, rowCap int) (*schema.QueryStatsSnapshot, error) {
 	s.QueryStatsN++
+	s.LastRowCap = rowCap
 	if s.QueryStatsErr != nil {
 		return nil, s.QueryStatsErr
 	}
@@ -240,6 +242,21 @@ func TestRunInitCapture_Branches(t *testing.T) {
 	}
 }
 
+func TestRunInitCapture_ForwardsRowCap(t *testing.T) {
+	cap := &stubCapturer{}
+	w := &stubWriter{}
+	err := runInitCapture(context.Background(), cap, w, history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, t.TempDir(), initOptions{
+		Source: "test-node",
+		RowCap: 1000,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cap.LastRowCap != 1000 {
+		t.Errorf("LastRowCap=%d want=1000", cap.LastRowCap)
+	}
+}
+
 // captureQueryStatsBestEffort has an unusual contract for a capture helper in
 // this file: it swallows almost everything, but not quite everything. This
 // test drives it directly (rather than through the higher-level
@@ -266,7 +283,7 @@ func TestCaptureQueryStatsBestEffort(t *testing.T) {
 	t.Run("successful capture is persisted, returns nil", func(t *testing.T) {
 		cap := &stubCapturer{}
 		w := &stubWriter{}
-		if err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary"); err != nil {
+		if err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary", 0); err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
 		if cap.QueryStatsN != 1 {
@@ -280,7 +297,7 @@ func TestCaptureQueryStatsBestEffort(t *testing.T) {
 	t.Run("ErrQueryStatsUnavailable is swallowed, not surfaced", func(t *testing.T) {
 		cap := &stubCapturer{QueryStatsErr: schema.ErrQueryStatsUnavailable}
 		w := &stubWriter{}
-		if err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary"); err != nil {
+		if err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary", 0); err != nil {
 			t.Errorf("expected the sentinel to be swallowed, got: %v", err)
 		}
 		if w.QueryStatsN != 0 {
@@ -291,7 +308,7 @@ func TestCaptureQueryStatsBestEffort(t *testing.T) {
 	t.Run("an arbitrary capture error is logged and swallowed, not surfaced", func(t *testing.T) {
 		cap := &stubCapturer{QueryStatsErr: errors.New("connection reset")}
 		w := &stubWriter{}
-		if err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary"); err != nil {
+		if err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary", 0); err != nil {
 			t.Errorf("expected an ordinary capture error to be swallowed, got: %v", err)
 		}
 	})
@@ -299,7 +316,7 @@ func TestCaptureQueryStatsBestEffort(t *testing.T) {
 	t.Run("a save failure is logged and swallowed, not surfaced", func(t *testing.T) {
 		cap := &stubCapturer{}
 		w := &stubWriter{PutQueryStatsErr: errors.New("disk full")}
-		if err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary"); err != nil {
+		if err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary", 0); err != nil {
 			t.Errorf("expected a save failure to be swallowed, got: %v", err)
 		}
 	})
@@ -307,7 +324,7 @@ func TestCaptureQueryStatsBestEffort(t *testing.T) {
 	t.Run("context cancellation is the one error that propagates", func(t *testing.T) {
 		cap := &stubCapturer{QueryStatsErr: context.Canceled}
 		w := &stubWriter{}
-		err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary")
+		err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary", 0)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("want context.Canceled to propagate, got: %v", err)
 		}
@@ -316,7 +333,7 @@ func TestCaptureQueryStatsBestEffort(t *testing.T) {
 	t.Run("deadline exceeded also propagates", func(t *testing.T) {
 		cap := &stubCapturer{QueryStatsErr: context.DeadlineExceeded}
 		w := &stubWriter{}
-		err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary")
+		err := captureQueryStatsBestEffort(context.Background(), cap, w, key, "schema-hash", "primary", 0)
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("want context.DeadlineExceeded to propagate, got: %v", err)
 		}

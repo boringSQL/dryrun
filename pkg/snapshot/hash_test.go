@@ -3,6 +3,7 @@ package snapshot
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 // Baseline snapshot used by hash sensitivity tests below.
@@ -303,6 +304,99 @@ func TestActivityContentHash_DifferentiatesNodes(t *testing.T) {
 
 	if ComputeActivityContentHash(a) == ComputeActivityContentHash(&b) {
 		t.Errorf("activity hash didn't distinguish replicas")
+	}
+}
+
+// Compat pin: an unconditional key would rewrite every stored blob's digest and 422 historical re-push.
+func TestActivityContentHash_OmitsAbsentFieldsSoOldDigestsSurvive(t *testing.T) {
+	a := &ActivityStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "replica-1"},
+		Tables:        []TableActivityEntry{},
+	}
+	const preDatabaseScopedFields = "28e0808538e6e6ba47026a7959ec42866daeb8797f4a788dc7aa6482fbde52de"
+	if got := ComputeActivityContentHash(a); got != preDatabaseScopedFields {
+		t.Fatalf("a capture with none of the three new fields must hash exactly as it did before they existed:\n  got  %s\n  want %s", got, preDatabaseScopedFields)
+	}
+}
+
+func TestActivityContentHash_IncludesDatabaseScopedFields(t *testing.T) {
+	base := func() *ActivityStatsSnapshot {
+		return &ActivityStatsSnapshot{SchemaRefHash: "sref", Node: NodeIdentity{Source: "primary"}}
+	}
+
+	a := base()
+	baseHash := ComputeActivityContentHash(a)
+
+	withDB := base()
+	withDB.Database = &DatabaseActivity{Deadlocks: 1}
+	if ComputeActivityContentHash(withDB) == baseHash {
+		t.Error("Database field change did not affect the content hash")
+	}
+
+	slotsOK := true
+	withSlots := base()
+	withSlots.ReplicationSlots = []ReplicationSlotActivity{{SlotName: "s1", Active: true}}
+	withSlots.ReplicationSlotsReadOK = &slotsOK
+	if ComputeActivityContentHash(withSlots) == baseHash {
+		t.Error("ReplicationSlots field change did not affect the content hash")
+	}
+
+	withSlotsCheckedEmpty := base()
+	withSlotsCheckedEmpty.ReplicationSlotsReadOK = &slotsOK
+	if ComputeActivityContentHash(withSlotsCheckedEmpty) == baseHash {
+		t.Error("ReplicationSlotsReadOK alone (zero slots, but checked) did not affect the content hash")
+	}
+
+	withCheckpointer := base()
+	withCheckpointer.Checkpointer = &CheckpointerActivity{CheckpointsTimed: 1, View: "pg_stat_bgwriter"}
+	if ComputeActivityContentHash(withCheckpointer) == baseHash {
+		t.Error("Checkpointer field change did not affect the content hash")
+	}
+}
+
+func TestActivityContentHash_NilAndEmptyReplicationSlotsHashIdentically(t *testing.T) {
+	readOK := true
+	nilSlots := &ActivityStatsSnapshot{
+		SchemaRefHash: "sref", Node: NodeIdentity{Source: "primary"},
+		ReplicationSlots: nil, ReplicationSlotsReadOK: &readOK,
+	}
+	emptySlots := &ActivityStatsSnapshot{
+		SchemaRefHash: "sref", Node: NodeIdentity{Source: "primary"},
+		ReplicationSlots: []ReplicationSlotActivity{}, ReplicationSlotsReadOK: &readOK,
+	}
+	if ComputeActivityContentHash(nilSlots) != ComputeActivityContentHash(emptySlots) {
+		t.Error("nil vs non-nil-but-empty ReplicationSlots produced different digests; a decode round-trip cannot reproduce this")
+	}
+}
+
+func TestActivityContentHash_ReproducibleFromPayload(t *testing.T) {
+	readOK := true
+	resetAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	original := &ActivityStatsSnapshot{
+		SchemaRefHash: "sref",
+		Node:          NodeIdentity{Source: "primary"},
+		Tables:        []TableActivityEntry{},
+		Database:      &DatabaseActivity{Deadlocks: 3, XactCommit: 100, StatsReset: &resetAt},
+		ReplicationSlots: []ReplicationSlotActivity{
+			{SlotName: "s1", SlotType: "physical", Active: true},
+		},
+		ReplicationSlotsReadOK: &readOK,
+		Checkpointer:           &CheckpointerActivity{CheckpointsTimed: 5, CheckpointsReq: 1, View: "pg_stat_bgwriter"},
+	}
+	want := ComputeActivityContentHash(original)
+
+	body, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var received ActivityStatsSnapshot
+	if err := json.Unmarshal(body, &received); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got := ComputeActivityContentHash(&received); got != want {
+		t.Errorf("digest not reproducible from the posted body:\n  local  %s\n  remote %s", want, got)
 	}
 }
 
@@ -629,7 +723,7 @@ func TestQueryStatsContentHash_TracksEachCounter(t *testing.T) {
 	}
 }
 
-// Membership changes are real changes: a query entering or leaving the top 500
+// Membership changes are real changes: a query entering or leaving the row cap
 // alters what the capture observed, even if every surviving row is untouched.
 // Dedup must not swallow that, or the capture where a new hot query appeared
 // would never be written.
@@ -641,6 +735,19 @@ func TestQueryStatsContentHash_TracksMembershipChange(t *testing.T) {
 	two := ComputeQueryStatsContentHash(queryStatsWith(rowA, rowB))
 	if one == two {
 		t.Error("digest ignored a row appearing in the capture")
+	}
+}
+
+// RowCap is a capture parameter, not an observed counter; it must not move the digest.
+func TestQueryStatsContentHash_IgnoresRowCap(t *testing.T) {
+	row := QueryStatsMember{QueryID: 100, Calls: 5, TotalExecTimeMs: 50, Rows: 5}
+
+	withoutCap := queryStatsWith(row)
+	withCap := queryStatsWith(row)
+	withCap.RowCap = 1000
+
+	if ComputeQueryStatsContentHash(withoutCap) != ComputeQueryStatsContentHash(withCap) {
+		t.Error("digest moved when only RowCap changed")
 	}
 }
 

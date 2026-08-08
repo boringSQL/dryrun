@@ -154,6 +154,31 @@ func TestUnattributedSuppressedWhenStatementSetTruncated(t *testing.T) {
 	}
 }
 
+func TestUnattributedTruncationUsesCapturesOwnRowCap(t *testing.T) {
+	custom := annotatedWith(strPtr("top"), "SELECT 1 FROM visible_table")
+	custom.QueryStats[0].RowCap = 100
+	custom.QueryStats[0].RawRows = 100
+	if BuildQueryRefIndex(custom).Unattributed("hidden_table", unattributedScanThreshold) {
+		t.Error("hitting a custom row cap must still suppress the flag")
+	}
+
+	notTruncated := annotatedWith(strPtr("top"), "SELECT 1 FROM visible_table")
+	notTruncated.QueryStats[0].RowCap = 1000
+	notTruncated.QueryStats[0].RawRows = QueryStatsRowCap // below the capture's own (larger) cap
+	if !BuildQueryRefIndex(notTruncated).Unattributed("hidden_table", unattributedScanThreshold) {
+		t.Error("RawRows below the capture's own (larger) row cap must not read as truncated")
+	}
+}
+
+func TestEffectiveQueryStatsRowCap(t *testing.T) {
+	if got := EffectiveQueryStatsRowCap(QueryStatsSnapshot{}); got != QueryStatsRowCap {
+		t.Errorf("RowCap=0 (predates the field) should fall back to the default: got=%d want=%d", got, QueryStatsRowCap)
+	}
+	if got := EffectiveQueryStatsRowCap(QueryStatsSnapshot{RowCap: 250}); got != 250 {
+		t.Errorf("explicit RowCap must win: got=%d want=250", got)
+	}
+}
+
 // Activity is summed across nodes, so a single node that can see nested
 // statements is enough to disqualify the blind-spot explanation.
 func TestUnattributedRequiresEveryNodeOnTrackTop(t *testing.T) {

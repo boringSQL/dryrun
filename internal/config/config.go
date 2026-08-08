@@ -22,6 +22,12 @@ type (
 		RequireMasks *bool                    `toml:"require_masks"`
 		Remotes      []RemoteConfig           `toml:"remote"`
 		History      *HistoryConfig           `toml:"history"`
+		QueryStats   *QueryStatsConfig        `toml:"query_stats"`
+	}
+
+	// [query_stats] block; capture-time tuning for pg_stat_statements snapshots
+	QueryStatsConfig struct {
+		RowCap *int `toml:"row_cap"`
 	}
 
 	// [history] block; retention for captured activity/query series

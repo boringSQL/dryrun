@@ -614,9 +614,12 @@ type (
 		ContentHash   string `json:"content_hash"`
 		// qshape.GroupingVersion at capture; 0 for rows predating this field.
 		QshapeVersion int `json:"qshape_version,omitempty"`
-		// raw rows the top-500 fetch returned, pre-grouping; len(Queries) can't
+		// raw rows the row-capped fetch returned, pre-grouping; len(Queries) can't
 		// say by how much the capture missed.
 		RawRows int `json:"raw_rows,omitempty"`
+		// LIMIT applied to the pg_stat_statements fetch; 0 on rows predating this
+		// field, which captured at the fixed 500-row default.
+		RowCap int `json:"row_cap,omitempty"`
 		// pg_stat_statements.max at capture — the number that explains a dealloc;
 		// nil when the role can't read it.
 		PgssMax       *int    `json:"pgss_max,omitempty"`
@@ -633,7 +636,7 @@ type (
 		// true when the fetch filtered on pgss's toplevel flag (1.9+, PG14+);
 		// absent means unfiltered (pre-filter captures and pgss < 1.9).
 		ToplevelOnly bool `json:"toplevel_only,omitempty"`
-		// info view read around the top-500 fetch; pgss isn't MVCC-consistent
+		// info view read around the row-capped fetch; pgss isn't MVCC-consistent
 		// with it, so differing values mean the capture straddled a reset.
 		InfoBefore *QueryStatsInfo   `json:"info_before,omitempty"`
 		InfoAfter  *QueryStatsInfo   `json:"info_after,omitempty"`

@@ -39,6 +39,10 @@ func snapshotActivityCmd() *cobra.Command {
 			if url == "" {
 				return fmt.Errorf("--from <replica-url> or --db is required")
 			}
+			rowCap, err := resolveQueryStatsRowCap()
+			if err != nil {
+				return err
+			}
 
 			ctx, conn, err := connectDBProdFor(url)
 			if err != nil {
@@ -62,6 +66,7 @@ func snapshotActivityCmd() *cobra.Command {
 			if err := runSnapshotActivity(ctx, cap, store, key, captureOptions{
 				Label:       label,
 				AllowOrphan: allowOrphan,
+				RowCap:      rowCap,
 			}); err != nil {
 				return err
 			}
@@ -88,10 +93,10 @@ func snapshotActivityCmd() *cobra.Command {
 	return cmd
 }
 
-// Label/AllowOrphan are shared by every node-scoped capture command (activity, query-stats).
 type captureOptions struct {
 	Label       string
 	AllowOrphan bool
+	RowCap      int
 }
 
 func snapshotQueryStatsCmd() *cobra.Command {
@@ -119,6 +124,10 @@ func snapshotQueryStatsCmd() *cobra.Command {
 			if url == "" {
 				return fmt.Errorf("--from <connection-url> or --db is required")
 			}
+			rowCap, err := resolveQueryStatsRowCap()
+			if err != nil {
+				return err
+			}
 
 			ctx, conn, err := connectDBProdFor(url)
 			if err != nil {
@@ -142,6 +151,7 @@ func snapshotQueryStatsCmd() *cobra.Command {
 			if err := runSnapshotQueryStats(ctx, cap, store, key, captureOptions{
 				Label:       label,
 				AllowOrphan: allowOrphan,
+				RowCap:      rowCap,
 			}); err != nil {
 				return err
 			}
@@ -179,7 +189,7 @@ func runSnapshotQueryStats(ctx context.Context, cap initCapturer, store initWrit
 		return fmt.Errorf("no prior schema snapshot to bind to; take one first or pass --allow-orphan")
 	}
 
-	qs, err := cap.CaptureQueryStats(ctx, schemaRef, opts.Label)
+	qs, err := cap.CaptureQueryStats(ctx, schemaRef, opts.Label, opts.RowCap)
 	if err != nil {
 		if errors.Is(err, schema.ErrQueryStatsUnavailable) {
 			return fmt.Errorf("pg_stat_statements is not available on this node; " +
@@ -234,7 +244,7 @@ func runSnapshotActivity(ctx context.Context, cap initCapturer, store initWriter
 	if _, err := store.PutActivity(ctx, key, activity); err != nil {
 		return fmt.Errorf("save activity stats: %w", err)
 	}
-	if err := captureQueryStatsBestEffort(ctx, cap, store, key, schemaRef, opts.Label); err != nil {
+	if err := captureQueryStatsBestEffort(ctx, cap, store, key, schemaRef, opts.Label, opts.RowCap); err != nil {
 		return err
 	}
 

@@ -33,6 +33,7 @@ var (
 	flagStmtTimeout     time.Duration
 	flagLockTimeout     time.Duration
 	flagIdleTxTimeout   time.Duration
+	flagQueryStatsLimit int
 )
 
 func main() {
@@ -52,6 +53,7 @@ func main() {
 	pf.DurationVar(&flagStmtTimeout, "statement-timeout", guards.StatementTimeout, "session statement_timeout (0 disables)")
 	pf.DurationVar(&flagLockTimeout, "lock-timeout", guards.LockTimeout, "session lock_timeout (0 disables)")
 	pf.DurationVar(&flagIdleTxTimeout, "idle-tx-timeout", guards.IdleInTxTimeout, "session idle_in_transaction_session_timeout (0 disables)")
+	pf.IntVar(&flagQueryStatsLimit, "query-stats-limit", 0, "max pg_stat_statements rows to capture (default: 500, or [query_stats].row_cap in dryrun.toml)")
 
 	root.AddCommand(
 		probeCmd(), initCmd(), setupCmd(), importCmd(), dumpSchemaCmd(),
@@ -349,6 +351,11 @@ func snapshotCmd() *cobra.Command {
 		Use:   "take",
 		Short: "Take a new snapshot (schema + planner + activity; primary only)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			rowCap, err := resolveQueryStatsRowCap()
+			if err != nil {
+				return err
+			}
+
 			_, conn, err := connectDBProd()
 			if err != nil {
 				return err
@@ -389,7 +396,7 @@ func snapshotCmd() *cobra.Command {
 			}
 			fmt.Printf("Activity stats saved: %s (label=primary, %d tables, %d indexes)\n",
 				activity.ContentHash, len(activity.Tables), len(activity.Indexes))
-			if err := captureQueryStatsBestEffort(cmd.Context(), cap, store, key, snap.ContentHash, "primary"); err != nil {
+			if err := captureQueryStatsBestEffort(cmd.Context(), cap, store, key, snap.ContentHash, "primary", rowCap); err != nil {
 				return err
 			}
 
@@ -698,6 +705,24 @@ func marshalJSON(v any, pretty bool) []byte {
 
 func writeJSONFile(path string, v any, pretty bool) error {
 	return os.WriteFile(path, marshalJSON(v, pretty), 0o644)
+}
+
+func resolveQueryStatsRowCap() (int, error) {
+	if flagQueryStatsLimit < 0 {
+		return 0, fmt.Errorf("--query-stats-limit must be positive, got %d", flagQueryStatsLimit)
+	}
+	if flagQueryStatsLimit > 0 {
+		return flagQueryStatsLimit, nil
+	}
+	if _, cfg, err := loadProjectConfig(); err == nil && cfg.QueryStats != nil && cfg.QueryStats.RowCap != nil {
+		if *cfg.QueryStats.RowCap < 0 {
+			return 0, fmt.Errorf("[query_stats].row_cap must be positive, got %d", *cfg.QueryStats.RowCap)
+		}
+		if *cfg.QueryStats.RowCap > 0 {
+			return *cfg.QueryStats.RowCap, nil
+		}
+	}
+	return 0, nil
 }
 
 func loadProjectConfig() (string, *config.ProjectConfig, error) {

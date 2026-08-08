@@ -28,13 +28,13 @@ SELECT s.queryid, s.calls, s.query,
    AND regexp_replace(s.query, '^(\s*--[^\n]*\n)*\s*', '')
          ~* '^(with|select|insert|update|delete|merge|table|values|copy)\M'
  ORDER BY s.total_exec_time DESC
- LIMIT 500
+ LIMIT $1
 
 -- name: fetch-query-stats-toplevel
 -- pgss 1.9+ only; separate query because an older pgss (PG13, or one left
 -- below 1.9 by pg_upgrade) has no toplevel column and this would not compile. pgss also counts nested statements' time inside
 -- the caller's total, so the filter avoids double counting and keeps churning
--- nested rows out of the top 500. Consequence: function/trigger work is
+-- nested rows out of the row cap. Consequence: function/trigger work is
 -- invisible even under track = 'all', exactly as under track = 'top'.
 SELECT s.queryid, s.calls, s.query,
        s.total_exec_time, s.stddev_exec_time, s.rows,
@@ -55,7 +55,7 @@ SELECT s.queryid, s.calls, s.query,
    AND regexp_replace(s.query, '^(\s*--[^\n]*\n)*\s*', '')
          ~* '^(with|select|insert|update|delete|merge|table|values|copy)\M'
  ORDER BY s.total_exec_time DESC
- LIMIT 500
+ LIMIT $1
 
 -- name: fetch-pgss-info
 -- PG14+; the view doesn't exist on PG13, so failure means absent, not zero

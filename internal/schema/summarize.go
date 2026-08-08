@@ -1,7 +1,6 @@
 package schema
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -64,6 +63,13 @@ const unattributedScanThreshold = 100_000
 
 const QueryStatsRowCap = 500
 
+func EffectiveQueryStatsRowCap(s QueryStatsSnapshot) int {
+	if s.RowCap > 0 {
+		return s.RowCap
+	}
+	return QueryStatsRowCap
+}
+
 func DetectTableFlags(summary *TableSummary, a *AnnotatedSchema, ix *QueryRefIndex) []TableFlag {
 	var flags []TableFlag
 
@@ -116,7 +122,7 @@ func BuildQueryRefIndex(a *AnnotatedSchema) *QueryRefIndex {
 		if track == "none" || (track != "top" && !snap.ToplevelOnly) {
 			ix.toplevelOnly = false
 		}
-		if snap.RawRows >= QueryStatsRowCap {
+		if snap.RawRows >= EffectiveQueryStatsRowCap(snap) {
 			ix.truncated = true
 		}
 		if snap.InfoAfter != nil && snap.InfoAfter.Dealloc > 0 {
@@ -172,7 +178,7 @@ func (ix *QueryRefIndex) SkipReason() string {
 	}
 	var why []string
 	if ix.truncated {
-		why = append(why, fmt.Sprintf("the captured statement set is truncated (%d-row cap or evicted entries), so an unreferenced table proves nothing", QueryStatsRowCap))
+		why = append(why, "the captured statement set is truncated (row cap or evicted entries), so an unreferenced table proves nothing")
 	}
 	if !ix.toplevelOnly {
 		why = append(why, "a node records nothing (track = 'none'), runs another track than 'top' with an unfiltered capture, or never recorded the setting, so the captured statements may not be the whole workload")

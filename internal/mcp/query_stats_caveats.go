@@ -57,9 +57,9 @@ func queryStatsCaveats(latest, previous []schema.QueryStatsSnapshot) []string {
 			comparability = append(comparability, changeCaveats(node, p, snap)...)
 		}
 
-		if snap.RawRows >= schema.QueryStatsRowCap {
+		if cap := schema.EffectiveQueryStatsRowCap(snap); snap.RawRows >= cap {
 			scope = append(scope, fmt.Sprintf(
-				"%s hit the %d-row capture cap: this is the top of the workload, not all of it", node, schema.QueryStatsRowCap))
+				"%s hit the %d-row capture cap: this is the top of the workload, not all of it", node, cap))
 		}
 		if snap.InfoAfter != nil && snap.InfoAfter.Dealloc > 0 {
 			msg := fmt.Sprintf("pg_stat_statements has evicted entries on %s", node)

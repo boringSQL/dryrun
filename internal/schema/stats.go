@@ -110,7 +110,10 @@ func CaptureActivityStats(ctx context.Context, pool Querier, schemaRefHash, sour
 }
 
 // Per-node pg_stat_statements rollup, fingerprinted via qshape; ErrQueryStatsUnavailable if the extension isn't installed
-func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source string) (*QueryStatsSnapshot, error) {
+func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source string, rowCap int) (*QueryStatsSnapshot, error) {
+	if rowCap <= 0 {
+		rowCap = QueryStatsRowCap
+	}
 	var installed, hasInfoView, hasToplevel, renamedBlkTime bool
 	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).Scan(&installed, &hasInfoView, &hasToplevel, &renamedBlkTime); err != nil {
 		return nil, fmt.Errorf("check pg_stat_statements: %w", err)
@@ -123,7 +126,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	if err != nil {
 		return nil, err
 	}
-	// bracket the top-500 fetch: pgss isn't MVCC-consistent with its info view,
+	// bracket the row-capped fetch: pgss isn't MVCC-consistent with its info view,
 	// so only differing before/after values prove a reset mid-capture. Gated on
 	// the probe above: capture runs in one tx, and reading a missing view aborts it.
 	var infoBefore *QueryStatsInfo
@@ -131,7 +134,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		infoBefore = fetchPgssInfo(ctx, pool)
 	}
 	ioTiming := fetchTrackIOTiming(ctx, pool)
-	queries, err := fetchQueryStats(ctx, pool, hasToplevel, renamedBlkTime, ioTiming)
+	queries, err := fetchQueryStats(ctx, pool, hasToplevel, renamedBlkTime, ioTiming, rowCap)
 	if err != nil {
 		// role/session search_path can differ from the earlier to_regclass check.
 		// 42703: pgss left at 1.7 by pg_upgrade has no total_exec_time, so the
@@ -203,6 +206,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		SchemaRefHash:          schemaRefHash,
 		QshapeVersion:          qshape.GroupingVersion,
 		RawRows:                len(queries),
+		RowCap:                 rowCap,
 		PgssMax:                fetchPgssMax(ctx, pool),
 		PgssTrack:              fetchPgssTrack(ctx, pool),
 		PgssTrackPlanning:      fetchPgssTrackPlanning(ctx, pool),
@@ -330,7 +334,7 @@ func fetchPgssTrack(ctx context.Context, pool Querier) *string {
 
 // The toplevel variant filters nested rows in SQL (pgss 1.9+); the plain one
 // is for a pgss without the column (PG13, or < 1.9 after pg_upgrade).
-func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel, renamedBlkTime bool, ioTiming *bool) ([]qshape.Query, error) {
+func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel, renamedBlkTime bool, ioTiming *bool, rowCap int) ([]qshape.Query, error) {
 	name := "fetch-query-stats"
 	if hasToplevel {
 		name = "fetch-query-stats-toplevel"
@@ -340,7 +344,7 @@ func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel, renamedBlkT
 		readCol, writeCol = "shared_blk_read_time", "shared_blk_write_time"
 	}
 	sql := strings.NewReplacer("__READ_TIME__", readCol, "__WRITE_TIME__", writeCol).Replace(q(name))
-	rows, err := pool.Query(ctx, sql)
+	rows, err := pool.Query(ctx, sql, rowCap)
 	if err != nil {
 		return nil, err
 	}

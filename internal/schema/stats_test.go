@@ -72,6 +72,50 @@ func TestCaptureAll_AgainstLiveDB(t *testing.T) {
 	}
 }
 
+func TestCaptureActivityStats_DatabaseScopedFields(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	activity, err := CaptureActivityStats(ctx, pool, "sref", "test-primary")
+	if err != nil {
+		t.Fatalf("activity capture: %v", err)
+	}
+
+	if activity.Database == nil {
+		t.Fatal("expected Database to be populated against a live Postgres")
+	}
+	if activity.Database.BlksHit+activity.Database.BlksRead == 0 {
+		t.Errorf("Database.BlksHit+BlksRead = 0, want > 0 on a live connection")
+	}
+
+	if activity.Checkpointer == nil {
+		t.Fatal("expected Checkpointer to be populated against a live Postgres")
+	}
+	if activity.Checkpointer.View != "pg_stat_checkpointer" && activity.Checkpointer.View != "pg_stat_bgwriter" {
+		t.Errorf("Checkpointer.View = %q, want pg_stat_checkpointer or pg_stat_bgwriter", activity.Checkpointer.View)
+	}
+
+	if activity.ReplicationSlotsReadOK == nil {
+		t.Fatal("expected ReplicationSlotsReadOK to be set against a live Postgres")
+	}
+	if !*activity.ReplicationSlotsReadOK {
+		t.Error("expected the replication-slots read to succeed against a live Postgres")
+	}
+}
+
+func TestReplicationSlotsQueries_ParseAgainstLiveDB(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	for _, name := range []string{"fetch-replication-slots", "fetch-replication-slots-no-wal-status"} {
+		rows, err := pool.Query(ctx, q(name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		rows.Close()
+	}
+}
+
 // pg_stat_statements may not be preloaded on the test DB; the sentinel is a valid outcome too.
 func TestCaptureQueryStats_AgainstLiveDB(t *testing.T) {
 	pool := livePool(t)
@@ -82,7 +126,7 @@ func TestCaptureQueryStats_AgainstLiveDB(t *testing.T) {
 		t.Fatalf("introspect: %v", err)
 	}
 
-	qs, err := CaptureQueryStats(ctx, pool, snap.ContentHash, "test-primary")
+	qs, err := CaptureQueryStats(ctx, pool, snap.ContentHash, "test-primary", 0)
 	if err != nil {
 		if errors.Is(err, ErrQueryStatsUnavailable) {
 			t.Skip("pg_stat_statements not available on test DB")
@@ -153,7 +197,7 @@ func TestCaptureQueryStats_PopulatesRawMembers(t *testing.T) {
 	pool := livePool(t)
 	ctx := context.Background()
 
-	qs, err := CaptureQueryStats(ctx, pool, "fake-ddl-hash", "test-primary")
+	qs, err := CaptureQueryStats(ctx, pool, "fake-ddl-hash", "test-primary", 0)
 	if err != nil {
 		if errors.Is(err, ErrQueryStatsUnavailable) {
 			t.Skip("pg_stat_statements not available on test DB")
@@ -195,7 +239,7 @@ func TestCaptureQueryStats_ContentHashRecomputes(t *testing.T) {
 	pool := livePool(t)
 	ctx := context.Background()
 
-	qs, err := CaptureQueryStats(ctx, pool, "fake-ddl-hash", "test-primary")
+	qs, err := CaptureQueryStats(ctx, pool, "fake-ddl-hash", "test-primary", 0)
 	if err != nil {
 		if errors.Is(err, ErrQueryStatsUnavailable) {
 			t.Skip("pg_stat_statements not available on test DB")
