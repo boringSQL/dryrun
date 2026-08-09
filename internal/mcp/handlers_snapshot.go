@@ -3,8 +3,6 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -15,50 +13,24 @@ import (
 )
 
 func (s *Server) handleReloadSchema(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// history.db wins — it carries planner/activity
 	if a, ok := s.loadAnnotatedFromHistory(ctx); ok && a.Schema != nil {
 		s.mu.Lock()
 		s.annotated = a
 		s.uninitialized = false
 		s.mu.Unlock()
-		return textResult(fmt.Sprintf("Schema loaded from history.db: %d tables, %d views, %d functions",
-			len(a.Schema.Tables), len(a.Schema.Views), len(a.Schema.Functions))), nil
+		t, v, f := s.SchemaCounts()
+		return textResult(fmt.Sprintf("Schema loaded from history.db: %d tables, %d views, %d functions", t, v, f)), nil
 	}
 
 	s.mu.RLock()
-	candidates := append([]string(nil), s.schemaCandidates...)
+	key := s.snapshotKey
 	s.mu.RUnlock()
 
-	for _, path := range candidates {
-		if _, err := os.Stat(path); err != nil {
-			continue
-		}
-		snap, err := schema.LoadSchemaFile(path)
-		if err != nil {
-			return errResult(fmt.Sprintf("failed to load %s: %v", path, err)), nil
-		}
-		s.mu.Lock()
-		s.annotated = &schema.AnnotatedSchema{Schema: snap}
-		s.uninitialized = false
-		s.mu.Unlock()
-		msg := fmt.Sprintf("Schema loaded from %s: %d tables, %d views, %d functions",
-			path, len(snap.Tables), len(snap.Views), len(snap.Functions))
-		// history.db would carry planner/activity stats but was skipped
-		if note := s.historyNote(); note != nil {
-			msg += "\n\nNote: " + *note + "."
-		}
-		return textResult(msg), nil
+	msg := fmt.Sprintf("no schema snapshot in history.db for project=%s database=%s", key.ProjectID, key.DatabaseID)
+	if note := s.historyNote(); note != nil {
+		msg += "\n\nNote: " + *note + "."
 	}
-
-	var lines []string
-	for _, p := range candidates {
-		lines = append(lines, "  - "+p)
-	}
-	msg := "no schema file found at any expected location"
-	if len(lines) > 0 {
-		msg += ":\n" + strings.Join(lines, "\n")
-	}
-	msg += "\n\nRun `dryrun dump-schema --db <DATABASE_URL>` first."
+	msg += "\n\nRun `dryrun init --db <DATABASE_URL>` or `dryrun snapshot take` first."
 	return errResult(msg), nil
 }
 

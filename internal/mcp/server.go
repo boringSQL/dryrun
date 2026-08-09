@@ -26,7 +26,6 @@ type (
 		snapshotKey      history.SnapshotKey
 		lintConfig       lint.Config
 		pgmustardClient  *pgmustard.Client
-		schemaCandidates []string
 		uninitialized    bool
 	}
 )
@@ -43,7 +42,7 @@ func NewServer(pool *pgxpool.Pool, dbURL string, snap *schema.SchemaSnapshot, hi
 }
 
 func NewOfflineServer(snap *schema.SchemaSnapshot, lintCfg lint.Config) *Server {
-	slog.Info("loaded schema from file", "tables", len(snap.Tables), "database", snap.Database)
+	slog.Debug("offline server", "tables", len(snap.Tables), "database", snap.Database)
 	return NewOfflineServerAnnotated(&schema.AnnotatedSchema{Schema: snap}, lintCfg)
 }
 
@@ -61,20 +60,12 @@ func NewOfflineServerAnnotated(a *schema.AnnotatedSchema, lintCfg lint.Config) *
 	}
 }
 
-func (s *Server) SetSchemaCandidates(paths []string) {
+func (s *Server) SetUninitialized() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.schemaCandidates = paths
-}
-
-func (s *Server) SetUninitialized(paths []string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.schemaCandidates = paths
 	s.uninitialized = true
 }
 
-// Required before reload_schema can prefer history.db over schema.json
 func (s *Server) SetSnapshotKey(key history.SnapshotKey) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,6 +89,15 @@ func (s *Server) BootstrapFromHistory(ctx context.Context) bool {
 	s.uninitialized = false
 	s.mu.Unlock()
 	return true
+}
+
+// SchemaCounts reports the loaded snapshot's size; zeros when uninitialized.
+func (s *Server) SchemaCounts() (tables, views, functions int) {
+	snap, err := s.getSchema()
+	if err != nil || snap == nil {
+		return 0, 0, 0
+	}
+	return len(snap.Tables), len(snap.Views), len(snap.Functions)
 }
 
 func (s *Server) loadAnnotatedFromHistory(ctx context.Context) (*schema.AnnotatedSchema, bool) {
@@ -140,7 +140,7 @@ func (s *Server) getAnnotated() (*schema.AnnotatedSchema, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.annotated == nil || s.annotated.Schema == nil || s.uninitialized {
-		return nil, fmt.Errorf("no schema loaded — initialize first:\n\n1. Run `dryrun dump-schema --db <DATABASE_URL>` in a terminal\n2. Call the `reload_schema` tool in this session\n\nThe schema will be picked up without restarting the server.")
+		return nil, fmt.Errorf("no schema loaded — initialize first:\n\n1. Run `dryrun init --db <DATABASE_URL>` (or `dryrun snapshot take`) in a terminal\n2. Call the `reload_schema` tool in this session\n\nThe schema will be picked up without restarting the server.")
 	}
 	return s.annotated, nil
 }

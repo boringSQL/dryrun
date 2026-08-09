@@ -817,6 +817,19 @@ func openHistoryStore(path string) (*history.Store, error) {
 	return s, err
 }
 
+// openExistingHistoryStore opens .dryrun/history.db only if it already exists:
+// a read-only server must not mkdir .dryrun/ in whatever cwd the MCP client used.
+func openExistingHistoryStore() (*history.Store, error) {
+	path, err := history.DefaultHistoryPath()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	return openHistoryStore(path)
+}
+
 // warn if history.db was written by a different dryrun
 func warnIfIncompatible(s *history.Store) {
 	switch s.Compat() {
@@ -830,15 +843,17 @@ func warnIfIncompatible(s *history.Store) {
 
 func resolveSnapshotKey() history.SnapshotKey {
 	cwd, _ := os.Getwd()
-	if _, cfg, err := loadProjectConfig(); err == nil {
+	cfg := &config.ProjectConfig{}
+	if _, loaded, err := loadProjectConfig(); err == nil {
 		// resolve the profile by name only: a --db override must not drop its database_id
-		if resolved, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
+		if resolved, rerr := loaded.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
 			return resolved.SnapshotKey()
 		}
+		// profile ambiguous (several defined, none selected) — keep [project].id rather
+		// than falling back to the directory name, which would key a different history
+		cfg = loaded
 	}
-	// no config — synthesize the same shape ResolvedProfile would have produced for a CLI override
-	empty := &config.ProjectConfig{}
-	pid := empty.ProjectID(cwd)
+	pid := cfg.ProjectID(cwd)
 	return history.SnapshotKey{ProjectID: pid, DatabaseID: history.DatabaseId(pid)}
 }
 
@@ -859,34 +874,8 @@ func mcpServeCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lintCfg := loadLintConfig()
 
-			// Resolve schema source; --schema overrides global --schema-file
-			effectiveSchemaFile := schemaFile
-			if effectiveSchemaFile == "" && flagSchemaFile != "" {
-				effectiveSchemaFile = flagSchemaFile
-			}
-
-			// reload_schema reuses this list later
-			var candidates []string
-			if effectiveSchemaFile != "" {
-				candidates = append(candidates, effectiveSchemaFile)
-			}
-			cwd, _ := os.Getwd()
-			if _, cfg, err := loadProjectConfig(); err == nil {
-				if resolved, err := cfg.ResolveProfile(nilIfEmpty(flagDB), nil, nilIfEmpty(flagProfile), cwd); err == nil && resolved.SchemaFile != nil {
-					candidates = append(candidates, *resolved.SchemaFile)
-				}
-			}
-			if dataDir, err := history.DefaultDataDir(); err == nil {
-				candidates = append(candidates, dataDir+"/schema.json")
-			}
-
-			if effectiveSchemaFile == "" {
-				for _, c := range candidates {
-					if _, err := os.Stat(c); err == nil {
-						effectiveSchemaFile = c
-						break
-					}
-				}
+			if schemaFile != "" || flagSchemaFile != "" {
+				fmt.Fprintln(os.Stderr, "dryrun: --schema/--schema-file are ignored by mcp-serve; the schema is read from history.db")
 			}
 
 			var pgMustardAPIKey string
@@ -894,25 +883,10 @@ func mcpServeCmd() *cobra.Command {
 				pgMustardAPIKey = *cfg.Services.PgMustardAPIKey
 			}
 
+			key := resolveSnapshotKey()
+
 			var server *drmcp.Server
 			switch {
-			case effectiveSchemaFile != "":
-				snap, err := loadSchemaFile(effectiveSchemaFile)
-				if err != nil {
-					return err
-				}
-				fmt.Fprintf(os.Stderr, "dryrun: loaded schema from %s (%d tables, offline mode)\n",
-					effectiveSchemaFile, len(snap.Tables))
-				server = drmcp.NewOfflineServer(snap, lintCfg)
-				server.SetSchemaCandidates(candidates)
-				// history.db carries planner/activity stats; without it offline tools (vacuum_health, detect…) see nil sizing
-				if h, err := history.OpenDefault(); err == nil {
-					server.SetHistory(h)
-					server.SetSnapshotKey(resolveSnapshotKey())
-					if server.BootstrapFromHistory(context.Background()) {
-						fmt.Fprintln(os.Stderr, "dryrun: attached planner/activity stats from history.db")
-					}
-				}
 			case flagDB != "":
 				ctx := context.Background()
 				conn, err := schema.Connect(ctx, flagDB)
@@ -927,18 +901,34 @@ func mcpServeCmd() *cobra.Command {
 				}
 
 				var hist *history.Store
-				if h, err := history.OpenDefault(); err == nil {
+				if h, err := openHistoryStore(""); err == nil {
 					hist = h
 				}
 
 				server = drmcp.NewServer(conn.Pool(), flagDB, snap, hist, lintCfg, pgMustardAPIKey)
-				server.SetSchemaCandidates(candidates)
-				server.SetSnapshotKey(resolveSnapshotKey())
+				server.SetSnapshotKey(key)
 			default:
-				fmt.Fprintln(os.Stderr, "dryrun: no schema found — starting in uninitialized mode")
-				fmt.Fprintln(os.Stderr, "dryrun: use the reload_schema tool after running dump-schema")
 				server = drmcp.NewOfflineServer(&schema.SchemaSnapshot{}, lintCfg)
-				server.SetUninitialized(candidates)
+				server.SetSnapshotKey(key)
+
+				hist, err := openExistingHistoryStore()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "dryrun: no history database (%v) — starting in uninitialized mode\n", err)
+					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot take', then call the reload_schema tool")
+					server.SetUninitialized()
+					break
+				}
+				server.SetHistory(hist)
+
+				if server.BootstrapFromHistory(context.Background()) {
+					t, v, f := server.SchemaCounts()
+					fmt.Fprintf(os.Stderr, "dryrun: loaded schema from history.db (%d tables, %d views, %d functions, offline mode)\n", t, v, f)
+				} else {
+					fmt.Fprintf(os.Stderr, "dryrun: no schema snapshot in history.db for project=%s database=%s — starting in uninitialized mode\n",
+						key.ProjectID, key.DatabaseID)
+					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot take', then call the reload_schema tool")
+					server.SetUninitialized()
+				}
 			}
 
 			mcpSrv := mcpserver.NewMCPServer("dryrun", buildinfo.Get(),
@@ -963,6 +953,7 @@ func mcpServeCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&schemaFile, "schema", os.Getenv("DRY_RUN_SCHEMA_FILE"), "path to schema JSON file")
+	_ = cmd.Flags().MarkDeprecated("schema", "ignored; mcp-serve reads the schema from history.db")
 	cmd.Flags().StringVar(&transport, "transport", "stdio", "transport (stdio)")
 	cmd.Flags().IntVar(&port, "port", 3000, "port for HTTP transport")
 	return cmd
