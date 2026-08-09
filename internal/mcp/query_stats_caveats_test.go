@@ -412,3 +412,95 @@ func TestJoinCaveatsMarksContinuationLines(t *testing.T) {
 		t.Error("no caveats must join to the empty hint, which callers treat as absent")
 	}
 }
+
+// A capture-rule change decides whether a statement is in the capture at all,
+// which is strictly worse than qshape moving one between clusters. In the field
+// this was v1's whitelist excluding every comment-prefixed statement: the two
+// captures described different populations while every summary number, the
+// statement count included, looked continuous across the boundary.
+func TestChangeCaveatsReportCaptureRuleChange(t *testing.T) {
+	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
+	from := snap("primary", now.Add(-200*time.Hour), now.Add(-time.Hour))
+	to := snap("primary", now.Add(-200*time.Hour), now)
+	from.CaptureRuleVersion, to.CaptureRuleVersion = 1, 2
+
+	got := changeCaveats("primary", from, to)
+	if len(matching(got, "rule selecting which statements are captured changed")) != 1 {
+		t.Fatalf("a selection-rule change must be reported, got %#v", got)
+	}
+	// The reader has to know the delta is not a delta, not merely that a version moved.
+	if len(matching(got, "not increments")) != 1 {
+		t.Errorf("caveat must say the difference is not an increment: %#v", got)
+	}
+	for _, c := range got {
+		if !strings.Contains(c, "previous capture") {
+			t.Errorf("caveat overpromises its range: %s", c)
+		}
+	}
+}
+
+// Same "0 means unknown, never same" rule the qshape boundary uses: the 26
+// captures already on disk predate this field and must not read as matching.
+func TestChangeCaveatsWarnOnUnversionedCaptureRuleBoundary(t *testing.T) {
+	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
+	from := snap("primary", now.Add(-200*time.Hour), now.Add(-time.Hour))
+	to := snap("primary", now.Add(-200*time.Hour), now)
+	from.CaptureRuleVersion, to.CaptureRuleVersion = 0, 2
+
+	got := changeCaveats("primary", from, to)
+	if len(matching(got, "predates capture-rule versioning")) != 1 {
+		t.Fatalf("a 0 -> N transition must warn, got %#v", got)
+	}
+
+	from.CaptureRuleVersion, to.CaptureRuleVersion = 0, 0
+	if got := changeCaveats("primary", from, to); len(got) != 0 {
+		t.Errorf("unchanged version must be silent, got %#v", got)
+	}
+	from.CaptureRuleVersion, to.CaptureRuleVersion = 2, 2
+	if got := changeCaveats("primary", from, to); len(got) != 0 {
+		t.Errorf("equal versions must be silent, got %#v", got)
+	}
+}
+
+// The two version fields answer different questions and must both be reported
+// when both move; neither may mask the other.
+func TestChangeCaveatsReportQshapeAndCaptureRuleIndependently(t *testing.T) {
+	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
+	from := snap("primary", now.Add(-200*time.Hour), now.Add(-time.Hour))
+	to := snap("primary", now.Add(-200*time.Hour), now)
+	from.QshapeVersion, to.QshapeVersion = 1, 2
+	from.CaptureRuleVersion, to.CaptureRuleVersion = 1, 2
+
+	got := changeCaveats("primary", from, to)
+	if len(matching(got, "regrouped")) != 1 || len(matching(got, "rule selecting")) != 1 {
+		t.Fatalf("both boundaries must be reported, got %#v", got)
+	}
+}
+
+// A moved row cap changes which statements are present, and unlike a rule bump
+// it happens in ordinary operation. It only matters when the earlier capture
+// was actually at its cap — otherwise nothing was truncated.
+func TestChangeCaveatsReportRowCapMoveOnlyWhenBinding(t *testing.T) {
+	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
+	mk := func(fromCap, fromRaw, toCap int) []string {
+		from := snap("primary", now.Add(-200*time.Hour), now.Add(-time.Hour))
+		to := snap("primary", now.Add(-200*time.Hour), now)
+		from.RowCap, from.RawRows, to.RowCap = fromCap, fromRaw, toCap
+		return changeCaveats("primary", from, to)
+	}
+
+	if got := mk(500, 500, 2000); len(matching(got, "row cap moved")) != 1 {
+		t.Errorf("a cap move away from a binding cap must be reported: %#v", got)
+	}
+	if got := mk(500, 120, 2000); len(matching(got, "row cap moved")) != 0 {
+		t.Errorf("the earlier capture was nowhere near its cap; nothing was truncated: %#v", got)
+	}
+	if got := mk(500, 500, 500); len(matching(got, "row cap moved")) != 0 {
+		t.Errorf("an unchanged cap must be silent: %#v", got)
+	}
+	// 0 means the capture predates the field and captured at the fixed default;
+	// it is not a meaningful "from" for a comparison.
+	if got := mk(0, 500, 2000); len(matching(got, "row cap moved")) != 0 {
+		t.Errorf("an unversioned cap must not be compared numerically: %#v", got)
+	}
+}

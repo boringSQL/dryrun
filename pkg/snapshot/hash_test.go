@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -981,5 +982,48 @@ func TestQueryStatsContentHashCoversBlockTimings(t *testing.T) {
 				t.Fatal("member order moves the digest; the field is not breaking the tie")
 			}
 		})
+	}
+}
+
+// CaptureRuleVersion is a header field, so it must not participate in the
+// content hash: hashing it would move every stored digest and break dedup
+// against rows already written locally and pushed to cloud.
+func TestCaptureRuleVersionIsNotHashed(t *testing.T) {
+	mk := func(v int) *QueryStatsSnapshot {
+		return &QueryStatsSnapshot{
+			SchemaRefHash:      "abc",
+			CaptureRuleVersion: v,
+			Node:               NodeIdentity{Source: "primary"},
+			Queries: []QueryStatsEntry{{
+				Fingerprint: "f", Calls: 1, TotalExecTimeMs: 1,
+				Members: []QueryStatsMember{{QueryID: 7, Calls: 1, TotalExecTimeMs: 1}},
+			}},
+		}
+	}
+	if a, b := ComputeQueryStatsContentHash(mk(0)), ComputeQueryStatsContentHash(mk(2)); a != b {
+		t.Errorf("the header field moved the content hash:\n  v0: %s\n  v2: %s", a, b)
+	}
+}
+
+// 0 must stay absent on the wire so payloads written before the field existed
+// remain byte-identical, and must read back as 0 = unknown rather than as a
+// version that happens to match.
+func TestCaptureRuleVersionWireRoundTrip(t *testing.T) {
+	for _, v := range []int{0, 2} {
+		data, err := json.Marshal(&QueryStatsSnapshot{CaptureRuleVersion: v})
+		if err != nil {
+			t.Fatal(err)
+		}
+		present := strings.Contains(string(data), "capture_rule_version")
+		if present != (v != 0) {
+			t.Errorf("v=%d: key present=%v, want %v (omitempty keeps legacy bytes identical)", v, present, v != 0)
+		}
+		var back QueryStatsSnapshot
+		if err := json.Unmarshal(data, &back); err != nil {
+			t.Fatal(err)
+		}
+		if back.CaptureRuleVersion != v {
+			t.Errorf("v=%d round-tripped to %d", v, back.CaptureRuleVersion)
+		}
 	}
 }
