@@ -217,6 +217,24 @@ func changeCaveats(node string, from, to schema.QueryStatsSnapshot) []string {
 		}
 	}
 
+	// A moved cap only truncated anything if the older capture hit it.
+	if from.RowCap != to.RowCap && from.RowCap > 0 && from.RawRows >= from.RowCap {
+		out = append(out, fmt.Sprintf(
+			"compared with the previous capture of %s: the row cap moved (%d -> %d) and the earlier capture was at its cap, so statements absent there may have been truncated rather than idle; their apparent growth is not an increment",
+			node, from.RowCap, to.RowCap))
+	}
+
+	if from.CaptureRuleVersion != to.CaptureRuleVersion {
+		if from.CaptureRuleVersion == 0 || to.CaptureRuleVersion == 0 {
+			out = append(out, fmt.Sprintf(
+				"compared with the previous capture of %s: one capture predates capture-rule versioning, so the two may not have collected the same set of statements and their totals cannot be assumed comparable", node))
+		} else {
+			out = append(out, fmt.Sprintf(
+				"compared with the previous capture of %s: the rule selecting which statements are captured changed between them (capture rule v%d -> v%d), so the statement sets do not correspond and differences across that boundary are not increments",
+				node, from.CaptureRuleVersion, to.CaptureRuleVersion))
+		}
+	}
+
 	return out
 }
 

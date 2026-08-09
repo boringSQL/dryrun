@@ -67,8 +67,10 @@ type (
 	// Owners/RegresqlMeta/DynamicTagKeys come from the query's leading comment via
 	// qshape's tag policy; RegresqlMeta is unscreened free text, not a vetted label.
 	queryStatsEntry struct {
-		Node               string            `json:"node"`
-		CapturedAt         string            `json:"captured_at"`
+		Node       string `json:"node"`
+		CapturedAt string `json:"captured_at"`
+		// Different values mean different captured populations: not comparable.
+		CaptureRuleVersion int               `json:"capture_rule_version,omitempty"`
 		SchemaRefHash      string            `json:"schema_ref_hash"`
 		Fingerprint        string            `json:"fingerprint"`
 		Canonical          string            `json:"canonical"`

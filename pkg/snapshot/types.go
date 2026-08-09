@@ -10,6 +10,13 @@ import (
 // 0 means legacy. not hashed. 2 = digest covers reloptions.
 const FormatVersion = 2
 
+// CaptureRuleVersion: which pg_stat_statements rows a capture kept, per the
+// WHERE clause in internal/schema/sql/query_stats.sql plus dropUnsafeCopy.
+// Bump on any change that can alter the selected set;
+// TestCaptureRuleVersionMatchesSQL enforces it. 0 means legacy.
+// 1 excluded comment-prefixed statements; 2 strips leading comments first.
+const CaptureRuleVersion = 2
+
 type (
 
 	// DDL-only schema snapshot; sizing/activity live in AnnotatedSchema
@@ -614,6 +621,8 @@ type (
 		ContentHash   string `json:"content_hash"`
 		// qshape.GroupingVersion at capture; 0 for rows predating this field.
 		QshapeVersion int `json:"qshape_version,omitempty"`
+		// CaptureRuleVersion at capture; 0 for rows predating this field.
+		CaptureRuleVersion int `json:"capture_rule_version,omitempty"`
 		// raw rows the row-capped fetch returned, pre-grouping; len(Queries) can't
 		// say by how much the capture missed.
 		RawRows int `json:"raw_rows,omitempty"`

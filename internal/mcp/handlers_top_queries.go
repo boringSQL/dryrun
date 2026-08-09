@@ -105,6 +105,7 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 			entries = append(entries, queryStatsEntry{
 				Node:               snap.Node.Source,
 				CapturedAt:         capturedAt,
+				CaptureRuleVersion: snap.CaptureRuleVersion,
 				SchemaRefHash:      snap.SchemaRefHash,
 				Fingerprint:        q.Fingerprint,
 				Canonical:          canonical,

@@ -205,6 +205,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		FormatVersion:          FormatVersion,
 		SchemaRefHash:          schemaRefHash,
 		QshapeVersion:          qshape.GroupingVersion,
+		CaptureRuleVersion:     CaptureRuleVersion,
 		RawRows:                len(queries),
 		RowCap:                 rowCap,
 		PgssMax:                fetchPgssMax(ctx, pool),
