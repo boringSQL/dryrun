@@ -15,65 +15,28 @@ import (
 	"github.com/boringsql/dryrun/pkg/lint"
 )
 
-// verifies that reload_schema picks up a candidate path written at runtime,
-// returns the "Schema loaded from" status message, and that getSchema then
-// returns a populated snapshot. End-to-end test of the lazy-init reload flow.
-func TestReloadSchema_LoadsFromCandidate(t *testing.T) {
-	src, err := os.ReadFile("../../examples/demo/.dryrun/schema.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "schema.json")
-	if err := os.WriteFile(path, src, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	srv := &Server{lintConfig: lint.DefaultConfig()}
-	srv.SetUninitialized([]string{path})
-
-	res, err := srv.handleReloadSchema(context.Background(), mcp.CallToolRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res == nil || len(res.Content) == 0 {
-		t.Fatal("empty result")
-	}
-	tc := res.Content[0].(mcp.TextContent)
-	if !strings.Contains(tc.Text, "Schema loaded from") {
-		t.Errorf("unexpected reload output: %s", tc.Text)
-	}
-
-	snap, err := srv.getSchema()
-	if err != nil {
-		t.Fatalf("getSchema after reload: %v", err)
-	}
-	if snap == nil || len(snap.Tables) == 0 {
-		t.Error("expected snap with tables")
-	}
-}
-
-// Pins the fall-through behavior when no candidate path exists on disk:
-// reload_schema returns success with a "no schema file found" message instead
-// of erroring, so the MCP client can show a sensible hint to the user.
-func TestReloadSchema_NoCandidates(t *testing.T) {
-	srv := &Server{lintConfig: lint.DefaultConfig()}
-	srv.SetUninitialized([]string{"/no/such/path"})
+// Pins the fall-through behavior when history.db holds no schema for the key:
+// reload_schema reports the key it looked under, so an agent can tell an empty
+// history from a project/database mismatch.
+func TestReloadSchema_NoSchemaInHistory(t *testing.T) {
+	srv := &Server{lintConfig: lint.DefaultConfig(), snapshotKey: history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}}
+	srv.SetUninitialized()
 	res, err := srv.handleReloadSchema(context.Background(), mcp.CallToolRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	tc := res.Content[0].(mcp.TextContent)
-	if !strings.Contains(tc.Text, "no schema file found") {
+	if !strings.Contains(tc.Text, "no schema snapshot in history.db") {
 		t.Errorf("expected not-found message, got %s", tc.Text)
 	}
+	if !strings.Contains(tc.Text, "project=p") || !strings.Contains(tc.Text, "database=d") {
+		t.Errorf("expected the resolved key in the message, got %s", tc.Text)
+	}
 }
 
-// Locks down the v0.6 lookup order: when both history.db and a schema.json
-// candidate are present, reload_schema must prefer history.db so the
-// planner/activity streams come along for the ride. If this test ever
-// regresses, stats apply and the activity-aware tools silently lose data.
-func TestReloadSchema_HistoryBeatsSchemaFile(t *testing.T) {
+// history.db is the only schema source: a schema.json sitting next to it must
+// never be read, and the planner/activity streams must come along for the ride.
+func TestReloadSchema_HistoryOnlySchemaFileIgnored(t *testing.T) {
 	dir := t.TempDir()
 	store, err := history.Open(filepath.Join(dir, "history.db"))
 	if err != nil {
@@ -91,7 +54,7 @@ func TestReloadSchema_HistoryBeatsSchemaFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// candidate file carries a different table name; if reload picks it, getSchema
+	// decoy file carries a different table name; if reload picks it, getSchema
 	// will see t_from_file instead of t_from_history.
 	fileSnap := &schema.SchemaSnapshot{
 		Database:    "from_file",
@@ -108,7 +71,7 @@ func TestReloadSchema_HistoryBeatsSchemaFile(t *testing.T) {
 	}
 
 	srv := &Server{lintConfig: lint.DefaultConfig(), history: store, snapshotKey: key}
-	srv.SetUninitialized([]string{path})
+	srv.SetUninitialized()
 
 	res, err := srv.handleReloadSchema(context.Background(), mcp.CallToolRequest{})
 	if err != nil {

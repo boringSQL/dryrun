@@ -153,6 +153,29 @@ database_id = "staging-shard-a"
 	}
 }
 
+// Several profiles and none selected makes ResolveProfile fail. The fallback
+// must still honour [project].id: keying off the directory name instead would
+// point mcp-serve at a different history than every capture command wrote to.
+func TestResolveSnapshotKeyAmbiguousProfileKeepsProjectID(t *testing.T) {
+	resetFlags(t)
+	dir := writeTOML(t, t.TempDir(), `
+[project]
+id = "demo"
+
+[profiles.staging]
+db_url = "postgres://stg/x"
+
+[profiles.prod]
+db_url = "postgres://prod/x"
+`)
+	withCWD(t, dir)
+
+	key := resolveSnapshotKey()
+	if string(key.ProjectID) != "demo" || string(key.DatabaseID) != "demo" {
+		t.Errorf("got %+v, want demo/demo", key)
+	}
+}
+
 // TestBuildMaskerNoMasks: --no-masks is the hard opt-out. buildMasker must
 // short-circuit to nil before touching the filesystem, even when a perfectly
 // good data-masking-policy.yml is sitting right there.

@@ -103,7 +103,7 @@ func assertContains(t *testing.T, haystack, needle string) {
 // to surface actionable guidance back to the user.
 func TestGetSchema_UninitializedError(t *testing.T) {
 	srv := &Server{lintConfig: lint.DefaultConfig()}
-	srv.SetUninitialized([]string{"/tmp/nonexistent"})
+	srv.SetUninitialized()
 	_, err := srv.getSchema()
 	if err == nil {
 		t.Fatal("expected error when uninitialized")
