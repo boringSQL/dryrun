@@ -116,6 +116,81 @@ func TestReplicationSlotsQueries_ParseAgainstLiveDB(t *testing.T) {
 	}
 }
 
+func TestReplicationPeersQueries_ParseAgainstLiveDB(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	for _, name := range []string{"fetch-has-stat-replication", "fetch-replication-peers-primary", "fetch-replication-peers-standby"} {
+		rows, err := pool.Query(ctx, q(name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		rows.Close()
+	}
+}
+
+func TestCaptureActivityStats_ReplicationPeers(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	activity, err := CaptureActivityStats(ctx, pool, "sref", "test-primary")
+	if err != nil {
+		t.Fatalf("activity capture: %v", err)
+	}
+	if activity.ReplicationPeersReadOK == nil {
+		t.Fatal("expected ReplicationPeersReadOK to be set")
+	}
+	if !*activity.ReplicationPeersReadOK {
+		t.Error("expected the replication-peers read to succeed")
+	}
+	if activity.ReplicationPeers == nil {
+		t.Fatal("expected ReplicationPeers non-nil when ReadOK=true")
+	}
+}
+
+func TestFetchReplicationPeers_ZeroRowsOK(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	peers, ok := fetchReplicationPeers(ctx, pool, false)
+	if !ok {
+		t.Fatalf("expected ok=true against a live primary with no standbys")
+	}
+	if peers == nil {
+		t.Fatal("expected non-nil empty slice, not nil")
+	}
+	if len(peers) != 0 {
+		t.Errorf("expected 0 peers on a standalone primary, got %d", len(peers))
+	}
+}
+
+func TestFetchReplicationPeers_ReadFailureIsOKFalse(t *testing.T) {
+	pool := livePool(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	peers, ok := fetchReplicationPeers(ctx, pool, false)
+	if ok {
+		t.Errorf("expected ok=false on cancelled context")
+	}
+	if peers != nil {
+		t.Errorf("expected nil peers on failure, got %v", peers)
+	}
+}
+
+func TestFetchReplicationPeers_StandbyBranch(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	peers, ok := fetchReplicationPeers(ctx, pool, true)
+	if !ok {
+		t.Fatalf("expected standby branch to succeed on live DB")
+	}
+	if peers == nil {
+		t.Fatal("expected non-nil peers slice")
+	}
+}
+
 // pg_stat_statements may not be preloaded on the test DB; the sentinel is a valid outcome too.
 func TestCaptureQueryStats_AgainstLiveDB(t *testing.T) {
 	pool := livePool(t)

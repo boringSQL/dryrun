@@ -38,6 +38,7 @@ type (
 	NodeIdentity             = snapshot.NodeIdentity
 	DatabaseActivity         = snapshot.DatabaseActivity
 	ReplicationSlotActivity  = snapshot.ReplicationSlotActivity
+	ReplicationPeerActivity  = snapshot.ReplicationPeerActivity
 	CheckpointerActivity     = snapshot.CheckpointerActivity
 	TableSizingEntry         = snapshot.TableSizingEntry
 	IndexSizingEntry         = snapshot.IndexSizingEntry
