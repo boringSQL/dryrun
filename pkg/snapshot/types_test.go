@@ -193,3 +193,85 @@ func TestActivityStatsSnapshot_StandbyShape(t *testing.T) {
 		t.Errorf("is_standby lost in round-trip")
 	}
 }
+
+func TestActivityStatsSnapshot_ReplicationPeersRoundTrip(t *testing.T) {
+	addr := "10.0.0.5"
+	lagBytes := int64(4096)
+	writeLag := 1.5
+	ok := true
+
+	in := &ActivityStatsSnapshot{
+		SchemaRefHash: "ddl-hash",
+		ContentHash:   "activity-hash",
+		Node:          NodeIdentity{Source: "primary"},
+		ReplicationPeers: []ReplicationPeerActivity{
+			{
+				ApplicationName: "replica-1",
+				ClientAddr:      &addr,
+				State:           "streaming",
+				SyncState:       "async",
+				SentLSN:         "0/12345678",
+				WriteLSN:        "0/12345678",
+				FlushLSN:        "0/12345678",
+				ReplayLSN:       "0/12345670",
+				ReplayLagBytes:  &lagBytes,
+				WriteLagMs:      &writeLag,
+			},
+		},
+		ReplicationPeersReadOK: &ok,
+	}
+
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"application_name":"replica-1"`) {
+		t.Errorf("application_name missing in JSON: %s", b)
+	}
+	if strings.Contains(string(b), `"flush_lag_ms"`) {
+		t.Errorf("nil flush_lag_ms should be omitted: %s", b)
+	}
+
+	var out ActivityStatsSnapshot
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.ReplicationPeersReadOK == nil || !*out.ReplicationPeersReadOK {
+		t.Errorf("replication_peers_read_ok lost in round-trip")
+	}
+	if len(out.ReplicationPeers) != 1 {
+		t.Fatalf("expected 1 peer, got %+v", out.ReplicationPeers)
+	}
+	peer := out.ReplicationPeers[0]
+	if peer.ApplicationName != "replica-1" || peer.State != "streaming" {
+		t.Errorf("peer identity drifted: %+v", peer)
+	}
+	if peer.ClientAddr == nil || *peer.ClientAddr != addr {
+		t.Errorf("client_addr drifted: %+v", peer.ClientAddr)
+	}
+	if peer.ReplayLagBytes == nil || *peer.ReplayLagBytes != lagBytes {
+		t.Errorf("replay_lag_bytes drifted: %+v", peer.ReplayLagBytes)
+	}
+	if peer.WriteLagMs == nil || *peer.WriteLagMs != writeLag {
+		t.Errorf("write_lag_ms drifted: %+v", peer.WriteLagMs)
+	}
+	if peer.FlushLagMs != nil {
+		t.Errorf("nil flush_lag_ms became non-nil: %+v", peer.FlushLagMs)
+	}
+
+	empty := &ActivityStatsSnapshot{SchemaRefHash: "x", Node: NodeIdentity{Source: "primary"}}
+	b2, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	if strings.Contains(string(b2), "replication_peers") {
+		t.Errorf("absent peers section leaked into JSON: %s", b2)
+	}
+	var emptyOut ActivityStatsSnapshot
+	if err := json.Unmarshal(b2, &emptyOut); err != nil {
+		t.Fatalf("unmarshal empty: %v", err)
+	}
+	if emptyOut.ReplicationPeersReadOK != nil || len(emptyOut.ReplicationPeers) != 0 {
+		t.Errorf("absent peers section became present: read_ok=%v peers=%+v", emptyOut.ReplicationPeersReadOK, emptyOut.ReplicationPeers)
+	}
+}

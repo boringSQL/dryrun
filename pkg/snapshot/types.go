@@ -446,6 +446,22 @@ type ReplicationSlotActivity struct {
 	SafeWalSize *int64  `json:"safe_wal_size,omitempty"`
 }
 
+// nil lag fields mean "unknown" (idle standby), not "no lag"; pid is volatile and omitted.
+type ReplicationPeerActivity struct {
+	ApplicationName string   `json:"application_name"`
+	ClientAddr      *string  `json:"client_addr,omitempty"`
+	State           string   `json:"state"`
+	SyncState       string   `json:"sync_state"`
+	SentLSN         string   `json:"sent_lsn"`
+	WriteLSN        string   `json:"write_lsn"`
+	FlushLSN        string   `json:"flush_lsn"`
+	ReplayLSN       string   `json:"replay_lsn"`
+	ReplayLagBytes  *int64   `json:"replay_lag_bytes,omitempty"`
+	WriteLagMs      *float64 `json:"write_lag_ms,omitempty"`
+	FlushLagMs      *float64 `json:"flush_lag_ms,omitempty"`
+	ReplayLagMs     *float64 `json:"replay_lag_ms,omitempty"`
+}
+
 // Checkpoint counters; PG17 moved them from pg_stat_bgwriter to pg_stat_checkpointer
 // under renamed columns, so View records which catalog answered.
 type CheckpointerActivity struct {
@@ -552,6 +568,9 @@ type (
 		// ComputeActivityContentHash hashes them as a pair.
 		ReplicationSlots       []ReplicationSlotActivity `json:"replication_slots,omitempty"`
 		ReplicationSlotsReadOK *bool                     `json:"replication_slots_read_ok,omitempty"`
+		// Hashed as a pair; never set ReplicationPeers without ReadOK=true.
+		ReplicationPeers       []ReplicationPeerActivity `json:"replication_peers,omitempty"`
+		ReplicationPeersReadOK *bool                     `json:"replication_peers_read_ok,omitempty"`
 		Checkpointer           *CheckpointerActivity     `json:"checkpointer,omitempty"`
 	}
 
