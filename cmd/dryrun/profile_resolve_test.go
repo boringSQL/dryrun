@@ -28,12 +28,12 @@ func withCWD(t *testing.T, dir string) {
 // stay set between command runs in-process.
 func resetFlags(t *testing.T) {
 	t.Helper()
-	prevDB, prevProfile, prevConfig, prevSchema := flagDB, flagProfile, flagConfig, flagSchemaFile
+	prevDB, prevProfile, prevConfig := flagDB, flagProfile, flagConfig
 	prevMasksFile, prevMaskPolicy, prevNoMasks := flagMasksFile, flagMaskPolicy, flagNoMasks
-	flagDB, flagProfile, flagConfig, flagSchemaFile = "", "", "", ""
+	flagDB, flagProfile, flagConfig = "", "", ""
 	flagMasksFile, flagMaskPolicy, flagNoMasks = "", nil, false
 	t.Cleanup(func() {
-		flagDB, flagProfile, flagConfig, flagSchemaFile = prevDB, prevProfile, prevConfig, prevSchema
+		flagDB, flagProfile, flagConfig = prevDB, prevProfile, prevConfig
 		flagMasksFile, flagMaskPolicy, flagNoMasks = prevMasksFile, prevMaskPolicy, prevNoMasks
 	})
 	os.Unsetenv("PROFILE")

@@ -240,7 +240,7 @@ func buildMasker(key history.SnapshotKey) (*masking.Policy, error) {
 		if cfg.RequireMasks != nil {
 			requireMasks = *cfg.RequireMasks
 		}
-		if rp, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
+		if rp, rerr := cfg.ResolveProfile(nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
 			if rp.MasksFile != nil {
 				res.ProfileFile = *rp.MasksFile
 			}

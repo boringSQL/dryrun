@@ -32,7 +32,7 @@ Identifies the project. Snapshots are keyed by `(project_id, database_id)` so a 
 
 A profile names the snapshot key dryrun reads under, and optionally how to connect to a live database. Most projects have two or three: one for offline work, one for local dev, maybe one for staging.
 
-`schema_file` is accepted for backward compatibility but ignored: snapshots live in `.dryrun/history.db`, and offline commands read them from there.
+`schema_file` is removed, along with the `--schema-file` and `mcp-serve --schema` flags. A config that still carries the key loads fine — unknown keys are ignored — but it selects nothing: snapshots live in `.dryrun/history.db`, and offline commands read them from there.
 
 ```toml
 [profiles.offline]

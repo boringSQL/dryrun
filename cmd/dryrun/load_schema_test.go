@@ -58,8 +58,9 @@ profile = "local"
 	}
 }
 
-// A leftover .dryrun/schema.json must not win over history.db, and a profile
-// still carrying schema_file must not resurrect the file path either.
+// A leftover .dryrun/schema.json must not win over history.db. The profile here
+// still carries schema_file, now an unknown key: a config written before v0.15
+// has to keep loading, and the key has to stay inert.
 func TestLoadSchemaForLintIgnoresSchemaFile(t *testing.T) {
 	resetFlags(t)
 	dir := writeTOML(t, t.TempDir(), `
@@ -132,3 +133,4 @@ id = "demo"
 		}
 	}
 }
+

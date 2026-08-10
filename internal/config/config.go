@@ -60,7 +60,6 @@ type (
 
 	ProfileConfig struct {
 		DBURL        *string  `toml:"db_url"`
-		SchemaFile   *string  `toml:"schema_file"`
 		DatabaseID   *string  `toml:"database_id"`
 		MasksFile    *string  `toml:"masks_file"`
 		MaskPolicies []string `toml:"mask_policies"`
@@ -94,7 +93,6 @@ type (
 	ResolvedProfile struct {
 		Name           string
 		DBURL          *string
-		SchemaFile     *string
 		ProjectID      history.ProjectId
 		DatabaseID     *history.DatabaseId
 		MasksFile      *string
@@ -193,16 +191,13 @@ func Discover(startDir string) (string, *ProjectConfig, bool) {
 	}
 }
 
-// Priority: CLI flags > env var > config default > auto-discovery
-func (c *ProjectConfig) ResolveProfile(cliDB, cliSchema, cliProfile *string, projectRoot string) (*ResolvedProfile, error) {
+// Priority: CLI flag > env var > config default > the single defined profile
+func (c *ProjectConfig) ResolveProfile(cliDB, cliProfile *string, projectRoot string) (*ResolvedProfile, error) {
 	projectID := c.ProjectID(projectRoot)
 
 	if cliDB != nil {
 		expanded := ExpandEnvVars(*cliDB)
 		return &ResolvedProfile{Name: "<cli>", DBURL: &expanded, ProjectID: projectID}, nil
-	}
-	if cliSchema != nil {
-		return &ResolvedProfile{Name: "<cli>", SchemaFile: cliSchema, ProjectID: projectID}, nil
 	}
 
 	var profileName string
@@ -229,14 +224,8 @@ func (c *ProjectConfig) ResolveProfile(cliDB, cliSchema, cliProfile *string, pro
 		}
 	}
 
-	autoSchema := filepath.Join(projectRoot, ".dryrun", "schema.json")
-	if info, err := os.Stat(autoSchema); err == nil && !info.IsDir() {
-		return &ResolvedProfile{Name: "<auto>", SchemaFile: &autoSchema, ProjectID: projectID}, nil
-	}
-
 	return nil, fmt.Errorf("no profile found: specify --profile, set PROFILE, " +
-		"configure [default].profile in dryrun.toml, " +
-		"or place a schema at .dryrun/schema.json")
+		"or configure [default].profile in dryrun.toml")
 }
 
 func (c *ProjectConfig) ProjectID(projectRoot string) history.ProjectId {
@@ -301,13 +290,6 @@ func resolveProfileConfig(name string, profile *ProfileConfig, projectRoot strin
 	if profile.DBURL != nil {
 		expanded := ExpandEnvVars(*profile.DBURL)
 		rp.DBURL = &expanded
-	}
-	if profile.SchemaFile != nil {
-		p := *profile.SchemaFile
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(projectRoot, p)
-		}
-		rp.SchemaFile = &p
 	}
 	// profile name must not leak into the stream key; unset falls back to project id
 	did := string(projectID)

@@ -9,7 +9,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -29,7 +28,6 @@ var (
 	flagDB              string
 	flagProfile         string
 	flagConfig          string
-	flagSchemaFile      string
 	flagAllowPrivileged bool
 	flagStmtTimeout     time.Duration
 	flagLockTimeout     time.Duration
@@ -48,7 +46,6 @@ func main() {
 	pf.StringVar(&flagDB, "db", os.Getenv("DATABASE_URL"), "PostgreSQL connection URL [env: DATABASE_URL]")
 	pf.StringVar(&flagProfile, "profile", "", "config profile name")
 	pf.StringVar(&flagConfig, "config", "", "path to dryrun.toml")
-	pf.StringVar(&flagSchemaFile, "schema-file", os.Getenv("SCHEMA_FILE"), "path to schema JSON file")
 	pf.BoolVar(&flagAllowPrivileged, "allow-privileged", false, "permit superuser/replication/bypassrls roles on prod-reading commands (warns)")
 	guards := schema.DefaultSessionGuards()
 	pf.DurationVar(&flagStmtTimeout, "statement-timeout", guards.StatementTimeout, "session statement_timeout (0 disables)")
@@ -489,11 +486,9 @@ func profileCmd() *cobra.Command {
 				return nil
 			}
 			for name, p := range cfg.Profiles {
-				source := "empty"
+				source := "offline"
 				if p.DBURL != nil {
 					source = "db_url"
-				} else if p.SchemaFile != nil {
-					source = "schema_file"
 				}
 				fmt.Printf("  %s (%s)\n", name, source)
 			}
@@ -518,9 +513,6 @@ func profileCmd() *cobra.Command {
 			fmt.Printf("Profile: %s\n", name)
 			if p.DBURL != nil {
 				fmt.Printf("  db_url: %s\n", *p.DBURL)
-			}
-			if p.SchemaFile != nil {
-				fmt.Printf("  schema_file: %s\n", *p.SchemaFile)
 			}
 			return nil
 		},
@@ -597,7 +589,7 @@ func dbURLFromProfile() (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	resolved, err := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd)
+	resolved, err := cfg.ResolveProfile(nil, nilIfEmpty(flagProfile), cwd)
 	if err != nil || resolved.DBURL == nil || *resolved.DBURL == "" {
 		return "", false
 	}
@@ -733,8 +725,6 @@ func loadLintConfig() lint.Config {
 // loadSchemaForLint resolves the schema for lint: an explicit --db means "read
 // the live database", otherwise the newest snapshot in history.db.
 func loadSchemaForLint() (*schema.SchemaSnapshot, error) {
-	warnIfSchemaFileIgnored()
-
 	if flagDB != "" {
 		ctx, conn, err := connectDBProd()
 		if err != nil {
@@ -751,7 +741,6 @@ func loadSchemaForLint() (*schema.SchemaSnapshot, error) {
 // database, and sourcing both sides from one connection reports no drift by
 // construction.
 func loadSavedSchema() (*schema.SchemaSnapshot, error) {
-	warnIfSchemaFileIgnored()
 	key := resolveSnapshotKey()
 
 	hist, err := openExistingHistoryStore()
@@ -781,32 +770,6 @@ func loadSavedSchema() (*schema.SchemaSnapshot, error) {
 		"1. Run 'dryrun --db <url> init' to capture one\n"+
 		"2. Run 'dryrun snapshot pull --from-path <dir>' to load a shared one\n"+
 		"3. Pass --db <url> for live database mode", key.ProjectID, key.DatabaseID)
-}
-
-// the flag and the profile key still parse but no longer select a schema source.
-// Once per process: lint and drift both reach it, sometimes via two paths.
-var warnSchemaFileOnce sync.Once
-
-func warnIfSchemaFileIgnored() {
-	warnSchemaFileOnce.Do(func() {
-		if flagSchemaFile != "" {
-			fmt.Fprintln(os.Stderr, "warning: --schema-file is ignored; the schema is read from .dryrun/history.db")
-			return
-		}
-		cwd, _ := os.Getwd()
-		_, cfg, err := loadProjectConfig()
-		if err != nil {
-			return
-		}
-		// nil cliDB, like every other ResolveProfile caller: a --db override must
-		// not change which profile we are talking about
-		r, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd)
-		// "<auto>" is synthesized from a leftover .dryrun/schema.json, not written by the user
-		if rerr != nil || r.SchemaFile == nil || r.Name == "<auto>" {
-			return
-		}
-		fmt.Fprintf(os.Stderr, "warning: profile %q sets schema_file, which is ignored; the schema is read from .dryrun/history.db\n", r.Name)
-	})
 }
 
 func loadSchemaFile(path string) (*schema.SchemaSnapshot, error) {
@@ -866,7 +829,7 @@ func resolveSnapshotKey() history.SnapshotKey {
 	cfg := &config.ProjectConfig{}
 	if _, loaded, err := loadProjectConfig(); err == nil {
 		// resolve the profile by name only: a --db override must not drop its database_id
-		if resolved, rerr := loaded.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
+		if resolved, rerr := loaded.ResolveProfile(nil, nilIfEmpty(flagProfile), cwd); rerr == nil {
 			return resolved.SnapshotKey()
 		}
 		// profile ambiguous (several defined, none selected) — keep [project].id rather
@@ -885,7 +848,7 @@ func nilIfEmpty(s string) *string {
 }
 
 func mcpServeCmd() *cobra.Command {
-	var schemaFile, transport string
+	var transport string
 	var port int
 
 	cmd := &cobra.Command{
@@ -893,10 +856,6 @@ func mcpServeCmd() *cobra.Command {
 		Short: "Start MCP server",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lintCfg := loadLintConfig()
-
-			if schemaFile != "" || flagSchemaFile != "" {
-				fmt.Fprintln(os.Stderr, "dryrun: --schema/--schema-file are ignored by mcp-serve; the schema is read from history.db")
-			}
 
 			var pgMustardAPIKey string
 			if _, cfg, err := loadProjectConfig(); err == nil && cfg.Services != nil && cfg.Services.PgMustardAPIKey != nil {
@@ -972,8 +931,6 @@ func mcpServeCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&schemaFile, "schema", os.Getenv("DRY_RUN_SCHEMA_FILE"), "path to schema JSON file")
-	_ = cmd.Flags().MarkDeprecated("schema", "ignored; mcp-serve reads the schema from history.db")
 	cmd.Flags().StringVar(&transport, "transport", "stdio", "transport (stdio)")
 	cmd.Flags().IntVar(&port, "port", 3000, "port for HTTP transport")
 	return cmd

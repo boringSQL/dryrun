@@ -243,7 +243,7 @@ func profileRemote() string {
 	if err != nil {
 		return ""
 	}
-	rp, err := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd)
+	rp, err := cfg.ResolveProfile(nil, nilIfEmpty(flagProfile), cwd)
 	if err != nil || rp.Remote == nil {
 		return ""
 	}
@@ -260,7 +260,7 @@ func streamMapper() func(history.SnapshotKey) string {
 	overrides := map[history.SnapshotKey]string{}
 	for name := range cfg.Profiles {
 		n := name
-		rp, err := cfg.ResolveProfile(nil, nil, &n, cwd)
+		rp, err := cfg.ResolveProfile(nil, &n, cwd)
 		if err != nil {
 			continue
 		}

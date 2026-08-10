@@ -17,10 +17,11 @@ profile = "production"
 db_url = "${DEV_DATABASE_URL}"
 
 [profiles.staging]
-schema_file = ".dryrun/staging-schema.json"
+db_url = "${STAGING_DATABASE_URL}"
+database_id = "staging"
 
 [profiles.production]
-schema_file = ".dryrun/schema.json"
+db_url = "${PROD_DATABASE_URL}"
 
 [conventions]
 table_name = "snake_singular"
@@ -152,7 +153,7 @@ id = "demo"`)
 	root := "/tmp/whatever"
 
 	dbURL := "postgres://localhost/x"
-	rp, err := cfg.ResolveProfile(&dbURL, nil, nil, root)
+	rp, err := cfg.ResolveProfile(&dbURL, nil, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,14 +164,6 @@ id = "demo"`)
 		t.Errorf("--db DatabaseID: got %v, want nil", rp.DatabaseID)
 	}
 
-	schemaPath := "/tmp/schema.json"
-	rp, err = cfg.ResolveProfile(nil, &schemaPath, nil, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rp.ProjectID != "demo" || rp.DatabaseID != nil {
-		t.Errorf("--schema resolve: got (%q, %v), want (demo, nil)", rp.ProjectID, rp.DatabaseID)
-	}
 }
 
 // TestProfileDatabaseIDRoundTrip: TOML parsing for the database_id field on
@@ -195,7 +188,7 @@ db_url = "postgres://dev/x"
 	}
 
 	staging := "staging"
-	rp, err := cfg.ResolveProfile(nil, nil, &staging, "/tmp/demo")
+	rp, err := cfg.ResolveProfile(nil, &staging, "/tmp/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +197,7 @@ db_url = "postgres://dev/x"
 	}
 
 	dev := "dev"
-	rp, err = cfg.ResolveProfile(nil, nil, &dev, "/tmp/demo")
+	rp, err = cfg.ResolveProfile(nil, &dev, "/tmp/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +220,7 @@ database_id = "shard-a"`)
 
 	// profile path: explicit project + database IDs flow through
 	staging := "staging"
-	rp, _ := cfg.ResolveProfile(nil, nil, &staging, "/tmp/demo")
+	rp, _ := cfg.ResolveProfile(nil, &staging, "/tmp/demo")
 	k := rp.SnapshotKey()
 	want := history.SnapshotKey{ProjectID: "demo", DatabaseID: "shard-a"}
 	if k != want {
@@ -236,7 +229,7 @@ database_id = "shard-a"`)
 
 	// CLI override path: DatabaseID nil → SnapshotKey mirrors ProjectID
 	dbURL := "postgres://localhost/x"
-	rp, _ = cfg.ResolveProfile(&dbURL, nil, nil, "/tmp/demo")
+	rp, _ = cfg.ResolveProfile(&dbURL, nil, "/tmp/demo")
 	k = rp.SnapshotKey()
 	want = history.SnapshotKey{ProjectID: "demo", DatabaseID: "demo"}
 	if k != want {
@@ -253,7 +246,7 @@ func TestResolveMissingProfile(t *testing.T) {
 db_url = "postgres://dev/x"
 `)
 	bogus := "stagign"
-	_, err := cfg.ResolveProfile(nil, nil, &bogus, "/tmp/whatever")
+	_, err := cfg.ResolveProfile(nil, &bogus, "/tmp/whatever")
 	if err == nil {
 		t.Fatal("expected error for missing profile")
 	}
@@ -306,11 +299,10 @@ db_url = "postgres://prod/x"
 	os.Unsetenv("PROFILE")
 
 	cliDB := "postgres://cli/x"
-	cliSchema := "/tmp/schema.json"
 	dev := "dev"
 
 	// rung 1: --db wins over everything
-	rp, err := cfg.ResolveProfile(&cliDB, &cliSchema, &dev, root)
+	rp, err := cfg.ResolveProfile(&cliDB, &dev, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,17 +310,8 @@ db_url = "postgres://prod/x"
 		t.Errorf("--db rung: got %v, want %s", rp.DBURL, cliDB)
 	}
 
-	// rung 2: --schema wins when --db absent
-	rp, err = cfg.ResolveProfile(nil, &cliSchema, &dev, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rp.SchemaFile == nil || *rp.SchemaFile != cliSchema || rp.DBURL != nil {
-		t.Errorf("--schema rung: got schema=%v db=%v", rp.SchemaFile, rp.DBURL)
-	}
-
-	// rung 3: --profile wins over [default].profile
-	rp, err = cfg.ResolveProfile(nil, nil, &dev, root)
+	// rung 2: --profile wins over [default].profile
+	rp, err = cfg.ResolveProfile(nil, &dev, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,8 +319,8 @@ db_url = "postgres://prod/x"
 		t.Errorf("--profile rung: got %q, want dev", rp.Name)
 	}
 
-	// rung 4: [default].profile when no CLI selector
-	rp, err = cfg.ResolveProfile(nil, nil, nil, root)
+	// rung 3: [default].profile when no CLI selector
+	rp, err = cfg.ResolveProfile(nil, nil, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +337,7 @@ func TestResolveSingleProfileFallback(t *testing.T) {
 [profiles.only]
 db_url = "postgres://only/x"
 `)
-	rp, err := one.ResolveProfile(nil, nil, nil, "/tmp/demo")
+	rp, err := one.ResolveProfile(nil, nil, "/tmp/demo")
 	if err != nil {
 		t.Fatalf("single-profile fallback: %v", err)
 	}
@@ -369,8 +352,8 @@ db_url = "postgres://a/x"
 [profiles.b]
 db_url = "postgres://b/x"
 `)
-	tmp := t.TempDir() // ensure no .dryrun/schema.json under cwd
-	if _, err := two.ResolveProfile(nil, nil, nil, tmp); err == nil {
+	tmp := t.TempDir()
+	if _, err := two.ResolveProfile(nil, nil, tmp); err == nil {
 		t.Error("expected error with two profiles and no selector")
 	}
 }
@@ -384,7 +367,7 @@ db_url = "postgres://stg/x"
 `)
 	cliDB := "postgres://override/x"
 	staging := "staging"
-	rp, err := cfg.ResolveProfile(&cliDB, nil, &staging, "/tmp/demo")
+	rp, err := cfg.ResolveProfile(&cliDB, &staging, "/tmp/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,10 +391,9 @@ func contains(haystack, needle string) bool {
 // TestProfileMasksRoundTrip exercises the C3 config plumbing for data masking.
 // The masks_file and mask_policies keys must survive TOML decoding onto
 // ProfileConfig, and then flow through ResolveProfile onto ResolvedProfile.
-// masks_file additionally inherits the same relative-path treatment as
-// schema_file: a bare filename in the config is resolved against project_root,
-// so `dryrun init` works the same whether it is invoked from the project root
-// or a nested subdirectory.
+// A bare masks_file filename is resolved against project_root, so `dryrun init`
+// works the same whether it is invoked from the project root or a nested
+// subdirectory.
 func TestProfileMasksRoundTrip(t *testing.T) {
 	toml := `
 [project]
@@ -439,7 +421,7 @@ mask_policies = ["pii", "internal"]
 	// resolved: the relative masks_file is rebased onto project_root, while
 	// the policy list passes through unchanged.
 	name := "dev"
-	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo-root")
+	rp, err := cfg.ResolveProfile(nil, &name, "/tmp/demo-root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +448,7 @@ masks_file = "/etc/dryrun/masks.yml"
 		t.Fatal(err)
 	}
 	name := "dev"
-	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo-root")
+	rp, err := cfg.ResolveProfile(nil, &name, "/tmp/demo-root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +471,7 @@ db_url = "postgres://dev/x"
 		t.Fatal(err)
 	}
 	name := "dev"
-	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo-root")
+	rp, err := cfg.ResolveProfile(nil, &name, "/tmp/demo-root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +551,7 @@ stream = "shared/auth"
 	}
 
 	name := "auth"
-	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo")
+	rp, err := cfg.ResolveProfile(nil, &name, "/tmp/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +591,7 @@ stream = ""
 	}
 
 	name := "auth"
-	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo")
+	rp, err := cfg.ResolveProfile(nil, &name, "/tmp/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +604,7 @@ stream = ""
 	}
 
 	empty := "empty"
-	rp, err = cfg.ResolveProfile(nil, nil, &empty, "/tmp/demo")
+	rp, err = cfg.ResolveProfile(nil, &empty, "/tmp/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +686,7 @@ db_url = "postgres://dev/x"
 		t.Errorf("expected no remotes, got %d", len(cfg.Remotes))
 	}
 	name := "dev"
-	rp, err := cfg.ResolveProfile(nil, nil, &name, "/tmp/demo")
+	rp, err := cfg.ResolveProfile(nil, &name, "/tmp/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
