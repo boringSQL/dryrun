@@ -354,6 +354,35 @@ func TestActivityContentHash_IncludesDatabaseScopedFields(t *testing.T) {
 	if ComputeActivityContentHash(withCheckpointer) == baseHash {
 		t.Error("Checkpointer field change did not affect the content hash")
 	}
+
+	peersOK := true
+	withPeers := base()
+	withPeers.ReplicationPeers = []ReplicationPeerActivity{{ApplicationName: "r1", State: "streaming"}}
+	withPeers.ReplicationPeersReadOK = &peersOK
+	if ComputeActivityContentHash(withPeers) == baseHash {
+		t.Error("ReplicationPeers field change did not affect the content hash")
+	}
+
+	withPeersCheckedEmpty := base()
+	withPeersCheckedEmpty.ReplicationPeersReadOK = &peersOK
+	if ComputeActivityContentHash(withPeersCheckedEmpty) == baseHash {
+		t.Error("ReplicationPeersReadOK alone (zero peers, but checked) did not affect the content hash")
+	}
+}
+
+func TestActivityContentHash_NilAndEmptyReplicationPeersHashIdentically(t *testing.T) {
+	readOK := true
+	nilPeers := &ActivityStatsSnapshot{
+		SchemaRefHash: "sref", Node: NodeIdentity{Source: "primary"},
+		ReplicationPeers: nil, ReplicationPeersReadOK: &readOK,
+	}
+	emptyPeers := &ActivityStatsSnapshot{
+		SchemaRefHash: "sref", Node: NodeIdentity{Source: "primary"},
+		ReplicationPeers: []ReplicationPeerActivity{}, ReplicationPeersReadOK: &readOK,
+	}
+	if ComputeActivityContentHash(nilPeers) != ComputeActivityContentHash(emptyPeers) {
+		t.Error("nil vs non-nil-but-empty ReplicationPeers produced different digests; a decode round-trip cannot reproduce this")
+	}
 }
 
 func TestActivityContentHash_NilAndEmptyReplicationSlotsHashIdentically(t *testing.T) {

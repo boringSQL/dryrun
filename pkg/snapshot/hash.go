@@ -183,13 +183,10 @@ type (
 	}
 )
 
-// Per-node activity; node.source included so two nodes never collide. The database-
-// scoped fields join the canonical map only when present — an unconditional key would
-// hash "database": null (etc.) into digests computed by CLIs predating them and move
+// Per-node activity; node.source included so two nodes never collide. Database-scoped
+// sections join the canonical map only when present — an unconditional key would move
 // every historical digest (TestActivityContentHash_OmitsAbsentFieldsSoOldDigestsSurvive).
-// Deploy cloud before any CLI carrying this, per CLAUDE.md's wire-addition rule.
-// Consequence: blks_hit/checkpoints_timed advance nearly every capture, so docs stop
-// deduping once these populate — intended.
+// Deploy cloud before any CLI carrying a new section, per CLAUDE.md's wire-addition rule.
 func ComputeActivityContentHash(a *ActivityStatsSnapshot) string {
 	canonical := map[string]any{
 		"schema_ref_hash": a.SchemaRefHash,
@@ -207,6 +204,12 @@ func ComputeActivityContentHash(a *ActivityStatsSnapshot) string {
 		canonical["replication_slots_read_ok"] = *a.ReplicationSlotsReadOK
 		if len(a.ReplicationSlots) > 0 {
 			canonical["replication_slots"] = a.ReplicationSlots
+		}
+	}
+	if a.ReplicationPeersReadOK != nil {
+		canonical["replication_peers_read_ok"] = *a.ReplicationPeersReadOK
+		if len(a.ReplicationPeers) > 0 {
+			canonical["replication_peers"] = a.ReplicationPeers
 		}
 	}
 	if a.Checkpointer != nil {
