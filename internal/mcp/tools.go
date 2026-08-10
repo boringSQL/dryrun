@@ -206,7 +206,7 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("reload_schema",
-			mcp.WithDescription("Reload schema from history.db or schema.json"),
+			mcp.WithDescription("Reload the newest schema snapshot from history.db"),
 		),
 		s.handleReloadSchema,
 	)

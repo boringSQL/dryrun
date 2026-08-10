@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -120,42 +121,20 @@ func probeCmd() *cobra.Command {
 	}
 }
 
+// `import` copied a JSON file into .dryrun/. Kept for one release as a hidden
+// stub so the removal explains itself instead of cobra's "unknown command".
 func importCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "import <schema-file>",
-		Short: "Import a schema JSON file into .dryrun/",
-		Args:  cobra.ExactArgs(1),
+	return &cobra.Command{
+		Use:    "import <schema-file>",
+		Short:  "Removed: use 'dryrun snapshot pull'",
+		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			snap, err := schema.LoadSchemaFile(args[0])
-			if err != nil {
-				return fmt.Errorf("invalid schema file: %w", err)
-			}
-
-			if len(snap.Tables) == 0 && len(snap.Views) == 0 {
-				return fmt.Errorf("schema file contains no tables or views")
-			}
-
-			snap.ContentHash = schema.DigestFor(snap)
-
-			dataDir, err := history.DefaultDataDir()
-			if err != nil {
-				return err
-			}
-			if err := os.MkdirAll(dataDir, 0o755); err != nil {
-				return err
-			}
-
-			outputPath := filepath.Join(dataDir, "schema.json")
-			if err := writeJSONFile(outputPath, snap, true); err != nil {
-				return err
-			}
-
-			fmt.Fprintf(os.Stderr, "Imported %d tables, %d views to %s\n",
-				len(snap.Tables), len(snap.Views), outputPath)
-			return nil
+			return fmt.Errorf("'dryrun import' was removed in v0.15: schemas live in .dryrun/history.db, not a JSON file.\n" +
+				"To share a snapshot, push it from the machine with database access and pull it here:\n" +
+				"  dryrun snapshot push --to-path <dir>    # on the machine with credentials\n" +
+				"  dryrun snapshot pull --from-path <dir>  # here")
 		},
 	}
-	return cmd
 }
 
 func dumpSchemaCmd() *cobra.Command {
@@ -281,13 +260,15 @@ func driftCmd() *cobra.Command {
 		Use:   "drift",
 		Short: "Compare live database schema against saved snapshot",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// --against is the explicit snapshot path; wins over global --schema-file and auto-discovery.
+			// --against is an explicit snapshot file; otherwise the saved side comes from history.db.
 			var saved *schema.SchemaSnapshot
 			var err error
+			// never loadSchemaForLint here: with --db set it would introspect the
+			// same connection `live` comes from, and drift would always be clean
 			if against != "" {
 				saved, err = loadSchemaFile(against)
 			} else {
-				saved, err = loadSchemaForLint()
+				saved, err = loadSavedSchema()
 			}
 			if err != nil {
 				return fmt.Errorf("cannot load saved schema: %w", err)
@@ -330,7 +311,7 @@ func driftCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&pretty, "pretty", false, "pretty-print JSON")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output as JSON")
-	cmd.Flags().StringVar(&against, "against", "", "explicit snapshot file path (wins over --schema-file)")
+	cmd.Flags().StringVar(&against, "against", "", "explicit snapshot file path (otherwise the newest snapshot in history.db)")
 	return cmd
 }
 
@@ -749,44 +730,83 @@ func loadLintConfig() lint.Config {
 	return cfg.LintConfig()
 }
 
+// loadSchemaForLint resolves the schema for lint: an explicit --db means "read
+// the live database", otherwise the newest snapshot in history.db.
 func loadSchemaForLint() (*schema.SchemaSnapshot, error) {
-	cwd, _ := os.Getwd()
+	warnIfSchemaFileIgnored()
 
-	// try profile-based schema file
-	if _, cfg, err := loadProjectConfig(); err == nil {
-		resolved, err := cfg.ResolveProfile(nilIfEmpty(flagDB), nilIfEmpty(""), nilIfEmpty(flagProfile), cwd)
-		if err == nil && resolved.SchemaFile != nil {
-			return loadSchemaFile(*resolved.SchemaFile)
-		}
-	}
-
-	if flagSchemaFile != "" {
-		return loadSchemaFile(flagSchemaFile)
-	}
-
-	// try auto-discovered schema.json
-	if dataDir, err := history.DefaultDataDir(); err == nil {
-		candidate := dataDir + "/schema.json"
-		if _, err := os.Stat(candidate); err == nil {
-			return loadSchemaFile(candidate)
-		}
-	}
-
-	// fall back to live DB
 	if flagDB != "" {
-		ctx := context.Background()
-		conn, err := schema.Connect(ctx, flagDB)
+		ctx, conn, err := connectDBProd()
 		if err != nil {
 			return nil, err
 		}
 		defer conn.Close()
 		return conn.Introspect(ctx)
 	}
+	return loadSavedSchema()
+}
 
-	return nil, fmt.Errorf("no schema source found. Either:\n" +
-		"1. Run 'dryrun --db <url> init' to create .dryrun/schema.json\n" +
-		"2. Pass --db <url> for live database mode\n" +
-		"3. Configure a profile in dryrun.toml")
+// loadSavedSchema reads the newest schema snapshot from history.db. It never
+// falls back to a live connection: `drift` compares its result against the live
+// database, and sourcing both sides from one connection reports no drift by
+// construction.
+func loadSavedSchema() (*schema.SchemaSnapshot, error) {
+	warnIfSchemaFileIgnored()
+	key := resolveSnapshotKey()
+
+	hist, err := openExistingHistoryStore()
+	if err == nil {
+		defer hist.Close()
+		// a legacy db never ran migrate(), so GetSchema would fail on a missing column
+		switch hist.Compat() {
+		case history.CompatLegacy:
+			return nil, fmt.Errorf(".dryrun/history.db was created by an older dryrun and cannot be read; " +
+				"re-run 'dryrun init' or 'dryrun snapshot pull' to recapture its snapshots")
+		case history.CompatNewer:
+			return nil, fmt.Errorf(".dryrun/history.db was written by a newer dryrun; upgrade dryrun")
+		}
+		snap, gerr := hist.GetSchema(context.Background(), key, history.NewRefLatest())
+		if gerr == nil && snap != nil {
+			return snap, nil
+		}
+		// an unreadable db must not read as an empty one
+		if gerr != nil && !errors.Is(gerr, history.ErrSnapshotNotFound) {
+			return nil, fmt.Errorf("read .dryrun/history.db: %w", gerr)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("open .dryrun/history.db: %w", err)
+	}
+
+	return nil, fmt.Errorf("no schema snapshot in .dryrun/history.db for project=%s database=%s. Either:\n"+
+		"1. Run 'dryrun --db <url> init' to capture one\n"+
+		"2. Run 'dryrun snapshot pull --from-path <dir>' to load a shared one\n"+
+		"3. Pass --db <url> for live database mode", key.ProjectID, key.DatabaseID)
+}
+
+// the flag and the profile key still parse but no longer select a schema source.
+// Once per process: lint and drift both reach it, sometimes via two paths.
+var warnSchemaFileOnce sync.Once
+
+func warnIfSchemaFileIgnored() {
+	warnSchemaFileOnce.Do(func() {
+		if flagSchemaFile != "" {
+			fmt.Fprintln(os.Stderr, "warning: --schema-file is ignored; the schema is read from .dryrun/history.db")
+			return
+		}
+		cwd, _ := os.Getwd()
+		_, cfg, err := loadProjectConfig()
+		if err != nil {
+			return
+		}
+		// nil cliDB, like every other ResolveProfile caller: a --db override must
+		// not change which profile we are talking about
+		r, rerr := cfg.ResolveProfile(nil, nil, nilIfEmpty(flagProfile), cwd)
+		// "<auto>" is synthesized from a leftover .dryrun/schema.json, not written by the user
+		if rerr != nil || r.SchemaFile == nil || r.Name == "<auto>" {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "warning: profile %q sets schema_file, which is ignored; the schema is read from .dryrun/history.db\n", r.Name)
+	})
 }
 
 func loadSchemaFile(path string) (*schema.SchemaSnapshot, error) {

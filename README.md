@@ -22,7 +22,7 @@ The model doesn't need to *query* your database. It needs to *understand* your s
 
 ### CLI - extract and analyze
 
-The CLI connects to your PostgreSQL database, introspects the full catalog (tables, views, indexes, constraints, partitions, functions, enums, RLS policies, triggers, extensions, GUCs), and writes a single JSON snapshot. That snapshot is the source of truth for everything else.
+The CLI connects to your PostgreSQL database, introspects the full catalog (tables, views, indexes, constraints, partitions, functions, enums, RLS policies, triggers, extensions, GUCs), and writes a snapshot into `.dryrun/history.db`. That snapshot is the source of truth for everything else.
 
 Once you have the snapshot, the CLI works offline:
 
@@ -116,7 +116,7 @@ dryrun lint
 [WARN ] public.user_notifications: table is missing 'created_at' column
        fix: add: created_at timestamptz NOT NULL DEFAULT now()
 
-22 violation(s): 6 error, 16 warning, 0 info (13 tables checked)
+26 finding(s): 6 error, 20 warning, 0 info (13 tables checked)
 ```
 
 No database needed. Works entirely from the offline snapshot.
@@ -133,24 +133,28 @@ If you can connect to a PostgreSQL instance (local, dev, or production), one com
 dryrun init --db "$DATABASE_URL"
 ```
 
-This creates `dryrun.toml` (with `[project] id` and default profile), the `.dryrun/` data directory, and introspects the database into `.dryrun/schema.json`. Snapshots are keyed by `(project_id, database_id)`; set `database_id` per profile when a project has multiple databases (e.g. `auth`, `billing`). See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for the full config reference.
+This creates `dryrun.toml` (with `[project] id` and default profile), the `.dryrun/` data directory, and captures the database into `.dryrun/history.db`. Snapshots are keyed by `(project_id, database_id)`; set `database_id` per profile when a project has multiple databases (e.g. `auth`, `billing`). See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for the full config reference.
 
 ### Option B: Someone else has database access
 
-The person with credentials exports the schema once:
+The person with credentials captures once and pushes to a shared directory — one that lives in the repo, or anywhere both sides can reach:
 
 ```sh
-dryrun dump-schema --source "$DATABASE_URL" --pretty --name "production" -o schema.json
+dryrun init --db "$DATABASE_URL"
+dryrun snapshot push --to-path ./snapshots
 ```
 
-They commit `schema.json` to the repo (or share it however you like). Everyone else initializes and imports:
+They commit **both** `dryrun.toml` and `./snapshots`. Everyone else pulls:
 
 ```sh
-dryrun init
-dryrun import schema.json
+dryrun snapshot pull --from-path ./snapshots
 ```
 
-`dryrun init` creates `dryrun.toml` and `.dryrun/`. `dryrun import` loads the snapshot. No database needed on their machine.
+`snapshot pull` loads the snapshot into `.dryrun/history.db`. No database needed on their machine.
+
+Committing `dryrun.toml` is not optional: snapshots are keyed by `(project_id, database_id)`, and `dryrun init` bakes `database_id` from the live database name. A teammate who runs `dryrun init` without `--db` gets a different `database_id`, and `pull` then reports `0 copied` because it looked under a key the source does not have.
+
+A pushed snapshot carries planner and activity stats alongside the schema, so the offline tools that need sizing and vacuum data work too — which a plain JSON export cannot do. For a registry instead of a directory, see `dryrun remote add` and `snapshot push --remote`. To hand a human or an agent readable JSON, `dryrun dump-schema` still writes it; it is an export, not an input.
 
 ### Then use it
 
@@ -158,11 +162,9 @@ dryrun import schema.json
 dryrun lint
 ```
 
-All commands work offline from the schema file. Each project has its own `dryrun.toml` and `.dryrun/`, there is no global state. Add `.dryrun/` to your `.gitignore`.
+All commands work offline from `.dryrun/history.db`. Each project has its own `dryrun.toml` and `.dryrun/`, there is no global state. Add `.dryrun/` to your `.gitignore`.
 
-Snapshots live in `.dryrun/history.db`, keyed by `(project_id, database_id)`. The MCP server reads from the history db first and falls back to `.dryrun/schema.json` for first-run or shared snapshots. After `dryrun snapshot take` it will switch to DB.
-
-Static file `schema.json` will be deprecated in future.
+Snapshots live in `.dryrun/history.db`, keyed by `(project_id, database_id)`. It is the only schema source: the MCP server, `lint` and `drift` all read from it. A `.dryrun/schema.json` left over from an older dryrun is ignored.
 
 ### Multi-node: capture activity from replicas
 
@@ -210,7 +212,7 @@ dryrun --profile billing snapshot diff --latest
 
 See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for all profile options.
 
-Every DB-related command (`init`, `import`, `probe`, `dump-schema`, `lint`, `drift`, `stats apply`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` and `schema_file` when the corresponding CLI flag is not provided.
+Every DB-related command (`init`, `probe`, `dump-schema`, `drift`, `stats apply`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` when `--db` is not provided. `lint` is offline: it reads `.dryrun/history.db` and only touches a live database when you pass `--db` explicitly.
 
 > **Note:** the MCP server is currently single-database. Using the default profile. Or the option is to run one `dryrun mcp-serve` process per database. Native multi-database support inside one MCP process is tracked in [#7](https://github.com/boringSQL/dryrun/issues/7).
 
@@ -309,7 +311,7 @@ The raw client config for this form is:
 }
 ```
 
-That's it. The server auto-discovers `.dryrun/schema.json` in the current project. No database credentials needed, your AI assistant gets full schema intelligence from the offline snapshot.
+That's it. The server reads the newest snapshot from `.dryrun/history.db` in the current project. No database credentials needed, your AI assistant gets full schema intelligence from the offline snapshot.
 
 For projects with multiple databases, run one `dryrun mcp-serve` per database and add an entry per server in your client config. Native multi-database serving inside one MCP process is tracked in [#4](https://github.com/boringSQL/dryrun/issues/4).
 

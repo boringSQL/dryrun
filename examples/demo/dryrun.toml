@@ -5,7 +5,6 @@ id = "demo"
 profile = "offline"
 
 [profiles.offline]
-schema_file = ".dryrun/schema.json"
 database_id = "demo-offline"
 
 [profiles.dev]

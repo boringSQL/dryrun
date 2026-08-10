@@ -211,7 +211,7 @@ func TestRunInitCapture_Branches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cap := &stubCapturer{Standby: tc.standby, QueryStatsErr: tc.queryStatsErr}
 			w := &stubWriter{}
-			err := runInitCapture(context.Background(), cap, w, history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, t.TempDir(), initOptions{
+			err := runInitCapture(context.Background(), cap, w, history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, initOptions{
 				AllowReplica: tc.allowReplica,
 				Source:       "test-node",
 			})
@@ -245,7 +245,7 @@ func TestRunInitCapture_Branches(t *testing.T) {
 func TestRunInitCapture_ForwardsRowCap(t *testing.T) {
 	cap := &stubCapturer{}
 	w := &stubWriter{}
-	err := runInitCapture(context.Background(), cap, w, history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, t.TempDir(), initOptions{
+	err := runInitCapture(context.Background(), cap, w, history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, initOptions{
 		Source: "test-node",
 		RowCap: 1000,
 	})
@@ -348,7 +348,7 @@ func TestRunInitCapture_ReplicaBindsToStoredSchemaRef(t *testing.T) {
 	cap := &stubCapturer{Standby: true}
 	w := &stubWriter{Stored: &schema.SchemaSnapshot{ContentHash: "primary-schema-abc"}}
 
-	if err := runInitCapture(context.Background(), cap, w, history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, t.TempDir(), initOptions{
+	if err := runInitCapture(context.Background(), cap, w, history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, initOptions{
 		AllowReplica: true,
 		Source:       "replica-1",
 	}); err != nil {
@@ -483,7 +483,6 @@ func TestRunInitCapture_Masking(t *testing.T) {
 			err := runInitCapture(
 				context.Background(), cap, w,
 				history.SnapshotKey{ProjectID: "p", DatabaseID: "testdb"},
-				t.TempDir(),
 				initOptions{Source: "test-node", Policy: tc.policy},
 			)
 			if err != nil {

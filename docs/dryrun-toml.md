@@ -12,10 +12,12 @@ id = "myapp"
 profile = "offline"
 
 [profiles.offline]
-schema_file = ".dryrun/schema.json"
+database_id = "myapp"
 ```
 
-That's it. Everything else has sensible defaults.
+That's it. Everything else has sensible defaults. The schema itself is read from
+`.dryrun/history.db`; a profile only says which key to read it under, and how to
+connect when a command needs a live database.
 
 ## Project
 
@@ -28,11 +30,13 @@ Identifies the project. Snapshots are keyed by `(project_id, database_id)` so a 
 
 ## Profiles
 
-A profile points dryrun at a schema source, either an offline JSON snapshot or a live database connection. Most projects have two or three: one for offline work, one for local dev, maybe one for staging. Each profile has a name and exactly one source.
+A profile names the snapshot key dryrun reads under, and optionally how to connect to a live database. Most projects have two or three: one for offline work, one for local dev, maybe one for staging.
+
+`schema_file` is accepted for backward compatibility but ignored: snapshots live in `.dryrun/history.db`, and offline commands read them from there.
 
 ```toml
 [profiles.offline]
-schema_file = ".dryrun/schema.json"
+database_id = "myapp"
 
 [profiles.local]
 db_url = "postgresql://dev:dev@localhost:5432/myapp"
@@ -61,13 +65,10 @@ A profile is selected from:
 1. `--profile` flag
 2. `PROFILE` environment variable
 3. `[default].profile` in dryrun.toml
-4. Auto-discovery of `.dryrun/schema.json` (no profile, just a schema)
 
-CLI flags `--db` and `--schema-file` override the resolved profile's matching fields for that invocation; they don't bypass the profile, so `database_id` and `project_id` are still taken from it. `--profile billing --db $OTHER` connects to `$OTHER` but keys snapshots under billing's `database_id`.
+The `--db` flag overrides the resolved profile's `db_url` for that invocation; it doesn't bypass the profile, so `database_id` and `project_id` are still taken from it. `--profile billing --db $OTHER` connects to `$OTHER` but keys snapshots under billing's `database_id`.
 
-Every DB command (`init`, `import`, `probe`, `dump-schema`, `lint`, `drift`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` / `schema_file` when the corresponding CLI flag is omitted.
-
-Relative paths in `schema_file` are resolved from the project root (the directory containing `dryrun.toml`). Absolute paths work too.
+Every DB command (`init`, `probe`, `dump-schema`, `drift`, all `snapshot` subcommands) accepts `--profile` and falls back to the resolved profile's `db_url` when `--db` is omitted. `lint` is offline: it reads `.dryrun/history.db` under the profile's key and only connects when `--db` is passed explicitly.
 
 ### Environment variable expansion
 
@@ -331,14 +332,15 @@ You don't need to disable the suppressed rules manually.
 profile = "offline"
 
 [profiles.offline]
-schema_file = ".dryrun/schema.json"
+database_id = "myapp"
 
 [profiles.dev]
 db_url = "${DEV_DATABASE_URL}"
 remote = "ghcr"
 
 [profiles.staging]
-schema_file = ".dryrun/staging-schema.json"
+db_url = "${STAGING_DATABASE_URL}"
+database_id = "staging"
 
 [[remote]]
 name = "ghcr"

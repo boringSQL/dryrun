@@ -1,6 +1,8 @@
 /bin/
 .env
 *.db
+# the README's 30-second demo runs from this fixture; lint reads history.db
+!examples/demo/.dryrun/history.db
 vendor/
 ROADMAP-internal.md
 CUSTOM-GUIDELINES.md

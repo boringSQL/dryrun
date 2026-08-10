@@ -204,7 +204,7 @@ func initCmd() *cobra.Command {
 				slog.Warn("masking disabled by --no-masks; raw planner stats will be written to history.db")
 			}
 
-			return runInitCapture(ctx, cap, store, key, dataDir, initOptions{
+			return runInitCapture(ctx, cap, store, key, initOptions{
 				AllowReplica: allowReplica,
 				Source:       source,
 				Policy:       policy,
@@ -271,7 +271,7 @@ type initOptions struct {
 
 // init flow: refuse standbys by default; primary writes all three streams,
 // replica with --allow-replica writes activity only.
-func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, dataDir string, opts initOptions) error {
+func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, opts initOptions) error {
 	standby, err := cap.IsStandby(ctx)
 	if err != nil {
 		return fmt.Errorf("check standby status: %w", err)
@@ -313,14 +313,9 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		return err
 	}
 
-	schemaPath := filepath.Join(dataDir, "schema.json")
-	if err := writeJSONFile(schemaPath, snap, true); err != nil {
-		return err
-	}
-
 	fmt.Fprintf(os.Stderr, "Captured schema: %d tables, %d views, %d functions\n",
 		len(snap.Tables), len(snap.Views), len(snap.Functions))
-	fmt.Fprintf(os.Stderr, "  Schema:   %s\n", schemaPath)
+	fmt.Fprintf(os.Stderr, "  Schema:   %s\n", snap.ContentHash)
 	fmt.Fprintf(os.Stderr, "  Planner:  %d tables, %d indexes, %d columns\n",
 		len(planner.Tables), len(planner.Indexes), len(planner.Columns))
 	if masked > 0 {
@@ -442,7 +437,6 @@ id = %q
 profile = %q
 
 [profiles.%s]
-schema_file = ".dryrun/schema.json"
 %s
 # masks_file = "data-masking-policy.yml"   # PII policy shared with fixturize; auto-discovered if omitted
 # mask_policies = ["pii"]                  # optional; default masks every column listed for this database

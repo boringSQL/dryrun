@@ -14,24 +14,29 @@ Binary: `bin/dryrun`
 
 ## Part A: Offline workflow (no database needed)
 
-This is the **recommended starting point** for evaluation. Someone dumps the schema once, everyone else works from the JSON file.
+This is the **recommended starting point** for evaluation. Someone captures the schema once and pushes it to a shared directory; everyone else pulls.
 
-### 1. Get a schema file
+### 1. Get a snapshot
 
-Either from a teammate, CI, or dump it yourself:
+Whoever has credentials captures and pushes — the directory can live in the repo, or anywhere both sides can reach:
 
 ```sh
 export DATABASE_URL="postgres://readonly_user:pass@host:5432/your_db"
-dryrun dump-schema --source "$DATABASE_URL" --pretty --name "production" -o schema.json
+dryrun init --db "$DATABASE_URL"
+dryrun snapshot push --to-path ./snapshots
 ```
 
-### 2. Import it
+They commit `dryrun.toml` along with `./snapshots` — it carries the `database_id` the snapshot is keyed under, and a teammate who runs `dryrun init` without `--db` would derive a different one and pull nothing.
+
+### 2. Pull it
 
 ```sh
-dryrun import schema.json
+dryrun snapshot pull --from-path ./snapshots
 ```
 
-This validates the JSON and copies it to `.dryrun/schema.json`. Add `.dryrun/` to `.gitignore`.
+This loads the snapshot into `.dryrun/history.db`, which is the only schema source dryrun reads. Add `.dryrun/` to `.gitignore`.
+
+Unlike a plain JSON export, a pushed snapshot carries planner and activity stats alongside the schema, so the tools that need sizing and vacuum data work offline too. `dryrun dump-schema` still writes JSON when a human or an agent wants readable text — it is an export, not an input.
 
 ### 3. Lint
 
@@ -63,7 +68,7 @@ rules = ["naming/index_pattern"]
 
 ### 4. MCP server (offline)
 
-Install in Claude Code, it auto-discovers `.dryrun/schema.json`:
+Install in Claude Code, it reads the newest snapshot from `.dryrun/history.db`:
 
 ```sh
 claude mcp add dryrun -- dryrun mcp-serve
@@ -103,7 +108,7 @@ Privileges:
 dryrun init --db "$DATABASE_URL"
 ```
 
-Creates `dryrun.toml`, the `.dryrun/` directory, and `.dryrun/schema.json`. Snapshot history lives in `~/.dryrun/history.db` (shared across projects, keyed by `(project_id, database_id)`). If a `data-masking-policy.yml` resolves, `init` masks planner stats in-process before writing; for projects with PII, set `require_masks = true` in `dryrun.toml` to fail closed when the policy is missing. See [SECURITY.md](SECURITY.md).
+Creates `dryrun.toml` and the `.dryrun/` directory, and captures the first snapshot. Snapshot history lives in `.dryrun/history.db`, keyed by `(project_id, database_id)`. If a `data-masking-policy.yml` resolves, `init` masks planner stats in-process before writing; for projects with PII, set `require_masks = true` in `dryrun.toml` to fail closed when the policy is missing. See [SECURITY.md](SECURITY.md).
 
 ### 3. Snapshots and diffing
 
@@ -126,7 +131,8 @@ profile = "development"
 db_url = "${DEV_DATABASE_URL}"
 
 [profiles.staging]
-schema_file = ".dryrun/staging-schema.json"
+db_url = "${STAGING_DATABASE_URL}"
+database_id = "staging"
 
 [profiles.production]
 db_url = "${PROD_DATABASE_URL}"
@@ -151,7 +157,7 @@ All tools available including EXPLAIN ANALYZE (runs in rolled-back transactions,
 
 For setups with one primary and N replicas serving different query patterns. Activity counters (`seq_scan`, `idx_scan`, `n_dead_tup`) differ per node and only live where the queries actually run, on the replicas. dryrun captures schema + planner stats from the primary and activity stats from each replica, then aggregates them.
 
-A snapshot is split into three rows in `~/.dryrun/history.db`: `schema`, `planner_stats`, `activity_stats`. `snapshot take` writes all three from the primary, with the activity row labeled `primary`. `snapshot activity` writes one additional `activity_stats` row per replica, tagged with `--label`. Planner stats are masked per `data-masking-policy.yml` at capture time; see [SECURITY.md](SECURITY.md).
+A snapshot is split into three rows in `.dryrun/history.db`: `schema`, `planner_stats`, `activity_stats`. `snapshot take` writes all three from the primary, with the activity row labeled `primary`. `snapshot activity` writes one additional `activity_stats` row per replica, tagged with `--label`. Planner stats are masked per `data-masking-policy.yml` at capture time; see [SECURITY.md](SECURITY.md).
 
 ### 1. Schema + planner + activity from the primary
 
@@ -214,11 +220,8 @@ Each row prints its `kind` (`schema` / `planner_stats` / `activity_stats`), `nod
 ### Claude Code (recommended)
 
 ```sh
-# offline (auto-discover .dryrun/schema.json)
+# offline (reads .dryrun/history.db in the current project)
 claude mcp add dryrun -- dryrun mcp-serve
-
-# offline (explicit schema file)
-claude mcp add dryrun -- dryrun mcp-serve --schema-file /path/to/schema.json
 
 # live database
 claude mcp add dryrun -- env DATABASE_URL=postgres://user:pass@host:5432/db dryrun mcp-serve
@@ -236,7 +239,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "dryrun": {
       "command": "dryrun",
-      "args": ["mcp-serve", "--schema-file", "/path/to/schema.json"]
+      "args": ["mcp-serve"],
+      "cwd": "/path/to/your/project"
     }
   }
 }
@@ -286,7 +290,7 @@ GRANT pg_monitor TO your_readonly_user;
 
 **EXPLAIN ANALYZE times out** - The query actually runs (rolled back). Use `analyze=false` (default) for cost estimates only.
 
-**Schema is stale** - Ask Claude to "refresh the schema", or re-run `init` / `import`.
+**Schema is stale** - Ask Claude to "refresh the schema", or re-run `dryrun snapshot take` (or `snapshot pull`) and call `reload_schema`.
 
 **MCP connection issues** - Server logs to stderr, MCP protocol to stdout. For SSE mode, test with `curl http://host:port/sse`.
 
