@@ -196,6 +196,12 @@ func TestActivityStatsSnapshot_StandbyShape(t *testing.T) {
 
 func TestActivityStatsSnapshot_ReplicationPeersRoundTrip(t *testing.T) {
 	addr := "10.0.0.5"
+	state := "streaming"
+	syncState := "async"
+	sentLSN := "0/12345678"
+	writeLSN := "0/12345678"
+	flushLSN := "0/12345678"
+	replayLSN := "0/12345670"
 	lagBytes := int64(4096)
 	writeLag := 1.5
 	ok := true
@@ -208,12 +214,12 @@ func TestActivityStatsSnapshot_ReplicationPeersRoundTrip(t *testing.T) {
 			{
 				ApplicationName: "replica-1",
 				ClientAddr:      &addr,
-				State:           "streaming",
-				SyncState:       "async",
-				SentLSN:         "0/12345678",
-				WriteLSN:        "0/12345678",
-				FlushLSN:        "0/12345678",
-				ReplayLSN:       "0/12345670",
+				State:           &state,
+				SyncState:       &syncState,
+				SentLSN:         &sentLSN,
+				WriteLSN:        &writeLSN,
+				FlushLSN:        &flushLSN,
+				ReplayLSN:       &replayLSN,
 				ReplayLagBytes:  &lagBytes,
 				WriteLagMs:      &writeLag,
 			},
@@ -243,7 +249,7 @@ func TestActivityStatsSnapshot_ReplicationPeersRoundTrip(t *testing.T) {
 		t.Fatalf("expected 1 peer, got %+v", out.ReplicationPeers)
 	}
 	peer := out.ReplicationPeers[0]
-	if peer.ApplicationName != "replica-1" || peer.State != "streaming" {
+	if peer.ApplicationName != "replica-1" || peer.State == nil || *peer.State != "streaming" {
 		t.Errorf("peer identity drifted: %+v", peer)
 	}
 	if peer.ClientAddr == nil || *peer.ClientAddr != addr {

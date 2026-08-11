@@ -15,8 +15,9 @@ GRANT CONNECT ON DATABASE :db_name TO dryrun_readonly;
 -- 3. pg_read_all_data covers SELECT on all tables, views, sequences across all schemas (PG14+)
 GRANT pg_read_all_data TO dryrun_readonly;
 
--- 4. pg_read_all_stats exposes pg_stat_replication peers and full pg_replication_slots
--- visibility. Without it both sections may appear empty rather than failing.
+-- 4. pg_read_all_stats exposes pg_stat_replication peers. Without it the section
+-- doesn't fail; it degrades: pg_stat_replication still returns one row per
+-- walsender, but with every column NULL except pid.
 GRANT pg_read_all_stats TO dryrun_readonly;
 
 -- 5. Create a login user that inherits the role

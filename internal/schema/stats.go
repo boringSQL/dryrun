@@ -94,7 +94,7 @@ func CaptureActivityStats(ctx context.Context, pool Querier, schemaRefHash, sour
 	// present, PUBLIC-readable — so they run inline. A real error still aborts the
 	// shared tx; see the caveat at the CaptureQueryStats call site (cmd/dryrun/init.go).
 	slots, slotsOK := fetchReplicationSlots(ctx, pool)
-	peers, peersOK := fetchReplicationPeers(ctx, pool, node.IsStandby)
+	peers, peersOK := fetchReplicationPeers(ctx, pool)
 	snap := &ActivityStatsSnapshot{
 		FormatVersion:          FormatVersion,
 		SchemaRefHash:          schemaRefHash,
@@ -480,23 +480,11 @@ func fetchReplicationSlots(ctx context.Context, pool Querier) ([]ReplicationSlot
 	return slots, true
 }
 
-// pg_stat_replication is primary-side, but a cascading standby also has walsenders.
-// Reference LSN must avoid pg_current_wal_lsn() on standbys (errors in recovery).
-func fetchReplicationPeers(ctx context.Context, pool Querier, isStandby bool) ([]ReplicationPeerActivity, bool) {
-	var hasStatReplication bool
-	if err := pool.QueryRow(ctx, q("fetch-has-stat-replication")).Scan(&hasStatReplication); err != nil {
-		slog.Debug("pg_stat_replication unavailable; capturing without it", "error", err)
-		return nil, false
-	}
-	if !hasStatReplication {
-		return nil, false
-	}
-
-	name := "fetch-replication-peers-primary"
-	if isStandby {
-		name = "fetch-replication-peers-standby"
-	}
-	rows, err := pool.Query(ctx, q(name))
+// No version probe: pg_stat_replication predates the PG13 floor CapturePlannerStats
+// already enforces via pg_snapshot_xmax(). The single query branches primary/standby
+// in SQL — see fetch-replication-peers for why.
+func fetchReplicationPeers(ctx context.Context, pool Querier) ([]ReplicationPeerActivity, bool) {
+	rows, err := pool.Query(ctx, q("fetch-replication-peers"))
 	if err != nil {
 		slog.Debug("pg_stat_replication unavailable; capturing without it", "error", err)
 		return nil, false

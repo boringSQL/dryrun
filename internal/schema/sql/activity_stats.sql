@@ -72,11 +72,8 @@ SELECT slot_name, slot_type, active
 -- PG17 split checkpoint counters out of pg_stat_bgwriter into their own view.
 SELECT to_regclass('pg_catalog.pg_stat_checkpointer') IS NOT NULL
 
--- name: fetch-has-stat-replication
-SELECT current_setting('server_version_num')::int >= 100000
-
--- name: fetch-replication-peers-primary
-SELECT application_name,
+-- name: fetch-replication-peers
+SELECT COALESCE(application_name, '') AS application_name,
        client_addr::text,
        state,
        sync_state,
@@ -84,28 +81,17 @@ SELECT application_name,
        write_lsn::text,
        flush_lsn::text,
        replay_lsn::text,
-       pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), replay_lsn)::int8 AS replay_lag_bytes,
-       EXTRACT(EPOCH FROM write_lag) * 1000 AS write_lag_ms,
-       EXTRACT(EPOCH FROM flush_lag) * 1000 AS flush_lag_ms,
-       EXTRACT(EPOCH FROM replay_lag) * 1000 AS replay_lag_ms
+       pg_catalog.pg_wal_lsn_diff(
+           CASE WHEN pg_catalog.pg_is_in_recovery()
+                THEN pg_catalog.pg_last_wal_receive_lsn()
+                ELSE pg_catalog.pg_current_wal_lsn()
+           END,
+           replay_lsn)::int8 AS replay_lag_bytes,
+       EXTRACT(EPOCH FROM write_lag)::float8 * 1000 AS write_lag_ms,
+       EXTRACT(EPOCH FROM flush_lag)::float8 * 1000 AS flush_lag_ms,
+       EXTRACT(EPOCH FROM replay_lag)::float8 * 1000 AS replay_lag_ms
   FROM pg_catalog.pg_stat_replication
- ORDER BY application_name, client_addr::text, state
-
--- name: fetch-replication-peers-standby
-SELECT application_name,
-       client_addr::text,
-       state,
-       sync_state,
-       sent_lsn::text,
-       write_lsn::text,
-       flush_lsn::text,
-       replay_lsn::text,
-       pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_last_wal_replay_lsn(), replay_lsn)::int8 AS replay_lag_bytes,
-       EXTRACT(EPOCH FROM write_lag) * 1000 AS write_lag_ms,
-       EXTRACT(EPOCH FROM flush_lag) * 1000 AS flush_lag_ms,
-       EXTRACT(EPOCH FROM replay_lag) * 1000 AS replay_lag_ms
-  FROM pg_catalog.pg_stat_replication
- ORDER BY application_name, client_addr::text, state
+ ORDER BY application_name COLLATE "C", client_addr::text COLLATE "C", state COLLATE "C"
 
 -- name: fetch-checkpointer-stats-pg17
 SELECT num_timed, num_requested, stats_reset

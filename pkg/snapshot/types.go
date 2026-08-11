@@ -446,16 +446,20 @@ type ReplicationSlotActivity struct {
 	SafeWalSize *int64  `json:"safe_wal_size,omitempty"`
 }
 
-// nil lag fields mean "unknown" (idle standby), not "no lag"; pid is volatile and omitted.
+// nil means "unknown", not "no lag"/"no state": an idle standby has NULL lag, a
+// state='backup' walsender (pg_basebackup) has NULL LSNs, and without
+// pg_read_all_stats every column but pid comes back NULL. ApplicationName is
+// coalesced to "" in SQL so the unprivileged row still hashes stably. pid is
+// volatile and omitted.
 type ReplicationPeerActivity struct {
 	ApplicationName string   `json:"application_name"`
 	ClientAddr      *string  `json:"client_addr,omitempty"`
-	State           string   `json:"state"`
-	SyncState       string   `json:"sync_state"`
-	SentLSN         string   `json:"sent_lsn"`
-	WriteLSN        string   `json:"write_lsn"`
-	FlushLSN        string   `json:"flush_lsn"`
-	ReplayLSN       string   `json:"replay_lsn"`
+	State           *string  `json:"state,omitempty"`
+	SyncState       *string  `json:"sync_state,omitempty"`
+	SentLSN         *string  `json:"sent_lsn,omitempty"`
+	WriteLSN        *string  `json:"write_lsn,omitempty"`
+	FlushLSN        *string  `json:"flush_lsn,omitempty"`
+	ReplayLSN       *string  `json:"replay_lsn,omitempty"`
 	ReplayLagBytes  *int64   `json:"replay_lag_bytes,omitempty"`
 	WriteLagMs      *float64 `json:"write_lag_ms,omitempty"`
 	FlushLagMs      *float64 `json:"flush_lag_ms,omitempty"`

@@ -356,8 +356,9 @@ func TestActivityContentHash_IncludesDatabaseScopedFields(t *testing.T) {
 	}
 
 	peersOK := true
+	streaming := "streaming"
 	withPeers := base()
-	withPeers.ReplicationPeers = []ReplicationPeerActivity{{ApplicationName: "r1", State: "streaming"}}
+	withPeers.ReplicationPeers = []ReplicationPeerActivity{{ApplicationName: "r1", State: &streaming}}
 	withPeers.ReplicationPeersReadOK = &peersOK
 	if ComputeActivityContentHash(withPeers) == baseHash {
 		t.Error("ReplicationPeers field change did not affect the content hash")

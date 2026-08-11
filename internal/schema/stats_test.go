@@ -120,7 +120,7 @@ func TestReplicationPeersQueries_ParseAgainstLiveDB(t *testing.T) {
 	pool := livePool(t)
 	ctx := context.Background()
 
-	for _, name := range []string{"fetch-has-stat-replication", "fetch-replication-peers-primary", "fetch-replication-peers-standby"} {
+	for _, name := range []string{"fetch-replication-peers"} {
 		rows, err := pool.Query(ctx, q(name))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -143,22 +143,20 @@ func TestCaptureActivityStats_ReplicationPeers(t *testing.T) {
 	if !*activity.ReplicationPeersReadOK {
 		t.Error("expected the replication-peers read to succeed")
 	}
-	if activity.ReplicationPeers == nil {
-		t.Fatal("expected ReplicationPeers non-nil when ReadOK=true")
-	}
+	// No assertion on ReplicationPeers itself: a standalone primary legitimately
+	// reads zero rows, and scanAll returns nil for those — nil IS the empty list.
 }
 
 func TestFetchReplicationPeers_ZeroRowsOK(t *testing.T) {
 	pool := livePool(t)
 	ctx := context.Background()
 
-	peers, ok := fetchReplicationPeers(ctx, pool, false)
+	peers, ok := fetchReplicationPeers(ctx, pool)
 	if !ok {
 		t.Fatalf("expected ok=true against a live primary with no standbys")
 	}
-	if peers == nil {
-		t.Fatal("expected non-nil empty slice, not nil")
-	}
+	// scanAll returns nil on zero rows; hash.go gates on len(...) > 0, so nil and
+	// empty hash identically. Assert length only.
 	if len(peers) != 0 {
 		t.Errorf("expected 0 peers on a standalone primary, got %d", len(peers))
 	}
@@ -169,25 +167,12 @@ func TestFetchReplicationPeers_ReadFailureIsOKFalse(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	peers, ok := fetchReplicationPeers(ctx, pool, false)
+	peers, ok := fetchReplicationPeers(ctx, pool)
 	if ok {
 		t.Errorf("expected ok=false on cancelled context")
 	}
 	if peers != nil {
 		t.Errorf("expected nil peers on failure, got %v", peers)
-	}
-}
-
-func TestFetchReplicationPeers_StandbyBranch(t *testing.T) {
-	pool := livePool(t)
-	ctx := context.Background()
-
-	peers, ok := fetchReplicationPeers(ctx, pool, true)
-	if !ok {
-		t.Fatalf("expected standby branch to succeed on live DB")
-	}
-	if peers == nil {
-		t.Fatal("expected non-nil peers slice")
 	}
 }
 
