@@ -95,6 +95,14 @@ in the policy explicitly.
 
 Full workflow and examples: see [`MASKING-TUTORIAL.md`](MASKING-TUTORIAL.md).
 
+## Sharing snapshots
+
+`snapshot push` / `pull` and direct file copies move the captured bytes without
+re-masking. The snapshot may include infrastructure metadata that the column-oriented
+masking policy does not cover, notably replica `client_addr` values from
+`pg_stat_replication`. Treat shared snapshots as containing that metadata under the
+same trust model as the rest of the file.
+
 ## Related documents
 
 - [`MASKING-TUTORIAL.md`](MASKING-TUTORIAL.md): masking policy
