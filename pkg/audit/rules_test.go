@@ -288,3 +288,53 @@ func TestRunRules(t *testing.T) {
 	findings := RunRules(snap, &config)
 	_ = findings
 }
+
+// Distinct expression indexes used to arrive with Columns=[] (the introspection
+// query dropped expression entries), so sliceEqual matched them and lint told
+// users to DROP INDEX one of two indexes serving different queries. Expressions
+// now come through as deparsed text, which keeps them apart.
+func TestDuplicateIndexes_ExpressionsAreNotAllEqual(t *testing.T) {
+	idx := func(name string, cols ...string) schema.Index {
+		return schema.Index{Name: name, Columns: cols, IndexType: "btree", IsValid: true, IsReady: true, HasExpressions: true}
+	}
+
+	t.Run("different expressions are distinct", func(t *testing.T) {
+		snap := testSnap()
+		snap.Tables = []schema.Table{{
+			Schema: "public", Name: "users",
+			Indexes: []schema.Index{idx("idx_lower", "lower(email)"), idx("idx_upper", "upper(email)")},
+		}}
+		if findings := checkDuplicateIndexes(snap); len(findings) != 0 {
+			t.Errorf("expected 0 findings for different expressions, got %d: %v", len(findings), findings)
+		}
+	})
+
+	t.Run("same expression still flagged", func(t *testing.T) {
+		snap := testSnap()
+		snap.Tables = []schema.Table{{
+			Schema: "public", Name: "users",
+			Indexes: []schema.Index{idx("idx_lower", "lower(email)"), idx("idx_lower2", "lower(email)")},
+		}}
+		findings := checkDuplicateIndexes(snap)
+		if len(findings) != 1 {
+			t.Fatalf("expected 1 finding for identical expressions, got %d", len(findings))
+		}
+		if !strings.Contains(findings[0].Message, "lower(email)") {
+			t.Errorf("expected message to name the expression, got %q", findings[0].Message)
+		}
+	})
+
+	t.Run("expression key column is not a plain-column prefix", func(t *testing.T) {
+		snap := testSnap()
+		snap.Tables = []schema.Table{{
+			Schema: "public", Name: "users",
+			Indexes: []schema.Index{
+				{Name: "idx_expr", Columns: []string{"lower(email)"}, IndexType: "btree", IsValid: true, IsReady: true, HasExpressions: true},
+				{Name: "idx_plain", Columns: []string{"email", "created_at"}, IndexType: "btree", IsValid: true, IsReady: true},
+			},
+		}}
+		if findings := checkRedundantIndexes(snap); len(findings) != 0 {
+			t.Errorf("expected 0 redundant findings, got %d: %v", len(findings), findings)
+		}
+	})
+}
