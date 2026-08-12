@@ -169,12 +169,17 @@ SELECT i.indrelid::int4      AS table_oid,
             WHERE con.conindid = i.indexrelid
        ) AS backs_constraint,
        (i.indexprs IS NOT NULL) AS has_expressions,
-       -- All column names (key + include)
-       (SELECT array_agg(a.attname ORDER BY ord.n)
+       -- All entries (key + include) in indkey order; expressions become deparsed text
+       (SELECT array_agg(
+                 COALESCE(a.attname,
+                          btrim(regexp_replace(
+                              pg_catalog.pg_get_indexdef(i.indexrelid, ord.n::int, true),
+                              '\s+', ' ', 'g')),
+                          '')
+                 ORDER BY ord.n)
           FROM unnest(i.indkey) WITH ORDINALITY AS ord(attnum, n)
-          JOIN pg_catalog.pg_attribute a
-            ON a.attrelid = i.indrelid AND a.attnum = ord.attnum
-         WHERE ord.attnum > 0
+          LEFT JOIN pg_catalog.pg_attribute a
+            ON a.attrelid = i.indrelid AND a.attnum = ord.attnum AND ord.attnum > 0
        ) AS all_col_names
   FROM pg_catalog.pg_index i
   JOIN pg_catalog.pg_class ci ON ci.oid = i.indexrelid

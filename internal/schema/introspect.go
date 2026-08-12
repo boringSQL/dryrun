@@ -433,6 +433,14 @@ func fetchComposites(ctx context.Context, pool Querier) ([]CompositeType, error)
 	return out, nil
 }
 
+// splitKeyInclude splits indkey-ordered entries at the key/include boundary.
+func splitKeyInclude(all []string, nKeyAtts int) (key, include []string) {
+	if nKeyAtts <= 0 || nKeyAtts > len(all) {
+		return all, nil
+	}
+	return all[:nKeyAtts], all[nKeyAtts:]
+}
+
 func fetchIndexes(ctx context.Context, pool Querier) ([]rawIndex, error) {
 	rows, err := query(ctx, pool, "fetch-indexes")
 	if err != nil {
@@ -456,13 +464,7 @@ func fetchIndexes(ctx context.Context, pool Querier) ([]rawIndex, error) {
 		}
 		ri.tableOID = uint32(tableOID)
 		ri.oid = uint32(indexOID)
-		n := int(nKeyAtts)
-		if n > 0 && n <= len(allCols) {
-			ri.columns = allCols[:n]
-			ri.includeColumns = allCols[n:]
-		} else {
-			ri.columns = allCols
-		}
+		ri.columns, ri.includeColumns = splitKeyInclude(allCols, int(nKeyAtts))
 		return ri, nil
 	})
 }
