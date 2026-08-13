@@ -171,7 +171,7 @@ SELECT i.indrelid::int4      AS table_oid,
        (i.indexprs IS NOT NULL) AS has_expressions,
        -- All entries (key + include) in indkey order; expressions become deparsed text
        (SELECT array_agg(
-                 COALESCE(a.attname,
+                 COALESCE(a.attname::text,
                           btrim(regexp_replace(
                               pg_catalog.pg_get_indexdef(i.indexrelid, ord.n::int, true),
                               '\s+', ' ', 'g')),
