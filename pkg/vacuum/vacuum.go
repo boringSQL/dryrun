@@ -130,6 +130,10 @@ func ParseAutovacuumDefaults(gucs []snapshot.GucSetting) AutovacuumDefaults {
 	for _, g := range gucs {
 		switch g.Name {
 		case "autovacuum":
+			// GUCs are already canonicalized by Postgres (pg_settings.setting is "on"/"off"
+			// for every vartype='bool' GUC, verified live) — unlike a reloption, which stores
+			// the literal typed. parsePGBool below is for reloptions; routing a GUC through it
+			// too would be work with no bug to fix.
 			d.Enabled = g.Setting == "on"
 		case "autovacuum_vacuum_threshold":
 			if v, err := strconv.ParseInt(g.Setting, 10, 64); err == nil {
@@ -184,6 +188,39 @@ func parseReloptions(reloptions []string) map[string]string {
 		}
 	}
 	return opts
+}
+
+// parsePGBool mirrors PG's parse_bool: 1/0 plus any UNIQUE prefix of
+// true/false/yes/no/on/off, case-insensitive. "o" is a prefix of both "on"
+// and "off" and PG refuses it (verified live: `select 'o'::boolean` errors)
+// — so every candidate has to be collected before deciding, not returned on
+// the first match, or "o" resolves to whichever word the loop reaches first.
+func parsePGBool(v string) (bool, bool) {
+	if v == "" {
+		return false, false
+	}
+	v = strings.ToLower(v)
+	if v == "1" || v == "0" {
+		return v == "1", true
+	}
+	var matched []bool
+	for _, w := range []struct {
+		word string
+		val  bool
+	}{{"true", true}, {"false", false}, {"yes", true}, {"no", false}, {"on", true}, {"off", false}} {
+		if strings.HasPrefix(w.word, v) {
+			matched = append(matched, w.val)
+		}
+	}
+	if len(matched) == 0 {
+		return false, false
+	}
+	for _, m := range matched {
+		if m != matched[0] {
+			return false, false // ambiguous, e.g. "o"
+		}
+	}
+	return matched[0], true
 }
 
 // Planner GUCs are re-captured every snapshot; the schema's freeze at the last DDL change.
@@ -261,7 +298,12 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 			}
 		}
 		if v, ok := opts["autovacuum_enabled"]; ok {
-			avEnabled = v == "on" || v == "true"
+			// An unparseable value (never valid DDL, but pg_class.reloptions is trusted
+			// verbatim) falls back to the cluster default rather than asserting disabled —
+			// same asserting-direction rule the cloud's reloptionBool documents for itself.
+			if enabled, valid := parsePGBool(v); valid {
+				avEnabled = enabled
+			}
 		}
 
 		triggerAt := float64(threshold) + scaleFactor*reltuples
