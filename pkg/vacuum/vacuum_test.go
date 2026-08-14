@@ -242,6 +242,63 @@ func TestAnalyzeVacuumHealth_DisabledAutovacuum(t *testing.T) {
 	}
 }
 
+// reloptions keep the literal the user typed; every spelling PG's parse_bool
+// accepts must parse the same way here.
+func TestParsePGBool(t *testing.T) {
+	truthy := []string{"true", "tru", "t", "yes", "ye", "y", "on", "1", "TRUE", "On"}
+	falsy := []string{"false", "fal", "f", "no", "n", "off", "of", "0", "FALSE", "Off"}
+	for _, v := range truthy {
+		if got, ok := parsePGBool(v); !ok || !got {
+			t.Errorf("parsePGBool(%q) = %v, %v; want true, true", v, got, ok)
+		}
+	}
+	for _, v := range falsy {
+		if got, ok := parsePGBool(v); !ok || got {
+			t.Errorf("parsePGBool(%q) = %v, %v; want false, true", v, got, ok)
+		}
+	}
+	// "o" is a prefix of both "on" and "off"; PG refuses it (verified live:
+	// `select 'o'::boolean` errors) rather than picking one.
+	for _, v := range []string{"", "maybe", "2", "onn", "truee", "o", "O"} {
+		if _, ok := parsePGBool(v); ok {
+			t.Errorf("parsePGBool(%q): want ok=false", v)
+		}
+	}
+}
+
+// A table with autovacuum_enabled=1 (or any other truthy literal) must not be
+// flagged as disabled — the feed stores the typed literal, not a normalized bool.
+func TestAnalyzeVacuumHealth_EnabledAutovacuumSpellings(t *testing.T) {
+	for _, opt := range []string{"autovacuum_enabled=1", "autovacuum_enabled=t", "autovacuum_enabled=yes", "autovacuum_enabled=on"} {
+		a := vacuumFixture("enabled_av", 50_000, 10000, []string{opt})
+		vh := AnalyzeVacuumHealth(a)[0]
+		if !vh.AutovacuumEnabled {
+			t.Errorf("%s: expected autovacuum enabled", opt)
+		}
+		for _, f := range vh.Findings {
+			if f.Code == CodeAutovacuumDisabled {
+				t.Errorf("%s: false disabled-autovacuum finding", opt)
+			}
+		}
+	}
+}
+
+// An unparseable autovacuum_enabled value must fall back to the cluster default rather
+// than assert disabled — inventing a disabled table from garbage DDL is the asserting
+// direction, the same rule reloptionBool documents on the cloud side.
+func TestAnalyzeVacuumHealth_UnparseableAutovacuumEnabledFallsBackToCluster(t *testing.T) {
+	a := vacuumFixture("garbage_av", 50_000, 10000, []string{"autovacuum_enabled=maybe"})
+	vh := AnalyzeVacuumHealth(a)[0]
+	if !vh.AutovacuumEnabled {
+		t.Error("garbage value should defer to the cluster default (on), not assert disabled")
+	}
+	for _, f := range vh.Findings {
+		if f.Code == CodeAutovacuumDisabled {
+			t.Error("garbage value produced a false disabled-autovacuum finding")
+		}
+	}
+}
+
 // Tables ≥ 1M rows using cluster defaults get a tuning recommendation — the
 // recommendation message starts with "large table".
 func TestAnalyzeVacuumHealth_LargeTableRecommendation(t *testing.T) {
