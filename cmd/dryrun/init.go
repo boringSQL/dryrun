@@ -215,7 +215,7 @@ func initCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&allowReplica, "allow-replica", false, "permit capture on a standby (activity stats only)")
 	cmd.Flags().BoolVar(&force, "force", false, "capture even if the cluster/database identity differs from this project's history")
-	cmd.Flags().StringVar(&source, "source", "", "node label for activity stats (default: hostname)")
+	cmd.Flags().StringVar(&source, "source", "", "node label for activity stats (default: the server's cluster_name, else its address)")
 	cmd.Flags().StringVar(&flagMasksFile, "masks-file", "", "path to data-masking-policy.yml")
 	cmd.Flags().StringSliceVar(&flagMaskPolicy, "mask-policy", nil, "masking policy name (repeatable, comma-separated)")
 	cmd.Flags().BoolVar(&flagNoMasks, "no-masks", false, "disable planner-stats masking (raw stats land in history.db)")
@@ -277,14 +277,9 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		return fmt.Errorf("check standby status: %w", err)
 	}
 
+	// Empty source is passed through: CaptureNodeIdentity derives a server-side
+	// fallback; os.Hostname() here would name the machine running dryrun.
 	source := opts.Source
-	if source == "" {
-		if h, err := os.Hostname(); err == nil {
-			source = h
-		} else {
-			source = "unknown"
-		}
-	}
 
 	if standby {
 		if !opts.AllowReplica {

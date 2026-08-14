@@ -37,8 +37,12 @@ SELECT s.schemaname                       AS schema_name,
 
 -- name: fetch-node-identity
 -- pg_stat_replication is primary-side; pg_is_in_recovery() distinguishes role
-SELECT pg_catalog.pg_is_in_recovery() AS is_standby,
-       version()                       AS pg_version
+-- cluster_name / inet_server_addr() are the server-side fallback node name (see CaptureNodeIdentity);
+-- both can be empty (cluster_name unset by default, inet_server_addr() NULL over a Unix socket).
+SELECT pg_catalog.pg_is_in_recovery()                     AS is_standby,
+       version()                                          AS pg_version,
+       COALESCE(current_setting('cluster_name', true), '') AS cluster_name,
+       COALESCE(host(pg_catalog.inet_server_addr()), '')   AS server_addr
 
 -- name: fetch-database-stats
 SELECT d.deadlocks,

@@ -227,17 +227,29 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	return snap, nil
 }
 
+// CaptureNodeIdentity reads the node's own view of itself. An empty source falls back to a
+// name derived from the server (cluster_name / address), never the machine running dryrun.
 func CaptureNodeIdentity(ctx context.Context, pool Querier, source string) (*NodeIdentity, error) {
 	var (
-		isStandby bool
-		pgVersion string
+		isStandby   bool
+		pgVersion   string
+		clusterName string
+		serverAddr  string
 	)
-	if err := pool.QueryRow(ctx, q("fetch-node-identity")).Scan(&isStandby, &pgVersion); err != nil {
+	if err := pool.QueryRow(ctx, q("fetch-node-identity")).
+		Scan(&isStandby, &pgVersion, &clusterName, &serverAddr); err != nil {
 		return nil, fmt.Errorf("fetch node identity: %w", err)
 	}
 	takenAt, err := serverNow(ctx, pool)
 	if err != nil {
 		return nil, err
+	}
+	if source == "" {
+		source = serverNodeName(clusterName, serverAddr)
+		slog.Warn("no node label given; derived one from the server. pass --source (or --label) "+
+			"to name this node yourself — a derived name can change when the server's address does, "+
+			"and every counter is differenced per node label",
+			"derived", source)
 	}
 	return &NodeIdentity{
 		Source:    source,
@@ -245,6 +257,20 @@ func CaptureNodeIdentity(ctx context.Context, pool Querier, source string) (*Nod
 		PgVersion: pgVersion,
 		Timestamp: takenAt,
 	}, nil
+}
+
+// serverNodeName picks the best server-side name available, or "unknown".
+// The address comes first: cluster_name is identical across hosts on Debian/Ubuntu
+// packaged clusters ("<version>/<cluster>"), which would merge two servers into one
+// node series.
+func serverNodeName(clusterName, serverAddr string) string {
+	if a := strings.TrimSpace(serverAddr); a != "" {
+		return a
+	}
+	if n := strings.TrimSpace(clusterName); n != "" {
+		return n
+	}
+	return "unknown"
 }
 
 func fetchPlannerTableSizing(ctx context.Context, pool Querier) ([]TableSizingEntry, error) {
