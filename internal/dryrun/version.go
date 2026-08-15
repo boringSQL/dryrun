@@ -39,14 +39,7 @@ func ParsePgVersion(versionStr string) (PgVersion, error) {
 
 	parts := strings.Split(token, ".")
 	parsePart := func(s string) (int, error) {
-		// strip trailing non-digit chars (e.g. "2beta1" -> 2)
-		numeric := strings.TrimRightFunc(s, func(r rune) bool {
-			return !unicode.IsDigit(r)
-		})
-		numeric = strings.TrimLeftFunc(numeric, func(r rune) bool {
-			return !unicode.IsDigit(r)
-		})
-		// leading digits only
+		// leading digits only (e.g. "2beta1" -> 2)
 		var digits []rune
 		for _, r := range s {
 			if unicode.IsDigit(r) {
@@ -60,10 +53,6 @@ func ParsePgVersion(versionStr string) (PgVersion, error) {
 				fmt.Sprintf("invalid version component: %s", s))
 		}
 		return strconv.Atoi(string(digits))
-	}
-
-	if len(parts) < 1 {
-		return PgVersion{}, NewError(ErrVersionParse, "missing major version")
 	}
 
 	major, err := parsePart(parts[0])

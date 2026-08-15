@@ -254,7 +254,7 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 		if sizing == nil || sizing.Reltuples < 10_000 {
 			continue
 		}
-		var reltuples float64 = sizing.Reltuples
+		reltuples := sizing.Reltuples
 		var deadTuples, modSinceAnalyze int64
 		if activity != nil {
 			deadTuples = activity.NDeadTup

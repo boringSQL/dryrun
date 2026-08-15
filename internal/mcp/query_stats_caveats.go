@@ -181,7 +181,7 @@ func changeCaveats(node string, from, to schema.QueryStatsSnapshot) []string {
 	// fetch. Only flips involving 'none' or an unfiltered 'all' change what
 	// gets recorded.
 	if from.PgssTrack != nil && to.PgssTrack != nil && *from.PgssTrack != *to.PgssTrack &&
-		!(recordsTopLevelOnly(from) && recordsTopLevelOnly(to)) {
+		(!recordsTopLevelOnly(from) || !recordsTopLevelOnly(to)) {
 		out = append(out, fmt.Sprintf(
 			"compared with the previous capture of %s: pg_stat_statements.track changed ('%s' at %s -> '%s' at %s), so totals moved because the recording rule moved, not the workload",
 			node, *from.PgssTrack, captureStamp(from), *to.PgssTrack, captureStamp(to)))

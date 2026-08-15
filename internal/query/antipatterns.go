@@ -7,8 +7,6 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
-const largeTableThreshold = 10_000.0
-
 func detectAntipatterns(parsed *ParsedQuery, snap *schema.SchemaSnapshot, warnings *[]ValidationWarning) {
 	detectSelectStar(parsed, warnings)
 	detectUnboundedQuery(parsed, snap, warnings)

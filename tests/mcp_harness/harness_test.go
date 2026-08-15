@@ -206,27 +206,3 @@ func callMaybeError(t *testing.T, cli *client.Client, name string, args map[stri
 	}
 	return tc.Text, res.IsError
 }
-
-// callRaw returns the first text content unchanged (useful for tools that
-// sometimes return plain-text "no findings" responses).
-func callRaw(t *testing.T, cli *client.Client, name string, args map[string]any) string {
-	t.Helper()
-	call := mcp.CallToolRequest{}
-	call.Params.Name = name
-	call.Params.Arguments = args
-	res, err := cli.CallTool(context.Background(), call)
-	if err != nil {
-		t.Fatalf("call %s: %v", name, err)
-	}
-	if res.IsError {
-		t.Fatalf("%s returned error: %+v", name, res.Content)
-	}
-	if len(res.Content) == 0 {
-		t.Fatalf("%s returned no content", name)
-	}
-	tc, ok := res.Content[0].(mcp.TextContent)
-	if !ok {
-		t.Fatalf("%s: expected TextContent, got %T", name, res.Content[0])
-	}
-	return tc.Text
-}

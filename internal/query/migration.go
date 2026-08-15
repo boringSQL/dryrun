@@ -233,25 +233,6 @@ func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate
 	}
 }
 
-func findColumn(snap *schema.SchemaSnapshot, tableName, colName string) *schema.Column {
-	schemaPart, namePart := "public", tableName
-	if i := strings.LastIndex(tableName, "."); i >= 0 {
-		schemaPart = tableName[:i]
-		namePart = tableName[i+1:]
-	}
-	for i := range snap.Tables {
-		t := &snap.Tables[i]
-		if t.Name == namePart && t.Schema == schemaPart {
-			for j := range t.Columns {
-				if t.Columns[j].Name == colName {
-					return &t.Columns[j]
-				}
-			}
-		}
-	}
-	return nil
-}
-
 func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, tableName string, tableSize *string, rowEstimate *float64, pgVersion *dryrun.PgVersion) *MigrationCheck {
 	isNotValid := false
 	operation := "ADD CONSTRAINT"
@@ -399,19 +380,6 @@ func lookupTableStats(snap *schema.SchemaSnapshot, tableName string) (*string, *
 	_ = schemaPart
 	_ = snap
 	return nil, nil
-}
-
-func formatBytes(bytes int64) string {
-	switch {
-	case bytes >= 1_073_741_824:
-		return fmt.Sprintf("%.1f GB", float64(bytes)/1_073_741_824)
-	case bytes >= 1_048_576:
-		return fmt.Sprintf("%.1f MB", float64(bytes)/1_048_576)
-	case bytes >= 1024:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
-	default:
-		return fmt.Sprintf("%d bytes", bytes)
-	}
 }
 
 func versionBehaviorAddColumn(pgVersion *dryrun.PgVersion) *string {

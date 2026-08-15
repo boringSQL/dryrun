@@ -507,11 +507,3 @@ func defElemLanguage(opts []*pg_query.Node) string {
 }
 
 func strp(s string) *string { return &s }
-
-func splitQualified(name string) (*string, string) {
-	if i := strings.LastIndex(name, "."); i >= 0 {
-		schema := name[:i]
-		return &schema, name[i+1:]
-	}
-	return nil, name
-}

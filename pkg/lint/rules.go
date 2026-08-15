@@ -457,7 +457,7 @@ func checkFKHasIndex(t *snapshot.Table, qualified string, _ *snapshot.SchemaSnap
 				Tables:         []string{qualified},
 				Column:         new(colList),
 				Message:        fmt.Sprintf("FK '%s' on column(s) (%s) has no covering index", con.Name, colList),
-				Recommendation: fmt.Sprintf("Add an index on FK columns to avoid sequential scans on DELETE/UPDATE of the referenced table."),
+				Recommendation: "Add an index on FK columns to avoid sequential scans on DELETE/UPDATE of the referenced table.",
 				DDLFix:         strp(ddl),
 				ConventionDoc:  "constraints",
 			})
@@ -635,14 +635,6 @@ func checkPartitionNoDefault(t *snapshot.Table, qualified string, violations *[]
 		DDLFix:         strp(e.Fix),
 		ConventionDoc:  "partitioning",
 	})
-}
-
-func parsePartitionKey(key string) []string {
-	parts := strings.Split(key, ",")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
-	}
-	return parts
 }
 
 func checkPartitionGUCs(snap *snapshot.SchemaSnapshot, config *Config, violations *[]Finding) {

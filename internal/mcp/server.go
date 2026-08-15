@@ -140,7 +140,7 @@ func (s *Server) getAnnotated() (*schema.AnnotatedSchema, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.annotated == nil || s.annotated.Schema == nil || s.uninitialized {
-		return nil, fmt.Errorf("no schema loaded — initialize first:\n\n1. Run `dryrun init --db <DATABASE_URL>` (or `dryrun snapshot take`) in a terminal\n2. Call the `reload_schema` tool in this session\n\nThe schema will be picked up without restarting the server.")
+		return nil, fmt.Errorf("no schema loaded — initialize first:\n\n1. Run `dryrun init --db <DATABASE_URL>` (or `dryrun snapshot take`) in a terminal\n2. Call the `reload_schema` tool in this session\n\nThe schema will be picked up without restarting the server")
 	}
 	return s.annotated, nil
 }

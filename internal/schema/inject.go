@@ -318,7 +318,6 @@ func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaNa
 	if s.Correlation != nil {
 		parts = append(parts, fmt.Sprintf("'correlation', $%d::real", idx))
 		args = append(args, float32(*s.Correlation))
-		idx++
 	}
 
 	sql := "SELECT pg_restore_attribute_stats(" + strings.Join(parts, ", ") + ")"
