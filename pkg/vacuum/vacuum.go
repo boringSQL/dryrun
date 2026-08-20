@@ -467,11 +467,6 @@ func freezeMessage(ageName, maxName, failsafeName string, age, maxAge, failsafeA
 		ageName, age, float64(age)/float64(maxAge), maxName, maxAge)
 }
 
-// Shared with audit so both sides recommend the same numbers.
-func SuggestedVacuumKnobs(reltuples float64) (vacSF float64, vacThresh int64, azSF float64, azThresh int64) {
-	return suggestedVacuumKnobs(reltuples)
-}
-
 func suggestedVacuumKnobs(reltuples float64) (vacSF float64, vacThresh int64, azSF float64, azThresh int64) {
 	vacSF = 100_000.0 / reltuples
 	vacSF = math.Round(vacSF*1000) / 1000

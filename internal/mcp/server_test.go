@@ -13,17 +13,13 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
-	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 func setupOfflineTest(t *testing.T) *client.Client {
 	t.Helper()
 
-	snap, err := schema.LoadSchemaFile("../../examples/demo/.dryrun/schema.json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	snap := loadDemoSchema(t)
 
 	srv := NewOfflineServer(snap, lint.DefaultConfig())
 	// mirror production options (cmd/dryrun mcp-serve) so schema drift between

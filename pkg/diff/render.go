@@ -28,11 +28,6 @@ func (r ObjectRef) Qualified() string {
 	return r.Name
 }
 
-// Human +/~/- tree for schema, sizing/stat movers for planner, counter movers for activity.
-func RenderConsole(w io.Writer, env *SnapshotDiff) {
-	RenderConsoleMinPct(w, env, DefaultMinPct)
-}
-
 // minPct drops small planner/activity movers; schema doesn't use it.
 func RenderConsoleMinPct(w io.Writer, env *SnapshotDiff, minPct float64) {
 	if env.Planner != nil {

@@ -207,17 +207,6 @@ func SuggestGiST(table, col, colType string) Entry {
 	}
 }
 
-func SuggestPartialIndex(table, col, predicate string) Entry {
-	return Entry{
-		Status: "INFO: partial index may be more efficient",
-		Reason: fmt.Sprintf("Column '%s.%s' has skewed data distribution. A partial index on the selective values avoids indexing rows you never query.", table, col),
-		Fix: fmt.Sprintf(
-			"  CREATE INDEX CONCURRENTLY idx_%s_%s_partial ON %s(%s) WHERE %s;",
-			stripSchema(table), col, table, col, predicate),
-		Note: "The WHERE clause in queries must syntactically match the index predicate for the planner to recognize it.",
-	}
-}
-
 func MissingPrimaryKey(table string) Entry {
 	return Entry{
 		Status: "ERROR: table has no primary key",

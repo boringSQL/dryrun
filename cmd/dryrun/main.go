@@ -849,7 +849,6 @@ func nilIfEmpty(s string) *string {
 
 func mcpServeCmd() *cobra.Command {
 	var transport string
-	var port int
 
 	cmd := &cobra.Command{
 		Use:   "mcp-serve",
@@ -932,6 +931,5 @@ func mcpServeCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&transport, "transport", "stdio", "transport (stdio)")
-	cmd.Flags().IntVar(&port, "port", 3000, "port for HTTP transport")
 	return cmd
 }

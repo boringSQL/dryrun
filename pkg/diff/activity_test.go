@@ -339,7 +339,7 @@ func TestRenderConsole_DispatchesActivity(t *testing.T) {
 	env := &SnapshotDiff{Kind: "activity", FromHash: from.ContentHash, ToHash: to.ContentHash, Activity: delta}
 
 	var buf bytes.Buffer
-	RenderConsole(&buf, env)
+	RenderConsoleMinPct(&buf, env, DefaultMinPct)
 	if !strings.Contains(buf.String(), "activity diff") {
 		t.Errorf("expected RenderConsole to route to the activity renderer, got:\n%s", buf.String())
 	}

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -10,6 +11,20 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/lint"
 )
+
+// loadDemoSchema loads the checked-in demo fixture used by offline MCP tests.
+func loadDemoSchema(t *testing.T) *schema.SchemaSnapshot {
+	t.Helper()
+	data, err := os.ReadFile("../../examples/demo/.dryrun/schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap schema.SchemaSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatal(err)
+	}
+	return &snap
+}
 
 // Two schemas (public, billing) with overlapping table names so we can pin
 // the AND-narrowing behaviour of filterSnap across both filter axes.

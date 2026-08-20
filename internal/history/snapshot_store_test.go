@@ -120,7 +120,7 @@ func TestGetByLatestAtHash(t *testing.T) {
 
 	t.Run("At", func(t *testing.T) {
 		// asking for "30 minutes ago" should resolve to the mid row (latest <= cutoff)
-		s, err := store.GetSchema(ctx, k, NewRefAt(now.Add(-30*time.Minute)))
+		s, err := store.GetSchema(ctx, k, SnapshotRef{Kind: RefAt, At: now.Add(-30 * time.Minute)})
 		if err != nil || s == nil {
 			t.Fatalf("got (%v, %v)", s, err)
 		}
@@ -153,7 +153,7 @@ func TestGetNotFound(t *testing.T) {
 		ref  SnapshotRef
 	}{
 		{"Latest", NewRefLatest()},
-		{"At", NewRefAt(time.Now().UTC())},
+		{"At", SnapshotRef{Kind: RefAt, At: time.Now().UTC()}},
 		{"Hash", NewRefHash("does-not-exist")},
 	}
 	for _, c := range cases {

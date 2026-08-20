@@ -80,7 +80,7 @@ func TestCompactReportGroupsByRule(t *testing.T) {
 		{Rule: "types/timestamptz", Severity: SeverityWarning, Tables: []string{"public.a"}, Column: new("created_at"), Message: "bad type"},
 	}
 	report := NewReport(findings, 2, "default")
-	compact := CompactReportFromReport(report)
+	compact := CompactReportFromReportN(report, 0)
 
 	if len(compact.RuleGroups) != 2 {
 		t.Errorf("expected 2 rule groups, got %d", len(compact.RuleGroups))

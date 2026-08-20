@@ -27,10 +27,6 @@ func BundleFilename(ts time.Time, contentHash string) string {
 	return fmt.Sprintf("%s-%s%s", ts.UTC().Format(bundleTimeLayout), contentHash, bundleExtension)
 }
 
-func BundlePath(root string, key SnapshotKey, ts time.Time, contentHash string) string {
-	return filepath.Join(BundleDir(root, key), BundleFilename(ts, contentHash))
-}
-
 // inverse of BundleFilename; returns (ts, content_hash, ok)
 func ParseBundleFilename(name string) (time.Time, string, bool) {
 	if !strings.HasSuffix(name, bundleExtension) {

@@ -34,9 +34,8 @@ type SnapshotRef struct {
 	Hash string
 }
 
-func NewRefLatest() SnapshotRef        { return SnapshotRef{Kind: RefLatest} }
-func NewRefAt(t time.Time) SnapshotRef { return SnapshotRef{Kind: RefAt, At: t} }
-func NewRefHash(h string) SnapshotRef  { return SnapshotRef{Kind: RefHash, Hash: h} }
+func NewRefLatest() SnapshotRef       { return SnapshotRef{Kind: RefLatest} }
+func NewRefHash(h string) SnapshotRef { return SnapshotRef{Kind: RefHash, Hash: h} }
 
 type TimeRange struct {
 	From *time.Time

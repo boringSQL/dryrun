@@ -100,10 +100,6 @@ type (
 	}
 )
 
-func CompactReportFromReport(r Report) CompactReport {
-	return CompactReportFromReportN(r, 0)
-}
-
 // maxExamples=0 keeps all items
 func CompactReportFromReportN(r Report, maxExamples int) CompactReport {
 	groups := make(map[string]*RuleGroup)

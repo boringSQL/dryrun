@@ -429,7 +429,7 @@ func TestRenderConsole_DispatchesPlanner(t *testing.T) {
 	env := &SnapshotDiff{Kind: "planner", FromHash: from.ContentHash, ToHash: to.ContentHash, Planner: delta}
 
 	var buf bytes.Buffer
-	RenderConsole(&buf, env)
+	RenderConsoleMinPct(&buf, env, DefaultMinPct)
 	if !strings.Contains(buf.String(), "planner diff") {
 		t.Errorf("expected RenderConsole to route to the planner renderer, got:\n%s", buf.String())
 	}

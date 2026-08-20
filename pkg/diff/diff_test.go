@@ -410,7 +410,7 @@ func TestRenderConsole_SchemaTree(t *testing.T) {
 	env := &SnapshotDiff{Kind: "schema", FromHash: from.ContentHash, ToHash: to.ContentHash, Schema: delta}
 
 	var buf bytes.Buffer
-	RenderConsole(&buf, env)
+	RenderConsoleMinPct(&buf, env, DefaultMinPct)
 	out := buf.String()
 	if !strings.Contains(out, "~ table public.users") {
 		t.Errorf("missing table header:\n%s", out)
@@ -429,7 +429,7 @@ func TestRenderConsole_NoChanges(t *testing.T) {
 	to := emptySnap("b")
 	delta, _ := DiffSchema(from, to)
 	var buf bytes.Buffer
-	RenderConsole(&buf, &SnapshotDiff{Kind: "schema", Schema: delta})
+	RenderConsoleMinPct(&buf, &SnapshotDiff{Kind: "schema", Schema: delta}, DefaultMinPct)
 	if !strings.Contains(buf.String(), "no changes") {
 		t.Errorf("expected 'no changes', got %q", buf.String())
 	}

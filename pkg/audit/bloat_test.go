@@ -177,10 +177,10 @@ func TestBloatRules_NilPlannerYieldsNothing(t *testing.T) {
 		t.Errorf("expected no table findings without planner stats, got %+v", got)
 	}
 
-	// the plain DDL-only RunRules entry point must also produce no bloat findings
-	for _, f := range RunRules(bloatedAnnotated().Schema, &cfg) {
+	// the plain DDL-only RunRulesAnnotated entry point must also produce no bloat findings
+	for _, f := range RunRulesAnnotated(&schema.AnnotatedSchema{Schema: bloatedAnnotated().Schema}, &cfg) {
 		if f.Rule == "indexes/bloated" || f.Rule == "tables/bloated" {
-			t.Errorf("RunRules (DDL-only) leaked a bloat finding: %+v", f)
+			t.Errorf("RunRulesAnnotated (DDL-only) leaked a bloat finding: %+v", f)
 		}
 	}
 }

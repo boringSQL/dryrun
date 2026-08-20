@@ -69,10 +69,7 @@ func TestRegisterOffline_ExactSubset(t *testing.T) {
 func setupOfflineRegisterTest(t *testing.T) *client.Client {
 	t.Helper()
 
-	snap, err := schema.LoadSchemaFile("../../examples/demo/.dryrun/schema.json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	snap := loadDemoSchema(t)
 
 	srv := NewOfflineServerAnnotated(&schema.AnnotatedSchema{Schema: snap}, lint.DefaultConfig())
 	mcpSrv := mcpserver.NewMCPServer("dryrun-offline-test", "0.1.0",
