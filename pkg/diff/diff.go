@@ -13,7 +13,7 @@ import (
 // holds exactly one of the three deltas
 type (
 	SnapshotDiff struct {
-		Kind        string         `json:"kind"` // schema | planner | activity
+		Kind        string         `json:"kind"` // schema | planner | activity | query
 		FromHash    string         `json:"from_hash"`
 		ToHash      string         `json:"to_hash"`
 		FromTakenAt time.Time      `json:"from_taken_at"`
@@ -21,6 +21,7 @@ type (
 		Schema      *SchemaDelta   `json:"schema,omitempty"`
 		Planner     *PlannerDelta  `json:"planner,omitempty"`
 		Activity    *ActivityDelta `json:"activity,omitempty"`
+		Query       *QueryDelta    `json:"query,omitempty"`
 	}
 
 	SchemaDelta struct {

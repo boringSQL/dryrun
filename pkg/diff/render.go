@@ -38,6 +38,10 @@ func RenderConsoleMinPct(w io.Writer, env *SnapshotDiff, minPct float64) {
 		RenderActivityConsole(w, env, minPct)
 		return
 	}
+	if env.Query != nil {
+		RenderQueryConsole(w, env)
+		return
+	}
 	if env.Schema == nil {
 		fmt.Fprintf(w, "%s diff %s → %s: no renderer yet\n", env.Kind, short(env.FromHash), short(env.ToHash))
 		return

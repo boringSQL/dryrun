@@ -337,7 +337,7 @@ func (s *Store) PutSchema(ctx context.Context, key SnapshotKey, snap *schema.Sch
 	_ = s.db.QueryRowContext(ctx,
 		`SELECT content_hash FROM snapshots
 		  WHERE project_id = ? AND database_id = ?
-		  ORDER BY timestamp DESC LIMIT 1`,
+		  ORDER BY timestamp DESC, id DESC LIMIT 1`,
 		pid, did,
 	).Scan(&latest)
 
@@ -383,7 +383,7 @@ func (s *Store) GetSchema(ctx context.Context, key SnapshotKey, at SnapshotRef) 
 		err = s.db.QueryRowContext(ctx,
 			`SELECT snapshot_json FROM snapshots
 			  WHERE project_id = ? AND database_id = ?
-			  ORDER BY timestamp DESC LIMIT 1`,
+			  ORDER BY timestamp DESC, id DESC LIMIT 1`,
 			pid, did,
 		).Scan(&jsonStr)
 	case RefAt:
@@ -391,7 +391,7 @@ func (s *Store) GetSchema(ctx context.Context, key SnapshotKey, at SnapshotRef) 
 		err = s.db.QueryRowContext(ctx,
 			`SELECT snapshot_json FROM snapshots
 			  WHERE project_id = ? AND database_id = ? AND timestamp <= ?
-			  ORDER BY timestamp DESC LIMIT 1`,
+			  ORDER BY timestamp DESC, id DESC LIMIT 1`,
 			pid, did, at.At.Format(time.RFC3339),
 		).Scan(&jsonStr)
 	case RefHash:
@@ -453,7 +453,7 @@ func (s *Store) GetSchemaByExactHash(ctx context.Context, key SnapshotKey, hash 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT snapshot_json FROM snapshots
 		  WHERE project_id = ? AND database_id = ? AND content_hash = ?
-		  ORDER BY timestamp DESC LIMIT 1`,
+		  ORDER BY timestamp DESC, id DESC LIMIT 1`,
 		pid, did, hash,
 	).Scan(&jsonStr)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -486,7 +486,7 @@ func (s *Store) ListSchema(ctx context.Context, key SnapshotKey, rng TimeRange) 
 		sb.WriteString(" AND timestamp < ?")
 		args = append(args, rng.To.Format(time.RFC3339))
 	}
-	sb.WriteString(" ORDER BY timestamp DESC")
+	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
 
 	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
@@ -521,7 +521,7 @@ func (s *Store) ResolveSchemaSnapshot(ctx context.Context, key SnapshotKey, hash
 		`SELECT id, db_url_hash, timestamp, content_hash, database_name, project_id, database_id
 		   FROM snapshots
 		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
-		  ORDER BY timestamp DESC LIMIT 2`,
+		  ORDER BY timestamp DESC, id DESC LIMIT 2`,
 		string(key.ProjectID), string(key.DatabaseID), hashPrefix+"%")
 	if err != nil {
 		return SnapshotSummary{}, err
@@ -555,7 +555,7 @@ func (s *Store) ResolveSchemaSnapshot(ctx context.Context, key SnapshotKey, hash
 func (s *Store) nodeStatsHashMatches(ctx context.Context, pid, did, like, table string, mk func(string) SnapshotKind) ([]SnapshotSummary, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT id, schema_ref_hash, content_hash, node_source, timestamp FROM "+table+
-			" WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ORDER BY timestamp DESC LIMIT 2",
+			" WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ORDER BY timestamp DESC, id DESC LIMIT 2",
 		pid, did, like)
 	if err != nil {
 		return nil, err
@@ -595,7 +595,7 @@ func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix
 		`SELECT id, db_url_hash, timestamp, content_hash, database_name, project_id, database_id
 		   FROM snapshots
 		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
-		  ORDER BY timestamp DESC LIMIT 2`,
+		  ORDER BY timestamp DESC, id DESC LIMIT 2`,
 		pid, did, like)
 	if err != nil {
 		return SnapshotSummary{}, err
@@ -618,7 +618,7 @@ func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix
 		`SELECT id, schema_ref_hash, content_hash, timestamp
 		   FROM planner_stats
 		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
-		  ORDER BY timestamp DESC LIMIT 2`,
+		  ORDER BY timestamp DESC, id DESC LIMIT 2`,
 		pid, did, like)
 	if err != nil {
 		return SnapshotSummary{}, err

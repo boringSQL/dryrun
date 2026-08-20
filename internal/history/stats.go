@@ -118,7 +118,7 @@ func (s *Store) GetPlanner(ctx context.Context, key SnapshotKey, schemaRefHash s
 	err := s.db.QueryRowContext(ctx,
 		`SELECT payload_json FROM planner_stats
 		  WHERE project_id = ? AND database_id = ? AND schema_ref_hash = ?
-		  ORDER BY timestamp DESC LIMIT 1`,
+		  ORDER BY timestamp DESC, id DESC LIMIT 1`,
 		string(key.ProjectID), string(key.DatabaseID), schemaRefHash,
 	).Scan(&jsonStr)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -140,12 +140,13 @@ func (s *Store) GetActivity(ctx context.Context, key SnapshotKey, schemaRefHash 
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT payload_json FROM activity_stats AS a
 		  WHERE project_id = ? AND database_id = ? AND schema_ref_hash = ?
-		    AND timestamp = (
-		      SELECT MAX(timestamp) FROM activity_stats
+		    AND id = (
+		      SELECT id FROM activity_stats
 		       WHERE project_id = a.project_id
 		         AND database_id = a.database_id
 		         AND schema_ref_hash = a.schema_ref_hash
 		         AND node_source = a.node_source
+		       ORDER BY timestamp DESC, id DESC LIMIT 1
 		    )
 		  ORDER BY node_source`,
 		string(key.ProjectID), string(key.DatabaseID), schemaRefHash,
@@ -287,7 +288,7 @@ func (s *Store) LatestPlanner(ctx context.Context, key SnapshotKey) (*schema.Pla
 	err := s.db.QueryRowContext(ctx,
 		`SELECT payload_json FROM planner_stats
 		  WHERE project_id = ? AND database_id = ?
-		  ORDER BY timestamp DESC LIMIT 1`,
+		  ORDER BY timestamp DESC, id DESC LIMIT 1`,
 		string(key.ProjectID), string(key.DatabaseID),
 	).Scan(&jsonStr)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -392,7 +393,7 @@ func (s *Store) getPlannerRef(ctx context.Context, key SnapshotKey, at SnapshotR
 		err = s.db.QueryRowContext(ctx,
 			`SELECT payload_json FROM planner_stats
 			  WHERE project_id = ? AND database_id = ?
-			  ORDER BY timestamp DESC LIMIT 1`,
+			  ORDER BY timestamp DESC, id DESC LIMIT 1`,
 			pid, did,
 		).Scan(&jsonStr)
 	case RefAt:
@@ -400,7 +401,7 @@ func (s *Store) getPlannerRef(ctx context.Context, key SnapshotKey, at SnapshotR
 		err = s.db.QueryRowContext(ctx,
 			`SELECT payload_json FROM planner_stats
 			  WHERE project_id = ? AND database_id = ? AND timestamp <= ?
-			  ORDER BY timestamp DESC LIMIT 1`,
+			  ORDER BY timestamp DESC, id DESC LIMIT 1`,
 			pid, did, at.At.Format(time.RFC3339),
 		).Scan(&jsonStr)
 	case RefHash:
@@ -450,12 +451,12 @@ func (s *Store) getActivityRef(ctx context.Context, key SnapshotKey, nodeLabel s
 	switch at.Kind {
 	case RefLatest:
 		detail = "latest activity"
-		err = s.db.QueryRowContext(ctx, base+" ORDER BY timestamp DESC LIMIT 1", args...).Scan(&jsonStr)
+		err = s.db.QueryRowContext(ctx, base+" ORDER BY timestamp DESC, id DESC LIMIT 1", args...).Scan(&jsonStr)
 	case RefAt:
 		detail = fmt.Sprintf("activity at-or-before %s", at.At.Format(time.RFC3339))
 		args = append(args, at.At.Format(time.RFC3339))
 		err = s.db.QueryRowContext(ctx,
-			base+" AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1",
+			base+" AND timestamp <= ? ORDER BY timestamp DESC, id DESC LIMIT 1",
 			args...).Scan(&jsonStr)
 	case RefHash:
 		detail = "activity hash " + at.Hash
@@ -495,7 +496,7 @@ func (s *Store) listPlanner(ctx context.Context, key SnapshotKey, rng TimeRange)
 		sb.WriteString(" AND timestamp < ?")
 		args = append(args, rng.To.Format(time.RFC3339))
 	}
-	sb.WriteString(" ORDER BY timestamp DESC")
+	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
 
 	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
@@ -549,7 +550,7 @@ func (s *Store) listActivity(ctx context.Context, key SnapshotKey, nodeLabel str
 		sb.WriteString(" AND timestamp < ?")
 		args = append(args, rng.To.Format(time.RFC3339))
 	}
-	sb.WriteString(" ORDER BY timestamp DESC")
+	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
 
 	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
@@ -656,7 +657,7 @@ func (s *Store) listQueryStats(ctx context.Context, key SnapshotKey, nodeLabel s
 		sb.WriteString(" AND timestamp < ?")
 		args = append(args, rng.To.Format(time.RFC3339))
 	}
-	sb.WriteString(" ORDER BY timestamp DESC")
+	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
 
 	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
@@ -726,11 +727,12 @@ func (s *Store) LatestActivity(ctx context.Context, key SnapshotKey) ([]schema.A
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT payload_json FROM activity_stats AS a
 		  WHERE project_id = ? AND database_id = ?
-		    AND timestamp = (
-		      SELECT MAX(timestamp) FROM activity_stats
+		    AND id = (
+		      SELECT id FROM activity_stats
 		       WHERE project_id = a.project_id
 		         AND database_id = a.database_id
 		         AND node_source = a.node_source
+		       ORDER BY timestamp DESC, id DESC LIMIT 1
 		    )
 		  ORDER BY node_source`,
 		string(key.ProjectID), string(key.DatabaseID),

@@ -109,7 +109,7 @@ hash-prefix operands carry their own kind. Mixing kinds is rejected.`,
 	c.Flags().StringVar(&fromHash, "from", "", "source snapshot (compat; prefer positional)")
 	c.Flags().StringVar(&toHash, "to", "", "target snapshot (compat; prefer positional)")
 	c.Flags().BoolVar(&latest, "latest", false, "diff the previous capture against the latest (latest~1..latest)")
-	c.Flags().StringVar(&kindFlag, "kind", "schema", "kind for latest/latest~N operands: schema|planner|activity|query (query resolves but diffing isn't implemented yet)")
+	c.Flags().StringVar(&kindFlag, "kind", "schema", "kind for latest/latest~N operands: schema|planner|activity|query")
 	c.Flags().StringVar(&nodeFlag, "node", "", "activity/query node label (when multiple nodes)")
 	c.Flags().BoolVar(&live, "live", false, "diff a stored snapshot against the live database (schema only)")
 	c.Flags().BoolVar(&jsonDiff, "json", false, "output the SnapshotDiff as JSON")
@@ -184,8 +184,14 @@ func buildSnapshotDiff(ctx context.Context, store *history.Store, key history.Sn
 			return nil, err
 		}
 		env.Kind, env.Activity = "activity", d
+	case history.KindQuery:
+		d, err := diff.DiffQueryStats(from.AsQueryStats(), to.AsQueryStats())
+		if err != nil {
+			return nil, err
+		}
+		env.Kind, env.Query = "query", d
 	default:
-		return nil, fmt.Errorf("unsupported diff kind %s (schema|planner|activity only; query diff not implemented yet)", kind)
+		return nil, fmt.Errorf("unsupported diff kind %s", kind)
 	}
 	return env, nil
 }
