@@ -47,6 +47,9 @@ var nodeTables = []struct {
 
 func (s *Store) ListNodes(ctx context.Context, key SnapshotKey) ([]NodeSummary, error) {
 	byLabel := map[string]*NodeSummary{}
+	// roles observed per label, accumulated across both tables: a flip that
+	// splits one role per stream shows in neither table's own counts
+	seen := map[string]*struct{ primary, standby bool }{}
 
 	for _, t := range nodeTables {
 		aggs, err := s.aggregateNodes(ctx, key, t.table)
@@ -59,6 +62,14 @@ func (s *Store) ListNodes(ctx context.Context, key SnapshotKey) ([]NodeSummary, 
 				n = &NodeSummary{Label: label}
 				byLabel[label] = n
 			}
+			roles, ok := seen[label]
+			if !ok {
+				roles = &struct{ primary, standby bool }{}
+				seen[label] = roles
+			}
+			roles.primary = roles.primary || a.sawPrimary
+			roles.standby = roles.standby || a.sawStandby
+
 			n.Streams = append(n.Streams, t.stream)
 			n.OrphanRows += a.orphans
 			n.CorruptRows += a.corruptRows
@@ -66,12 +77,6 @@ func (s *Store) ListNodes(ctx context.Context, key SnapshotKey) ([]NodeSummary, 
 				n.ActivityRows = a.rows
 			} else {
 				n.QueryRows = a.rows
-			}
-			if a.sawPrimary && a.sawStandby {
-				n.RoleFlipped = true
-			}
-			if (a.sawPrimary && n.Role == NodeRoleStandby) || (a.sawStandby && n.Role == NodeRolePrimary) {
-				n.RoleFlipped = true
 			}
 			if a.last.After(n.LastCapture) {
 				n.LastCapture = a.last
@@ -87,6 +92,9 @@ func (s *Store) ListNodes(ctx context.Context, key SnapshotKey) ([]NodeSummary, 
 			return nil, err
 		}
 		n.Role = role
+		if r := seen[n.Label]; r != nil {
+			n.RoleFlipped = r.primary && r.standby
+		}
 		out = append(out, *n)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
