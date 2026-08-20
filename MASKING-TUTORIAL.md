@@ -92,7 +92,7 @@ The summary line names how many columns got blanked:
 
 ```
 Captured schema: 24 tables, 3 views, 8 functions
-  Schema:   .dryrun/schema.json
+  Schema:   4f9c2a1b8e7d305c6a2f1e9b4d8c7a3f2e1d0c9b8a7f6e5d4c3b2a1908f7e6d5
   Planner:  24 tables, 41 indexes, 312 columns
   Masked:   2 planner-stats columns
   Activity: node=db-primary, 24 tables, 41 indexes

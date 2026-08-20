@@ -251,22 +251,14 @@ func lintCmd() *cobra.Command {
 
 func driftCmd() *cobra.Command {
 	var pretty, jsonOutput bool
-	var against string
 
 	cmd := &cobra.Command{
 		Use:   "drift",
 		Short: "Compare live database schema against saved snapshot",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// --against is an explicit snapshot file; otherwise the saved side comes from history.db.
-			var saved *schema.SchemaSnapshot
-			var err error
 			// never loadSchemaForLint here: with --db set it would introspect the
 			// same connection `live` comes from, and drift would always be clean
-			if against != "" {
-				saved, err = loadSchemaFile(against)
-			} else {
-				saved, err = loadSavedSchema()
-			}
+			saved, err := loadSavedSchema()
 			if err != nil {
 				return fmt.Errorf("cannot load saved schema: %w", err)
 			}
@@ -308,7 +300,6 @@ func driftCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&pretty, "pretty", false, "pretty-print JSON")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output as JSON")
-	cmd.Flags().StringVar(&against, "against", "", "explicit snapshot file path (otherwise the newest snapshot in history.db)")
 	return cmd
 }
 
@@ -770,18 +761,6 @@ func loadSavedSchema() (*schema.SchemaSnapshot, error) {
 		"1. Run 'dryrun --db <url> init' to capture one\n"+
 		"2. Run 'dryrun snapshot pull --from-path <dir>' to load a shared one\n"+
 		"3. Pass --db <url> for live database mode", key.ProjectID, key.DatabaseID)
-}
-
-func loadSchemaFile(path string) (*schema.SchemaSnapshot, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var snap schema.SchemaSnapshot
-	if err := json.Unmarshal(data, &snap); err != nil {
-		return nil, err
-	}
-	return &snap, nil
 }
 
 func openHistoryStore(path string) (*history.Store, error) {
