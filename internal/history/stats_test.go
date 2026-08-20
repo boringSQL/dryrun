@@ -320,3 +320,138 @@ func TestGetPlanner_FiltersBySchemaRefHash(t *testing.T) {
 		t.Errorf("GetPlanner returned wrong row: %q", got.ContentHash)
 	}
 }
+
+// LatestNodeRole backs the v0.16 role-flip guard on `snapshot activity`. It
+// answers "what role did this label last capture as" WITHOUT a node_role column
+// -- the column, its backfill and the migration machinery are v0.17 -- by
+// reading $.node.is_standby back out of the stored payload with SQLite's
+// json_extract.
+//
+// That makes three things load-bearing that no compiler checks, so they are
+// pinned here:
+//
+//   - NodeIdentity.IsStandby has NO omitempty, so a primary serializes
+//     "is_standby":false and json_extract yields 0, not NULL. If that tag ever
+//     gains omitempty, every primary silently reads as unknown and the guard
+//     quietly stops guarding. The "primary" subtests below fail if that happens.
+//   - a row with no recorded role must read as unknown, never as primary --
+//     guessing would refuse legitimate captures on legacy rows.
+//   - the newest row wins, including across a promotion, and timestamps are
+//     only second-granularity today, so the id tiebreak carries same-second
+//     captures.
+func TestLatestNodeRole(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+
+	if _, err := store.PutActivity(ctx, key, activityFixture("sr", "ac-1", "node-a", true)); err != nil {
+		t.Fatal(err)
+	}
+	// node-b never captured activity, only query stats: the fallback arm
+	if _, err := store.PutQueryStats(ctx, key, queryStatsFixture("sr", "qs-1", "node-b")); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("standby read from activity_stats", func(t *testing.T) {
+		got, err := store.LatestNodeRole(ctx, key, "node-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != NodeRoleStandby {
+			t.Errorf("got %q, want %q", got, NodeRoleStandby)
+		}
+	})
+
+	// queryStatsFixture builds a non-standby node, so this also pins that
+	// json_extract of a JSON false is 0 and maps to primary rather than unknown
+	t.Run("primary read from query_stats when activity has no row", func(t *testing.T) {
+		got, err := store.LatestNodeRole(ctx, key, "node-b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != NodeRolePrimary {
+			t.Errorf("got %q, want %q -- a JSON false must not read as unknown", got, NodeRolePrimary)
+		}
+	})
+
+	t.Run("label never captured is unknown", func(t *testing.T) {
+		got, err := store.LatestNodeRole(ctx, key, "never-seen")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != NodeRoleUnknown {
+			t.Errorf("got %q, want unknown", got)
+		}
+	})
+
+	// a label is scoped to its (project, database); another project's rows
+	// under the same label must not answer for it
+	t.Run("other project's rows do not leak in", func(t *testing.T) {
+		other := SnapshotKey{ProjectID: "other", DatabaseID: "d"}
+		got, err := store.LatestNodeRole(ctx, other, "node-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != NodeRoleUnknown {
+			t.Errorf("got %q for a different project, want unknown", got)
+		}
+	})
+
+	t.Run("newest row wins after a promotion", func(t *testing.T) {
+		if _, err := store.PutActivity(ctx, key, activityFixture("sr", "ac-2", "node-a", false)); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.LatestNodeRole(ctx, key, "node-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != NodeRolePrimary {
+			t.Errorf("got %q, want %q -- the newer row should win", got, NodeRolePrimary)
+		}
+	})
+
+	// timestamps are second-granularity RFC3339 strings, so two captures inside
+	// one second tie and only the id tiebreak resolves them
+	t.Run("same-second captures resolve by id", func(t *testing.T) {
+		ts := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+		for i, standby := range []bool{false, true} {
+			payload := fmt.Sprintf(`{"node":{"source":"tied","is_standby":%t}}`, standby)
+			if _, err := store.db.ExecContext(ctx,
+				`INSERT INTO activity_stats
+				   (project_id, database_id, schema_ref_hash, content_hash, node_source, timestamp, payload_json)
+				   VALUES (?, ?, 'sr', ?, 'tied', ?, ?)`,
+				string(key.ProjectID), string(key.DatabaseID),
+				fmt.Sprintf("tied-%d", i), ts, payload); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := store.LatestNodeRole(ctx, key, "tied")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// the standby row was inserted second, so it holds the higher id
+		if got != NodeRoleStandby {
+			t.Errorf("got %q, want %q -- the later insert should win the tie", got, NodeRoleStandby)
+		}
+	})
+
+	// a payload with no $.node.is_standby at all: json_extract returns NULL and
+	// the guard must stay silent rather than invent a role to compare against
+	t.Run("payload without the field is unknown, not primary", func(t *testing.T) {
+		if _, err := store.db.ExecContext(ctx,
+			`INSERT INTO activity_stats
+			   (project_id, database_id, schema_ref_hash, content_hash, node_source, timestamp, payload_json)
+			   VALUES (?, ?, 'sr', 'legacy-1', 'node-legacy', ?, '{"tables":[]}')`,
+			string(key.ProjectID), string(key.DatabaseID),
+			time.Now().UTC().Format(time.RFC3339)); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.LatestNodeRole(ctx, key, "node-legacy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != NodeRoleUnknown {
+			t.Errorf("got %q, want unknown -- a missing field must never read as primary", got)
+		}
+	})
+}
