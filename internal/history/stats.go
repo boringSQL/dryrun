@@ -699,30 +699,26 @@ const (
 )
 
 func (s *Store) LatestNodeRole(ctx context.Context, key SnapshotKey, nodeLabel string) (string, error) {
-	for _, table := range []string{"activity_stats", "query_stats"} {
-		var standby sql.NullInt64
-		err := s.db.QueryRowContext(ctx,
-			`SELECT json_extract(payload_json, '$.node.is_standby') FROM `+table+
-				` WHERE project_id = ? AND database_id = ? AND node_source = ?
-				  ORDER BY timestamp DESC, id DESC LIMIT 1`,
-			string(key.ProjectID), string(key.DatabaseID), nodeLabel,
-		).Scan(&standby)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return NodeRoleUnknown, err
-		}
-		// legacy rows lack the field: unknown, never primary
-		if !standby.Valid {
-			return NodeRoleUnknown, nil
-		}
-		if standby.Int64 == 1 {
-			return NodeRoleStandby, nil
-		}
-		return NodeRolePrimary, nil
+	pid, did := string(key.ProjectID), string(key.DatabaseID)
+	var standby sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT standby FROM (
+		   SELECT timestamp AS ts, id, 0 AS stream, `+nodeStandbyExpr("")+` AS standby
+		     FROM activity_stats WHERE project_id = ? AND database_id = ? AND node_source = ?
+		   UNION ALL
+		   SELECT timestamp, id, 1, `+nodeStandbyExpr("")+`
+		     FROM query_stats WHERE project_id = ? AND database_id = ? AND node_source = ?
+		 ) ORDER BY ts DESC, stream ASC, id DESC LIMIT 1`,
+		pid, did, nodeLabel, pid, did, nodeLabel,
+	).Scan(&standby)
+	if errors.Is(err, sql.ErrNoRows) {
+		return NodeRoleUnknown, nil
 	}
-	return NodeRoleUnknown, nil
+	if err != nil {
+		return NodeRoleUnknown, err
+	}
+	// legacy rows lack the field: unknown, never primary
+	return roleFromExtract(standby), nil
 }
 
 // one row per node, taken at the most recent timestamp per node_source
