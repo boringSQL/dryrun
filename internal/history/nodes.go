@@ -3,6 +3,8 @@ package history
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"sort"
 	"time"
 )
@@ -158,6 +160,43 @@ func (s *Store) RecentNodeFingerprints(ctx context.Context, key SnapshotKey, nod
 		out = append(out, NodeFingerprint{StartedAt: at, ServerAddr: addr.String})
 	}
 	return out, rows.Err()
+}
+
+// Newest capture for one node's stream, for cadence decisions. Pulled rows
+// land in the same tables, so a pull can make a node look recently captured;
+// v0.17's captured_locally column is what fixes that.
+func (s *Store) LastCaptureAt(ctx context.Context, key SnapshotKey, nodeLabel, stream string) (time.Time, bool, error) {
+	table, ok := map[string]string{
+		"activity": "activity_stats",
+		"query":    "query_stats",
+		"planner":  "planner_stats",
+		"schema":   "snapshots",
+	}[stream]
+	if !ok {
+		return time.Time{}, false, fmt.Errorf("unknown stream %q", stream)
+	}
+	q := `SELECT timestamp FROM ` + table + ` WHERE project_id = ? AND database_id = ?`
+	args := []any{string(key.ProjectID), string(key.DatabaseID)}
+	// only activity and query are per node; schema and planner are project-wide
+	if table == "activity_stats" || table == "query_stats" {
+		q += " AND node_source = ?"
+		args = append(args, nodeLabel)
+	}
+	q += " ORDER BY timestamp DESC, id DESC LIMIT 1"
+
+	var ts string
+	err := s.db.QueryRowContext(ctx, q, args...).Scan(&ts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	at, perr := time.Parse(time.RFC3339, ts)
+	if perr != nil {
+		return time.Time{}, false, nil
+	}
+	return at, true, nil
 }
 
 func roleFromExtract(standby sql.NullInt64) string {

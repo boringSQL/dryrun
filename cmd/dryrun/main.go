@@ -454,7 +454,10 @@ func snapshotCmd() *cobra.Command {
 	nodesCmd := snapshotNodesCmd(&historyDB)
 	addHistFlag(nodesCmd)
 
-	cmd.AddCommand(takeCmd, listCmd, nodesCmd, diffCmd, deleteCmd, snapshotActivityCmd(),
+	captureCmd := snapshotCaptureCmd(&historyDB)
+	addHistFlag(captureCmd)
+
+	cmd.AddCommand(takeCmd, listCmd, nodesCmd, captureCmd, diffCmd, deleteCmd, snapshotActivityCmd(),
 		snapshotQueryStatsCmd(), snapshotPushCmd(), snapshotPullCmd())
 	return cmd
 }

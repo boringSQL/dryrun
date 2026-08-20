@@ -284,6 +284,13 @@ func queryCaveats(from, to *snapshot.QueryStatsSnapshot, d *QueryDelta) []string
 	if d.FromTruncated {
 		out = append(out, "the older capture hit its row cap; shapes marked 'truncated' have no baseline to subtract, so no growth is claimed for them")
 	}
+	// dealloc proves eviction (never a reset, 3.2): entries left pgss during
+	// the window, so a shape absent from one side may have been evicted and
+	// re-added rather than started or stopped
+	if n := deallocGrowth(from, to); n > 0 {
+		out = append(out, fmt.Sprintf(
+			"pg_stat_statements evicted %d entries during the window (pgss.max pressure); 'new' may be a re-added shape and 'gone' an evicted one", n))
+	}
 	if straddledReset(from) || straddledReset(to) {
 		out = append(out, "pg_stat_statements was reset while a capture was reading it; that capture's rows are part pre-reset and part post-reset")
 	}
@@ -297,6 +304,18 @@ func queryCaveats(from, to *snapshot.QueryStatsSnapshot, d *QueryDelta) []string
 		out = append(out, "both captures carry the same timestamp; rates over the window are not meaningful")
 	}
 	return out
+}
+
+// Only meaningful without a reset in between: a reset zeroes dealloc too.
+func deallocGrowth(from, to *snapshot.QueryStatsSnapshot) int64 {
+	a, b := latestInfo(from), latestInfo(to)
+	if a == nil || b == nil || statsWasReset(from, to) {
+		return 0
+	}
+	if b.Dealloc <= a.Dealloc {
+		return 0
+	}
+	return b.Dealloc - a.Dealloc
 }
 
 func trackOf(q *snapshot.QueryStatsSnapshot) string {

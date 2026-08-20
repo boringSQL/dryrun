@@ -23,6 +23,22 @@ type (
 		Remotes      []RemoteConfig           `toml:"remote"`
 		History      *HistoryConfig           `toml:"history"`
 		QueryStats   *QueryStatsConfig        `toml:"query_stats"`
+		Nodes        []NodeConfig             `toml:"node"`
+	}
+
+	// [[node]] block; one physical node (or one read pool) and its cadence.
+	// URL stays a ${VAR} reference or an env var name so dryrun.toml is safe
+	// to commit.
+	NodeConfig struct {
+		Name     string   `toml:"name"`
+		Role     string   `toml:"role"` // primary | standby | auto (default)
+		URL      string   `toml:"url"`
+		URLEnv   string   `toml:"url_env"`
+		Streams  []string `toml:"streams"`
+		Interval string   `toml:"interval"`
+		// this label is a read pool: members rotate by design, so identity
+		// drift is expected rather than a warning
+		Pool bool `toml:"pool"`
 	}
 
 	// [query_stats] block; capture-time tuning for pg_stat_statements snapshots

@@ -543,3 +543,52 @@ func TestTruncateQuery_KeepsRunesIntact(t *testing.T) {
 		t.Errorf("truncation split a rune: %q", got)
 	}
 }
+
+// dealloc proves eviction, never a reset (that is stats_reset's job). Over a
+// long window entries leave pgss under pgss.max pressure, so a shape absent
+// from one side may have been evicted and re-added rather than started.
+func TestDiffQueryStats_DeallocCaveatsNewAndGone(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	same := t0.Add(-72 * time.Hour)
+
+	from := qSnap("primary", t0, qEntry("fp-old", "SELECT 1", 100, 100, 100))
+	from.InfoAfter = &snapshot.QueryStatsInfo{StatsReset: same, Dealloc: 10}
+	to := qSnap("primary", t0.Add(24*time.Hour), qEntry("fp-fresh", "SELECT 2", 500, 900, 500))
+	to.InfoAfter = &snapshot.QueryStatsInfo{StatsReset: same, Dealloc: 4210}
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.StatsReset {
+		t.Fatal("dealloc growth was read as a reset")
+	}
+	var said bool
+	for _, c := range d.Caveats {
+		if strings.Contains(c, "evicted 4200 entries") {
+			said = true
+		}
+	}
+	if !said {
+		t.Errorf("eviction pressure was not reported: %v", d.Caveats)
+	}
+}
+
+// A reset zeroes dealloc too, so the difference across one means nothing.
+func TestDiffQueryStats_DeallocIgnoredAcrossAReset(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := qSnap("primary", t0, qEntry("fp", "SELECT 1", 100, 100, 100))
+	from.InfoAfter = &snapshot.QueryStatsInfo{StatsReset: t0.Add(-48 * time.Hour), Dealloc: 900}
+	to := qSnap("primary", t0.Add(time.Hour), qEntry("fp", "SELECT 1", 5, 5, 5))
+	to.InfoAfter = &snapshot.QueryStatsInfo{StatsReset: t0.Add(-time.Minute), Dealloc: 3}
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range d.Caveats {
+		if strings.Contains(c, "evicted") {
+			t.Errorf("claimed eviction across a reset: %q", c)
+		}
+	}
+}
