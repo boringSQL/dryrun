@@ -37,6 +37,7 @@ type initWriter interface {
 	PutPlanner(ctx context.Context, key history.SnapshotKey, p *schema.PlannerStatsSnapshot) (history.PutOutcome, error)
 	PutActivity(ctx context.Context, key history.SnapshotKey, a *schema.ActivityStatsSnapshot) (history.PutOutcome, error)
 	PutQueryStats(ctx context.Context, key history.SnapshotKey, q *schema.QueryStatsSnapshot) (history.PutOutcome, error)
+	LatestNodeRole(ctx context.Context, key history.SnapshotKey, nodeLabel string) (string, error)
 }
 
 // one REPEATABLE READ, READ ONLY tx (as pg_dump uses) for the whole capture:

@@ -90,6 +90,11 @@ type stubWriter struct {
 	LastPlanner                               *schema.PlannerStatsSnapshot
 	LastQueryRef                              string
 	PutQueryStatsErr                          error
+	PrevRole                                  string
+}
+
+func (s *stubWriter) LatestNodeRole(_ context.Context, _ history.SnapshotKey, _ string) (string, error) {
+	return s.PrevRole, nil
 }
 
 func (s *stubWriter) GetSchema(_ context.Context, _ history.SnapshotKey, _ history.SnapshotRef) (*schema.SchemaSnapshot, error) {

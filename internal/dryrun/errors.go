@@ -15,6 +15,7 @@ const (
 	ErrDatabase
 	ErrReplicaCapture
 	ErrIdentityMismatch
+	ErrNodeRoleChanged
 )
 
 type Error struct {

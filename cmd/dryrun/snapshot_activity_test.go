@@ -11,11 +11,6 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
-// Drives runSnapshotActivity across the three behavior contracts the v0.6.1
-// `snapshot activity` subcommand promises: primaries are refused; standbys
-// without a prior schema snapshot are refused unless --allow-orphan; and
-// standbys with a prior snapshot bind the activity row to that snapshot's
-// content_hash so the stats-apply join is satisfied.
 func TestRunSnapshotActivity_Branches(t *testing.T) {
 	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
 
@@ -30,11 +25,6 @@ func TestRunSnapshotActivity_Branches(t *testing.T) {
 		wantActivityN   int
 		wantBoundRef    string
 	}{
-		{
-			name:        "primary refused with ErrReplicaCapture",
-			standby:     false,
-			wantErrKind: ptrKind(dryrun.ErrReplicaCapture),
-		},
 		{
 			name:            "standby without prior snapshot refused",
 			standby:         true,

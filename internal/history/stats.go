@@ -692,6 +692,39 @@ func (s *Store) listQueryStats(ctx context.Context, key SnapshotKey, nodeLabel s
 	return out, rows.Err()
 }
 
+const (
+	NodeRoleUnknown = ""
+	NodeRolePrimary = "primary"
+	NodeRoleStandby = "standby"
+)
+
+func (s *Store) LatestNodeRole(ctx context.Context, key SnapshotKey, nodeLabel string) (string, error) {
+	for _, table := range []string{"activity_stats", "query_stats"} {
+		var standby sql.NullInt64
+		err := s.db.QueryRowContext(ctx,
+			`SELECT json_extract(payload_json, '$.node.is_standby') FROM `+table+
+				` WHERE project_id = ? AND database_id = ? AND node_source = ?
+				  ORDER BY timestamp DESC, id DESC LIMIT 1`,
+			string(key.ProjectID), string(key.DatabaseID), nodeLabel,
+		).Scan(&standby)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return NodeRoleUnknown, err
+		}
+		// legacy rows lack the field: unknown, never primary
+		if !standby.Valid {
+			return NodeRoleUnknown, nil
+		}
+		if standby.Int64 == 1 {
+			return NodeRoleStandby, nil
+		}
+		return NodeRolePrimary, nil
+	}
+	return NodeRoleUnknown, nil
+}
+
 // one row per node, taken at the most recent timestamp per node_source
 func (s *Store) LatestActivity(ctx context.Context, key SnapshotKey) ([]schema.ActivityStatsSnapshot, error) {
 	rows, err := s.db.QueryContext(ctx,

@@ -16,17 +16,18 @@ import (
 
 func snapshotActivityCmd() *cobra.Command {
 	var (
-		from        string
-		label       string
-		allowOrphan bool
-		historyDB   string
-		pushAfter   bool
-		pushRemote  string
+		from            string
+		label           string
+		allowOrphan     bool
+		historyDB       string
+		allowRoleChange bool
+		pushAfter       bool
+		pushRemote      string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "activity",
-		Short: "Capture activity stats from a standby into history",
+		Short: "Capture activity stats from a node into history",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if label == "" {
@@ -64,9 +65,10 @@ func snapshotActivityCmd() *cobra.Command {
 
 			key := resolveSnapshotKey()
 			if err := runSnapshotActivity(ctx, cap, store, key, captureOptions{
-				Label:       label,
-				AllowOrphan: allowOrphan,
-				RowCap:      rowCap,
+				Label:           label,
+				AllowOrphan:     allowOrphan,
+				RowCap:          rowCap,
+				AllowRoleChange: allowRoleChange,
 			}); err != nil {
 				return err
 			}
@@ -84,7 +86,8 @@ func snapshotActivityCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&from, "from", "", "standby connection URL (default: --db)")
+	cmd.Flags().StringVar(&from, "from", "", "node connection URL (default: --db)")
+	cmd.Flags().BoolVar(&allowRoleChange, "allow-role-change", false, "accept a label whose role flipped (promotion/failover)")
 	cmd.Flags().StringVar(&label, "label", "", "node label for the activity row (required)")
 	cmd.Flags().BoolVar(&allowOrphan, "allow-orphan", false, "permit capture without a bound schema snapshot")
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
@@ -94,9 +97,29 @@ func snapshotActivityCmd() *cobra.Command {
 }
 
 type captureOptions struct {
-	Label       string
-	AllowOrphan bool
-	RowCap      int
+	Label           string
+	AllowOrphan     bool
+	RowCap          int
+	AllowRoleChange bool
+}
+
+func guardNodeRole(ctx context.Context, store initWriter, key history.SnapshotKey, opts captureOptions, role string) error {
+	if opts.AllowRoleChange {
+		return nil
+	}
+	prev, err := store.LatestNodeRole(ctx, key, opts.Label)
+	if err != nil {
+		return fmt.Errorf("check recorded node role: %w", err)
+	}
+	if prev == history.NodeRoleUnknown || prev == role {
+		return nil
+	}
+	return dryrun.NewError(dryrun.ErrNodeRoleChanged, fmt.Sprintf(
+		"label %q was last captured as a %s, this node is a %s.\n"+
+			"After a promotion or failover, re-run with --allow-role-change.\n"+
+			"During a PITR restore or an in-progress promotion, wait and retry.\n"+
+			"Otherwise --label is pointed at a different node than before.",
+		opts.Label, prev, role))
 }
 
 func snapshotQueryStatsCmd() *cobra.Command {
@@ -178,8 +201,6 @@ func snapshotQueryStatsCmd() *cobra.Command {
 	return cmd
 }
 
-// query stats capture: no primary/standby restriction, unlike activity - pg_stat_statements
-// is meaningful on either. Binds to the latest schema hash unless --allow-orphan.
 func runSnapshotQueryStats(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, opts captureOptions) error {
 	schemaRef := ""
 	if snap, err := store.GetSchema(ctx, key, history.NewRefLatest()); err == nil && snap != nil {
@@ -218,15 +239,17 @@ func runSnapshotQueryStats(ctx context.Context, cap initCapturer, store initWrit
 	return nil
 }
 
-// activity capture: standby-only, binds to latest schema hash unless --allow-orphan.
 func runSnapshotActivity(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, opts captureOptions) error {
 	standby, err := cap.IsStandby(ctx)
 	if err != nil {
 		return fmt.Errorf("check standby status: %w", err)
 	}
-	if !standby {
-		return dryrun.NewError(dryrun.ErrReplicaCapture,
-			"snapshot activity is for standbys; this node is a primary. Re-run on a standby (pg_is_in_recovery() must be true)")
+	role := history.NodeRolePrimary
+	if standby {
+		role = history.NodeRoleStandby
+	}
+	if err := guardNodeRole(ctx, store, key, opts, role); err != nil {
+		return err
 	}
 
 	schemaRef := ""

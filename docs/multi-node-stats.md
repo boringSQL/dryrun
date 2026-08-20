@@ -38,7 +38,7 @@ dryrun --profile primary snapshot take
 
 Refuses to run on a standby (`pg_is_in_recovery() = false` required). Writes one `schema` row, one `planner_stats` row (masked per policy), and one `activity_stats` row labeled `primary`.
 
-### Activity stats from replicas
+### Activity stats per node
 
 ```sh
 dryrun --profile replica1 snapshot activity \
@@ -51,7 +51,7 @@ dryrun --profile replica3 snapshot activity \
   --from "postgres://readonly@replica-3:5432/mydb" --label replica3
 ```
 
-`--label` is required and identifies the node in `describe_table` and `detect`. `snapshot activity` refuses to run on the primary. Each row captures `pg_stat_user_tables`, `pg_stat_user_indexes`, and `stats_reset` for the node, then joins to the latest schema by `schema_ref_hash`. Use `--allow-orphan` when activity arrives before any schema snapshot exists; orphan rows are stored but not reattached when a matching schema lands later.
+`--label` is required and identifies the node in `describe_table` and `detect`. `snapshot activity` runs against either role — `pg_stat_user_tables` is per-node and meaningful on a primary too, so a primary's activity can be re-captured without re-running `snapshot take`. A label whose previous capture recorded the other role is refused with a role-change error, since that usually means `--label` is pointed at a rotating endpoint and two nodes' counters would append into one series; pass `--allow-role-change` after a genuine promotion or failover. Each row captures `pg_stat_user_tables`, `pg_stat_user_indexes`, and `stats_reset` for the node, then joins to the latest schema by `schema_ref_hash`. Use `--allow-orphan` when activity arrives before any schema snapshot exists; orphan rows are stored but not reattached when a matching schema lands later.
 
 Each activity row also carries four database-scoped, best-effort sections, independent of any table: `pg_stat_database` counters for the connected database (deadlocks, temp spill, commit/rollback volume, buffer hit ratio, conflicts, checksum failures), `pg_replication_slots` (per-slot activity and WAL retention risk, PG13+ fields nullable on 13-), `pg_stat_replication` peers (application_name, client_addr, state, sync_state, LSN positions, and lag), and checkpoint counters normalized from `pg_stat_checkpointer` (PG17+) or `pg_stat_bgwriter` (older). All four are CLUSTER facts riding a per-node, per-database document — a multi-database cluster reports identical checkpoint counters once per tracked database, a standby's own replication-slot list is normally empty (its slots, if any, live on the primary), and peers are normally empty on a standby unless it is itself feeding further standbys via cascading replication. A read failure on any of the four leaves it absent on the wire, never a substitute zero.
 
@@ -161,10 +161,10 @@ Activity captures are lightweight and safe for cron. Take the primary snapshot f
 15 2 * * * app dryrun --profile replica3 snapshot activity --from "$REPLICA3_DB" --label replica3
 ```
 
-`snapshot take` already captures the primary's own activity row (labeled `primary`), so there is no separate `snapshot activity` line for the primary, and the command itself refuses to run on the primary. `snapshot take` is idempotent on a quiet schema: repeated runs produce the same `schema_ref_hash`, so re-attaching activity rows is automatic. Run it nightly alongside activity captures, or only after migrations if you want fewer rows in history.
+`snapshot take` already captures the primary's own activity row (labeled `primary`), so the cron above has no separate `snapshot activity` line for it. Adding one is legal — `snapshot activity` accepts a primary — and is how you refresh primary activity counters more often than you re-snapshot the schema; reuse the same `--label` so both land in one series. `snapshot take` is idempotent on a quiet schema: repeated runs produce the same `schema_ref_hash`, so re-attaching activity rows is automatic. Run it nightly alongside activity captures, or only after migrations if you want fewer rows in history.
 
 ## Snapshot storage
 
-Snapshots live in `~/.dryrun/history.db`, keyed by `(project_id, database_id, kind, schema_ref_hash, node_label)`. Activity rows from `snapshot activity` carry their `--label` in `node_label`; the activity row from `snapshot take` uses `primary`. `is_standby` is auto-detected from `pg_is_in_recovery()` and enforced by the CLI: `take` requires false, `activity` requires true.
+Snapshots live in `~/.dryrun/history.db`, keyed by `(project_id, database_id, kind, schema_ref_hash, node_label)`. Activity rows from `snapshot activity` carry their `--label` in `node_label`; the activity row from `snapshot take` uses `primary`. `is_standby` is auto-detected from `pg_is_in_recovery()` and recorded on every row. `take` still requires a primary; `activity` accepts either role and instead checks the label: if the newest row for that label recorded the other role, the capture is refused unless `--allow-role-change` is passed.
 
 To share a snapshot across machines, use `snapshot push` / `snapshot pull`. They move `history.db` byte-for-byte between stores without re-masking or re-transforming. See [SECURITY.md](../SECURITY.md) for the sharing trust model.
