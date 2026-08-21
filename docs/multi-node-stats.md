@@ -159,26 +159,26 @@ Wiring every node's URL into cron by hand does not scale past a couple of replic
 [[node]]
 name     = "primary"
 role     = "primary"
-url_env  = "PRIMARY_URL"
+url      = "service=dryrun-primary"
 streams  = ["planner", "activity", "query"]
 interval = "1h"
 
 [[node]]
 name     = "replica-eu"
 role     = "standby"
-url_env  = "REPLICA_EU_URL"
+url      = "service=dryrun-replica-eu"
 streams  = ["activity", "query"]
 interval = "30m"
 
 [[node]]
 name     = "read-pool"
-url_env  = "POOL_URL"
+url      = "service=dryrun-read-pool"
 streams  = ["query"]
 interval = "15m"
 pool     = true
 ```
 
-`url_env` names an environment variable and `url` may hold a `${VAR}` reference, so `dryrun.toml` never carries a password and stays committable. `role` is asserted against the node at capture time; `auto` (the default) accepts whatever it finds. Omit `streams` and the detected role decides: a standby has no schema of its own and its planner stats mirror the primary's, so it captures activity and query only.
+`url = "service=name"` is preferred: the entry lives in `~/.pg_service.conf` (or `$PGSERVICEFILE`) on the capture host and the password in `~/.pgpass`, so `dryrun.toml` never carries a password — or even a variable name — and stays committable. Where a service file is impractical, `url_env` names an environment variable and `url` may hold a `${VAR}` reference instead; either way nothing secret lands in the file. `role` is asserted against the node at capture time; `auto` (the default) accepts whatever it finds. Omit `streams` and the detected role decides: a standby has no schema of its own and its planner stats mirror the primary's, so it captures activity and query only.
 
 `pool = true` says the label names a read pool rather than one machine. Members rotate by design there, so the identity-drift warning is suppressed for that label — see the fingerprint paragraph above. Do not set it on a label that is supposed to be one node: the warning is the only thing that tells you two servers' counters are interleaving.
 
@@ -191,13 +191,38 @@ dryrun snapshot capture --node primary # one node from the config
 dryrun snapshot capture --from "$URL" --label replica-3 --streams query
 ```
 
+### Checking the wiring first
+
+A fleet's connection details are the part that goes wrong, and a wrong one is usually silent: a URL copied from the primary into the replica block captures one server twice, an unset `url_env` fails only that node's next tick, a `role` left over from a failover fails every tick. `--check` is the preflight — it connects to every target, runs `SELECT 1`, and reports what a capture would do, without capturing anything:
+
+```sh
+dryrun snapshot capture --all --check
+```
+
+```
+NODE       STATUS  ROLE      PG      DATABASE      SERVER           STREAMS
+analytics  ok      primary   17.10   analytics     10.0.0.1         activity
+primary    ok      primary   17.10   app           10.0.0.1         activity,query
+replica-1  FAIL    primary   17.10   app           10.0.0.1         activity,query
+replica-2  FAIL    -         -       -             -                -
+
+warning: analytics, primary and replica-1 are the same server (10.0.0.1), different databases.
+
+error: primary and replica-1 point at 10.0.0.1 (database app): one server under 2 labels. --all captures it once per label, and the fleet view shows nodes that are the same server.
+error: replica-1: [[node]] replica-1 declares role standby, but this node is a primary;
+  swap the roles in dryrun.toml, or set role = auto
+error: replica-2: url_env REPLICA2_URL is unset in this environment
+```
+
+Each node is checked on its own, so one unreachable node still leaves a full report rather than aborting at the first failure, and `--check-timeout` (10s by default) bounds a node that neither answers nor refuses. Every check is one that capture itself makes: the privileged-role refusal, the declared vs. detected role, the role a label was last captured under, whether this label's last capture came from a different server, `pg_stat_statements` for the query stream, a schema snapshot for every stream (waived by `--allow-orphan`, except for planner, which annotates against the snapshot itself), the stream names, the row cap, and the masking policy `require_masks` demands. Two checks are only visible across the fleet — two labels resolving to one server (fatal; identified by the server's boot time, not by the URL text, so a hostname and its IP are still caught, and only a warning when one of the labels is a `pool = true` endpoint that lands on a member by design) and a fleet spread over several databases, whose stats all land under one `database_id`. Failures exit nonzero; warnings do not. No capture lock is taken, so the preflight is safe to run while a cron capture is in flight.
+
 `--due` is what makes one cron line implement every cadence:
 
 ```sh
 */5 * * * * app dryrun snapshot capture --all --due
 ```
 
-Cadence is decided before connecting, so a tick with nothing due opens no database connections at all. One node failing logs and continues so a single unreachable replica does not strand the fleet, and the command exits nonzero if any node failed. A capture lock stops an overlapping tick from stacking a second set of production connections; a crashed run's lock is taken over after two hours.
+Cadence is decided before connecting, so a tick with nothing due opens no database connections at all. One node failing logs and continues so a single unreachable replica does not strand the fleet, and the command exits nonzero if any node failed. With `--push`, a partially failed run still pushes what captured. A capture lock stops an overlapping tick from stacking a second set of production connections. A crashed run's lock is not reclaimed automatically — taking a lock over by path cannot be made race-free, so two runs that both judged it stale would both proceed — and the next run reports the lock's age and the command to clear it.
 
 Two limits worth knowing. `--due` keys off the newest stored row, and a `snapshot pull` writes rows into the same tables, so pulling can make a node look freshly captured and skip one interval — it self-heals on the next tick. And a row dated in the future (a peer with a skewed clock) is ignored for cadence rather than trusted, since it is not evidence that this host captured anything.
 
@@ -221,7 +246,9 @@ Query stats: node=primary, window 21h16m22s (2026-08-19 09:37:59 -> 2026-08-20 0
 
 The mean column is the point. `pg_stat_statements.mean_exec_time` averages since pgss last reset, so a query that got slower today is invisible in it; the window mean is `Δtotal_time / Δcalls` over the two captures, and `12.00<-2.00` reads as "12ms per call this window, up from 2ms". In the example above a recursive CTE running 330 times went from 464ms to 1128ms a call — a regression that the totals, dominated by a query running 3.9 million times at 0.03ms, would never show.
 
-Counters are cumulative, so the diff refuses rather than guesses. It will not subtract across a `pg_stat_statements` reset, a qshape regrouping, a capture-rule change, or two different nodes, and says which. Any counter going backwards makes that shape unsubtractable: an entry groups several queryids, so one member being evicted can pull time down while calls rise. If the older capture hit its row cap, shapes that appear in the newer one are marked `truncated` rather than `new` — they may have been running below the cap all along — and are left out of the totals.
+Counters are cumulative, so the diff refuses rather than guesses. It will not subtract across a `pg_stat_statements` reset, a qshape regrouping, a capture-rule change, or two different labels, and says which. The recorded server fingerprint is consulted too: two captures whose `inet_server_addr` differ are two machines under one label, and the diff refuses them. A changed `pg_postmaster_start_time` alone is reported but not refused, since pg_stat_statements survives a clean restart; when the address is unknown (a Unix socket, or a tunnel that shows every member as 127.0.0.1) the change is a caveat rather than a refusal. Any counter going backwards makes that shape unsubtractable: an entry groups several queryids, so one member being evicted can pull time down while calls rise. If the older capture hit its row cap, shapes that appear in the newer one are marked `truncated` rather than `new` — they may have been running below the cap all along — and are left out of the totals.
+
+See [query-stats.md](query-stats.md) for the full capture and diff reference.
 
 Statuses: `grew`, `shrank`, `flat`, `new`, `gone` (absent from an uncapped newer capture), `evicted` (absent from a capped one, so it may still be running), `reset`, `truncated`. `--json` carries every shape; the console shows movers only.
 
