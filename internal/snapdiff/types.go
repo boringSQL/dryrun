@@ -20,7 +20,7 @@ const (
 type Options struct {
 	From   string        // ref token; default "latest~1"
 	To     string        // ref token; default "latest"
-	Kind   string        // schema|planner|activity; the timeline refs name. default schema
+	Kind   string        // schema|planner|activity|query; the timeline refs name. default schema
 	Node   string        // activity node label, when several exist
 	Window time.Duration // correlation window; default DefaultWindow
 	Schema string        // narrow to one schema
@@ -47,6 +47,7 @@ type (
 		SchemaDelta   *diff.SchemaDelta   `json:"schema_delta,omitempty"`
 		PlannerDelta  *diff.PlannerDelta  `json:"planner_delta,omitempty"`
 		ActivityDelta []NodeActivityDelta `json:"activity_delta,omitempty"`
+		QueryDelta    []NodeQueryDelta    `json:"query_delta,omitempty"`
 	}
 
 	// co-locates everything that moved for one object across the three streams
@@ -65,8 +66,14 @@ type (
 		Schema         CategoryCounts `json:"schema"`
 		PlannerMovers  int            `json:"planner_movers"`
 		ActivityMovers int            `json:"activity_movers"`
-		ObjectsChanged int            `json:"objects_changed"`
-		TopObjects     []string       `json:"top_objects,omitempty"`
+		// query shapes whose call count or time moved, across all nodes
+		QueryMovers int `json:"query_movers"`
+		// shapes present but not subtractable (a reset, or a truncated baseline)
+		QueryUnknown int `json:"query_unknown,omitempty"`
+		// nodes whose query pair could not be diffed at all
+		QueryRefused   int      `json:"query_refused,omitempty"`
+		ObjectsChanged int      `json:"objects_changed"`
+		TopObjects     []string `json:"top_objects,omitempty"`
 	}
 
 	CategoryCounts struct {
@@ -78,6 +85,11 @@ type (
 	NodeActivityDelta struct {
 		Node  string              `json:"node"`
 		Delta *diff.ActivityDelta `json:"delta"`
+	}
+
+	NodeQueryDelta struct {
+		Node  string           `json:"node"`
+		Delta *diff.QueryDelta `json:"delta"`
 	}
 
 	// which planner/activity captures matched each anchor, and the time skew
@@ -110,7 +122,8 @@ func (r *Result) IsEmpty() bool {
 	return len(r.Objects) == 0 &&
 		r.SchemaDelta.IsEmpty() &&
 		r.PlannerDelta.IsEmpty() &&
-		!hasActivity(r.ActivityDelta)
+		!hasActivity(r.ActivityDelta) &&
+		len(r.QueryDelta) == 0
 }
 
 func hasActivity(nds []NodeActivityDelta) bool {
@@ -131,11 +144,16 @@ func (r *Result) ForView(view string, limit int) *Result {
 		cp.SchemaDelta, cp.OmittedRows = capSchemaDelta(cp.SchemaDelta, limit)
 		cp.PlannerDelta, po = capPlannerDelta(cp.PlannerDelta, limit)
 		cp.ActivityDelta, ao = capActivityDeltas(cp.ActivityDelta, limit)
-		cp.OmittedRows += po + ao
+		var qo int
+		cp.QueryDelta, qo = capQueryDeltas(cp.QueryDelta, limit)
+		cp.OmittedRows += po + ao + qo
 	} else {
 		cp.SchemaDelta = nil
 		cp.PlannerDelta = nil
 		cp.ActivityDelta = nil
+		// a summary carrying every shape's SQL text is not a summary; the
+		// counts and any refusal survive in Summary
+		cp.QueryDelta = nil
 	}
 	cp.Truncated = cp.OmittedObjects > 0 || cp.OmittedRows > 0
 	return &cp
@@ -167,6 +185,26 @@ func capPlannerDelta(d *diff.PlannerDelta, limit int) (*diff.PlannerDelta, int) 
 	cp := *d
 	cp.Sizing, cp.Stats = sz, st
 	return &cp, o1 + o2
+}
+
+func capQueryDeltas(nds []NodeQueryDelta, limit int) ([]NodeQueryDelta, int) {
+	if nds == nil {
+		return nil, 0
+	}
+	out := make([]NodeQueryDelta, len(nds))
+	total := 0
+	for i, nd := range nds {
+		out[i] = nd
+		if nd.Delta == nil {
+			continue
+		}
+		e, om := capSlice(nd.Delta.Entries, limit)
+		cpd := *nd.Delta
+		cpd.Entries = e
+		out[i].Delta = &cpd
+		total += om
+	}
+	return out, total
 }
 
 func capActivityDeltas(nds []NodeActivityDelta, limit int) ([]NodeActivityDelta, int) {

@@ -182,13 +182,13 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
 		mcp.NewTool("snapshot_diff",
-			mcp.WithDescription("What changed between two snapshots: schema DDL plus the correlated planner sizing/stats and activity drift for the same capture window. Snapshot-to-snapshot, read from .dryrun/history.db."),
+			mcp.WithDescription("What changed between two snapshots: schema DDL plus the correlated planner sizing/stats, activity and query-shape drift for the same capture window. Query deltas are per shape over the window, so their mean is comparable across captures -- unlike pg_stat_statements' own mean, which averages since its last reset. Snapshot-to-snapshot, read from .dryrun/history.db."),
 			mcp.WithString("from", mcp.Description("Base snapshot: 'latest~N' or a content-hash prefix. Default 'latest~1'.")),
 			mcp.WithString("to", mcp.Description("Target snapshot: 'latest' or a content-hash prefix. Default 'latest'.")),
 			mcp.WithString("kind",
-				mcp.Enum("schema", "planner", "activity"),
+				mcp.Enum("schema", "planner", "activity", "query"),
 				mcp.DefaultString("schema"),
-				mcp.Description("Timeline the refs name and the headline delta; the other kinds are correlated by capture time. Use 'planner' when the schema is stable but stats/sizing moved."),
+				mcp.Description("Timeline the refs name and the headline delta; the other kinds are correlated by capture time. Use 'planner' when the schema is stable but stats/sizing moved, 'query' for pg_stat_statements drift (per shape, per node)."),
 			),
 			mcp.WithString("node", mcp.Description("Activity node label, when activity has multiple nodes.")),
 			mcp.WithString("view",

@@ -107,6 +107,22 @@ func buildSummary(r *Result) Summary {
 		s.PlannerMovers += len(o.Sizing)
 		s.ActivityMovers += len(o.Activity)
 	}
+	for _, nd := range r.QueryDelta {
+		if nd.Delta.Incomparable != "" {
+			s.QueryRefused++
+			continue
+		}
+		for _, e := range nd.Delta.Entries {
+			switch e.Status {
+			case diff.QueryGrew, diff.QueryShrank, diff.QueryNew:
+				s.QueryMovers++
+			case diff.QueryReset, diff.QueryTruncated:
+				// no subtractable baseline: growth is unknowable, so this is
+				// not a mover
+				s.QueryUnknown++
+			}
+		}
+	}
 	s.ObjectsChanged = len(r.Objects)
 	for i, o := range r.Objects {
 		if i >= 5 {
@@ -133,8 +149,25 @@ func headline(r *Result, s Summary) string {
 	if s.ActivityMovers > 0 {
 		parts = append(parts, fmt.Sprintf("%s of activity drift", plural(s.ActivityMovers, "mover", "movers")))
 	}
-	return fmt.Sprintf("%s across %s, %s → %s",
-		strings.Join(parts, "; "), plural(s.ObjectsChanged, "object", "objects"), short(r.FromHash), short(r.ToHash))
+	if s.QueryMovers > 0 {
+		parts = append(parts, fmt.Sprintf("%s of query drift", plural(s.QueryMovers, "shape", "shapes")))
+	}
+	if s.QueryUnknown > 0 {
+		parts = append(parts, fmt.Sprintf("%s with no comparable baseline", plural(s.QueryUnknown, "shape", "shapes")))
+	}
+	if s.QueryRefused > 0 {
+		parts = append(parts, fmt.Sprintf("query stats not comparable on %s", plural(s.QueryRefused, "node", "nodes")))
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("no reportable changes between %s and %s", short(r.FromHash), short(r.ToHash))
+	}
+	// query shapes are not schema objects, so a query-only diff has none to
+	// count and "across 0 objects" would read as a contradiction
+	if s.ObjectsChanged > 0 {
+		return fmt.Sprintf("%s across %s, %s → %s",
+			strings.Join(parts, "; "), plural(s.ObjectsChanged, "object", "objects"), short(r.FromHash), short(r.ToHash))
+	}
+	return fmt.Sprintf("%s, %s → %s", strings.Join(parts, "; "), short(r.FromHash), short(r.ToHash))
 }
 
 func buildCorrelation(window time.Duration, fromKind, toKind history.SnapshotKind, from, to *moment) Correlation {

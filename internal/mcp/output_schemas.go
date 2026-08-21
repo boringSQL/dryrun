@@ -147,7 +147,7 @@ var (
 
 	snapshotDiffOutputSchema = json.RawMessage(`{
 		"type": "object",
-		"description": "Diff between two snapshots: refs, headline summary, ranked per-object deltas for the requested kind, correlated planner/activity drift; full view adds raw per-row deltas.",
+		"description": "Diff between two snapshots: refs, headline summary, ranked per-object deltas for the requested kind, correlated planner/activity drift, and per-node query-shape drift (query_delta) whose means are over the window rather than since pg_stat_statements last reset; full view adds raw per-row deltas.",
 		"properties": {
 			` + metaProperty + `
 		},
