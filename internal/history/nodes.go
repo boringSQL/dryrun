@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sort"
 	"time"
 )
@@ -99,6 +100,33 @@ func (s *Store) ListNodes(ctx context.Context, key SnapshotKey) ([]NodeSummary, 
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
 	return out, nil
+}
+
+// Newest recorded fingerprint for a label; empty when never recorded.
+func (s *Store) LatestNodeFingerprint(ctx context.Context, key SnapshotKey, nodeLabel string) (string, string, error) {
+	pid, did := string(key.ProjectID), string(key.DatabaseID)
+	var startedAt, addr sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT started, addr FROM (
+		   SELECT timestamp AS ts, id, 0 AS stream,
+		          `+nodeJSONExpr("", "$.node.postmaster_start_time")+` AS started,
+		          `+nodeJSONExpr("", "$.node.server_addr")+` AS addr
+		     FROM activity_stats WHERE project_id = ? AND database_id = ? AND node_source = ?
+		   UNION ALL
+		   SELECT timestamp, id, 1,
+		          `+nodeJSONExpr("", "$.node.postmaster_start_time")+`,
+		          `+nodeJSONExpr("", "$.node.server_addr")+`
+		     FROM query_stats WHERE project_id = ? AND database_id = ? AND node_source = ?
+		 ) WHERE started IS NOT NULL ORDER BY ts DESC, stream ASC, id DESC LIMIT 1`,
+		pid, did, nodeLabel, pid, did, nodeLabel,
+	).Scan(&startedAt, &addr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return startedAt.String, addr.String, nil
 }
 
 func roleFromExtract(standby sql.NullInt64) string {

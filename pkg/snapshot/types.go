@@ -482,6 +482,9 @@ type NodeIdentity struct {
 	IsStandby bool      `json:"is_standby"`
 	PgVersion string    `json:"pg_version"`
 	Timestamp time.Time `json:"timestamp"`
+	// distinguishes two members of one cluster; system_identifier cannot
+	PostmasterStartTime *time.Time `json:"postmaster_start_time,omitempty"`
+	ServerAddr          string     `json:"server_addr,omitempty"`
 }
 
 type TableSizingEntry struct {

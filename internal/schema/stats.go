@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/boringsql/qshape"
 	"github.com/boringsql/qshape/tags"
@@ -231,13 +232,14 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 // name derived from the server (cluster_name / address), never the machine running dryrun.
 func CaptureNodeIdentity(ctx context.Context, pool Querier, source string) (*NodeIdentity, error) {
 	var (
-		isStandby   bool
-		pgVersion   string
-		clusterName string
-		serverAddr  string
+		isStandby    bool
+		pgVersion    string
+		clusterName  string
+		serverAddr   string
+		postmasterUp time.Time
 	)
 	if err := pool.QueryRow(ctx, q("fetch-node-identity")).
-		Scan(&isStandby, &pgVersion, &clusterName, &serverAddr); err != nil {
+		Scan(&isStandby, &pgVersion, &clusterName, &serverAddr, &postmasterUp); err != nil {
 		return nil, fmt.Errorf("fetch node identity: %w", err)
 	}
 	takenAt, err := serverNow(ctx, pool)
@@ -252,10 +254,12 @@ func CaptureNodeIdentity(ctx context.Context, pool Querier, source string) (*Nod
 			"derived", source)
 	}
 	return &NodeIdentity{
-		Source:    source,
-		IsStandby: isStandby,
-		PgVersion: pgVersion,
-		Timestamp: takenAt,
+		Source:              source,
+		IsStandby:           isStandby,
+		PgVersion:           pgVersion,
+		Timestamp:           takenAt,
+		PostmasterStartTime: &postmasterUp,
+		ServerAddr:          serverAddr,
 	}, nil
 }
 

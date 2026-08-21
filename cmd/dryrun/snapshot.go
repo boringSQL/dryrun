@@ -122,6 +122,32 @@ func guardNodeRole(ctx context.Context, store initWriter, key history.SnapshotKe
 		opts.Label, prev, role))
 }
 
+// Warns rather than fails: under a label that names a pool this is normal.
+func warnNodeIdentityDrift(ctx context.Context, store initWriter, key history.SnapshotKey, label string, node schema.NodeIdentity) {
+	prevStart, prevAddr, err := store.LatestNodeFingerprint(ctx, key, label)
+	if err != nil || prevStart == "" || node.PostmasterStartTime == nil {
+		return
+	}
+	// compare instants: a pulled row carries the producer's offset
+	prev, err := time.Parse(time.RFC3339Nano, prevStart)
+	if err != nil || prev.Equal(*node.PostmasterStartTime) {
+		return
+	}
+	// same address, new start time: a restart, not a different machine
+	if prevAddr != "" && prevAddr == node.ServerAddr {
+		fmt.Fprintf(os.Stderr,
+			"warning: %s restarted since the last capture under label %q (counters reset).\n",
+			node.ServerAddr, label)
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"warning: label %q previously reported a different server (started %s, addr %s; now %s, addr %s).\n"+
+			"  If this label names one node, its counters now mix two machines and deltas will be wrong.\n"+
+			"  If it names a pool, expect this.\n",
+		label, prev.Format(time.RFC3339Nano), prevAddr,
+		node.PostmasterStartTime.Format(time.RFC3339Nano), node.ServerAddr)
+}
+
 func snapshotQueryStatsCmd() *cobra.Command {
 	var (
 		from        string
@@ -218,6 +244,7 @@ func runSnapshotQueryStats(ctx context.Context, cap initCapturer, store initWrit
 		}
 		return fmt.Errorf("capture query stats: %w", err)
 	}
+	warnNodeIdentityDrift(ctx, store, key, opts.Label, qs.Node)
 	outcome, err := store.PutQueryStats(ctx, key, qs)
 	if err != nil {
 		return fmt.Errorf("save query stats: %w", err)
@@ -264,6 +291,7 @@ func runSnapshotActivity(ctx context.Context, cap initCapturer, store initWriter
 	if err != nil {
 		return fmt.Errorf("capture activity stats: %w", err)
 	}
+	warnNodeIdentityDrift(ctx, store, key, opts.Label, activity.Node)
 	if _, err := store.PutActivity(ctx, key, activity); err != nil {
 		return fmt.Errorf("save activity stats: %w", err)
 	}

@@ -42,7 +42,8 @@ SELECT s.schemaname                       AS schema_name,
 SELECT pg_catalog.pg_is_in_recovery()                     AS is_standby,
        version()                                          AS pg_version,
        COALESCE(current_setting('cluster_name', true), '') AS cluster_name,
-       COALESCE(host(pg_catalog.inet_server_addr()), '')   AS server_addr
+       COALESCE(host(pg_catalog.inet_server_addr()), '')   AS server_addr,
+       pg_catalog.pg_postmaster_start_time()              AS postmaster_start_time
 
 -- name: fetch-database-stats
 SELECT d.deadlocks,
