@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -21,6 +22,7 @@ func snapshotActivityCmd() *cobra.Command {
 		allowOrphan     bool
 		historyDB       string
 		allowRoleChange bool
+		allowRotation   bool
 		pushAfter       bool
 		pushRemote      string
 	)
@@ -69,6 +71,7 @@ func snapshotActivityCmd() *cobra.Command {
 				AllowOrphan:     allowOrphan,
 				RowCap:          rowCap,
 				AllowRoleChange: allowRoleChange,
+				AllowRotation:   allowRotation,
 			}); err != nil {
 				return err
 			}
@@ -88,6 +91,7 @@ func snapshotActivityCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&from, "from", "", "node connection URL (default: --db)")
 	cmd.Flags().BoolVar(&allowRoleChange, "allow-role-change", false, "accept a label whose role flipped (promotion/failover)")
+	cmd.Flags().BoolVar(&allowRotation, "allow-rotation", false, "this label names a pool; do not warn when it alternates between servers")
 	cmd.Flags().StringVar(&label, "label", "", "node label for the activity row (required)")
 	cmd.Flags().BoolVar(&allowOrphan, "allow-orphan", false, "permit capture without a bound schema snapshot")
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
@@ -101,6 +105,7 @@ type captureOptions struct {
 	AllowOrphan     bool
 	RowCap          int
 	AllowRoleChange bool
+	AllowRotation   bool
 }
 
 func guardNodeRole(ctx context.Context, store initWriter, key history.SnapshotKey, opts captureOptions, role string) error {
@@ -122,40 +127,83 @@ func guardNodeRole(ctx context.Context, store initWriter, key history.SnapshotKe
 		opts.Label, prev, role))
 }
 
-// Warns rather than fails: under a label that names a pool this is normal.
-func warnNodeIdentityDrift(ctx context.Context, store initWriter, key history.SnapshotKey, label string, node schema.NodeIdentity) {
-	prevStart, prevAddr, err := store.LatestNodeFingerprint(ctx, key, label)
-	if err != nil || prevStart == "" || node.PostmasterStartTime == nil {
+// 2.5.1: oscillation (A->B->A) is a rotating endpoint and warns; a one-way
+// change is a restart or a replacement and only notices. Never fails: a label
+// may legitimately name a pool, which is what --allow-rotation declares.
+func warnNodeIdentityDrift(ctx context.Context, store initWriter, key history.SnapshotKey, label string, node schema.NodeIdentity, allowRotation bool) {
+	if node.PostmasterStartTime == nil {
 		return
 	}
-	// compare instants: a pulled row carries the producer's offset
-	prev, err := time.Parse(time.RFC3339Nano, prevStart)
-	if err != nil || prev.Equal(*node.PostmasterStartTime) {
+	seen, err := store.RecentNodeFingerprints(ctx, key, label)
+	if err != nil {
+		slog.Debug("node fingerprint check skipped", "node", label, "error", err)
 		return
 	}
-	// same address, new start time: a restart, not a different machine
-	if prevAddr != "" && prevAddr == node.ServerAddr {
-		fmt.Fprintf(os.Stderr,
-			"warning: %s restarted since the last capture under label %q (counters reset).\n",
+	if len(seen) == 0 {
+		return
+	}
+	prev := seen[0]
+	if prev.StartedAt.Equal(*node.PostmasterStartTime) {
+		return
+	}
+	for _, f := range seen[1:] {
+		if f.StartedAt.Equal(*node.PostmasterStartTime) {
+			if allowRotation {
+				return
+			}
+			fmt.Fprintf(os.Stderr,
+				"warning: label %q is alternating between servers (%d distinct in the last %d rows).\n"+
+					"  Their counters are interleaving under one label and deltas will be wrong.\n"+
+					"  If it names a pool, pass --allow-rotation; otherwise --label is aimed at a rotating endpoint.\n",
+				label, countDistinctServers(seen, *node.PostmasterStartTime), len(seen))
+			return
+		}
+	}
+	if prev.ServerAddr != "" && prev.ServerAddr == node.ServerAddr {
+		fmt.Fprintf(os.Stderr, "notice: %s restarted since the last capture under label %q (counters reset).\n",
 			node.ServerAddr, label)
 		return
 	}
 	fmt.Fprintf(os.Stderr,
-		"warning: label %q previously reported a different server (started %s, addr %s; now %s, addr %s).\n"+
-			"  If this label names one node, its counters now mix two machines and deltas will be wrong.\n"+
-			"  If it names a pool, expect this.\n",
-		label, prev.Format(time.RFC3339Nano), prevAddr,
-		node.PostmasterStartTime.Format(time.RFC3339Nano), node.ServerAddr)
+		"notice: label %q now reports a different server (was started %s addr %s; now %s addr %s).\n"+
+			"  Expected after a restart or a node replacement. Watch for it alternating back.\n",
+		label, prev.StartedAt.Format(time.RFC3339Nano), addrOrUnknown(prev.ServerAddr),
+		node.PostmasterStartTime.Format(time.RFC3339Nano), addrOrUnknown(node.ServerAddr))
+}
+
+func countDistinctServers(seen []history.NodeFingerprint, current time.Time) int {
+	distinct := []time.Time{current}
+	for _, f := range seen {
+		known := false
+		for _, d := range distinct {
+			if d.Equal(f.StartedAt) {
+				known = true
+				break
+			}
+		}
+		if !known {
+			distinct = append(distinct, f.StartedAt)
+		}
+	}
+	return len(distinct)
+}
+
+func addrOrUnknown(addr string) string {
+	if addr == "" {
+		return "unknown"
+	}
+	return addr
 }
 
 func snapshotQueryStatsCmd() *cobra.Command {
 	var (
-		from        string
-		label       string
-		allowOrphan bool
-		historyDB   string
-		pushAfter   bool
-		pushRemote  string
+		from          string
+		label         string
+		allowOrphan   bool
+		historyDB     string
+		allowRotation bool
+		pushAfter     bool
+		pushRemote    string
 	)
 
 	cmd := &cobra.Command{
@@ -198,9 +246,10 @@ func snapshotQueryStatsCmd() *cobra.Command {
 
 			key := resolveSnapshotKey()
 			if err := runSnapshotQueryStats(ctx, cap, store, key, captureOptions{
-				Label:       label,
-				AllowOrphan: allowOrphan,
-				RowCap:      rowCap,
+				Label:         label,
+				AllowOrphan:   allowOrphan,
+				RowCap:        rowCap,
+				AllowRotation: allowRotation,
 			}); err != nil {
 				return err
 			}
@@ -220,6 +269,7 @@ func snapshotQueryStatsCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&from, "from", "", "connection URL, primary or standby (default: --db)")
 	cmd.Flags().StringVar(&label, "label", "", "node label for the query-stats row (required)")
+	cmd.Flags().BoolVar(&allowRotation, "allow-rotation", false, "this label names a pool; do not warn when it alternates between servers")
 	cmd.Flags().BoolVar(&allowOrphan, "allow-orphan", false, "permit capture without a bound schema snapshot")
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
 	cmd.Flags().BoolVar(&pushAfter, "push", false, "push the snapshot to a remote after capture")
@@ -244,7 +294,7 @@ func runSnapshotQueryStats(ctx context.Context, cap initCapturer, store initWrit
 		}
 		return fmt.Errorf("capture query stats: %w", err)
 	}
-	warnNodeIdentityDrift(ctx, store, key, opts.Label, qs.Node)
+	warnNodeIdentityDrift(ctx, store, key, qs.Node.Source, qs.Node, opts.AllowRotation)
 	outcome, err := store.PutQueryStats(ctx, key, qs)
 	if err != nil {
 		return fmt.Errorf("save query stats: %w", err)
@@ -291,7 +341,7 @@ func runSnapshotActivity(ctx context.Context, cap initCapturer, store initWriter
 	if err != nil {
 		return fmt.Errorf("capture activity stats: %w", err)
 	}
-	warnNodeIdentityDrift(ctx, store, key, opts.Label, activity.Node)
+	warnNodeIdentityDrift(ctx, store, key, activity.Node.Source, activity.Node, opts.AllowRotation)
 	if _, err := store.PutActivity(ctx, key, activity); err != nil {
 		return fmt.Errorf("save activity stats: %w", err)
 	}

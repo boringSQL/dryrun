@@ -3,7 +3,6 @@ package history
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"sort"
 	"time"
 )
@@ -25,6 +24,13 @@ type (
 		RoleFlipped bool `json:"role_flipped,omitempty"`
 		// a timestamp that would not parse; LastCapture is zero
 		CorruptRows int `json:"corrupt_rows,omitempty"`
+	}
+
+	// which server a capture came from: boot time identifies the member,
+	// address only colours the message
+	NodeFingerprint struct {
+		StartedAt  time.Time
+		ServerAddr string
 	}
 
 	nodeAgg struct {
@@ -102,31 +108,56 @@ func (s *Store) ListNodes(ctx context.Context, key SnapshotKey) ([]NodeSummary, 
 	return out, nil
 }
 
-// Newest recorded fingerprint for a label; empty when never recorded.
-func (s *Store) LatestNodeFingerprint(ctx context.Context, key SnapshotKey, nodeLabel string) (string, string, error) {
+// 2.5.1: oscillation is judged over a window, not against one prior row.
+const (
+	nodeFingerprintRows = 20
+	nodeFingerprintAge  = 30 * 24 * time.Hour
+)
+
+// Newest first, fingerprinted rows only. Unparseable rows are skipped:
+// corruption is not evidence the node moved.
+func (s *Store) RecentNodeFingerprints(ctx context.Context, key SnapshotKey, nodeLabel string) ([]NodeFingerprint, error) {
 	pid, did := string(key.ProjectID), string(key.DatabaseID)
-	var startedAt, addr sql.NullString
-	err := s.db.QueryRowContext(ctx,
+	since := time.Now().UTC().Add(-nodeFingerprintAge).Format(time.RFC3339)
+	// each arm orders and limits on its own so the index supplies the order;
+	// sorting the whole window to return 20 rows runs on every capture
+	arm := func(table string) string {
+		return `SELECT timestamp AS ts, id, ` + nodeJSONExpr("", "$.node.postmaster_start_time") + ` AS started,
+		               ` + nodeJSONExpr("", "$.node.server_addr") + ` AS addr
+		          FROM ` + table + `
+		         WHERE project_id = ? AND database_id = ? AND node_source = ? AND timestamp >= ?
+		         ORDER BY timestamp DESC, id DESC LIMIT ?`
+	}
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT started, addr FROM (
-		   SELECT timestamp AS ts, id, 0 AS stream,
-		          `+nodeJSONExpr("", "$.node.postmaster_start_time")+` AS started,
-		          `+nodeJSONExpr("", "$.node.server_addr")+` AS addr
-		     FROM activity_stats WHERE project_id = ? AND database_id = ? AND node_source = ?
+		   SELECT ts, id, 0 AS stream, started, addr FROM (`+arm("activity_stats")+`)
 		   UNION ALL
-		   SELECT timestamp, id, 1,
-		          `+nodeJSONExpr("", "$.node.postmaster_start_time")+`,
-		          `+nodeJSONExpr("", "$.node.server_addr")+`
-		     FROM query_stats WHERE project_id = ? AND database_id = ? AND node_source = ?
-		 ) WHERE started IS NOT NULL ORDER BY ts DESC, stream ASC, id DESC LIMIT 1`,
-		pid, did, nodeLabel, pid, did, nodeLabel,
-	).Scan(&startedAt, &addr)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", nil
-	}
+		   SELECT ts, id, 1, started, addr FROM (`+arm("query_stats")+`)
+		 ) WHERE started IS NOT NULL
+		 ORDER BY ts DESC, stream ASC, id DESC LIMIT ?`,
+		pid, did, nodeLabel, since, nodeFingerprintRows,
+		pid, did, nodeLabel, since, nodeFingerprintRows,
+		nodeFingerprintRows,
+	)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
-	return startedAt.String, addr.String, nil
+	defer rows.Close()
+
+	var out []NodeFingerprint
+	for rows.Next() {
+		var started string
+		var addr sql.NullString
+		if err := rows.Scan(&started, &addr); err != nil {
+			return nil, err
+		}
+		at, perr := time.Parse(time.RFC3339Nano, started)
+		if perr != nil {
+			continue
+		}
+		out = append(out, NodeFingerprint{StartedAt: at, ServerAddr: addr.String})
+	}
+	return out, rows.Err()
 }
 
 func roleFromExtract(standby sql.NullInt64) string {

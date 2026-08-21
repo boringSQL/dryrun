@@ -343,10 +343,12 @@ func TestListNodes_AgreesWithCaptureGuard(t *testing.T) {
 	}
 }
 
-func putNodeActivityFingerprint(t *testing.T, s *Store, key SnapshotKey, hash, label string, started time.Time, addr string) {
+// rowTS (when we captured) and started (when that server booted) are separate
+// facts: a returning member has an old start time on a new row.
+func putNodeActivityFingerprintAt(t *testing.T, s *Store, key SnapshotKey, hash, label string, rowTS, started time.Time, addr string) {
 	t.Helper()
 	a := activityFixture("sr", hash, label, false)
-	a.Node.Timestamp = started
+	a.Node.Timestamp = rowTS
 	a.Node.PostmasterStartTime = &started
 	a.Node.ServerAddr = addr
 	if _, err := s.PutActivity(context.Background(), key, a); err != nil {
@@ -354,88 +356,112 @@ func putNodeActivityFingerprint(t *testing.T, s *Store, key SnapshotKey, hash, l
 	}
 }
 
-// LatestNodeFingerprint answers "which server did this label last capture
-// from", so the next capture can notice the label moved. It reads the same
-// rows as LatestNodeRole and must break ties the same way, or the role guard
-// and the drift warning end up describing different captures.
-func TestLatestNodeFingerprint(t *testing.T) {
+// RecentNodeFingerprints backs the drift check. It answers "which servers has
+// this label captured from lately", newest first, because oscillation (A->B->A)
+// is what identifies a rotating endpoint -- a single change is just a restart.
+func TestRecentNodeFingerprints(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
-	base := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	// relative to now: the window is computed from the clock, so fixed dates
+	// would fall out of it and fail on a date rather than on a change
+	base := time.Now().UTC().Truncate(time.Second).Add(-24 * time.Hour)
 
-	t.Run("no rows yields empty, not an error", func(t *testing.T) {
-		started, addr, err := store.LatestNodeFingerprint(ctx, key, "never-seen")
+	t.Run("no rows yields nothing, not an error", func(t *testing.T) {
+		seen, err := store.RecentNodeFingerprints(ctx, key, "never-seen")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if started != "" || addr != "" {
-			t.Errorf("got %q/%q, want empty -- a first capture must not warn", started, addr)
+		if len(seen) != 0 {
+			t.Errorf("got %d fingerprints, want none -- a first capture must not warn", len(seen))
 		}
 	})
 
-	t.Run("reads back what was captured", func(t *testing.T) {
-		putNodeActivityFingerprint(t, store, key, "fp-1", "node-a", base, "10.0.0.1")
-		started, addr, err := store.LatestNodeFingerprint(ctx, key, "node-a")
+	t.Run("newest first, with what was captured", func(t *testing.T) {
+		putNodeActivityFingerprintAt(t, store, key, "fp-1", "node-a", base, base, "10.0.0.1")
+		putNodeActivityFingerprintAt(t, store, key, "fp-2", "node-a", base.Add(time.Hour), base.Add(time.Hour), "10.0.0.2")
+		seen, err := store.RecentNodeFingerprints(ctx, key, "node-a")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if addr != "10.0.0.1" {
-			t.Errorf("addr %q, want 10.0.0.1", addr)
+		if len(seen) != 2 {
+			t.Fatalf("got %d fingerprints, want 2", len(seen))
 		}
-		got, perr := time.Parse(time.RFC3339Nano, started)
-		if perr != nil {
-			t.Fatalf("stored start time %q does not parse: %v", started, perr)
+		if !seen[0].StartedAt.Equal(base.Add(time.Hour)) || seen[0].ServerAddr != "10.0.0.2" {
+			t.Errorf("newest is %s/%s, want the later row", seen[0].StartedAt, seen[0].ServerAddr)
 		}
-		if !got.Equal(base) {
-			t.Errorf("start time %s, want %s", got, base)
+		if !seen[1].StartedAt.Equal(base) {
+			t.Errorf("second is %s, want %s", seen[1].StartedAt, base)
 		}
 	})
 
-	t.Run("newest row wins", func(t *testing.T) {
-		later := base.Add(2 * time.Hour)
-		putNodeActivityFingerprint(t, store, key, "fp-2", "node-a", later, "10.0.0.2")
-		started, addr, err := store.LatestNodeFingerprint(ctx, key, "node-a")
+	// the whole point: the window has to reach past the previous row, or
+	// A->B->A is indistinguishable from a one-way change
+	t.Run("window reaches past the previous row", func(t *testing.T) {
+		// server A returns: a new capture carrying A's original start time
+		putNodeActivityFingerprintAt(t, store, key, "fp-3", "node-a",
+			base.Add(2*time.Hour), base, "10.0.0.1")
+		seen, err := store.RecentNodeFingerprints(ctx, key, "node-a")
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, _ := time.Parse(time.RFC3339Nano, started)
-		if !got.Equal(later) || addr != "10.0.0.2" {
-			t.Errorf("got %s/%s, want the newer row %s/10.0.0.2", got, addr, later)
+		if len(seen) < 3 {
+			t.Fatalf("got %d fingerprints, want the full history", len(seen))
+		}
+		var distinct int
+		for i, f := range seen {
+			if i == 0 || !f.StartedAt.Equal(seen[i-1].StartedAt) {
+				distinct++
+			}
+		}
+		if distinct < 3 {
+			t.Errorf("alternation is not visible in the window: %+v", seen)
 		}
 	})
 
-	// rows written before the fingerprint existed carry no start time; they
-	// must be skipped rather than answering "" and masking an older real
-	// observation, which would silently disable the warning
+	// rows written before the fingerprint existed carry none; they must drop
+	// out rather than appear as a distinct member
 	t.Run("rows without a fingerprint are skipped", func(t *testing.T) {
-		insertRawActivity(t, store, key, "fp-legacy", "node-a",
-			base.Add(9*time.Hour).Format(time.RFC3339), `{"node":{"source":"node-a","is_standby":false}}`)
-		started, addr, err := store.LatestNodeFingerprint(ctx, key, "node-a")
+		insertRawActivity(t, store, key, "fp-legacy", "node-legacy",
+			base.Format(time.RFC3339), `{"node":{"source":"node-legacy","is_standby":false}}`)
+		seen, err := store.RecentNodeFingerprints(ctx, key, "node-legacy")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if started == "" {
-			t.Fatal("a legacy row masked the recorded fingerprint")
+		if len(seen) != 0 {
+			t.Errorf("got %d fingerprints from unfingerprinted rows", len(seen))
 		}
-		if addr != "10.0.0.2" {
-			t.Errorf("addr %q, want the newest row that has one", addr)
+	})
+
+	// corruption is not evidence the node moved
+	t.Run("unparseable start times are skipped, not fatal", func(t *testing.T) {
+		insertRawActivity(t, store, key, "fp-bad", "node-bad", base.Format(time.RFC3339),
+			`{"node":{"source":"node-bad","postmaster_start_time":"not-a-timestamp"}}`)
+		putNodeActivityFingerprintAt(t, store, key, "fp-good", "node-bad", base.Add(time.Hour), base.Add(time.Hour), "10.0.0.9")
+		seen, err := store.RecentNodeFingerprints(ctx, key, "node-bad")
+		if err != nil {
+			t.Fatalf("a corrupt value failed the read: %v", err)
+		}
+		if len(seen) != 1 || seen[0].ServerAddr != "10.0.0.9" {
+			t.Errorf("got %+v, want only the readable row", seen)
 		}
 	})
 
 	t.Run("scoped to its own label and project", func(t *testing.T) {
-		putNodeActivityFingerprint(t, store, key, "fp-other", "node-b", base, "10.9.9.9")
-		if _, addr, _ := store.LatestNodeFingerprint(ctx, key, "node-a"); addr == "10.9.9.9" {
-			t.Error("another label's fingerprint leaked in")
+		putNodeActivityFingerprintAt(t, store, key, "fp-other", "node-b", base, base, "10.9.9.9")
+		seen, _ := store.RecentNodeFingerprints(ctx, key, "node-a")
+		for _, f := range seen {
+			if f.ServerAddr == "10.9.9.9" {
+				t.Error("another label's fingerprint leaked in")
+			}
 		}
 		other := SnapshotKey{ProjectID: "elsewhere", DatabaseID: "d"}
-		if started, _, _ := store.LatestNodeFingerprint(ctx, other, "node-a"); started != "" {
-			t.Error("another project's fingerprint leaked in")
+		if s, _ := store.RecentNodeFingerprints(ctx, other, "node-a"); len(s) != 0 {
+			t.Error("another project's fingerprints leaked in")
 		}
 	})
 
-	// a label may capture only query stats
-	t.Run("falls back to query_stats", func(t *testing.T) {
+	t.Run("includes query_stats rows", func(t *testing.T) {
 		q := queryStatsFixture("sr", "qfp-1", "node-q")
 		q.Node.Timestamp = base
 		q.Node.PostmasterStartTime = &base
@@ -443,8 +469,60 @@ func TestLatestNodeFingerprint(t *testing.T) {
 		if _, err := store.PutQueryStats(ctx, key, q); err != nil {
 			t.Fatal(err)
 		}
-		if _, addr, _ := store.LatestNodeFingerprint(ctx, key, "node-q"); addr != "10.0.0.7" {
-			t.Errorf("addr %q, want 10.0.0.7 from query_stats", addr)
+		seen, _ := store.RecentNodeFingerprints(ctx, key, "node-q")
+		if len(seen) != 1 || seen[0].ServerAddr != "10.0.0.7" {
+			t.Errorf("got %+v, want the query_stats fingerprint", seen)
+		}
+	})
+
+	t.Run("rows older than the window are excluded", func(t *testing.T) {
+		old := base.Add(-nodeFingerprintAge - 24*time.Hour)
+		putNodeActivityFingerprintAt(t, store, key, "fp-ancient", "node-old", old, old, "10.0.0.5")
+		if seen, _ := store.RecentNodeFingerprints(ctx, key, "node-old"); len(seen) != 0 {
+			t.Errorf("got %d fingerprints from outside the window", len(seen))
+		}
+		putNodeActivityFingerprintAt(t, store, key, "fp-recent", "node-old", base, base, "10.0.0.6")
+		if seen, _ := store.RecentNodeFingerprints(ctx, key, "node-old"); len(seen) != 1 {
+			t.Errorf("got %d fingerprints, want only the in-window row", len(seen))
+		}
+	})
+
+	// the two streams are one series: a query-stats row between two activity
+	// rows must sort into place, or oscillation spanning both is invisible
+	t.Run("streams interleave by timestamp", func(t *testing.T) {
+		putNodeActivityFingerprintAt(t, store, key, "mix-1", "node-mix", base, base, "10.0.0.1")
+		q := queryStatsFixture("sr", "mix-2", "node-mix")
+		mid := base.Add(time.Hour)
+		q.Node.Timestamp, q.Node.PostmasterStartTime, q.Node.ServerAddr = mid, &mid, "10.0.0.2"
+		if _, err := store.PutQueryStats(ctx, key, q); err != nil {
+			t.Fatal(err)
+		}
+		putNodeActivityFingerprintAt(t, store, key, "mix-3", "node-mix",
+			base.Add(2*time.Hour), base, "10.0.0.1")
+
+		seen, err := store.RecentNodeFingerprints(ctx, key, "node-mix")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(seen) != 3 {
+			t.Fatalf("got %d fingerprints, want 3 across both streams", len(seen))
+		}
+		if !seen[1].StartedAt.Equal(mid) {
+			t.Errorf("query-stats row did not sort between the activity rows: %+v", seen)
+		}
+	})
+
+	t.Run("window is bounded", func(t *testing.T) {
+		for i := 0; i < nodeFingerprintRows+5; i++ {
+			at := base.Add(time.Duration(i) * time.Minute)
+			putNodeActivityFingerprintAt(t, store, key, fmt.Sprintf("bulk-%d", i), "node-bulk", at, at, "10.0.0.1")
+		}
+		seen, err := store.RecentNodeFingerprints(ctx, key, "node-bulk")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(seen) != nodeFingerprintRows {
+			t.Errorf("window returned %d rows, want %d", len(seen), nodeFingerprintRows)
 		}
 	})
 }

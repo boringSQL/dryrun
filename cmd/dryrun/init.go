@@ -38,7 +38,7 @@ type initWriter interface {
 	PutActivity(ctx context.Context, key history.SnapshotKey, a *schema.ActivityStatsSnapshot) (history.PutOutcome, error)
 	PutQueryStats(ctx context.Context, key history.SnapshotKey, q *schema.QueryStatsSnapshot) (history.PutOutcome, error)
 	LatestNodeRole(ctx context.Context, key history.SnapshotKey, nodeLabel string) (string, error)
-	LatestNodeFingerprint(ctx context.Context, key history.SnapshotKey, nodeLabel string) (string, string, error)
+	RecentNodeFingerprints(ctx context.Context, key history.SnapshotKey, nodeLabel string) ([]history.NodeFingerprint, error)
 }
 
 // one REPEATABLE READ, READ ONLY tx (as pg_dump uses) for the whole capture:
@@ -298,7 +298,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		if err != nil {
 			return fmt.Errorf("capture activity stats: %w", err)
 		}
-		warnNodeIdentityDrift(ctx, store, key, activity.Node.Source, activity.Node)
+		warnNodeIdentityDrift(ctx, store, key, activity.Node.Source, activity.Node, false)
 		if _, err := store.PutActivity(ctx, key, activity); err != nil {
 			return fmt.Errorf("save activity stats: %w", err)
 		}
@@ -372,7 +372,7 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 	if err != nil {
 		return snap, planner, nil, masked, fmt.Errorf("capture activity stats: %w", err)
 	}
-	warnNodeIdentityDrift(ctx, store, key, activity.Node.Source, activity.Node)
+	warnNodeIdentityDrift(ctx, store, key, activity.Node.Source, activity.Node, false)
 	if _, err := store.PutActivity(ctx, key, activity); err != nil {
 		slog.Warn("could not save activity stats", "error", err)
 	}
