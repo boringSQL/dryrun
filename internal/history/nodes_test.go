@@ -342,3 +342,109 @@ func TestListNodes_AgreesWithCaptureGuard(t *testing.T) {
 		}
 	}
 }
+
+func putNodeActivityFingerprint(t *testing.T, s *Store, key SnapshotKey, hash, label string, started time.Time, addr string) {
+	t.Helper()
+	a := activityFixture("sr", hash, label, false)
+	a.Node.Timestamp = started
+	a.Node.PostmasterStartTime = &started
+	a.Node.ServerAddr = addr
+	if _, err := s.PutActivity(context.Background(), key, a); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// LatestNodeFingerprint answers "which server did this label last capture
+// from", so the next capture can notice the label moved. It reads the same
+// rows as LatestNodeRole and must break ties the same way, or the role guard
+// and the drift warning end up describing different captures.
+func TestLatestNodeFingerprint(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	base := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+
+	t.Run("no rows yields empty, not an error", func(t *testing.T) {
+		started, addr, err := store.LatestNodeFingerprint(ctx, key, "never-seen")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if started != "" || addr != "" {
+			t.Errorf("got %q/%q, want empty -- a first capture must not warn", started, addr)
+		}
+	})
+
+	t.Run("reads back what was captured", func(t *testing.T) {
+		putNodeActivityFingerprint(t, store, key, "fp-1", "node-a", base, "10.0.0.1")
+		started, addr, err := store.LatestNodeFingerprint(ctx, key, "node-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if addr != "10.0.0.1" {
+			t.Errorf("addr %q, want 10.0.0.1", addr)
+		}
+		got, perr := time.Parse(time.RFC3339Nano, started)
+		if perr != nil {
+			t.Fatalf("stored start time %q does not parse: %v", started, perr)
+		}
+		if !got.Equal(base) {
+			t.Errorf("start time %s, want %s", got, base)
+		}
+	})
+
+	t.Run("newest row wins", func(t *testing.T) {
+		later := base.Add(2 * time.Hour)
+		putNodeActivityFingerprint(t, store, key, "fp-2", "node-a", later, "10.0.0.2")
+		started, addr, err := store.LatestNodeFingerprint(ctx, key, "node-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := time.Parse(time.RFC3339Nano, started)
+		if !got.Equal(later) || addr != "10.0.0.2" {
+			t.Errorf("got %s/%s, want the newer row %s/10.0.0.2", got, addr, later)
+		}
+	})
+
+	// rows written before the fingerprint existed carry no start time; they
+	// must be skipped rather than answering "" and masking an older real
+	// observation, which would silently disable the warning
+	t.Run("rows without a fingerprint are skipped", func(t *testing.T) {
+		insertRawActivity(t, store, key, "fp-legacy", "node-a",
+			base.Add(9*time.Hour).Format(time.RFC3339), `{"node":{"source":"node-a","is_standby":false}}`)
+		started, addr, err := store.LatestNodeFingerprint(ctx, key, "node-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if started == "" {
+			t.Fatal("a legacy row masked the recorded fingerprint")
+		}
+		if addr != "10.0.0.2" {
+			t.Errorf("addr %q, want the newest row that has one", addr)
+		}
+	})
+
+	t.Run("scoped to its own label and project", func(t *testing.T) {
+		putNodeActivityFingerprint(t, store, key, "fp-other", "node-b", base, "10.9.9.9")
+		if _, addr, _ := store.LatestNodeFingerprint(ctx, key, "node-a"); addr == "10.9.9.9" {
+			t.Error("another label's fingerprint leaked in")
+		}
+		other := SnapshotKey{ProjectID: "elsewhere", DatabaseID: "d"}
+		if started, _, _ := store.LatestNodeFingerprint(ctx, other, "node-a"); started != "" {
+			t.Error("another project's fingerprint leaked in")
+		}
+	})
+
+	// a label may capture only query stats
+	t.Run("falls back to query_stats", func(t *testing.T) {
+		q := queryStatsFixture("sr", "qfp-1", "node-q")
+		q.Node.Timestamp = base
+		q.Node.PostmasterStartTime = &base
+		q.Node.ServerAddr = "10.0.0.7"
+		if _, err := store.PutQueryStats(ctx, key, q); err != nil {
+			t.Fatal(err)
+		}
+		if _, addr, _ := store.LatestNodeFingerprint(ctx, key, "node-q"); addr != "10.0.0.7" {
+			t.Errorf("addr %q, want 10.0.0.7 from query_stats", addr)
+		}
+	})
+}

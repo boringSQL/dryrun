@@ -1057,3 +1057,92 @@ func TestCaptureRuleVersionWireRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// The node identity fingerprint (postmaster_start_time / server_addr) rides
+// inside the payload but must stay OUTSIDE both content hashes. If it ever
+// entered one, a node restart would change the digest of otherwise-identical
+// stats: local dedup would stop collapsing them, and every remote push would
+// upload the same content under a new digest forever. Both hash functions
+// canonicalize an explicit field list taking only Node.Source, and these tests
+// exist so that stays true when fields are added.
+func TestActivityContentHash_IgnoresNodeFingerprint(t *testing.T) {
+	started := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	a := &ActivityStatsSnapshot{
+		SchemaRefHash: "sr",
+		Node:          NodeIdentity{Source: "primary", PgVersion: "17.0"},
+		Tables:        []TableActivityEntry{{Table: QualifiedName{Schema: "public", Name: "users"}}},
+	}
+	before := ComputeActivityContentHash(a)
+
+	a.Node.PostmasterStartTime = &started
+	a.Node.ServerAddr = "10.0.0.1"
+	if got := ComputeActivityContentHash(a); got != before {
+		t.Errorf("fingerprint changed the activity digest:\n before %s\n after  %s", before, got)
+	}
+
+	// a restart on the same node must not move it either
+	restarted := started.Add(time.Hour)
+	a.Node.PostmasterStartTime = &restarted
+	a.Node.ServerAddr = "10.0.0.2"
+	if got := ComputeActivityContentHash(a); got != before {
+		t.Errorf("a changed fingerprint moved the activity digest: %s != %s", got, before)
+	}
+
+	// the label is identity and must still count
+	a.Node.Source = "replica"
+	if got := ComputeActivityContentHash(a); got == before {
+		t.Error("node source no longer affects the activity digest")
+	}
+}
+
+func TestQueryStatsContentHash_IgnoresNodeFingerprint(t *testing.T) {
+	started := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	q := &QueryStatsSnapshot{
+		SchemaRefHash: "sr",
+		Node:          NodeIdentity{Source: "primary", PgVersion: "17.0"},
+		Queries: []QueryStatsEntry{{
+			Fingerprint: "sha1:abc",
+			Members:     []QueryStatsMember{{QueryID: 42, Calls: 5}},
+			Calls:       5,
+		}},
+	}
+	before := ComputeQueryStatsContentHash(q)
+
+	q.Node.PostmasterStartTime = &started
+	q.Node.ServerAddr = "10.0.0.1"
+	if got := ComputeQueryStatsContentHash(q); got != before {
+		t.Errorf("fingerprint changed the query-stats digest:\n before %s\n after  %s", before, got)
+	}
+}
+
+// The wire shape has to survive a round trip, since a pulled snapshot is
+// decoded before its digest is recomputed by the receiving store.
+func TestNodeFingerprint_SurvivesJSONRoundTrip(t *testing.T) {
+	started := time.Date(2026, 8, 20, 9, 0, 0, 123456000, time.UTC)
+	in := NodeIdentity{Source: "primary", PostmasterStartTime: &started, ServerAddr: "10.0.0.1"}
+
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out NodeIdentity
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.PostmasterStartTime == nil || !out.PostmasterStartTime.Equal(started) {
+		t.Errorf("start time did not round trip: %v", out.PostmasterStartTime)
+	}
+	if out.ServerAddr != in.ServerAddr {
+		t.Errorf("server addr %q, want %q", out.ServerAddr, in.ServerAddr)
+	}
+
+	// absent on an older capture: nil, never a zero time that would read as a
+	// real observation
+	var legacy NodeIdentity
+	if err := json.Unmarshal([]byte(`{"source":"primary","is_standby":false}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.PostmasterStartTime != nil {
+		t.Errorf("missing field decoded to %v, want nil", legacy.PostmasterStartTime)
+	}
+}

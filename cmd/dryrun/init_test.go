@@ -94,6 +94,7 @@ type stubWriter struct {
 	PrevRoleErr                               error
 	PrevStart                                 string
 	PrevAddr                                  string
+	PrevFpErr                                 error
 }
 
 func (s *stubWriter) LatestNodeRole(_ context.Context, _ history.SnapshotKey, _ string) (string, error) {
@@ -101,7 +102,7 @@ func (s *stubWriter) LatestNodeRole(_ context.Context, _ history.SnapshotKey, _ 
 }
 
 func (s *stubWriter) LatestNodeFingerprint(_ context.Context, _ history.SnapshotKey, _ string) (string, string, error) {
-	return s.PrevStart, s.PrevAddr, nil
+	return s.PrevStart, s.PrevAddr, s.PrevFpErr
 }
 
 func (s *stubWriter) GetSchema(_ context.Context, _ history.SnapshotKey, _ history.SnapshotRef) (*schema.SchemaSnapshot, error) {
