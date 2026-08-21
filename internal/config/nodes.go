@@ -88,6 +88,27 @@ func nodeNames(nodes []ResolvedNode) []string {
 	return out
 }
 
+// resolveNode's stream rules for names from the CLI instead of a [[node]]
+// block: fail before anything connects
+func ValidateStreams(streams []string) error {
+	for _, s := range streams {
+		if err := validateStream(strings.TrimSpace(s)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateStream(s string) error {
+	if s == "schema" {
+		return fmt.Errorf("stream \"schema\": captured by `dryrun snapshot take`, which guards that it runs on a primary")
+	}
+	if !hasString(knownStreams, s) {
+		return fmt.Errorf("stream %q: want one of %s", s, strings.Join(knownStreams, ", "))
+	}
+	return nil
+}
+
 func resolveNode(n NodeConfig) (ResolvedNode, error) {
 	r := ResolvedNode{Name: strings.TrimSpace(n.Name), Pool: n.Pool}
 	if r.Name == "" {
@@ -113,11 +134,8 @@ func resolveNode(n NodeConfig) (ResolvedNode, error) {
 
 	for _, s := range n.Streams {
 		s = strings.TrimSpace(s)
-		if s == "schema" {
-			return r, fmt.Errorf("stream \"schema\": captured by `dryrun snapshot take`, which guards that it runs on a primary")
-		}
-		if !hasString(knownStreams, s) {
-			return r, fmt.Errorf("stream %q: want one of %s", s, strings.Join(knownStreams, ", "))
+		if err := validateStream(s); err != nil {
+			return r, err
 		}
 		if !hasString(r.Streams, s) {
 			r.Streams = append(r.Streams, s)

@@ -43,6 +43,8 @@ func snapshotCaptureCmd(historyDB *string) *cobra.Command {
 		allowRoleChange       bool
 		pushAfter             bool
 		pushRemote            string
+		check                 bool
+		checkTimeout          time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -53,9 +55,21 @@ func snapshotCaptureCmd(historyDB *string) *cobra.Command {
 Nodes come from [[node]] blocks in dryrun.toml, or from --from/--label for a
 one-off. With --all every configured node is captured in turn; --due skips the
 ones whose interval has not elapsed, so a single cron line implements every
-node's cadence.`,
+node's cadence.
+
+--check is the preflight: it connects to every target, runs SELECT 1, and
+reports what capture would do -- role, database, server, streams -- without
+capturing anything. Nodes are checked independently, so one unreachable node
+still leaves a full report, and the exit status is non-zero if any node would
+fail.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if check && pushAfter {
+				return fmt.Errorf("--check writes nothing, so there is nothing to --push")
+			}
+			if check && checkTimeout <= 0 {
+				return fmt.Errorf("--check-timeout must be positive")
+			}
 			targets, err := captureTargets(nodeName, from, label, streams, all)
 			if err != nil {
 				return err
@@ -69,6 +83,31 @@ node's cadence.`,
 				return err
 			}
 
+			key := resolveSnapshotKey()
+			opts := captureRunOptions{
+				AllowOrphan:     allowOrphan,
+				AllowRotation:   allowRotation,
+				AllowRoleChange: allowRoleChange,
+				Due:             due,
+			}
+
+			// the preflight takes no lock: it has to work while the cron capture
+			// it's diagnosing is still running
+			if check {
+				// a failed preflight isn't a usage error; the report is the output
+				cmd.SilenceUsage = true
+				// resolve masking before touching any node: require_masks fails
+				// the whole capture, so find out now
+				if _, err := buildMasker(key); err != nil {
+					return err
+				}
+				// same for a bad row cap: fails every node
+				if _, err := resolveQueryStatsRowCap(); err != nil {
+					return err
+				}
+				return runCaptureCheck(cmd.Context(), store, key, targets, opts, checkTimeout, cmd.OutOrStdout())
+			}
+
 			// one capture at a time per project: an overlapping cron tick on a
 			// slow node would otherwise stack connections on production
 			unlock, err := lockCaptures(*historyDB)
@@ -77,20 +116,13 @@ node's cadence.`,
 			}
 			defer unlock()
 
-			key := resolveSnapshotKey()
 			// same policy resolution `snapshot take` uses, including
 			// require_masks; planner rows are pushed, so this is not optional
 			policy, err := buildMasker(key)
 			if err != nil {
 				return err
 			}
-			opts := captureRunOptions{
-				MaskPolicy:      policy,
-				AllowOrphan:     allowOrphan,
-				AllowRotation:   allowRotation,
-				AllowRoleChange: allowRoleChange,
-				Due:             due,
-			}
+			opts.MaskPolicy = policy
 
 			var failed []string
 			for _, t := range targets {
@@ -134,6 +166,8 @@ node's cadence.`,
 	cmd.Flags().BoolVar(&allowOrphan, "allow-orphan", false, "permit capture without a bound schema snapshot")
 	cmd.Flags().BoolVar(&allowRotation, "allow-rotation", false, "this label names a pool; do not warn when it alternates between servers")
 	cmd.Flags().BoolVar(&allowRoleChange, "allow-role-change", false, "accept a label whose role flipped (promotion/failover)")
+	cmd.Flags().BoolVar(&check, "check", false, "preflight only: connect, SELECT 1, report what capture would do; capture nothing")
+	cmd.Flags().DurationVar(&checkTimeout, "check-timeout", checkTimeoutDefault, "per-node time budget for --check")
 	cmd.Flags().BoolVar(&pushAfter, "push", false, "push to a remote after capturing")
 	cmd.Flags().StringVar(&pushRemote, "remote", "", "configured [[remote]] name (with --push)")
 	return cmd
@@ -159,6 +193,11 @@ type captureRunOptions struct {
 func captureTargets(nodeName, from, label string, streams []string, all bool) ([]captureTarget, error) {
 	if all && (nodeName != "" || from != "") {
 		return nil, fmt.Errorf("--all captures every configured node; drop --node/--from")
+	}
+	// unknown --streams must fail before anything connects; config streams
+	// are checked when the node resolves
+	if err := config.ValidateStreams(streams); err != nil {
+		return nil, err
 	}
 	if from != "" && nodeName != "" {
 		return nil, fmt.Errorf("--from is a one-off connection; it does not combine with --node")

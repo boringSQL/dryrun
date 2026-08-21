@@ -574,3 +574,14 @@ func FetchSystemIdentifier(ctx context.Context, pool Querier) (string, error) {
 	err := pool.QueryRow(ctx, "SELECT system_identifier::text FROM pg_catalog.pg_control_system()").Scan(&id)
 	return id, err
 }
+
+// QueryStatsAvailable runs CaptureQueryStats' first probe without reading
+// rows; the preflight needs it per node
+func QueryStatsAvailable(ctx context.Context, pool Querier) (bool, error) {
+	var installed, hasInfoView, hasToplevel, renamedBlkTime bool
+	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).
+		Scan(&installed, &hasInfoView, &hasToplevel, &renamedBlkTime); err != nil {
+		return false, fmt.Errorf("check pg_stat_statements: %w", err)
+	}
+	return installed, nil
+}
