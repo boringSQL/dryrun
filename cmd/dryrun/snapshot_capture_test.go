@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/boringsql/fixturize/masking"
 
 	"github.com/boringsql/dryrun/internal/config"
 	"github.com/boringsql/dryrun/internal/history"
@@ -263,5 +266,76 @@ func putQueryAt(t *testing.T, s *history.Store, key history.SnapshotKey, hash, l
 	}
 	if _, err := s.PutQueryStats(context.Background(), key, q); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// `capture` writes planner rows that `push` ships to a registry, so it must
+// mask exactly as `snapshot take` does. Before this test the planner stream
+// bypassed masking, bloat annotation and Masking entirely.
+func TestCaptureStream_PlannerMasksLikeTake(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "testdb"}
+	target := captureTarget{Label: "primary"}
+
+	cases := []struct {
+		name       string
+		policy     *masking.Policy
+		wantMasked map[string]bool
+	}{
+		{"no policy leaves stats intact", nil, map[string]bool{"email": false, "id": false}},
+		{"policy nulls the matching column only", loadTestPolicy(t, "users.email"), map[string]bool{"email": true, "id": false}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cap := &stubCapturer{PlannerColumns: []schema.ColumnStatsEntry{
+				colWithStats("users", "email"),
+				colWithStats("users", "id"),
+			}}
+			w := &stubWriter{Stored: &schema.SchemaSnapshot{ContentHash: "sr-1"}}
+
+			if _, err := captureStream(ctx, cap, w, key, target, "planner", "sr-1", 0,
+				captureRunOptions{MaskPolicy: tc.policy}); err != nil {
+				t.Fatalf("captureStream: %v", err)
+			}
+			if w.LastPlanner == nil {
+				t.Fatal("PutPlanner never received a snapshot")
+			}
+			for _, c := range w.LastPlanner.Columns {
+				masked := c.Stats.MostCommonVals == nil
+				if masked != tc.wantMasked[c.Column] {
+					t.Errorf("column %s masked=%t, want %t", c.Column, masked, tc.wantMasked[c.Column])
+				}
+			}
+			// a row whose Masking is nil is indistinguishable from "unknown"
+			if w.LastPlanner.Masking == nil {
+				t.Fatal("Masking was not recorded on the row")
+			}
+			if w.LastPlanner.Masking.Applied != (tc.policy != nil) {
+				t.Errorf("Masking.Applied=%t, want %t", w.LastPlanner.Masking.Applied, tc.policy != nil)
+			}
+		})
+	}
+}
+
+// A node without pg_stat_statements must be skipped, not fail the fleet run
+// every five minutes forever.
+func TestCaptureStream_QueryStatsUnavailableIsSkipped(t *testing.T) {
+	cap := &stubCapturer{QueryStatsErr: schema.ErrQueryStatsUnavailable}
+	w := &stubWriter{Stored: &schema.SchemaSnapshot{ContentHash: "sr-1"}}
+
+	_, err := captureStream(context.Background(), cap, w,
+		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"},
+		captureTarget{Label: "replica"}, "query", "sr-1", 0, captureRunOptions{})
+	if !errors.Is(err, errStreamUnavailable) {
+		t.Errorf("got %v, want errStreamUnavailable", err)
+	}
+}
+
+func TestCaptureStream_SchemaIsRefused(t *testing.T) {
+	_, err := captureStream(context.Background(), &stubCapturer{}, &stubWriter{},
+		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"},
+		captureTarget{Label: "primary"}, "schema", "sr-1", 0, captureRunOptions{})
+	if err == nil || !strings.Contains(err.Error(), "snapshot take") {
+		t.Errorf("got %v, want a pointer to snapshot take", err)
 	}
 }

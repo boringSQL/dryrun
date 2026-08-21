@@ -119,7 +119,7 @@ func TestRunSnapshotActivity_Branches(t *testing.T) {
 			name:            "standby without prior snapshot refused",
 			standby:         true,
 			stored:          nil,
-			wantErrContains: "no prior schema snapshot",
+			wantErrContains: "no schema snapshot to bind to",
 		},
 		{
 			name:          "standby with prior snapshot writes activity bound to its hash",

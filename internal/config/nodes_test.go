@@ -61,8 +61,12 @@ pool = true
 	})
 
 	t.Run("url comes from the environment, not the file", func(t *testing.T) {
-		if nodes[0].URL != "postgres://u@primary/db" {
-			t.Errorf("url %q", nodes[0].URL)
+		got, err := nodes[0].URL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "postgres://u@primary/db" {
+			t.Errorf("url %q", got)
 		}
 	})
 
@@ -119,6 +123,11 @@ func TestResolveNodes_Errors(t *testing.T) {
 			wantErr: "url or url_env is required",
 		},
 		{
+			name:    "schema is not a capture stream",
+			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\nstreams = [\"schema\"]\n",
+			wantErr: "snapshot take",
+		},
+		{
 			name:    "both url and url_env",
 			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\nurl_env = \"SOME_URL\"\n",
 			wantErr: "not both",
@@ -158,13 +167,57 @@ func TestResolveNodes_Errors(t *testing.T) {
 	}
 }
 
-// An unset url_env is the fleet-scale failure: cron does not inherit a login
-// shell, so one missing variable silently stops one node. It must fail loudly.
+// A cron host that lost one variable must still capture every other node, so
+// the URL is resolved at the point of use rather than when the config loads.
 func TestResolveNodes_UnsetURLEnv(t *testing.T) {
-	cfg := parseNodes(t, "[[node]]\nname = \"a\"\nurl_env = \"DEFINITELY_UNSET_URL\"\n")
-	_, err := cfg.ResolveNodes()
-	if err == nil || !strings.Contains(err.Error(), "unset") {
-		t.Fatalf("want an unset-env error, got %v", err)
+	t.Setenv("PRESENT_URL", "postgres://u@h/db")
+	cfg := parseNodes(t, `
+[[node]]
+name = "ok"
+url_env = "PRESENT_URL"
+
+[[node]]
+name = "broken"
+url_env = "DEFINITELY_UNSET_URL"
+`)
+	nodes, err := cfg.ResolveNodes()
+	if err != nil {
+		t.Fatalf("one unset variable failed the whole fleet: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("got %d nodes, want both", len(nodes))
+	}
+	if _, err := nodes[1].URL(); err != nil {
+		t.Fatalf("the good node could not resolve: %v", err)
+	}
+	if _, err := nodes[0].URL(); err == nil || !strings.Contains(err.Error(), "unset") {
+		t.Errorf("want an unset-env error from the broken node, got %v", err)
+	}
+}
+
+func TestResolvedNode_URLExpansion(t *testing.T) {
+	t.Setenv("PGURL", "postgres://u@h/db")
+	cfg := parseNodes(t, "[[node]]\nname = \"a\"\nurl = \"${PGURL}\"\n")
+	nodes, err := cfg.ResolveNodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := nodes[0].URL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "postgres://u@h/db" {
+		t.Errorf("url %q, want the expanded value", got)
+	}
+
+	// a reference that expands to nothing is a misconfiguration, not a URL
+	cfg2 := parseNodes(t, "[[node]]\nname = \"a\"\nurl = \"${DEFINITELY_UNSET_PGURL}\"\n")
+	n2, err := cfg2.ResolveNodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n2[0].URL(); err == nil || !strings.Contains(err.Error(), "expanded to nothing") {
+		t.Errorf("want an expansion error, got %v", err)
 	}
 }
 

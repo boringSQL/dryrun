@@ -10,16 +10,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/boringsql/fixturize/masking"
 	"github.com/spf13/cobra"
 
 	"github.com/boringsql/dryrun/internal/config"
+	"github.com/boringsql/dryrun/internal/datamask"
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/bloat"
 )
 
 type captureTarget struct {
-	Label   string
+	Label string
+	// nil for an ad-hoc --from; otherwise resolved per node so one missing
+	// environment variable costs one node, not the fleet
+	node    *config.ResolvedNode
 	URL     string
 	Role    string // primary | standby | auto
 	Streams []string
@@ -73,7 +79,14 @@ node's cadence.`,
 			defer unlock()
 
 			key := resolveSnapshotKey()
+			// same policy resolution `snapshot take` uses, including
+			// require_masks; planner rows are pushed, so this is not optional
+			policy, err := buildMasker(key)
+			if err != nil {
+				return err
+			}
 			opts := captureRunOptions{
+				MaskPolicy:      policy,
 				AllowOrphan:     allowOrphan,
 				AllowRotation:   allowRotation,
 				AllowRoleChange: allowRoleChange,
@@ -82,14 +95,18 @@ node's cadence.`,
 
 			var failed []string
 			for _, t := range targets {
-				if err := captureOneNode(cmd.Context(), store, key, t, opts); err != nil {
-					if len(targets) == 1 {
-						return err
-					}
-					// one bad node must not strand the rest of the fleet
-					fmt.Fprintf(os.Stderr, "error: %s: %s\n", t.Label, redactURLPasswords(err.Error()))
-					failed = append(failed, t.Label)
+				err := captureOneNode(cmd.Context(), store, key, t, opts)
+				if err == nil {
+					continue
 				}
+				// connection errors quote the URL, and cron logs it
+				err = errors.New(redactURLPasswords(err.Error()))
+				if len(targets) == 1 {
+					return err
+				}
+				// one bad node must not strand the rest of the fleet
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", t.Label, err)
+				failed = append(failed, t.Label)
 			}
 
 			if pushAfter && len(failed) < len(targets) {
@@ -125,7 +142,16 @@ node's cadence.`,
 	return cmd
 }
 
+// a stream this node cannot provide: skipped with a notice, never a failure
+var (
+	errStreamUnavailable = errors.New("stream unavailable on this node")
+	// the put collapsed into an existing row: nothing was written, so the
+	// summary must not claim a count
+	errStreamUnchanged = errors.New("unchanged since the last capture")
+)
+
 type captureRunOptions struct {
+	MaskPolicy      *masking.Policy
 	AllowOrphan     bool
 	AllowRotation   bool
 	AllowRoleChange bool
@@ -139,6 +165,11 @@ func captureTargets(nodeName, from, label string, streams []string, all bool) ([
 	}
 	if from != "" && nodeName != "" {
 		return nil, fmt.Errorf("--from is a one-off connection; it does not combine with --node")
+	}
+	// a label from config would be silently overridden, and silently is the
+	// problem: the label decides which series the counters land in
+	if label != "" && (all || nodeName != "") {
+		return nil, fmt.Errorf("--label names an ad-hoc node; a configured node's label is its [[node]] name")
 	}
 
 	if all || nodeName != "" {
@@ -182,7 +213,7 @@ func captureTargets(nodeName, from, label string, streams []string, all bool) ([
 func targetFromNode(n config.ResolvedNode, cliStreams []string) captureTarget {
 	t := captureTarget{
 		Label:    n.Name,
-		URL:      n.URL,
+		node:     &n,
 		Role:     n.Role,
 		Streams:  n.Streams,
 		Pool:     n.Pool,
@@ -196,6 +227,13 @@ func targetFromNode(n config.ResolvedNode, cliStreams []string) captureTarget {
 }
 
 func captureOneNode(ctx context.Context, store *history.Store, key history.SnapshotKey, t captureTarget, opts captureRunOptions) error {
+	url := t.URL
+	if t.node != nil {
+		var err error
+		if url, err = t.node.URL(); err != nil {
+			return err
+		}
+	}
 	// Decide cadence before connecting. On a fleet cron most ticks have
 	// nothing to do, and opening a production connection to find that out is
 	// the cost that makes a short interval expensive.
@@ -210,7 +248,7 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 		}
 	}
 
-	ctx, conn, err := connectDBProdFor(t.URL)
+	ctx, conn, err := connectDBProdFor(url)
 	if err != nil {
 		return err
 	}
@@ -231,8 +269,10 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 		role = history.NodeRoleStandby
 	}
 	if t.Role != "" && t.Role != "auto" && t.Role != role {
-		return dryrun.NewError(dryrun.ErrReplicaCapture,
-			fmt.Sprintf("configured role %s, but this node is a %s", t.Role, role))
+		return dryrun.NewError(dryrun.ErrNodeRoleChanged, fmt.Sprintf(
+			"[[node]] %s declares role %s, but this node is a %s.\n"+
+				"  After a failover, swap the roles in dryrun.toml or set role = auto.",
+			t.Label, t.Role, role))
 	}
 	if err := guardNodeRole(ctx, store, key, captureOptions{
 		Label: t.Label, AllowRoleChange: opts.AllowRoleChange,
@@ -253,12 +293,9 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 		return nil
 	}
 
-	schemaRef := ""
-	if snap, err := store.GetSchema(ctx, key, history.NewRefLatest()); err == nil && snap != nil {
-		schemaRef = snap.ContentHash
-	}
-	if schemaRef == "" && !opts.AllowOrphan {
-		return fmt.Errorf("no schema snapshot to bind to; run `dryrun snapshot take` on the primary first, or pass --allow-orphan")
+	schemaRef, err := resolveSchemaRef(ctx, store, key, opts.AllowOrphan)
+	if err != nil {
+		return err
 	}
 
 	rowCap, err := resolveQueryStatsRowCap()
@@ -269,10 +306,18 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 	var done []string
 	for _, s := range wanted {
 		n, err := captureStream(ctx, cap, store, key, t, s, schemaRef, rowCap, opts)
-		if err != nil {
+		switch {
+		case errors.Is(err, errStreamUnavailable):
+			done = append(done, s+"=n/a")
+		case errors.Is(err, errStreamUnchanged):
+			done = append(done, s+"=unchanged")
+		case err != nil:
+			// the capture shares one transaction, so a failed read can leave
+			// it unusable for the streams after it
 			return fmt.Errorf("%s: %w", s, err)
+		default:
+			done = append(done, fmt.Sprintf("%s=%d", s, n))
 		}
-		done = append(done, fmt.Sprintf("%s=%d", s, n))
 	}
 	fmt.Fprintf(os.Stderr, "%s (%s): %s\n", t.Label, role, strings.Join(done, " "))
 	if len(skipped) > 0 {
@@ -281,17 +326,33 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 	return nil
 }
 
-// Returns the item count so the caller can say what it actually wrote rather
-// than just that it ran.
-func captureStream(ctx context.Context, cap initCapturer, store *history.Store, key history.SnapshotKey, t captureTarget, stream, schemaRef string, rowCap int, opts captureRunOptions) (int, error) {
+func captureStream(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, t captureTarget, stream, schemaRef string, rowCap int, opts captureRunOptions) (int, error) {
 	switch stream {
 	case "planner":
+		// planner rows carry pg_statistic MCVs and histogram bounds, so they
+		// go through the same masking `snapshot take` applies -- push ships
+		// whatever lands in history.db
+		snap, err := store.GetSchema(ctx, key, history.NewRefLatest())
+		if err != nil || snap == nil {
+			return 0, fmt.Errorf("planner stats need a schema snapshot to annotate against; run `dryrun snapshot take` first")
+		}
 		p, err := cap.CapturePlanner(ctx, schemaRef)
 		if err != nil {
 			return 0, err
 		}
-		if _, err := store.PutPlanner(ctx, key, p); err != nil {
+		bloat.Annotate(p, snap)
+		masked := datamask.MaskPlanner(opts.MaskPolicy, p)
+		p.Masking = &schema.MaskingInfo{
+			Applied:       opts.MaskPolicy != nil,
+			ColumnsMasked: masked,
+			JSONBStripped: true,
+		}
+		out, err := store.PutPlanner(ctx, key, p)
+		if err != nil {
 			return 0, err
+		}
+		if out == history.PutDeduped {
+			return 0, errStreamUnchanged
 		}
 		return len(p.Tables), nil
 
@@ -309,15 +370,20 @@ func captureStream(ctx context.Context, cap initCapturer, store *history.Store, 
 	case "query":
 		q, err := cap.CaptureQueryStats(ctx, schemaRef, t.Label, rowCap)
 		if err != nil {
+			// a replica without the extension must not fail a fleet run every
+			// tick; every other capture path treats this as best-effort
 			if errors.Is(err, schema.ErrQueryStatsUnavailable) {
-				return 0, fmt.Errorf("pg_stat_statements is not available on this node; " +
-					"add it to shared_preload_libraries and restart, then CREATE EXTENSION pg_stat_statements")
+				return 0, errStreamUnavailable
 			}
 			return 0, err
 		}
 		warnNodeIdentityDrift(ctx, store, key, q.Node.Source, q.Node, opts.AllowRotation || t.Pool)
-		if _, err := store.PutQueryStats(ctx, key, q); err != nil {
+		out, err := store.PutQueryStats(ctx, key, q)
+		if err != nil {
 			return 0, err
+		}
+		if out == history.PutDeduped {
+			return 0, errStreamUnchanged
 		}
 		return len(q.Queries), nil
 
@@ -332,6 +398,9 @@ func captureStream(ctx context.Context, cap initCapturer, store *history.Store, 
 func candidateStreams(t captureTarget) []string {
 	if len(t.Streams) > 0 {
 		return t.Streams
+	}
+	if t.Role == "standby" {
+		return config.DefaultStreamsFor("standby")
 	}
 	return []string{"planner", "activity", "query"}
 }
@@ -368,7 +437,7 @@ func dueStreams(ctx context.Context, store *history.Store, key history.SnapshotK
 // Connection errors quote the URL they failed on, and --all puts that in a
 // cron log for every unreachable node.
 func redactURLPasswords(msg string) string {
-	for {
+	{
 		i := strings.Index(msg, "://")
 		if i < 0 {
 			return msg
@@ -407,14 +476,21 @@ const captureLockStale = 2 * time.Hour
 
 func lockCaptures(historyDB string) (func(), error) {
 	path := captureLockPath(historyDB)
-	if err := os.MkdirAll(filepathDir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err == nil {
-		fmt.Fprintf(f, "%d %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+		token := fmt.Sprintf("%d %s", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
+		fmt.Fprintln(f, token)
 		f.Close()
-		return func() { os.Remove(path) }, nil
+		// two processes can both take over the same stale lock; the loser must
+		// not delete the winner's
+		return func() {
+			if held, rerr := os.ReadFile(path); rerr == nil && strings.TrimSpace(string(held)) == token {
+				os.Remove(path)
+			}
+		}, nil
 	}
 	if !os.IsExist(err) {
 		return nil, err
@@ -434,5 +510,3 @@ func captureLockPath(historyDB string) string {
 	}
 	return filepath.Join(".dryrun", "capture.lock")
 }
-
-func filepathDir(p string) string { return filepath.Dir(p) }

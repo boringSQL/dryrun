@@ -30,7 +30,10 @@ func snapshotActivityCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "activity",
 		Short: "Capture activity stats from a node into history",
-		Args:  cobra.NoArgs,
+		Long: `Capture activity stats from a node into history.
+
+` + captureSupersedes + `  dryrun snapshot capture --from <url> --label <name> --streams activity`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if label == "" {
 				return fmt.Errorf("--label is required")
@@ -99,6 +102,26 @@ func snapshotActivityCmd() *cobra.Command {
 	cmd.Flags().StringVar(&pushRemote, "remote", "", "configured [[remote]] name (with --push)")
 	return cmd
 }
+
+// `capture` covers both of these and adds config-driven nodes, --all and
+// --due; they stay for the cron jobs already using them.
+const captureSupersedes = "Superseded by `dryrun snapshot capture`:\n"
+
+// Four call sites resolved this independently and worded the error four ways.
+func resolveSchemaRef(ctx context.Context, store initWriter, key history.SnapshotKey, allowOrphan bool) (string, error) {
+	if snap, err := store.GetSchema(ctx, key, history.NewRefLatest()); err == nil && snap != nil {
+		return snap.ContentHash, nil
+	}
+	if allowOrphan {
+		return "", nil
+	}
+	return "", fmt.Errorf("no schema snapshot to bind to; run `dryrun snapshot take` on the primary first, or pass --allow-orphan")
+}
+
+// pg_stat_statements is a server configuration, so the remedy is the same
+// wherever the capture was attempted from.
+const pgssUnavailable = "pg_stat_statements is not available on this node; " +
+	"add it to shared_preload_libraries and restart, then CREATE EXTENSION pg_stat_statements"
 
 type captureOptions struct {
 	Label           string
@@ -209,7 +232,10 @@ func snapshotQueryStatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query-stats",
 		Short: "Capture pg_stat_statements into history (primary or replica)",
-		Args:  cobra.NoArgs,
+		Long: `Capture pg_stat_statements into history (primary or replica).
+
+` + captureSupersedes + `  dryrun snapshot capture --from <url> --label <name> --streams query`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if label == "" {
 				return fmt.Errorf("--label is required")
@@ -278,19 +304,15 @@ func snapshotQueryStatsCmd() *cobra.Command {
 }
 
 func runSnapshotQueryStats(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, opts captureOptions) error {
-	schemaRef := ""
-	if snap, err := store.GetSchema(ctx, key, history.NewRefLatest()); err == nil && snap != nil {
-		schemaRef = snap.ContentHash
-	}
-	if schemaRef == "" && !opts.AllowOrphan {
-		return fmt.Errorf("no prior schema snapshot to bind to; take one first or pass --allow-orphan")
+	schemaRef, err := resolveSchemaRef(ctx, store, key, opts.AllowOrphan)
+	if err != nil {
+		return err
 	}
 
 	qs, err := cap.CaptureQueryStats(ctx, schemaRef, opts.Label, opts.RowCap)
 	if err != nil {
 		if errors.Is(err, schema.ErrQueryStatsUnavailable) {
-			return fmt.Errorf("pg_stat_statements is not available on this node; " +
-				"add it to shared_preload_libraries and restart, then CREATE EXTENSION pg_stat_statements")
+			return errors.New(pgssUnavailable)
 		}
 		return fmt.Errorf("capture query stats: %w", err)
 	}
@@ -329,12 +351,9 @@ func runSnapshotActivity(ctx context.Context, cap initCapturer, store initWriter
 		return err
 	}
 
-	schemaRef := ""
-	if snap, err := store.GetSchema(ctx, key, history.NewRefLatest()); err == nil && snap != nil {
-		schemaRef = snap.ContentHash
-	}
-	if schemaRef == "" && !opts.AllowOrphan {
-		return fmt.Errorf("no prior schema snapshot to bind to; take one on the primary first or pass --allow-orphan")
+	schemaRef, err := resolveSchemaRef(ctx, store, key, opts.AllowOrphan)
+	if err != nil {
+		return err
 	}
 
 	activity, err := cap.CaptureActivity(ctx, schemaRef, opts.Label)

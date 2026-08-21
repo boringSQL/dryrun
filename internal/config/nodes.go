@@ -12,16 +12,36 @@ type ResolvedNode struct {
 	Name string
 	// primary | standby | auto; asserted against the node at capture
 	Role string
-	URL  string
 	// nil when the block did not name any: the capture picks by detected role
 	Streams  []string
 	Interval time.Duration
 	Pool     bool
+
+	// resolved on demand: an unset variable is one node's problem, not the
+	// whole fleet's
+	url    string
+	urlEnv string
+}
+
+// URL reads the connection string from the environment at the point of use.
+func (n ResolvedNode) URL() (string, error) {
+	if n.urlEnv != "" {
+		v := os.Getenv(n.urlEnv)
+		if v == "" {
+			return "", fmt.Errorf("url_env %s is unset in this environment", n.urlEnv)
+		}
+		return v, nil
+	}
+	v := ExpandEnvVars(n.url)
+	if strings.Contains(n.url, "${") && v == "" {
+		return "", fmt.Errorf("url %q expanded to nothing", n.url)
+	}
+	return v, nil
 }
 
 // Streams a node can feed. schema and planner are primary-only in practice but
 // the check belongs at capture, where the role is known.
-var knownStreams = []string{"schema", "planner", "activity", "query"}
+var knownStreams = []string{"planner", "activity", "query"}
 
 // Config declares intent; nothing here connects. A bad block should fail the
 // command that reads it, not the capture that is already halfway through a
@@ -83,14 +103,19 @@ func resolveNode(n NodeConfig) (ResolvedNode, error) {
 		return r, fmt.Errorf("role %q: want primary, standby, or auto", n.Role)
 	}
 
-	url, err := nodeURL(n)
-	if err != nil {
-		return r, err
+	if n.URL != "" && n.URLEnv != "" {
+		return r, fmt.Errorf("set url or url_env, not both")
 	}
-	r.URL = url
+	if n.URL == "" && n.URLEnv == "" {
+		return r, fmt.Errorf("one of url or url_env is required")
+	}
+	r.url, r.urlEnv = n.URL, n.URLEnv
 
 	for _, s := range n.Streams {
 		s = strings.TrimSpace(s)
+		if s == "schema" {
+			return r, fmt.Errorf("stream \"schema\": captured by `dryrun snapshot take`, which guards that it runs on a primary")
+		}
 		if !hasString(knownStreams, s) {
 			return r, fmt.Errorf("stream %q: want one of %s", s, strings.Join(knownStreams, ", "))
 		}
@@ -110,28 +135,6 @@ func resolveNode(n NodeConfig) (ResolvedNode, error) {
 		r.Interval = d
 	}
 	return r, nil
-}
-
-// url_env names a variable; url may hold a ${VAR} reference. Neither should
-// carry a literal password, which is what keeps dryrun.toml committable.
-func nodeURL(n NodeConfig) (string, error) {
-	switch {
-	case n.URL != "" && n.URLEnv != "":
-		return "", fmt.Errorf("set url or url_env, not both")
-	case n.URLEnv != "":
-		v := os.Getenv(n.URLEnv)
-		if v == "" {
-			return "", fmt.Errorf("url_env %s is unset in this environment", n.URLEnv)
-		}
-		return v, nil
-	case n.URL != "":
-		v := ExpandEnvVars(n.URL)
-		if strings.Contains(n.URL, "${") && v == "" {
-			return "", fmt.Errorf("url %q expanded to nothing", n.URL)
-		}
-		return v, nil
-	}
-	return "", fmt.Errorf("one of url or url_env is required")
 }
 
 // DefaultStreamsFor is what a node captures when its block names none.

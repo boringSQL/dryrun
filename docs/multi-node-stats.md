@@ -151,16 +151,95 @@ Fix: add a covering index for the BI query pattern, or route analytics to a dedi
 
 A connection pooler is supposed to round-robin across three replicas, but `replica-1` handles 5x more traffic than the others. `detect kind=anomalies` flags the imbalance automatically.
 
+## Declaring the fleet
+
+Wiring every node's URL into cron by hand does not scale past a couple of replicas, and a missed variable fails silently until that node's next capture. Describe the fleet once instead:
+
+```toml
+[[node]]
+name     = "primary"
+role     = "primary"
+url_env  = "PRIMARY_URL"
+streams  = ["planner", "activity", "query"]
+interval = "1h"
+
+[[node]]
+name     = "replica-eu"
+role     = "standby"
+url_env  = "REPLICA_EU_URL"
+streams  = ["activity", "query"]
+interval = "30m"
+
+[[node]]
+name     = "read-pool"
+url_env  = "POOL_URL"
+streams  = ["query"]
+interval = "15m"
+pool     = true
+```
+
+`url_env` names an environment variable and `url` may hold a `${VAR}` reference, so `dryrun.toml` never carries a password and stays committable. `role` is asserted against the node at capture time; `auto` (the default) accepts whatever it finds. Omit `streams` and the detected role decides: a standby has no schema of its own and its planner stats mirror the primary's, so it captures activity and query only.
+
+`pool = true` says the label names a read pool rather than one machine. Members rotate by design there, so the identity-drift warning is suppressed for that label — see the fingerprint paragraph above. Do not set it on a label that is supposed to be one node: the warning is the only thing that tells you two servers' counters are interleaving.
+
+Then capture the whole fleet:
+
+```sh
+dryrun snapshot capture --all          # every node, every configured stream
+dryrun snapshot capture --all --due    # only what its interval says is due
+dryrun snapshot capture --node primary # one node from the config
+dryrun snapshot capture --from "$URL" --label replica-3 --streams query
+```
+
+`--due` is what makes one cron line implement every cadence:
+
+```sh
+*/5 * * * * app dryrun snapshot capture --all --due
+```
+
+Cadence is decided before connecting, so a tick with nothing due opens no database connections at all. One node failing logs and continues so a single unreachable replica does not strand the fleet, and the command exits nonzero if any node failed. A capture lock stops an overlapping tick from stacking a second set of production connections; a crashed run's lock is taken over after two hours.
+
+Two limits worth knowing. `--due` keys off the newest stored row, and a `snapshot pull` writes rows into the same tables, so pulling can make a node look freshly captured and skip one interval — it self-heals on the next tick. And a row dated in the future (a peer with a skewed clock) is ignored for cadence rather than trusted, since it is not evidence that this host captured anything.
+
+## Reading what changed
+
+`snapshot diff --kind query` subtracts two captures of one node:
+
+```sh
+dryrun snapshot diff --latest --kind query --node primary
+```
+
+```
+Query stats: node=primary, window 21h16m22s (2026-08-19 09:37:59 -> 2026-08-20 06:54:21)
+  +15190558 calls, +4348376 ms total
+
+  STATUS           CALLS       TIME(ms) MEAN(ms)           QUERY
+  grew           +337262        +623588 1.85<-1.78         SELECT time_entry.id, time_entry.type, time_ent…
+  grew              +330        +372305 1128.20<-463.64    WITH RECURSIVE project_hierarchy AS (SELECT id,…
+  new             +30963        +179610 5.80               WITH excluded_projects AS MATERIALIZED (SELECT …
+```
+
+The mean column is the point. `pg_stat_statements.mean_exec_time` averages since pgss last reset, so a query that got slower today is invisible in it; the window mean is `Δtotal_time / Δcalls` over the two captures, and `12.00<-2.00` reads as "12ms per call this window, up from 2ms". In the example above a recursive CTE running 330 times went from 464ms to 1128ms a call — a regression that the totals, dominated by a query running 3.9 million times at 0.03ms, would never show.
+
+Counters are cumulative, so the diff refuses rather than guesses. It will not subtract across a `pg_stat_statements` reset, a qshape regrouping, a capture-rule change, or two different nodes, and says which. Any counter going backwards makes that shape unsubtractable: an entry groups several queryids, so one member being evicted can pull time down while calls rise. If the older capture hit its row cap, shapes that appear in the newer one are marked `truncated` rather than `new` — they may have been running below the cap all along — and are left out of the totals.
+
+Statuses: `grew`, `shrank`, `flat`, `new`, `gone` (absent from an uncapped newer capture), `evicted` (absent from a capped one, so it may still be running), `reset`, `truncated`. `--json` carries every shape; the console shows movers only.
+
 ## Automating collection
 
 Activity captures are lightweight and safe for cron. Take the primary snapshot first so replica activity rows have a `schema_ref_hash` to attach to:
 
 ```sh
 # /etc/cron.d/dryrun-stats
-0  2 * * * app dryrun --profile primary  snapshot take
+0  2 * * * app dryrun snapshot take            # schema + planner, on the primary
+*/5 * * * * app dryrun snapshot capture --all --due
+```
+
+With [[node]] blocks the second line covers every node at its own interval. Without them, each node needs its own line:
+
+```sh
 15 2 * * * app dryrun --profile replica1 snapshot activity --from "$REPLICA1_DB" --label replica1
 15 2 * * * app dryrun --profile replica2 snapshot activity --from "$REPLICA2_DB" --label replica2
-15 2 * * * app dryrun --profile replica3 snapshot activity --from "$REPLICA3_DB" --label replica3
 ```
 
 `snapshot take` already captures the primary's own activity row (labeled `primary`), so the cron above has no separate `snapshot activity` line for it. Adding one is legal — `snapshot activity` accepts a primary — and is how you refresh primary activity counters more often than you re-snapshot the schema; reuse the same `--label` so both land in one series. `snapshot take` is idempotent on a quiet schema: repeated runs produce the same `schema_ref_hash`, so re-attaching activity rows is automatic. Run it nightly alongside activity captures, or only after migrations if you want fewer rows in history.

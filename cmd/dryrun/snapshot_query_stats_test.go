@@ -58,7 +58,7 @@ func TestRunSnapshotQueryStats_Branches(t *testing.T) {
 			name:            "no prior snapshot and no --allow-orphan is refused before capture",
 			standby:         true,
 			stored:          nil,
-			wantErrContains: "no prior schema snapshot",
+			wantErrContains: "no schema snapshot to bind to",
 			wantQueryStatsN: 0,
 		},
 		{
