@@ -592,3 +592,129 @@ func TestDiffQueryStats_DeallocIgnoredAcrossAReset(t *testing.T) {
 		}
 	}
 }
+
+// The label is a name, not proof of one machine -- which is why captures
+// record which server answered. Two servers' cumulative counters are
+// unrelated, so subtracting them fabricates growth.
+func TestDiffQueryStats_ServerChanged(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	bootA := t0.Add(-72 * time.Hour)
+	bootB := t0.Add(-2 * time.Hour)
+
+	withServer := func(q *snapshot.QueryStatsSnapshot, boot time.Time, addr string) *snapshot.QueryStatsSnapshot {
+		b := boot
+		q.Node.PostmasterStartTime = &b
+		q.Node.ServerAddr = addr
+		return q
+	}
+
+	t.Run("two addresses under one label is refused", func(t *testing.T) {
+		from := withServer(qSnap("pool", t0, qEntry("fp", "SELECT 1", 1000, 2000, 1000)), bootA, "10.0.0.1")
+		to := withServer(qSnap("pool", t0.Add(time.Hour), qEntry("fp", "SELECT 1", 40, 80, 40)), bootB, "10.0.0.2")
+
+		d, err := DiffQueryStats(from, to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Incomparable == "" {
+			t.Fatal("subtracted two servers' counters under one label")
+		}
+		if len(d.Entries) != 0 {
+			t.Error("produced entries for two unrelated servers")
+		}
+	})
+
+	// pg_stat_statements survives a clean restart, so a moved boot time alone
+	// is not grounds to refuse -- but it is worth saying out loud
+	t.Run("same address, new boot time still diffs, with a caveat", func(t *testing.T) {
+		from := withServer(qSnap("primary", t0, qEntry("fp", "SELECT 1", 100, 200, 100)), bootA, "10.0.0.1")
+		to := withServer(qSnap("primary", t0.Add(time.Hour), qEntry("fp", "SELECT 1", 300, 600, 300)), bootB, "10.0.0.1")
+
+		d, err := DiffQueryStats(from, to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Incomparable != "" {
+			t.Fatalf("refused a restart of the same machine: %s", d.Incomparable)
+		}
+		if d.ServerChanged == "" {
+			t.Error("the restart was not reported")
+		}
+		var said bool
+		for _, c := range d.Caveats {
+			if strings.Contains(c, "restarted or was replaced") {
+				said = true
+			}
+		}
+		if !said {
+			t.Errorf("caveats do not mention the restart: %v", d.Caveats)
+		}
+		if e := findEntry(t, d, "fp"); e.CallsDelta != 200 {
+			t.Errorf("calls delta %d, want 200", e.CallsDelta)
+		}
+	})
+
+	// an address is NULL over a Unix socket and identical behind a tunnel, so
+	// it can never be the thing that clears a diff
+	t.Run("unknown addresses caveat rather than refuse", func(t *testing.T) {
+		from := withServer(qSnap("primary", t0, qEntry("fp", "SELECT 1", 100, 200, 100)), bootA, "")
+		to := withServer(qSnap("primary", t0.Add(time.Hour), qEntry("fp", "SELECT 1", 300, 600, 300)), bootB, "")
+
+		d, err := DiffQueryStats(from, to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Incomparable != "" || d.ServerChanged == "" {
+			t.Errorf("incomparable=%q serverChanged=%q, want a caveat", d.Incomparable, d.ServerChanged)
+		}
+	})
+
+	t.Run("same server says nothing", func(t *testing.T) {
+		from := withServer(qSnap("primary", t0, qEntry("fp", "SELECT 1", 100, 200, 100)), bootA, "10.0.0.1")
+		to := withServer(qSnap("primary", t0.Add(time.Hour), qEntry("fp", "SELECT 1", 300, 600, 300)), bootA, "10.0.0.1")
+
+		d, err := DiffQueryStats(from, to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.ServerChanged != "" {
+			t.Errorf("reported a change on an unchanged server: %s", d.ServerChanged)
+		}
+	})
+
+	// captures predating the fingerprint carry none; the diff must still work
+	t.Run("no fingerprint on either side is silent", func(t *testing.T) {
+		d, err := DiffQueryStats(
+			qSnap("primary", t0, qEntry("fp", "SELECT 1", 100, 200, 100)),
+			qSnap("primary", t0.Add(time.Hour), qEntry("fp", "SELECT 1", 300, 600, 300)),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Incomparable != "" || d.ServerChanged != "" {
+			t.Errorf("unfingerprinted captures were flagged: %q / %q", d.Incomparable, d.ServerChanged)
+		}
+	})
+}
+
+// PostmasterStartTime and ServerAddr are independently optional, so a pair
+// with two addresses and no boot time on one side must still be refused --
+// gating the strong signal behind the weak one silently subtracts two
+// machines' counters.
+func TestDiffQueryStats_TwoAddressesWithoutBootTime(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := qSnap("pool", t0, qEntry("fp", "SELECT 1", 1000, 2000, 1000))
+	from.Node.ServerAddr = "10.0.0.1"
+	to := qSnap("pool", t0.Add(time.Hour), qEntry("fp", "SELECT 1", 40, 80, 40))
+	to.Node.ServerAddr = "10.0.0.2"
+	boot := t0.Add(-time.Hour)
+	to.Node.PostmasterStartTime = &boot // only one side carries it
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Incomparable == "" {
+		t.Fatal("subtracted two servers' counters because one boot time was missing")
+	}
+}

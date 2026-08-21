@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,13 +98,11 @@ node's cadence.`,
 				if err == nil {
 					continue
 				}
-				// connection errors quote the URL, and cron logs it
-				err = errors.New(redactURLPasswords(err.Error()))
 				if len(targets) == 1 {
 					return err
 				}
 				// one bad node must not strand the rest of the fleet
-				fmt.Fprintf(os.Stderr, "error: %s: %v\n", t.Label, err)
+				fmt.Fprintf(os.Stderr, "error: %s: %s\n", t.Label, redactSecrets(err.Error()))
 				failed = append(failed, t.Label)
 			}
 
@@ -434,27 +431,9 @@ func dueStreams(ctx context.Context, store *history.Store, key history.SnapshotK
 	return run, skipped, nil
 }
 
-// Connection errors quote the URL they failed on, and --all puts that in a
-// cron log for every unreachable node.
-func redactURLPasswords(msg string) string {
-	{
-		i := strings.Index(msg, "://")
-		if i < 0 {
-			return msg
-		}
-		rest := msg[i+3:]
-		at := strings.IndexAny(rest, "@ \t\n")
-		if at < 0 || rest[at] != '@' {
-			return msg[:i+3] + redactURLPasswords(rest)
-		}
-		cred := rest[:at]
-		colon := strings.Index(cred, ":")
-		if colon < 0 {
-			return msg[:i+3] + cred + "@" + redactURLPasswords(rest[at+1:])
-		}
-		return msg[:i+3] + cred[:colon] + ":***@" + redactURLPasswords(rest[at+1:])
-	}
-}
+// Redaction lives with the code that builds connection errors, so every
+// command benefits; --all is only the loudest consumer.
+func redactSecrets(msg string) string { return schema.RedactSecrets(msg) }
 
 // A legacy database never ran migrate(), so the node tables may not exist.
 func historyUsable(store *history.Store) error {
@@ -469,39 +448,61 @@ func historyUsable(store *history.Store) error {
 }
 
 // Single-flight across processes: a cron tick that overlaps a slow fleet
-// capture would otherwise open a second set of production connections. The
-// lock is advisory and self-healing -- a crashed run leaves a file, and the
-// next run past the timeout takes it over.
-const captureLockStale = 2 * time.Hour
-
+// capture would otherwise open a second set of production connections.
+//
+// A crashed run leaves the file behind and it is NOT taken over automatically.
+// Reclaiming a lock by path cannot be made safe -- rename and remove are both
+// unconditional, so two processes that agree a lock is stale will both take it
+// and both run -- and the alternative, a kernel lock, is not portable to every
+// platform this ships on. So a stale lock is reported with its age and cleared
+// by hand.
 func lockCaptures(historyDB string) (func(), error) {
 	path := captureLockPath(historyDB)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err == nil {
-		token := fmt.Sprintf("%d %s", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
-		fmt.Fprintln(f, token)
-		f.Close()
-		// two processes can both take over the same stale lock; the loser must
-		// not delete the winner's
-		return func() {
-			if held, rerr := os.ReadFile(path); rerr == nil && strings.TrimSpace(string(held)) == token {
-				os.Remove(path)
-			}
-		}, nil
-	}
-	if !os.IsExist(err) {
+	unlock, ok, err := tryLock(path)
+	if err != nil {
 		return nil, err
 	}
-	info, statErr := os.Stat(path)
-	if statErr == nil && time.Since(info.ModTime()) > captureLockStale {
-		slog.Warn("taking over a stale capture lock", "path", path, "age", time.Since(info.ModTime()).Round(time.Minute))
-		os.Remove(path)
-		return lockCaptures(historyDB)
+	if ok {
+		return unlock, nil
 	}
-	return nil, fmt.Errorf("another capture is running (%s); wait for it, or remove the file if it is stale", path)
+
+	held := "unknown age"
+	if info, serr := os.Stat(path); serr == nil {
+		held = fmt.Sprintf("held for %s", time.Since(info.ModTime()).Round(time.Second))
+	}
+	return nil, fmt.Errorf("another capture is running (%s, %s).\n"+
+		"  If no capture is running, that run crashed: rm %s", path, held, path)
+}
+
+// The token is what makes unlock safe: only the holder removes the file, so a
+// lock cleared by hand and retaken by another run is never deleted by the one
+// that lost it.
+func tryLock(path string) (func(), bool, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if os.IsExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	token := fmt.Sprintf("%d %s", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
+	if _, err := fmt.Fprintln(f, token); err != nil {
+		f.Close()
+		os.Remove(path)
+		return nil, false, err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return nil, false, err
+	}
+	return func() {
+		if got, rerr := os.ReadFile(path); rerr == nil && strings.TrimSpace(string(got)) == token {
+			os.Remove(path)
+		}
+	}, true, nil
 }
 
 func captureLockPath(historyDB string) string {

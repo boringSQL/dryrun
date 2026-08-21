@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -167,5 +168,31 @@ func checkAccess(ctx context.Context, pool *pgxpool.Pool, query string) bool {
 }
 
 func classifyConnError(err error, url string) error {
-	return fmt.Errorf("connection failed to %s: %w", url, err)
+	return fmt.Errorf("connection failed to %s: %w", RedactSecrets(url), err)
+}
+
+// Postgres takes a secret in three shapes, and a connection error quotes
+// whatever it failed with. Redacting here covers every command that connects,
+// not just the one that logs per node.
+var (
+	// scheme://user:secret@host -- greedy to the LAST @ in the run, so neither
+	// an unencoded @ nor a / inside the password leaks its tail. Over-redacts
+	// a path containing @, which is the safe direction.
+	urlCredRe = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://[^\s/@]*?):[^\s]*@`)
+	// ?password=secret or &password=secret
+	urlParamRe = regexp.MustCompile(`(?i)([?&](?:password|sslpassword)=)[^&\s]+`)
+	// keyword/value DSN: host=h password=secret. The left context is explicit
+	// rather than \b so APP_PASSWORD= is covered too -- an underscore is a
+	// word character, so \b would not fire there.
+	dsnRe = regexp.MustCompile(`(?i)(^|[\s'"?&;])([a-z0-9_]*password\s*=\s*)('[^']*'|"[^"]*"|\S+)`)
+	// a userinfo pair with no scheme in front of it; the password may not
+	// start with / so this cannot re-match an already-redacted URL
+	bareCredRe = regexp.MustCompile(`(^|\s)([^\s:/@]+):([^\s/@][^\s]*)@([^\s]+)`)
+)
+
+func RedactSecrets(msg string) string {
+	msg = urlCredRe.ReplaceAllString(msg, "$1:***@")
+	msg = urlParamRe.ReplaceAllString(msg, "${1}***")
+	msg = dsnRe.ReplaceAllString(msg, "${1}${2}***")
+	return bareCredRe.ReplaceAllString(msg, "${1}${2}:***@${4}")
 }

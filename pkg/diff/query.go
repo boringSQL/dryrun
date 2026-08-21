@@ -19,6 +19,9 @@ type (
 		// pg_stat_statements was reset between the captures: counters restarted
 		// from zero, so growth is unknowable for every shape
 		StatsReset bool `json:"stats_reset,omitempty"`
+		// the label reported a different server, but not provably a different
+		// machine (a restart looks the same); set when the diff proceeds anyway
+		ServerChanged string `json:"server_changed,omitempty"`
 		// either capture hit its row cap, so a shape missing from one side may
 		// simply have fallen out of the top-N
 		Truncated bool `json:"truncated,omitempty"`
@@ -118,6 +121,17 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 		return d, nil
 	}
 
+	// The label alone does not prove one machine -- that is the whole reason
+	// captures record which server answered. Two servers under one label have
+	// unrelated counters, and subtracting them fabricates growth.
+	if why, refuse := serverChanged(from, to); why != "" {
+		if refuse {
+			d.Incomparable = why
+			return d, nil
+		}
+		d.ServerChanged = why
+	}
+
 	d.StatsReset = statsWasReset(from, to)
 	d.FromTruncated = hitRowCap(from)
 	d.Truncated = hitRowCap(from) || hitRowCap(to)
@@ -213,6 +227,27 @@ func missingStatus(truncated bool) string {
 	return QueryGone
 }
 
+// A restart gives the same machine a new postmaster start time, and
+// pg_stat_statements survives a clean restart, so a moved start time alone is
+// not grounds to refuse. Two different addresses are: those are two machines,
+// and their counters have nothing to do with each other.
+func serverChanged(from, to *snapshot.QueryStatsSnapshot) (why string, refuse bool) {
+	// the two identity fields are independently optional, so the strong signal
+	// must not sit behind the weak one
+	fa, fb := from.Node.ServerAddr, to.Node.ServerAddr
+	if fa != "" && fb != "" && fa != fb {
+		return fmt.Sprintf("label %q covered two servers (%s and %s): their counters are unrelated",
+			to.Node.Source, fa, fb), true
+	}
+	a, b := from.Node.PostmasterStartTime, to.Node.PostmasterStartTime
+	if a == nil || b == nil || a.Equal(*b) {
+		return "", false
+	}
+	return fmt.Sprintf("the server behind %q restarted or was replaced between the captures (started %s, then %s); "+
+		"if it was replaced these deltas are not increments",
+		to.Node.Source, a.UTC().Format(time.RFC3339), b.UTC().Format(time.RFC3339)), false
+}
+
 // stats_reset moving is the only proof of a reset. dealloc moves under
 // ordinary eviction pressure, so it says nothing about resets.
 //
@@ -290,6 +325,9 @@ func queryCaveats(from, to *snapshot.QueryStatsSnapshot, d *QueryDelta) []string
 	if n := deallocGrowth(from, to); n > 0 {
 		out = append(out, fmt.Sprintf(
 			"pg_stat_statements evicted %d entries during the window (pgss.max pressure); 'new' may be a re-added shape and 'gone' an evicted one", n))
+	}
+	if d.ServerChanged != "" {
+		out = append(out, d.ServerChanged)
 	}
 	if straddledReset(from) || straddledReset(to) {
 		out = append(out, "pg_stat_statements was reset while a capture was reading it; that capture's rows are part pre-reset and part post-reset")

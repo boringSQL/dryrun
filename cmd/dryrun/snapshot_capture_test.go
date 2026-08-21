@@ -199,57 +199,153 @@ func TestLockCaptures(t *testing.T) {
 	}
 	unlock()
 
-	// released: the next run gets it
 	unlock2, err := lockCaptures(db)
 	if err != nil {
 		t.Fatalf("lock was not released: %v", err)
 	}
 	unlock2()
-
-	// a crashed run leaves a file behind; it must not block cron forever
-	t.Run("stale lock is taken over", func(t *testing.T) {
-		path := captureLockPath(db)
-		if err := os.WriteFile(path, []byte("1 stale\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		old := time.Now().Add(-captureLockStale - time.Hour)
-		if err := os.Chtimes(path, old, old); err != nil {
-			t.Fatal(err)
-		}
-		unlock, err := lockCaptures(db)
-		if err != nil {
-			t.Fatalf("a stale lock blocked the run: %v", err)
-		}
-		unlock()
-	})
 }
 
-// --all puts connection failures in a cron log for every unreachable node.
-func TestRedactURLPasswords(t *testing.T) {
-	cases := []struct{ in, want string }{
+// A lock left by a crashed run is reported, not silently reclaimed: taking one
+// over by path cannot be made race-free, and two processes that both decide a
+// lock is stale would both run against production.
+func TestLockCaptures_StaleLockIsReportedNotTaken(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "history.db")
+	path := captureLockPath(db)
+
+	if err := os.WriteFile(path, []byte("999 crashed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-72 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := lockCaptures(db)
+	if err == nil {
+		t.Fatal("an old lock was taken over automatically")
+	}
+	// the operator needs the age and the way out, not just a refusal
+	for _, want := range []string{path, "held for", "rm "} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	// cleared by hand, the next run takes it
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockCaptures(db)
+	if err != nil {
+		t.Fatalf("lock not available after clearing: %v", err)
+	}
+	unlock()
+}
+
+// A lock cleared by hand and retaken by another run must not be deleted by the
+// run that lost it.
+func TestLockCaptures_UnlockOnlyRemovesItsOwn(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "history.db")
+	path := captureLockPath(db)
+
+	mine, err := lockCaptures(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("someone else\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mine()
+	if _, err := os.Stat(path); err != nil {
+		t.Error("unlock deleted another run's lock")
+	}
+}
+
+// --all puts connection failures in a cron log for every unreachable node, and
+// Postgres takes secrets in three shapes.
+func TestRedactSecrets(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		want   string
+		secret string
+	}{
 		{
-			in:   "connection failed to postgres://postgres:hunter2@10.0.0.1:5432/db: refused",
-			want: "postgres://postgres:***@10.0.0.1:5432/db",
+			name:   "url credentials",
+			in:     "connection failed to postgres://postgres:hunter2@10.0.0.1:5432/db: refused",
+			want:   "postgres://postgres:***@10.0.0.1:5432/db",
+			secret: "hunter2",
 		},
 		{
+			// an unencoded @ in the password used to leak everything after it
+			name:   "unencoded at-sign in the password",
+			in:     "postgres://u:p@ss@host/db",
+			want:   "postgres://u:***@host/db",
+			secret: "p@ss",
+		},
+		{
+			name: "no password to redact",
 			in:   "postgres://nopassword@host/db",
 			want: "postgres://nopassword@host/db",
 		},
 		{
-			in:   "two: postgres://a:b@h1/db and postgres://c:d@h2/db",
-			want: "postgres://c:***@h2/db",
+			name:   "keyword dsn",
+			in:     "host=h port=5432 password=s3cret dbname=x",
+			want:   "password=***",
+			secret: "s3cret",
 		},
-		{in: "no url here", want: "no url here"},
+		{
+			name:   "quoted keyword dsn",
+			in:     "password='quoted secret' host=h",
+			want:   "password=***",
+			secret: "quoted secret",
+		},
+		{
+			name:   "url query parameter",
+			in:     "postgres://u@h/db?password=leaked&sslmode=require",
+			want:   "password=***",
+			secret: "leaked",
+		},
+		{
+			// an address is not a credential
+			name: "plain text is untouched",
+			in:   "no url here, owner@example.com",
+			want: "owner@example.com",
+		},
 	}
 	for _, tc := range cases {
-		got := redactURLPasswords(tc.in)
-		if !strings.Contains(got, tc.want) {
-			t.Errorf("redact(%q) = %q, want it to contain %q", tc.in, got, tc.want)
-		}
-		if strings.Contains(got, "hunter2") || strings.Contains(got, ":b@") || strings.Contains(got, ":d@") {
-			t.Errorf("redact(%q) = %q still carries a password", tc.in, got)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactSecrets(tc.in)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("redactSecrets(%q) = %q, want it to contain %q", tc.in, got, tc.want)
+			}
+			if tc.secret != "" && strings.Contains(got, tc.secret) {
+				t.Errorf("redactSecrets(%q) = %q still carries the secret", tc.in, got)
+			}
+		})
 	}
+
+	t.Run("every url in a message", func(t *testing.T) {
+		got := redactSecrets("two: postgres://a:b@h1/db and postgres://c:d@h2/db")
+		for _, leaked := range []string{":b@", ":d@"} {
+			if strings.Contains(got, leaked) {
+				t.Errorf("%q still carries a password", got)
+			}
+		}
+	})
+
+	// sslmode is not a secret; over-redacting hides the cause of the failure
+	t.Run("non-secret parameters survive", func(t *testing.T) {
+		got := redactSecrets("host=h user=app sslmode=require dbname=x")
+		for _, want := range []string{"host=h", "user=app", "sslmode=require"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("redaction ate %q: %s", want, got)
+			}
+		}
+	})
 }
 
 func putQueryAt(t *testing.T, s *history.Store, key history.SnapshotKey, hash, label string, at time.Time) {
