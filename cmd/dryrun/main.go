@@ -783,8 +783,10 @@ func mcpServeCmd() *cobra.Command {
 	var transport string
 
 	cmd := &cobra.Command{
-		Use:   "mcp-serve",
-		Short: "Start MCP server",
+		// "mcp" is what every MCP client's install snippet uses; keep it working
+		Use:     "mcp-serve",
+		Aliases: []string{"mcp"},
+		Short:   "Start MCP server",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lintCfg := loadLintConfig()
 

@@ -7,6 +7,40 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
+// mcp-go's NewTool defaults every tool to readOnly=false, destructive=true,
+// openWorld=true -- the opposite of what all but two of ours do. Each tool must
+// state its own.
+var (
+	// reads the loaded snapshot only: no DB, no disk, same answer every call
+	annSnapshot = mcp.WithToolAnnotation(mcp.ToolAnnotation{
+		ReadOnlyHint:    mcp.ToBoolPtr(true),
+		DestructiveHint: mcp.ToBoolPtr(false),
+		IdempotentHint:  mcp.ToBoolPtr(true),
+		OpenWorldHint:   mcp.ToBoolPtr(false),
+	})
+	// reads local history.db, whose newest row moves between calls
+	annHistory = mcp.WithToolAnnotation(mcp.ToolAnnotation{
+		ReadOnlyHint:    mcp.ToBoolPtr(true),
+		DestructiveHint: mcp.ToBoolPtr(false),
+		IdempotentHint:  mcp.ToBoolPtr(false),
+		OpenWorldHint:   mcp.ToBoolPtr(false),
+	})
+	// reads a live database
+	annLiveRead = mcp.WithToolAnnotation(mcp.ToolAnnotation{
+		ReadOnlyHint:    mcp.ToBoolPtr(true),
+		DestructiveHint: mcp.ToBoolPtr(false),
+		IdempotentHint:  mcp.ToBoolPtr(false),
+		OpenWorldHint:   mcp.ToBoolPtr(true),
+	})
+	// analyze=true runs the caller's SQL verbatim, which may be DML
+	annLiveExec = mcp.WithToolAnnotation(mcp.ToolAnnotation{
+		ReadOnlyHint:    mcp.ToBoolPtr(false),
+		DestructiveHint: mcp.ToBoolPtr(true),
+		IdempotentHint:  mcp.ToBoolPtr(false),
+		OpenWorldHint:   mcp.ToBoolPtr(true),
+	})
+)
+
 // Register wires the full set: schema-only subset, history tools (snapshot_diff,
 // reload_schema), and live-only tools when a pool is set.
 func (s *Server) Register(srv *mcpserver.MCPServer) {
@@ -40,12 +74,13 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max results (default 50, 0 for all).")),
 			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Skip N results.")),
 			mcp.WithOutputSchema[listTablesResult](),
+			annSnapshot,
 		),
 		s.handleListTables,
 	)
 	srv.AddTool(
 		mcp.NewTool("describe_table",
-			mcp.WithDescription("Table columns, types, constraints, indexes, stats"),
+			mcp.WithDescription("Full definition of one table from the snapshot: columns and types, constraints, indexes, and planner stats. Call before writing SQL against a table you have not seen."),
 			mcp.WithString("table", mcp.Required(), mcp.Description("Table name.")),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("detail",
@@ -58,6 +93,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 				mcp.Description("Whitelist of sections: columns, indexes, constraints, stats, partition_info, column_profiles, comment, policies, triggers, reloptions, rls_enabled."),
 			),
 			mcp.WithRawOutputSchema(describeTableOutputSchema),
+			annSnapshot,
 		),
 		s.handleDescribeTable,
 	)
@@ -68,6 +104,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			mcp.WithNumber("limit", mcp.DefaultNumber(30), mcp.Description("Max results (default 30, 0 for all).")),
 			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Skip N results.")),
 			mcp.WithOutputSchema[searchSchemaResult](),
+			annSnapshot,
 		),
 		s.handleSearchSchema,
 	)
@@ -76,26 +113,29 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			mcp.WithDescription("Incoming and outgoing foreign keys for a table, with sample JOINs."),
 			mcp.WithString("table", mcp.Required(), mcp.Description("Table name.")),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
+			annSnapshot,
 		),
 		s.handleFindRelated,
 	)
 	srv.AddTool(
 		mcp.NewTool("validate_query",
-			mcp.WithDescription("Validate SQL against the schema; flags missing refs and anti-patterns"),
+			mcp.WithDescription("Check SQL against the snapshot without executing it: reports unknown tables and columns, ambiguous references, and anti-patterns. Call before proposing a query."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
+			annSnapshot,
 		),
 		s.handleValidateQuery,
 	)
 	srv.AddTool(
 		mcp.NewTool("check_migration",
-			mcp.WithDescription("Check DDL for lock level, duration, and safer alternatives"),
+			mcp.WithDescription("Review DDL offline: reports the lock level each statement takes, whether it rewrites the table, and a safer rewrite where one exists. Call before applying a migration."),
 			mcp.WithString("ddl", mcp.Required(), mcp.Description("DDL statement.")),
+			annSnapshot,
 		),
 		s.handleCheckMigration,
 	)
 	srv.AddTool(
 		mcp.NewTool("analyze_plan",
-			mcp.WithDescription("Analyze an EXPLAIN JSON plan against the schema"),
+			mcp.WithDescription("Interpret EXPLAIN JSON you already have against the snapshot: flags row misestimates, poor scan choices, and missing indexes. Use advise or explain_query to obtain a plan first."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("The original SQL query text.")),
 			// the handler accepts both the [{"Plan": ...}] array EXPLAIN (FORMAT JSON)
 			// returns and the unwrapped {"Plan": ...} object; the schema must say so
@@ -105,21 +145,23 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 				func(schema map[string]any) { schema["type"] = []string{"object", "array"} },
 			),
 			mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
+			annSnapshot,
 		),
 		s.handleAnalyzePlan,
 	)
 	srv.AddTool(
 		mcp.NewTool("advise",
-			mcp.WithDescription("Plan, anti-pattern, and index advice for a query"),
+			mcp.WithDescription("One-shot review of a single query: plan shape, anti-patterns, and index suggestions. Offline by default; analyze=true runs EXPLAIN ANALYZE, executing the SQL on a live DB."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
 			mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
 			mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query; live DB only).")),
+			annLiveExec,
 		),
 		s.handleAdvise,
 	)
 	srv.AddTool(
 		mcp.NewTool("lint_schema",
-			mcp.WithDescription("Schema quality checks (lint + audit)"),
+			mcp.WithDescription("Schema quality report: naming and convention violations plus an audit of missing keys, indexes, and unsafe defaults, each with a ddl_fix. Call when reviewing a schema as a whole."),
 			mcp.WithString("scope",
 				mcp.Enum("conventions", "audit", "all"),
 				mcp.DefaultString("all"),
@@ -137,6 +179,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("table", mcp.Description("Table filter.")),
 			mcp.WithRawOutputSchema(lintSchemaOutputSchema),
+			annSnapshot,
 		),
 		s.handleLintSchema,
 	)
@@ -159,12 +202,13 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 				mcp.Description("Max entries per category (default 50, 0=all)."),
 			),
 			mcp.WithRawOutputSchema(detectOutputSchema),
+			annSnapshot,
 		),
 		s.handleDetect,
 	)
 	srv.AddTool(
 		mcp.NewTool("vacuum_health",
-			mcp.WithDescription("Autovacuum status, dead tuples, tuning hints"),
+			mcp.WithDescription("Per-table autovacuum state from the snapshot: dead tuples, last (auto)vacuum and analyze times, and tuning hints for tables the autovacuumer is not keeping up with."),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("table", mcp.Description("Table filter.")),
 			mcp.WithNumber("limit",
@@ -172,6 +216,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 				mcp.Description("Max entries (default 50, 0=all)."),
 			),
 			mcp.WithOutputSchema[vacuumHealthResult](),
+			annSnapshot,
 		),
 		s.handleVacuumHealth,
 	)
@@ -201,12 +246,14 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max objects (and raw rows in full view); 0 for all. Truncation sets _meta.next to re-run uncapped.")),
 			mcp.WithNumber("window_minutes", mcp.DefaultNumber(30), mcp.Description("Correlation window for matching planner/activity captures to each anchor (default 30).")),
 			mcp.WithRawOutputSchema(snapshotDiffOutputSchema),
+			annHistory,
 		),
 		s.handleSnapshotDiff,
 	)
 	srv.AddTool(
 		mcp.NewTool("reload_schema",
-			mcp.WithDescription("Reload the newest schema snapshot from history.db"),
+			mcp.WithDescription("Re-read the newest schema snapshot from .dryrun/history.db into the server. Call after `dryrun snapshot take` so the other tools stop answering from the stale schema."),
+			annHistory,
 		),
 		s.handleReloadSchema,
 	)
@@ -223,6 +270,7 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max results (default 50, 0 for all).")),
 			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Skip N results.")),
 			mcp.WithOutputSchema[listTopQueriesResult](),
+			annHistory,
 		),
 		s.handleListTopQueries,
 	)
@@ -239,18 +287,21 @@ func (s *Server) registerLiveTools(srv *mcpserver.MCPServer) {
 			mcp.WithBoolean("with_stats", mcp.Description("Inject snapshot stats before EXPLAIN.")),
 			mcp.WithString("node", mcp.Description("Which node's stats to use (multi-node only).")),
 			mcp.WithBoolean("pgmustard", mcp.Description("Submit plan to pgMustard for extra tips.")),
+			annLiveExec,
 		),
 		s.handleExplainQuery,
 	)
 	srv.AddTool(
 		mcp.NewTool("check_drift",
-			mcp.WithDescription("Diff live DB against loaded snapshot (ahead/behind/diverged)"),
+			mcp.WithDescription("Compare the live database against the loaded snapshot and report ahead, behind, or diverged, listing the objects that differ. Call when tool output looks out of date."),
+			annLiveRead,
 		),
 		s.handleCheckDrift,
 	)
 	srv.AddTool(
 		mcp.NewTool("columnar_report",
-			mcp.WithDescription("AlloyDB only: columnar-engine state and findings (resident columns, empty store, stale blocks)"),
+			mcp.WithDescription("AlloyDB only: columnar-engine state -- resident columns, empty column store, stale blocks -- with findings. Returns unsupported on stock PostgreSQL."),
+			annLiveRead,
 		),
 		s.handleColumnarReport,
 	)
