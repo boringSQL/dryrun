@@ -443,6 +443,24 @@ profile = %q
 # [profiles.dev]
 # db_url = "${DATABASE_URL}"
 
+# Declare the fleet and "dryrun snapshot capture --all --due" becomes the whole
+# crontab: each node keeps its own interval. url_env names an environment
+# variable, so this file stays committable.
+#
+# [[node]]
+# name     = "primary"
+# role     = "primary"
+# url_env  = "PRIMARY_URL"
+# interval = "1h"
+#
+# [[node]]
+# name     = "replica-eu"
+# role     = "standby"
+# url_env  = "REPLICA_EU_URL"
+# streams  = ["activity", "query"]
+# interval = "30m"
+# pool     = true   # a read pool: members rotate, so do not warn about it
+
 # [query_stats]
 # row_cap = 500   # max pg_stat_statements rows to capture; overridable with --query-stats-limit
 

@@ -526,3 +526,108 @@ func TestRecentNodeFingerprints(t *testing.T) {
 		}
 	})
 }
+
+// `snapshot nodes` has to answer "is this label one machine?" without the user
+// running a capture to find out. Members counts distinct servers; oscillation
+// separates a rotating endpoint from an ordinary restart.
+func TestSummariseMembers(t *testing.T) {
+	a := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	b := a.Add(time.Hour)
+	c := a.Add(2 * time.Hour)
+	fp := func(at time.Time) NodeFingerprint { return NodeFingerprint{StartedAt: at} }
+
+	cases := []struct {
+		name        string
+		seen        []NodeFingerprint
+		wantMembers int
+		wantOsc     bool
+	}{
+		{"nothing recorded", nil, 0, false},
+		{"one server", []NodeFingerprint{fp(a), fp(a), fp(a)}, 1, false},
+		{"restart: one after another", []NodeFingerprint{fp(b), fp(a)}, 2, false},
+		{"replacement chain", []NodeFingerprint{fp(c), fp(b), fp(a)}, 3, false},
+		{"rotation A-B-A", []NodeFingerprint{fp(a), fp(b), fp(a)}, 2, true},
+		{"rotation with repeats", []NodeFingerprint{fp(a), fp(a), fp(b), fp(b), fp(a)}, 2, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			members, osc := summariseMembers(tc.seen)
+			if members != tc.wantMembers {
+				t.Errorf("members=%d, want %d", members, tc.wantMembers)
+			}
+			if osc != tc.wantOsc {
+				t.Errorf("oscillating=%t, want %t", osc, tc.wantOsc)
+			}
+		})
+	}
+}
+
+func TestListNodes_ReportsMembers(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	base := time.Now().UTC().Truncate(time.Second).Add(-3 * time.Hour)
+	a, b := base, base.Add(time.Minute)
+
+	// one label, two servers alternating: the rotating-endpoint case
+	putNodeActivityFingerprintAt(t, store, key, "r-1", "rotating", base, a, "10.0.0.1")
+	putNodeActivityFingerprintAt(t, store, key, "r-2", "rotating", base.Add(time.Hour), b, "10.0.0.2")
+	putNodeActivityFingerprintAt(t, store, key, "r-3", "rotating", base.Add(2*time.Hour), a, "10.0.0.1")
+	// one label, one server
+	putNodeActivityFingerprintAt(t, store, key, "s-1", "steady", base, a, "10.0.0.3")
+	// a label with no fingerprints at all
+	insertRawActivity(t, store, key, "legacy-1", "unknown-node",
+		base.Format(time.RFC3339), `{"node":{"source":"unknown-node","is_standby":false}}`)
+
+	nodes, err := store.ListNodes(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rotating := findNode(t, nodes, "rotating")
+	if rotating.Members != 2 || !rotating.Oscillating {
+		t.Errorf("rotating: members=%d osc=%t, want 2 and true", rotating.Members, rotating.Oscillating)
+	}
+	steady := findNode(t, nodes, "steady")
+	if steady.Members != 1 || steady.Oscillating {
+		t.Errorf("steady: members=%d osc=%t, want 1 and false", steady.Members, steady.Oscillating)
+	}
+	// one sighting is not evidence of stability; the CLI renders it as such
+	if steady.Fingerprinted != 1 {
+		t.Errorf("steady: fingerprinted=%d, want 1", steady.Fingerprinted)
+	}
+	// no fingerprints must read as unknown, never as "one server"
+	if u := findNode(t, nodes, "unknown-node"); u.Fingerprinted != 0 || u.Members != 0 {
+		t.Errorf("unfingerprinted node reports members=%d from %d rows", u.Members, u.Fingerprinted)
+	}
+}
+
+// The per-arm LIMIT once ran before the fingerprint filter, so a label whose
+// recent rows came from a pre-fingerprint binary burned the whole window and
+// reported no members at all -- which reads as "no rotation".
+func TestRecentNodeFingerprints_UnfingerprintedRowsDoNotEatTheWindow(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	base := time.Now().UTC().Truncate(time.Second).Add(-2 * time.Hour)
+
+	started := base.Add(-time.Hour)
+	putNodeActivityFingerprintAt(t, store, key, "fp-old", "node", base, started, "10.0.0.1")
+	// more recent rows than the window holds, none of them fingerprinted
+	for i := 0; i < nodeFingerprintRows+5; i++ {
+		insertRawActivity(t, store, key, fmt.Sprintf("legacy-%d", i), "node",
+			base.Add(time.Duration(i+1)*time.Minute).Format(time.RFC3339),
+			`{"node":{"source":"node","is_standby":false}}`)
+	}
+
+	seen, err := store.RecentNodeFingerprints(ctx, key, "node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("got %d fingerprints, want the one that exists behind the unfingerprinted rows", len(seen))
+	}
+	if seen[0].ServerAddr != "10.0.0.1" {
+		t.Errorf("got %+v", seen[0])
+	}
+}

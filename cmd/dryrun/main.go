@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -390,59 +389,7 @@ func snapshotCmd() *cobra.Command {
 	takeCmd.Flags().StringVar(&pushRemote, "remote", "", "configured [[remote]] name (with --push)")
 	takeCmd.Flags().BoolVar(&takeForce, "force", false, "record even if the cluster/database identity differs from this project's history")
 
-	listCmd := &cobra.Command{
-		Use:   "list",
-		Short: "List saved snapshots",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := openHistoryStore(historyDB)
-			if err != nil {
-				return err
-			}
-			defer store.Close()
-
-			key := resolveSnapshotKey()
-			kinds, err := store.ListKinds(cmd.Context(), key)
-			if err != nil {
-				return err
-			}
-			var summaries []history.SnapshotSummary
-			for _, k := range kinds {
-				list, err := store.List(cmd.Context(), key, k, history.TimeRange{})
-				if err != nil {
-					return err
-				}
-				for i := range list {
-					list[i].Kind = k
-				}
-				summaries = append(summaries, list...)
-			}
-			if len(summaries) == 0 {
-				fmt.Println("No snapshots found for this database.")
-				return nil
-			}
-			sort.Slice(summaries, func(i, j int) bool {
-				return summaries[i].Timestamp.After(summaries[j].Timestamp)
-			})
-			typeW := len("TYPE")
-			for _, s := range summaries {
-				if n := len(s.Kind.String()); n > typeW {
-					typeW = n
-				}
-			}
-			for _, s := range summaries {
-				hash := s.ContentHash
-				if len(hash) > 16 {
-					hash = hash[:16]
-				}
-				fmt.Printf("%s  %-*s  %s  %s\n",
-					s.Timestamp.Format("2006-01-02 15:04:05"),
-					typeW, s.Kind.String(),
-					hash, s.Database)
-			}
-			fmt.Printf("\n%d snapshot(s) total\n", len(summaries))
-			return nil
-		},
-	}
+	listCmd := snapshotListCmd(&historyDB)
 	addHistFlag(listCmd)
 
 	diffCmd := newDiffCmd(&historyDB)

@@ -11,18 +11,36 @@ import (
 var latestRefRe = regexp.MustCompile(`^latest(?:~(\d+))?$`)
 
 // schema|planner|activity|query; activity/query default to the sole node, else errors listing them
-func (s *Store) ResolveKindFlag(ctx context.Context, key SnapshotKey, kindFlag, nodeFlag string) (SnapshotKind, error) {
-	switch strings.ToLower(kindFlag) {
+// One place that knows the kind names, so `--kind` means the same thing to
+// every command that takes it.
+func ParseKindTag(kind string) (SnapshotKindTag, error) {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "", "schema":
-		return SchemaKind(), nil
+		return KindSchema, nil
 	case "planner":
-		return PlannerKind(), nil
+		return KindPlanner, nil
 	case "activity":
-		return s.resolveNodeKind(ctx, key, nodeFlag, ActivityKind)
+		return KindActivity, nil
 	case "query":
-		return s.resolveNodeKind(ctx, key, nodeFlag, QueryKind)
+		return KindQuery, nil
+	}
+	return 0, fmt.Errorf("unknown kind %q (use schema|planner|activity|query)", kind)
+}
+
+func (s *Store) ResolveKindFlag(ctx context.Context, key SnapshotKey, kindFlag, nodeFlag string) (SnapshotKind, error) {
+	tag, err := ParseKindTag(kindFlag)
+	if err != nil {
+		return SnapshotKind{}, err
+	}
+	switch tag {
+	case KindSchema:
+		return SchemaKind(), nil
+	case KindPlanner:
+		return PlannerKind(), nil
+	case KindActivity:
+		return s.resolveNodeKind(ctx, key, nodeFlag, ActivityKind)
 	default:
-		return SnapshotKind{}, fmt.Errorf("unknown kind %q (use schema|planner|activity|query)", kindFlag)
+		return s.resolveNodeKind(ctx, key, nodeFlag, QueryKind)
 	}
 }
 

@@ -55,7 +55,8 @@ func snapshotNodesCmd(historyDB *string) *cobra.Command {
 				return nil
 			}
 			printNodeTable(nodes)
-			fmt.Fprintf(os.Stderr, "\nROWS is activity/query. Schema and planner rows are not node-scoped.\n")
+			fmt.Fprintf(os.Stderr, "\nROWS is activity/query; schema and planner rows are not node-scoped.\n")
+			fmt.Fprintf(os.Stderr, "MEMBERS is distinct servers seen in the last %d captures (\"1?\" is one sighting, too few to tell).\n", history.NodeFingerprintWindow)
 			printNodeWarnings(nodes)
 			return nil
 		},
@@ -73,8 +74,8 @@ func printNodeTable(nodes []history.NodeSummary) {
 		}
 	}
 
-	fmt.Printf("%-*s  %-8s  %-8s  %-16s  %-19s  %s\n",
-		labelW, "NODE", "ROLE", "PG", "STREAMS", "LAST CAPTURE", "ROWS")
+	fmt.Printf("%-*s  %-8s  %-8s  %-16s  %-10s  %-19s  %s\n",
+		labelW, "NODE", "ROLE", "PG", "STREAMS", "MEMBERS", "LAST CAPTURE", "ROWS")
 	for _, n := range nodes {
 		role := n.Role
 		if role == history.NodeRoleUnknown {
@@ -88,11 +89,26 @@ func printNodeTable(nodes []history.NodeSummary) {
 		if !n.LastCapture.IsZero() {
 			last = n.LastCapture.Format("2006-01-02 15:04:05")
 		}
-		fmt.Printf("%-*s  %-8s  %-8s  %-16s  %-19s  %d/%d\n",
+		fmt.Printf("%-*s  %-8s  %-8s  %-16s  %-10s  %-19s  %d/%d\n",
 			labelW, n.Label, role, pg,
-			strings.Join(n.Streams, ","),
+			strings.Join(n.Streams, ","), membersCell(n),
 			last, n.ActivityRows, n.QueryRows)
 	}
+}
+
+// No evidence must never read as "one machine". A single fingerprinted row
+// cannot show rotation either -- rotation needs two rows to compare -- so it
+// is reported as provisional rather than as a count.
+func membersCell(n history.NodeSummary) string {
+	switch {
+	case n.Fingerprinted == 0:
+		return "unknown"
+	case n.Oscillating:
+		return fmt.Sprintf("%d (osc.)", n.Members)
+	case n.Fingerprinted == 1:
+		return "1?"
+	}
+	return fmt.Sprintf("%d", n.Members)
 }
 
 func printNodeWarnings(nodes []history.NodeSummary) {
@@ -105,6 +121,15 @@ func printNodeWarnings(nodes []history.NodeSummary) {
 		if n.Role == history.NodeRoleUnknown {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: no role recorded; the role guard cannot check this label.", n.Label))
+		}
+		if n.Oscillating {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: alternating between %d servers; their counters interleave under one label and deltas will be wrong. "+
+					"If it names a pool, set pool = true on its [[node]].", n.Label, n.Members))
+		}
+		if n.Members > 1 && !n.Oscillating {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: %d different servers seen, one after another (a restart or a replacement).", n.Label, n.Members))
 		}
 		if n.OrphanRows > 0 {
 			warnings = append(warnings, fmt.Sprintf(

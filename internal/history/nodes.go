@@ -26,6 +26,14 @@ type (
 		RoleFlipped bool `json:"role_flipped,omitempty"`
 		// a timestamp that would not parse; LastCapture is zero
 		CorruptRows int `json:"corrupt_rows,omitempty"`
+		// distinct servers seen under this label in the recent window, and
+		// whether they alternate (a rotating endpoint) rather than succeed
+		// one another (a restart or a replacement)
+		Members     int  `json:"members,omitempty"`
+		Oscillating bool `json:"oscillating,omitempty"`
+		// rows in the window that carry a fingerprint at all: without it
+		// "no rotation" is indistinguishable from "no evidence"
+		Fingerprinted int `json:"fingerprinted_rows"`
 	}
 
 	// which server a capture came from: boot time identifies the member,
@@ -104,6 +112,12 @@ func (s *Store) ListNodes(ctx context.Context, key SnapshotKey) ([]NodeSummary, 
 		if r := seen[n.Label]; r != nil {
 			n.RoleFlipped = r.primary && r.standby
 		}
+		fps, err := s.RecentNodeFingerprints(ctx, key, n.Label)
+		if err != nil {
+			return nil, err
+		}
+		n.Fingerprinted = len(fps)
+		n.Members, n.Oscillating = summariseMembers(fps)
 		out = append(out, *n)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
@@ -112,6 +126,9 @@ func (s *Store) ListNodes(ctx context.Context, key SnapshotKey) ([]NodeSummary, 
 
 // 2.5.1: oscillation is judged over a window, not against one prior row.
 const (
+	// exported so the CLI can say how far MEMBERS looks back
+	NodeFingerprintWindow = nodeFingerprintRows
+
 	nodeFingerprintRows = 20
 	nodeFingerprintAge  = 30 * 24 * time.Hour
 )
@@ -128,6 +145,7 @@ func (s *Store) RecentNodeFingerprints(ctx context.Context, key SnapshotKey, nod
 		               ` + nodeJSONExpr("", "$.node.server_addr") + ` AS addr
 		          FROM ` + table + `
 		         WHERE project_id = ? AND database_id = ? AND node_source = ? AND timestamp >= ?
+		           AND ` + nodeJSONExpr("", "$.node.postmaster_start_time") + ` IS NOT NULL
 		         ORDER BY timestamp DESC, id DESC LIMIT ?`
 	}
 	rows, err := s.db.QueryContext(ctx,
@@ -197,6 +215,31 @@ func (s *Store) LastCaptureAt(ctx context.Context, key SnapshotKey, nodeLabel, s
 		return time.Time{}, false, nil
 	}
 	return at, true, nil
+}
+
+// Members counts distinct servers; oscillation is one of them recurring after
+// another intervened, which is what separates a rotating endpoint from a
+// restart.
+func summariseMembers(fps []NodeFingerprint) (members int, oscillating bool) {
+	var distinct []time.Time
+	for i, f := range fps {
+		known := -1
+		for j, d := range distinct {
+			if d.Equal(f.StartedAt) {
+				known = j
+				break
+			}
+		}
+		if known < 0 {
+			distinct = append(distinct, f.StartedAt)
+			continue
+		}
+		// seen before, and something different sat between the two
+		if !fps[i-1].StartedAt.Equal(f.StartedAt) {
+			oscillating = true
+		}
+	}
+	return len(distinct), oscillating
 }
 
 func roleFromExtract(standby sql.NullInt64) string {
