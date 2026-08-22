@@ -285,6 +285,7 @@ type (
 		Comment          *string `json:"comment,omitempty"`
 		StatisticsTarget *int16  `json:"statistics_target,omitempty"`
 		Generated        *string `json:"generated,omitempty"`
+		GenerationExpr   *string `json:"generation_expr,omitempty"`
 	}
 
 	compactIndex struct {
@@ -334,7 +335,11 @@ func toCompactTable(t *schema.Table, sizing *schema.TableSizing) compactTable {
 	}
 	out.Columns = make([]compactColumn, len(t.Columns))
 	for i, c := range t.Columns {
-		out.Columns[i] = compactColumn{c.Name, c.Ordinal, c.TypeName, c.Nullable, c.Default, c.Identity, c.Comment, c.StatisticsTarget, c.Generated}
+		out.Columns[i] = compactColumn{
+			Name: c.Name, Ordinal: c.Ordinal, TypeName: c.TypeName, Nullable: c.Nullable,
+			Default: c.Default, Identity: c.Identity, Comment: c.Comment,
+			StatisticsTarget: c.StatisticsTarget, Generated: c.Generated, GenerationExpr: c.GenerationExpr,
+		}
 	}
 	out.Indexes = make([]compactIndex, len(t.Indexes))
 	for i, idx := range t.Indexes {

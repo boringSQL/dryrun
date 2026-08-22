@@ -629,3 +629,50 @@ func TestDiffSchema_StorageParamRetuneHasNoBaseline(t *testing.T) {
 		t.Errorf("retune resolved a baseline it does not need: %+v", p)
 	}
 }
+
+// PG17 can change what a generated column computes without touching anything
+// else. That used to surface as a default change, because the capture read the
+// expression out of pg_attrdef as default_expr; now it has its own change type
+// and must not go silent.
+func TestDiffSchema_GenerationExprChange(t *testing.T) {
+	build := func(hash, expr string) *snapshot.SchemaSnapshot {
+		e, kind := expr, "stored"
+		snap := emptySnap(hash)
+		snap.Tables = []snapshot.Table{{
+			Schema: "public", Name: "orders",
+			Columns: []snapshot.Column{{
+				Name: "total", Ordinal: 1, TypeName: "integer",
+				Generated: &kind, GenerationExpr: &e,
+			}},
+		}}
+		return snap
+	}
+
+	delta, err := DiffSchema(build("h1", "(a * b)"), build("h2", "(a + b)"))
+	if err != nil {
+		t.Fatalf("DiffSchema: %v", err)
+	}
+	var found *Change
+	for i := range delta.Changes {
+		if delta.Changes[i].Type == ColumnGenerationChanged {
+			found = &delta.Changes[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("generation expression change went unreported: %+v", delta.Changes)
+	}
+	if found.Column.FromExpr == nil || *found.Column.FromExpr != "(a * b)" {
+		t.Errorf("want the old expression, got %v", found.Column.FromExpr)
+	}
+	if found.Column.ToExpr == nil || *found.Column.ToExpr != "(a + b)" {
+		t.Errorf("want the new expression, got %v", found.Column.ToExpr)
+	}
+
+	same, err := DiffSchema(build("h1", "(a * b)"), build("h1", "(a * b)"))
+	if err != nil {
+		t.Fatalf("DiffSchema: %v", err)
+	}
+	if len(same.Changes) != 0 {
+		t.Errorf("identical schemas reported %d changes", len(same.Changes))
+	}
+}

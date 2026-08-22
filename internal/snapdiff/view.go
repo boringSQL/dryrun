@@ -212,7 +212,9 @@ func schemaScore(c diff.Change) float64 {
 	case diff.TableDropped, diff.ColumnDropped, diff.IndexDropped, diff.ConstraintDropped,
 		diff.ViewDropped, diff.FunctionDropped, diff.ObjectDropped:
 		return 100
-	case diff.ColumnTypeChanged, diff.ColumnSetNotNull, diff.FuncSecurityDefiner, diff.RLSToggled:
+	case diff.ColumnTypeChanged, diff.ColumnSetNotNull, diff.FuncSecurityDefiner, diff.RLSToggled,
+		// SET EXPRESSION rewrites the table under ACCESS EXCLUSIVE
+		diff.ColumnGenerationChanged:
 		return 70
 	}
 	switch c.Type.Category() {

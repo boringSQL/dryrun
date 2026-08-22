@@ -287,3 +287,42 @@ func TestDescribeTableCountsSurviveFieldsWhitelist(t *testing.T) {
 		t.Errorf("fields= deleted the omitted count: %.400s", out)
 	}
 }
+
+// A generated column is computed, never supplied. Reporting its expression as
+// a default tells an agent it can INSERT into it.
+func TestDescribeTableGeneratedColumn(t *testing.T) {
+	c := serveOffline(t, NewOfflineServerAnnotated(annotate(multiSchemaSnap(), 1000), lint.DefaultConfig()))
+	out := callTool(t, c, "describe_table", map[string]any{"table": "public.customers"})
+
+	var got struct {
+		Columns []struct {
+			Name           string  `json:"name"`
+			Default        *string `json:"default"`
+			Generated      *string `json:"generated"`
+			GenerationExpr *string `json:"generation_expr"`
+		} `json:"columns"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%.300s", err, out)
+	}
+
+	var found bool
+	for _, col := range got.Columns {
+		if col.Name != "email_lower" {
+			continue
+		}
+		found = true
+		if col.Default != nil {
+			t.Errorf("generated column reports a default of %q", *col.Default)
+		}
+		if col.Generated == nil || *col.Generated != "virtual" {
+			t.Errorf("want generated=virtual, got %v", col.Generated)
+		}
+		if col.GenerationExpr == nil || *col.GenerationExpr != "lower(email)" {
+			t.Errorf("want the expression kept, got %v", col.GenerationExpr)
+		}
+	}
+	if !found {
+		t.Fatalf("fixture no longer carries the generated column: %.300s", out)
+	}
+}

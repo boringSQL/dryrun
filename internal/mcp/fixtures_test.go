@@ -17,6 +17,16 @@ const testPageSize = 8192
 // a day after the schema, as separate cron entries would produce
 var fixtureActivityTime = time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 
+// pg keeps a generated column's expression in pg_attrdef, next to real
+// defaults; the capture separates them so the column does not read as writable.
+func generatedCol() schema.Column {
+	kind, expr := "virtual", "lower(email)"
+	return schema.Column{
+		Name: "email_lower", TypeName: "text", Nullable: true,
+		Generated: &kind, GenerationExpr: &expr,
+	}
+}
+
 func testCol(name, typ string, nullable bool) schema.Column {
 	return schema.Column{Name: name, TypeName: typ, Nullable: nullable}
 }
@@ -87,7 +97,7 @@ func multiSchemaSnap() *schema.SchemaSnapshot {
 	return finish(&schema.SchemaSnapshot{
 		Tables: []schema.Table{
 			orders,
-			testTable("public", "customers", testCol("email", "text", true)),
+			testTable("public", "customers", testCol("email", "text", true), generatedCol()),
 			testTable("public", "foo.bar", testCol("note", "text", true)),
 			testTable("app", "orders", testCol("tenant_id", "integer", false)),
 			testTable("app", "events", testCol("payload", "jsonb", true)),

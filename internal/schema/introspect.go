@@ -202,6 +202,7 @@ type (
 		typeName         string
 		nullable         bool
 		dflt             *string
+		generationExpr   *string
 		identity         *string
 		statisticsTarget *int16
 		generated        *string
@@ -308,7 +309,7 @@ func fetchColumns(ctx context.Context, pool Querier) ([]rawColumn, error) {
 	return scanAll(rows, func(r pgx.Rows) (rawColumn, error) {
 		var oid int32
 		var rc rawColumn
-		err := r.Scan(&oid, &rc.name, &rc.ordinal, &rc.typeName, &rc.nullable, &rc.dflt, &rc.identity, &rc.statisticsTarget, &rc.generated)
+		err := r.Scan(&oid, &rc.name, &rc.ordinal, &rc.typeName, &rc.nullable, &rc.dflt, &rc.generationExpr, &rc.identity, &rc.statisticsTarget, &rc.generated)
 		rc.tableOID = uint32(oid)
 		return rc, err
 	})
@@ -684,6 +685,7 @@ func assembleTables(
 			TypeName:         rc.typeName,
 			Nullable:         rc.nullable,
 			Default:          rc.dflt,
+			GenerationExpr:   rc.generationExpr,
 			Identity:         rc.identity,
 			StatisticsTarget: rc.statisticsTarget,
 			Generated:        rc.generated,

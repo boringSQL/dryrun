@@ -17,7 +17,14 @@ SELECT a.attrelid::int4   AS table_oid,
        a.attnum            AS ordinal,
        pg_catalog.format_type(a.atttypid, a.atttypmod) AS type_name,
        NOT a.attnotnull    AS nullable,
-       pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS default_expr,
+       -- pg_attrdef holds the generation expression for both stored and
+       -- virtual generated columns; it is not a default and must not read as one
+       CASE WHEN a.attgenerated = ''
+            THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+       END AS default_expr,
+       CASE WHEN a.attgenerated <> ''
+            THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+       END AS generation_expr,
        CASE a.attidentity
            WHEN 'a' THEN 'always'
            WHEN 'd' THEN 'by_default'
@@ -26,6 +33,8 @@ SELECT a.attrelid::int4   AS table_oid,
        NULLIF(a.attstattarget, -1)::int2 AS statistics_target,
        CASE a.attgenerated
            WHEN 's' THEN 'stored'
+           -- PG18 made virtual the default for GENERATED ALWAYS AS
+           WHEN 'v' THEN 'virtual'
            ELSE NULL
        END AS generated
   FROM pg_catalog.pg_attribute a

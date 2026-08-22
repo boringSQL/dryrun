@@ -133,6 +133,9 @@ func Describe(c Change) string {
 			null = "nullable"
 		}
 		s := fmt.Sprintf("column %s added (%s", c.Column.Name, null)
+		if c.Column.ToExpr != nil {
+			s += ", generated as " + *c.Column.ToExpr
+		}
 		if c.Column.DefaultKind != "" && c.Column.DefaultKind != DefaultNone {
 			s += ", " + string(c.Column.DefaultKind) + " default"
 		}
@@ -151,6 +154,9 @@ func Describe(c Change) string {
 		return fmt.Sprintf("column %s: DROP NOT NULL", c.Column.Name)
 	case ColumnDefaultChanged:
 		return fmt.Sprintf("column %s: default %s → %s", c.Column.Name, dflt(c.Column.FromDefault), dflt(c.Column.ToDefault))
+	case ColumnGenerationChanged:
+		return fmt.Sprintf("column %s: generation expression %s → %s",
+			c.Column.Name, dflt(c.Column.FromExpr), dflt(c.Column.ToExpr))
 	case ColumnCommentChanged:
 		return fmt.Sprintf("column %s: comment changed", c.Column.Name)
 	case IndexAdded:

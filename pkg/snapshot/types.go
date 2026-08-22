@@ -60,11 +60,14 @@ func (t *Table) Qual() QualifiedName {
 }
 
 type Column struct {
-	Name             string  `json:"name"`
-	Ordinal          int16   `json:"ordinal"`
-	TypeName         string  `json:"type_name"`
-	Nullable         bool    `json:"nullable"`
-	Default          *string `json:"default,omitempty"`
+	Name     string  `json:"name"`
+	Ordinal  int16   `json:"ordinal"`
+	TypeName string  `json:"type_name"`
+	Nullable bool    `json:"nullable"`
+	Default  *string `json:"default,omitempty"`
+	// the expression behind Generated; pg keeps it in pg_attrdef, but it is
+	// computed on read or write, never a value the caller may supply
+	GenerationExpr   *string `json:"generation_expr,omitempty"`
 	Identity         *string `json:"identity,omitempty"`
 	Comment          *string `json:"comment,omitempty"`
 	StatisticsTarget *int16  `json:"statistics_target,omitempty"`

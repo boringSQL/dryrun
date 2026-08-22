@@ -71,6 +71,8 @@ type (
 		Widening    *bool       `json:"widening,omitempty"`
 		FromDefault *string     `json:"from_default,omitempty"`
 		ToDefault   *string     `json:"to_default,omitempty"`
+		FromExpr    *string     `json:"from_generation_expr,omitempty"`
+		ToExpr      *string     `json:"to_generation_expr,omitempty"`
 	}
 
 	IndexChange struct {
@@ -130,6 +132,9 @@ const (
 	ColumnDropNotNull    ChangeType = "column_drop_not_null"
 	ColumnDefaultChanged ChangeType = "column_default_changed"
 	ColumnCommentChanged ChangeType = "column_comment_changed"
+	// PG17 ALTER COLUMN ... SET EXPRESSION; before the capture separated it
+	// from default_expr this surfaced as a default change
+	ColumnGenerationChanged ChangeType = "column_generation_changed"
 
 	IndexAdded   ChangeType = "index_added"
 	IndexDropped ChangeType = "index_dropped"
@@ -258,9 +263,13 @@ func diffTableBody(old, nw *snapshot.Table, gucs map[string]string, changes *[]C
 	for name, col := range newCols {
 		if _, ok := oldCols[name]; !ok {
 			nullable := col.Nullable
-			*changes = append(*changes, Change{Type: ColumnAdded, Object: ref, Column: &ColumnChange{
+			cc := &ColumnChange{
 				Name: name, Nullable: &nullable, DefaultKind: classifyDefault(col.Default),
-			}})
+			}
+			// a stored generated column rewrites the table on add, and its
+			// expression no longer arrives as a default to classify
+			cc.ToExpr = col.GenerationExpr
+			*changes = append(*changes, Change{Type: ColumnAdded, Object: ref, Column: cc})
 		}
 	}
 	for name := range oldCols {
@@ -289,6 +298,11 @@ func diffTableBody(old, nw *snapshot.Table, gucs map[string]string, changes *[]C
 		if ptrStr(oc.Default) != ptrStr(nc.Default) {
 			*changes = append(*changes, Change{Type: ColumnDefaultChanged, Object: ref, Column: &ColumnChange{
 				Name: name, FromDefault: oc.Default, ToDefault: nc.Default,
+			}})
+		}
+		if ptrStr(oc.GenerationExpr) != ptrStr(nc.GenerationExpr) {
+			*changes = append(*changes, Change{Type: ColumnGenerationChanged, Object: ref, Column: &ColumnChange{
+				Name: name, FromExpr: oc.GenerationExpr, ToExpr: nc.GenerationExpr,
 			}})
 		}
 		if ptrStr(oc.Comment) != ptrStr(nc.Comment) {

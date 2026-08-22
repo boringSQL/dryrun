@@ -87,7 +87,7 @@ func tableToStructural(t *Table, withReloptions bool) map[string]any {
 }
 
 func columnToStructural(c *Column) map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"name":              c.Name,
 		"ordinal":           c.Ordinal,
 		"type_name":         c.TypeName,
@@ -98,6 +98,13 @@ func columnToStructural(c *Column) map[string]any {
 		"statistics_target": c.StatisticsTarget,
 		"generated":         c.Generated,
 	}
+	// keyed only when set: a generation expression is DDL and must move the
+	// digest (ALTER ... SET EXPRESSION, PG17), but adding the key
+	// unconditionally would move every ordinary column's digest too
+	if c.GenerationExpr != nil {
+		m["generation_expr"] = *c.GenerationExpr
+	}
+	return m
 }
 
 // Index minus Children, which changes as partitions are created/dropped and
