@@ -167,3 +167,45 @@ func nearMatches(snap *schema.SchemaSnapshot, raw string) []string {
 	}
 	return out
 }
+
+// Resolves a filter without erroring: a filter may match nothing. The note
+// explains why; callers emit it only for an empty result.
+func resolveTableFilter(snap *schema.SchemaSnapshot, schemaF, tableF string) (string, string, string) {
+	if tableF == "" || tableExists(snap, schemaF, tableF) {
+		return schemaF, tableF, ""
+	}
+	if i := strings.Index(tableF, "."); i > 0 {
+		schemaPart, namePart := tableF[:i], tableF[i+1:]
+		if findTable(snap, schemaPart, namePart) != nil {
+			if schemaF == "" || schemaF == schemaPart {
+				return schemaPart, namePart, ""
+			}
+			// don't widen the scope silently; match nothing and say why
+			return schemaF, tableF, fmt.Sprintf(
+				"schema=%s and table=%s name different schemas, so this filter matched nothing.",
+				schemaF, tableF)
+		}
+	}
+	return schemaF, tableF, missNote(snap, schemaF, tableF)
+}
+
+func missNote(snap *schema.SchemaSnapshot, schemaF, tableF string) string {
+	qualified := tableF
+	if schemaF != "" {
+		qualified = schemaF + "." + tableF
+	}
+	note := fmt.Sprintf("no table named %s is in the snapshot, so this filter matched nothing", qualified)
+	if near := nearMatches(snap, tableF); len(near) > 0 {
+		note += "; did you mean " + strings.Join(near, ", ")
+	}
+	return note + fmt.Sprintf(`; search_schema {"query":"%s"} searches every schema.`, searchTerm(tableF))
+}
+
+func tableExists(snap *schema.SchemaSnapshot, schemaF, name string) bool {
+	for i := range snap.Tables {
+		if snap.Tables[i].Name == name && (schemaF == "" || snap.Tables[i].Schema == schemaF) {
+			return true
+		}
+	}
+	return false
+}

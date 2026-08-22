@@ -19,7 +19,8 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 		return errResult(err.Error()), nil
 	}
 
-	target := filterSnap(a.Schema, getArg(req, "schema"), getArg(req, "table"))
+	schemaF, tableF, filterNote := resolveTableFilter(a.Schema, schemaFilterArg(req), getArg(req, "table"))
+	target := filterSnap(a.Schema, schemaF, tableF)
 
 	// fields wins over scope when set
 	var wantConventions, wantAudit bool
@@ -110,11 +111,11 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 	var next []NextCall
 	if !fullMode && hasAuditFindings && !manyFindings {
 		args := map[string]any{"verbosity": "full"}
-		if v := getArg(req, "schema"); v != "" {
-			args["schema"] = v
+		if schemaF != "" {
+			args["schema"] = schemaF
 		}
-		if v := getArg(req, "table"); v != "" {
-			args["table"] = v
+		if tableF != "" {
+			args["table"] = tableF
 		}
 		if v := getArg(req, "scope"); v != "" {
 			args["scope"] = v
@@ -124,7 +125,7 @@ func (s *Server) handleLintSchema(_ context.Context, req mcp.CallToolRequest) (*
 		}
 		next = []NextCall{{Tool: "lint_schema", Args: args}}
 	}
-	s.injectMeta(result, hint, next)
+	s.injectMeta(result, joinHints(filterNote, hint), next)
 	return jsonResult(result), nil
 }
 

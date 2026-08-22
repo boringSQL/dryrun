@@ -79,6 +79,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 
 	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
+	schemaF, tableF, filterNote := resolveTableFilter(a.Schema, schemaF, tableF)
 	max := limitArg(req)
 	threshold := getFloatArg(req, "threshold", 4.0)
 
@@ -109,7 +110,10 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	case len(unusedEntries) > 0:
 		hint = "Unused indexes add write overhead. Verify index scans across all replicas before dropping."
 	}
-	hint = joinHints(hint, anomalyNote, unattributedScansHint(anomaliesKept))
+	if len(staleEntries)+len(unusedEntries)+len(bloatEntries)+len(bloatTableEntries)+len(anomalies) > 0 {
+		filterNote = ""
+	}
+	hint = joinHints(hint, filterNote, anomalyNote, unattributedScansHint(anomaliesKept))
 
 	// point next at the truncated categories only
 	var next []NextCall
@@ -137,9 +141,10 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 
 	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
+	schemaF, tableF, filterNote := resolveTableFilter(a.Schema, schemaF, tableF)
 	entries := filterByQual(schema.DetectStaleStats(a, int64(7)), schemaF, tableF, staleKey)
 	if len(entries) == 0 {
-		return s.emptyKindResult("stale_stats", "No stale statistics detected."), nil
+		return s.emptyKindResult("stale_stats", "No stale statistics detected.", filterNote), nil
 	}
 
 	total := len(entries)
@@ -195,9 +200,10 @@ func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRe
 
 	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
+	schemaF, tableF, filterNote := resolveTableFilter(a.Schema, schemaF, tableF)
 	entries := filterByQual(schema.DetectUnusedIndexes(a), schemaF, tableF, unusedKey)
 	if len(entries) == 0 {
-		return s.emptyKindResult("unused_indexes", "No unused indexes detected. All indexes have at least one scan recorded."), nil
+		return s.emptyKindResult("unused_indexes", "No unused indexes detected. All indexes have at least one scan recorded.", filterNote), nil
 	}
 	return cappedKindResult(s, "unused_indexes", entries, limitArg(req), schemaF, tableF), nil
 }
@@ -208,16 +214,19 @@ func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolReques
 		return errResult(err.Error()), nil
 	}
 
-	if a.Merged == nil {
-		return s.emptyKindResult("anomalies", "No node statistics available for anomaly detection."), nil
-	}
-
 	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
+	schemaF, tableF, filterNote := resolveTableFilter(a.Schema, schemaF, tableF)
+
+	// no node stats is the bigger reason, but a bad filter is still worth saying
+	if a.Merged == nil {
+		return s.emptyKindResult("anomalies", "No node statistics available for anomaly detection.", filterNote), nil
+	}
+
 	rawAnomalies, anomalyNote := buildAnomalies(a)
 	anomalies := filterByQual(rawAnomalies, schemaF, tableF, anomalyKey)
 	if len(anomalies) == 0 {
-		return s.emptyKindResult("anomalies", "No anomalies detected.", anomalyNote), nil
+		return s.emptyKindResult("anomalies", "No anomalies detected.", filterNote, anomalyNote), nil
 	}
 	max := limitArg(req)
 	shown, _ := capItems(anomalies, max)
@@ -232,10 +241,11 @@ func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolR
 
 	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
+	schemaF, tableF, filterNote := resolveTableFilter(a.Schema, schemaF, tableF)
 	threshold := getFloatArg(req, "threshold", 4.0)
 	entries := filterByQual(schema.DetectBloatedIndexes(a, threshold), schemaF, tableF, bloatKey)
 	if len(entries) == 0 {
-		return s.emptyKindResult("bloated_indexes", "No bloated indexes detected."), nil
+		return s.emptyKindResult("bloated_indexes", "No bloated indexes detected.", filterNote), nil
 	}
 	return cappedKindResult(s, "bloated_indexes", entries, limitArg(req), schemaF, tableF), nil
 }
@@ -248,10 +258,11 @@ func (s *Server) handleDetectBloatedTables(_ context.Context, req mcp.CallToolRe
 
 	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
+	schemaF, tableF, filterNote := resolveTableFilter(a.Schema, schemaF, tableF)
 	threshold := getFloatArg(req, "threshold", 4.0)
 	entries := filterByQual(schema.DetectBloatedTables(a, threshold), schemaF, tableF, bloatTableKey)
 	if len(entries) == 0 {
-		return s.emptyKindResult("bloated_tables", "No bloated tables detected."), nil
+		return s.emptyKindResult("bloated_tables", "No bloated tables detected.", filterNote), nil
 	}
 	return cappedKindResult(s, "bloated_tables", entries, limitArg(req), schemaF, tableF), nil
 }
@@ -285,11 +296,12 @@ func (s *Server) handleVacuumHealth(_ context.Context, req mcp.CallToolRequest) 
 
 	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
+	schemaF, tableF, filterNote := resolveTableFilter(a.Schema, schemaF, tableF)
 	results := filterByQual(vacuum.AnalyzeVacuumHealth(a), schemaF, tableF, vacuumKey)
 	if len(results) == 0 {
 		return structuredTextResult(
-			vacuumHealthResult{Entries: []vacuum.VacuumHealth{}, Meta: s.newMeta("", nil)},
-			s.wrapText("No vacuum health concerns found.", "")), nil
+			vacuumHealthResult{Entries: []vacuum.VacuumHealth{}, Meta: s.newMeta(filterNote, nil)},
+			s.wrapText("No vacuum health concerns found.", filterNote)), nil
 	}
 
 	kept, omitted := capItems(results, limitArg(req))
