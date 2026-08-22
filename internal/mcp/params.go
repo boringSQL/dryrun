@@ -60,8 +60,14 @@ func getBoolArg(req mcp.CallToolRequest, key string) bool {
 	return b
 }
 
+// Lookup tools answer about one object and need a schema to resolve against.
 func schemaArg(req mcp.CallToolRequest) string {
 	return argOr(req, "schema", "public")
+}
+
+// Filter tools must not default: absent means every schema, not "public".
+func schemaFilterArg(req mcp.CallToolRequest) string {
+	return getArg(req, "schema")
 }
 
 func argOr(req mcp.CallToolRequest, key, fallback string) string {

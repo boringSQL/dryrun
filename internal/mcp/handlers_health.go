@@ -77,7 +77,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 		return errResult(err.Error()), nil
 	}
 
-	schemaF := schemaArg(req)
+	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
 	max := limitArg(req)
 	threshold := getFloatArg(req, "threshold", 4.0)
@@ -135,7 +135,7 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 		return errResult(err.Error()), nil
 	}
 
-	schemaF := schemaArg(req)
+	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
 	entries := filterByQual(schema.DetectStaleStats(a, int64(7)), schemaF, tableF, staleKey)
 	if len(entries) == 0 {
@@ -193,7 +193,7 @@ func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRe
 		return errResult(err.Error()), nil
 	}
 
-	schemaF := schemaArg(req)
+	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
 	entries := filterByQual(schema.DetectUnusedIndexes(a), schemaF, tableF, unusedKey)
 	if len(entries) == 0 {
@@ -212,7 +212,7 @@ func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolReques
 		return s.emptyKindResult("anomalies", "No node statistics available for anomaly detection."), nil
 	}
 
-	schemaF := schemaArg(req)
+	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
 	rawAnomalies, anomalyNote := buildAnomalies(a)
 	anomalies := filterByQual(rawAnomalies, schemaF, tableF, anomalyKey)
@@ -230,7 +230,7 @@ func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolR
 		return errResult(err.Error()), nil
 	}
 
-	schemaF := schemaArg(req)
+	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
 	threshold := getFloatArg(req, "threshold", 4.0)
 	entries := filterByQual(schema.DetectBloatedIndexes(a, threshold), schemaF, tableF, bloatKey)
@@ -246,7 +246,7 @@ func (s *Server) handleDetectBloatedTables(_ context.Context, req mcp.CallToolRe
 		return errResult(err.Error()), nil
 	}
 
-	schemaF := schemaArg(req)
+	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
 	threshold := getFloatArg(req, "threshold", 4.0)
 	entries := filterByQual(schema.DetectBloatedTables(a, threshold), schemaF, tableF, bloatTableKey)
@@ -283,7 +283,7 @@ func (s *Server) handleVacuumHealth(_ context.Context, req mcp.CallToolRequest) 
 		return errResult(err.Error()), nil
 	}
 
-	schemaF := schemaArg(req)
+	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
 	results := filterByQual(vacuum.AnalyzeVacuumHealth(a), schemaF, tableF, vacuumKey)
 	if len(results) == 0 {

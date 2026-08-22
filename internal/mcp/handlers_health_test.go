@@ -354,13 +354,17 @@ func TestUnattributedScansHint(t *testing.T) {
 // unattributed_scans: one very hot table, and a top-level-only pg_stat_statements
 // capture whose statements reference referenced instead.
 func anomalySchema(referenced string) *schema.AnnotatedSchema {
+	return anomalySchemaIn("public", referenced)
+}
+
+func anomalySchemaIn(schemaName, referenced string) *schema.AnnotatedSchema {
 	track := "top"
 	return &schema.AnnotatedSchema{
 		Schema: &schema.SchemaSnapshot{},
 		Merged: &schema.MergedActivity{Nodes: []schema.NodeActivity{{
 			Node: schema.NodeIdentity{Source: "primary"},
 			Tables: []schema.TableActivityEntry{{
-				Table:    schema.QualifiedName{Schema: "public", Name: "events"},
+				Table:    schema.QualifiedName{Schema: schemaName, Name: "events"},
 				Activity: schema.TableActivity{SeqScan: 200_000, IdxScan: 1},
 			}},
 		}}},
@@ -408,5 +412,45 @@ func TestDetect_AnomaliesCarriesUnattributedScansHint(t *testing.T) {
 	}
 	if got := hintFor(t, "events"); strings.Contains(got, "unattributed_scans") {
 		t.Errorf("statements account for the scans: want no interpretation, got %q", got)
+	}
+}
+
+// A schema argument defaults to "public" for lookup tools, which need one to
+// resolve against. detect is a filter: it used to default the same way, so an
+// application living in its own schema got "no findings" with no error and no
+// hint -- a confidently wrong answer. Absent must mean every schema.
+func TestDetect_NoSchemaArgCoversAllSchemas(t *testing.T) {
+	srv := NewOfflineServerAnnotated(anomalySchemaIn("app", "orders"), lint.DefaultConfig())
+
+	call := func(t *testing.T, args map[string]any) string {
+		t.Helper()
+		var req mcp.CallToolRequest
+		req.Params.Name = "detect"
+		req.Params.Arguments = args
+		res, err := srv.handleDetect(context.Background(), req)
+		if err != nil {
+			t.Fatalf("handleDetect: %v", err)
+		}
+		text, ok := res.Content[0].(mcp.TextContent)
+		if !ok {
+			t.Fatalf("expected TextContent, got %T", res.Content[0])
+		}
+		return text.Text
+	}
+
+	// kind=all is the default and the path an agent actually hits
+	for _, kind := range []string{"all", "anomalies"} {
+		if got := call(t, map[string]any{"kind": kind}); !strings.Contains(got, `"app"`) {
+			t.Errorf("kind=%s: no schema argument must cover every schema, got %s", kind, got)
+		}
+	}
+	if got := call(t, map[string]any{"kind": "anomalies", "schema": "app"}); !strings.Contains(got, `"app"`) {
+		t.Errorf("explicit schema=app must still match, got %s", got)
+	}
+	// assert the empty result, not merely the absence of "app": a panic or an
+	// error result would satisfy a bare NotContains
+	got := call(t, map[string]any{"kind": "anomalies", "schema": "public"})
+	if !strings.Contains(got, "No anomalies detected.") {
+		t.Errorf("explicit schema=public must exclude app, got %s", got)
 	}
 }
