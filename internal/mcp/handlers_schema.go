@@ -10,12 +10,13 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/ddl"
 )
 
 var describeTableFields = []string{
 	"columns", "indexes", "constraints", "stats", "partition_info",
 	"column_profiles", "comment", "policies", "triggers", "reloptions",
-	"rls_enabled",
+	"rls_enabled", "ddl",
 }
 
 type (
@@ -143,8 +144,8 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 			}
 		}
 		// these sections live on the raw Table; bump to full so the merge picks them up
-		for _, f := range fields {
-			if f == "policies" || f == "triggers" || f == "reloptions" || f == "rls_enabled" {
+		for _, f := range []string{"policies", "triggers", "reloptions", "rls_enabled"} {
+			if wantsField(fields, f) {
 				detail = "full"
 				break
 			}
@@ -210,15 +211,7 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 		result["column_profiles"] = profiles
 	}
 
-	wantNodeBreakdown := fields == nil
-	if !wantNodeBreakdown {
-		for _, f := range fields {
-			if f == "indexes" || f == "stats" {
-				wantNodeBreakdown = true
-				break
-			}
-		}
-	}
+	wantNodeBreakdown := fields == nil || wantsField(fields, "indexes") || wantsField(fields, "stats")
 	if wantNodeBreakdown && a.Merged != nil {
 		var nodeBreakdown []map[string]any
 		for _, n := range a.Merged.Nodes {
@@ -295,6 +288,28 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 			break
 		}
 	}
+	// asked for by name, and never capped: ddl missing a column would not
+	// create the table
+	if wantsField(fields, "ddl") {
+		rendered, err := ddl.RenderTable(snap, t)
+		if err != nil {
+			// the other sections were asked for too, and they are fine
+			result["ddl_error"] = err.Error()
+		} else {
+			result["ddl"] = rendered.SQL
+			if len(rendered.Omitted) > 0 {
+				result["ddl_omitted"] = rendered.Omitted
+			}
+			if !rendered.ParseChecked {
+				result["ddl_parse_checked"] = false
+				hint = joinHints(hint, "The snapshot is from a newer PostgreSQL than the bundled parser, so the ddl was not syntax-checked.")
+			}
+			if selected {
+				hint = joinHints(hint, "The ddl is the whole table; the columns argument narrows the other sections only.")
+			}
+		}
+	}
+
 	if kinds := tableFindings(a, t); len(kinds) > 0 {
 		hint = joinHints(hint, findingsHint(kinds))
 		next = append(next, NextCall{
@@ -473,4 +488,13 @@ func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (
 		}})
 	}
 	return s.metaJSONResult(result, "", hint, next), nil
+}
+
+func wantsField(fields []string, name string) bool {
+	for _, f := range fields {
+		if f == name {
+			return true
+		}
+	}
+	return false
 }

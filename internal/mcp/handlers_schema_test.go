@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 // Smoke tests for the schema-family tools (list_tables, describe_table,
@@ -153,4 +157,93 @@ func keys(m map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// The DDL is what a person shares, diffs, and pastes into a migration, so it is
+// asked for by name rather than riding every describe_table.
+func TestDescribeTableDDL(t *testing.T) {
+	c := setupOfflineTest(t)
+
+	t.Run("absent unless asked for", func(t *testing.T) {
+		for _, args := range []map[string]any{
+			{"table": "users"},
+			{"table": "users", "detail": "full"},
+			{"table": "users", "fields": []string{"columns"}},
+		} {
+			if strings.Contains(callTool(t, c, "describe_table", args), `"ddl"`) {
+				t.Errorf("ddl returned unasked for %v", args)
+			}
+		}
+	})
+
+	t.Run("returned when asked for", func(t *testing.T) {
+		var decoded map[string]any
+		out := callTool(t, c, "describe_table", map[string]any{"table": "users", "fields": []string{"ddl"}})
+		if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		sql, _ := decoded["ddl"].(string)
+		for _, want := range []string{
+			"CREATE TABLE public.users (",
+			"user_id bigint GENERATED ALWAYS AS IDENTITY NOT NULL",
+			"CONSTRAINT users_pkey PRIMARY KEY (user_id)",
+			"ALTER TABLE public.users ADD CONSTRAINT users_organization_id_fkey FOREIGN KEY",
+		} {
+			if !strings.Contains(sql, want) {
+				t.Errorf("missing %q in:\n%s", want, sql)
+			}
+		}
+		if _, ok := decoded["ddl_omitted"].([]any); !ok {
+			t.Errorf("ddl without the list of what it cannot reproduce: %v", decoded["ddl_omitted"])
+		}
+	})
+
+	// a capped CREATE TABLE would not create the table
+	t.Run("not capped", func(t *testing.T) {
+		var decoded map[string]any
+		out := callTool(t, c, "describe_table", map[string]any{
+			"table": "users", "fields": []string{"ddl"}, "limit": float64(1),
+		})
+		if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		sql, _ := decoded["ddl"].(string)
+		for _, want := range []string{"user_id", "email", "name", "organization_id", "created_at"} {
+			if !strings.Contains(sql, want) {
+				t.Errorf("limit=1 dropped %q from the ddl:\n%s", want, sql)
+			}
+		}
+	})
+}
+
+// The other sections were asked for too; a table the renderer cannot build is
+// no reason to withhold them.
+func TestDescribeTableDDLErrorKeepsTheRest(t *testing.T) {
+	snap := &schema.SchemaSnapshot{
+		PgVersion: "PostgreSQL 17.0", Database: "test", Timestamp: time.Now().UTC(),
+		Tables: []schema.Table{{
+			Schema: "public", Name: "broken",
+			// no type, so there is no CREATE TABLE to render
+			Columns: []schema.Column{{Name: "a", Ordinal: 1}},
+		}},
+	}
+	c := serveOffline(t, NewOfflineServerAnnotated(&schema.AnnotatedSchema{Schema: snap}, lint.DefaultConfig()))
+	out := callTool(t, c, "describe_table", map[string]any{
+		"table": "broken", "fields": []string{"columns", "ddl"},
+	})
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decoded["columns"]; !ok {
+		t.Errorf("the columns section was withheld because the ddl failed:\n%s", out)
+	}
+	msg, _ := decoded["ddl_error"].(string)
+	if !strings.Contains(msg, "no type") {
+		t.Errorf("ddl_error should say what went wrong, got %q", msg)
+	}
+	if _, ok := decoded["ddl"]; ok {
+		t.Errorf("ddl returned alongside an error:\n%s", out)
+	}
 }

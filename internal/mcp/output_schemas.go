@@ -137,7 +137,7 @@ var (
 
 	describeTableOutputSchema = json.RawMessage(`{
 		"type": "object",
-		"description": "Table detail. Sections vary with detail= and fields=: columns, indexes, constraints, stats, bloat, column_profiles, node_breakdown, partition_summary, partition_child_sizing.",
+		"description": "Table detail. Sections vary with detail= and fields=: columns, indexes, constraints, stats, bloat, column_profiles, node_breakdown, partition_summary, partition_child_sizing. fields=[ddl] adds ddl (the CREATE TABLE and what finishes it), ddl_omitted (what the snapshot cannot reproduce) and, where the render failed, ddl_error.",
 		"properties": {
 			"schema": {"type": "string"},
 			"name": {"type": "string"},
@@ -145,6 +145,9 @@ var (
 			"indexes": {"type": "array"},
 			"constraints": {"type": "array"},
 			"column_profiles": {"type": "array"},
+			"ddl": {"type": "string"},
+			"ddl_omitted": {"type": "array"},
+			"ddl_error": {"type": "string"},
 			` + metaProperty + `
 		},
 		"additionalProperties": true

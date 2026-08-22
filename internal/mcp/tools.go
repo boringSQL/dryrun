@@ -80,7 +80,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("describe_table",
-			mcp.WithDescription("Before writing SQL against a table you have not read in this session: its columns and types, constraints, indexes, and planner stats. Needs no database connection; answers from the snapshot, and points at detect when the table has findings. Structure as of the last capture: no row data, and nothing a later migration changed."),
+			mcp.WithDescription("Before writing SQL against a table you have not read in this session: its columns and types, constraints, indexes, and planner stats. Needs no database connection; answers from the snapshot, and points at detect when the table has findings. Ask for the ddl field to get the CREATE TABLE that would rebuild it, with whatever the snapshot cannot reproduce listed beside it. Structure as of the last capture: no row data, and nothing a later migration changed."),
 			mcp.WithString("table", mcp.Required(), mcp.Description("Table name, bare or schema-qualified.")),
 			mcp.WithString("schema", mcp.Description("Schema name. Without it a bare name resolves in public, or in the one schema that holds it.")),
 			mcp.WithString("detail",
@@ -90,7 +90,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			),
 			mcp.WithArray("fields",
 				mcp.Items(map[string]any{"type": "string"}),
-				mcp.Description("Whitelist of sections: columns, indexes, constraints, stats, partition_info, column_profiles, comment, policies, triggers, reloptions, rls_enabled."),
+				mcp.Description("Whitelist of sections: columns, indexes, constraints, stats, partition_info, column_profiles, comment, policies, triggers, reloptions, rls_enabled, ddl. Ask for ddl to get the CREATE TABLE."),
 			),
 			mcp.WithArray("columns",
 				mcp.Items(map[string]any{"type": "string"}),
