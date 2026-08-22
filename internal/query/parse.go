@@ -24,6 +24,10 @@ type (
 		HasWhere           bool                `json:"has_where"`
 		HasJoin            bool                `json:"has_join"`
 		StatementType      string              `json:"statement_type"`
+
+		// a CTE shadows any real table of the same name, so it must not be
+		// reported missing -- or worse, "corrected" to one
+		cteNames []string
 	}
 
 	// body content is opaque to pg_query, so it escapes static validation.
@@ -37,11 +41,16 @@ type (
 		Name    string  `json:"name"`
 		Alias   *string `json:"alias,omitempty"`
 		Context string  `json:"context"`
+
+		// byte offsets of every occurrence, for rewriting the name in place
+		locs []int32
 	}
 
 	FilterColumn struct {
 		Table  *string `json:"table,omitempty"`
 		Column string  `json:"column"`
+
+		loc int32
 	}
 
 	FuncWrappedColumn struct {
@@ -63,6 +72,7 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 		funcWrappedColumns []FuncWrappedColumn
 		proceduralBodies   []ProceduralBody
 		updateTargets      []string
+		cteNames           []string
 		hasSelectStar      bool
 		hasJoin            bool
 		hasWhere           bool
@@ -70,7 +80,7 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 		stmtType           string
 	)
 
-	seenTables := make(map[string]bool)
+	seenTables := make(map[string]int)
 
 	for _, stmt := range result.Stmts {
 		node := stmt.Stmt
@@ -150,6 +160,11 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 			if child == nil {
 				return
 			}
+			for _, cte := range withClauseOf(child).GetCtes() {
+				if c, ok := cte.Node.(*pg_query.Node_CommonTableExpr); ok && c.CommonTableExpr != nil {
+					cteNames = append(cteNames, c.CommonTableExpr.Ctename)
+				}
+			}
 			switch cn := child.Node.(type) {
 			case *pg_query.Node_RangeVar:
 				rv := cn.RangeVar
@@ -160,21 +175,25 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 				if stmtType == "INSERT" || stmtType == "UPDATE" || stmtType == "DELETE" {
 					ctx = "dml"
 				}
-				key := rv.Relname + ":" + ctx
-				if !seenTables[key] {
-					seenTables[key] = true
-					t := ReferencedTable{
-						Name:    rv.Relname,
-						Context: ctx,
-					}
-					if rv.Schemaname != "" {
-						t.Schema = strp(rv.Schemaname)
-					}
-					if rv.Alias != nil && rv.Alias.Aliasname != "" {
-						t.Alias = strp(rv.Alias.Aliasname)
-					}
-					tables = append(tables, t)
+				// schema is part of the key: a.orders and b.orders are two tables
+				key := rv.Schemaname + "." + rv.Relname + ":" + ctx
+				if i, ok := seenTables[key]; ok {
+					tables[i].locs = append(tables[i].locs, rv.Location)
+					return
 				}
+				seenTables[key] = len(tables)
+				t := ReferencedTable{
+					Name:    rv.Relname,
+					Context: ctx,
+					locs:    []int32{rv.Location},
+				}
+				if rv.Schemaname != "" {
+					t.Schema = strp(rv.Schemaname)
+				}
+				if rv.Alias != nil && rv.Alias.Aliasname != "" {
+					t.Alias = strp(rv.Alias.Aliasname)
+				}
+				tables = append(tables, t)
 			case *pg_query.Node_JoinExpr:
 				_ = cn
 				hasJoin = true
@@ -186,6 +205,7 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 				}
 				fc := extractFilterColumn(cr)
 				if fc != nil {
+					fc.loc = cr.Location
 					filterColumns = append(filterColumns, *fc)
 				}
 			}
@@ -203,10 +223,25 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 			HasJoin:            hasJoin,
 			FuncWrappedColumns: funcWrappedColumns,
 			UpdateTargets:      updateTargets,
+			cteNames:           cteNames,
 			ProceduralBodies:   proceduralBodies,
 			StatementType:      stmtType,
 		},
 	}, nil
+}
+
+func withClauseOf(node *pg_query.Node) *pg_query.WithClause {
+	switch n := node.Node.(type) {
+	case *pg_query.Node_SelectStmt:
+		return n.SelectStmt.GetWithClause()
+	case *pg_query.Node_InsertStmt:
+		return n.InsertStmt.GetWithClause()
+	case *pg_query.Node_UpdateStmt:
+		return n.UpdateStmt.GetWithClause()
+	case *pg_query.Node_DeleteStmt:
+		return n.DeleteStmt.GetWithClause()
+	}
+	return nil
 }
 
 func walkSelect(s *pg_query.SelectStmt, hasWhere, hasLimit, hasSelectStar *bool) {

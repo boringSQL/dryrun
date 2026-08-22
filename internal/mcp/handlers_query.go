@@ -24,12 +24,19 @@ func (s *Server) handleValidateQuery(_ context.Context, req mcp.CallToolRequest)
 	}
 
 	hint := ""
-	if result.Valid && len(result.Warnings) > 0 {
+	var next []NextCall
+	switch {
+	case result.Valid && len(result.Warnings) > 0:
 		hint = "Query is valid but has warnings. Use advise for index suggestions and plan analysis."
-	} else if result.Valid {
+	case result.Valid:
 		hint = "Query is valid. Use advise if you need optimization suggestions."
+	case result.CorrectedSQL != "":
+		hint = "Every unknown name had one candidate in the snapshot. corrected_sql is the query with those names replaced and it validates clean -- dryrun matched names, not intent, so read fixes before applying it."
+		next = []NextCall{{Tool: "advise", Args: map[string]any{"sql": result.CorrectedSQL}}}
+	default:
+		hint = "Unknown names with no single obvious candidate. Look them up with search_schema before rewriting the query."
 	}
-	return s.metaJSONResult(result, "", hint, nil), nil
+	return s.metaJSONResult(result, "", hint, next), nil
 }
 
 func (s *Server) handleExplainQuery(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -194,9 +201,15 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 	if explainErr != "" {
 		wrapper["explain_error"] = explainErr
 	}
+	if validation.CorrectedSQL != "" {
+		wrapper["corrected_sql"] = validation.CorrectedSQL
+		wrapper["fixes"] = validation.Fixes
+	}
 
 	hint := ""
 	switch {
+	case !validation.Valid && validation.CorrectedSQL != "":
+		hint = "Query has validation errors, and every unknown name had one candidate: corrected_sql is the query with those names replaced. Re-run advise on it once you have checked the fixes."
 	case !validation.Valid:
 		hint = "Query has validation errors. Fix referenced tables/columns before running advise again."
 	case len(advice) > 0 || len(indexSuggestions) > 0:

@@ -127,7 +127,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("validate_query",
-			mcp.WithDescription("Before proposing or running any SQL: checks it against the snapshot and reports unknown tables and columns, ambiguous references, and anti-patterns. Needs no database connection and never executes the query. Names and shape only: not cost, not plan, not whether any rows match (advise, explain_query)."),
+			mcp.WithDescription("Before proposing or running any SQL: checks it against the snapshot and reports unknown tables, unknown columns on qualified references (t.col), and anti-patterns. When every unknown name has exactly one candidate it also returns corrected_sql -- the same query with those names replaced, re-validated -- so a misspelling comes back as a patch rather than prose. Needs no database connection and never executes the query. Names and shape only: not cost, not plan, not whether any rows match (advise, explain_query)."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
 			annSnapshot,
 		),
