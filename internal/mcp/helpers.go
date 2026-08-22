@@ -34,7 +34,8 @@ func errResult(msg string) *mcp.CallToolResult {
 }
 
 func (s *Server) wrapText(body, hint string) string {
-	header := fmt.Sprintf("PostgreSQL %s | %s | %s\n", s.pgDisplay(), s.databaseName(), s.modeStr())
+	header := fmt.Sprintf("PostgreSQL %s | %s | %s%s\n",
+		s.pgDisplay(), s.databaseName(), s.modeStr(), s.captureTimes().suffix())
 	if hint != "" {
 		return header + body + "\n\n> " + hint
 	}
@@ -52,21 +53,32 @@ type (
 	// toolMeta is the typed _meta envelope for tools with generated output
 	// schemas; map-based payloads keep using injectMeta.
 	toolMeta struct {
-		PgVersion string     `json:"pg_version"`
-		Database  string     `json:"database"`
-		Mode      string     `json:"mode"`
-		Hint      string     `json:"hint,omitempty"`
-		Next      []NextCall `json:"next,omitempty"`
+		PgVersion string `json:"pg_version"`
+		Database  string `json:"database"`
+		Mode      string `json:"mode"`
+		// DDL, planner stats and activity are captured by separate commands on
+		// separate schedules; one timestamp would misstate the other two
+		SchemaCapturedAt   string     `json:"schema_captured_at,omitempty"`
+		PlannerCapturedAt  string     `json:"planner_captured_at,omitempty"`
+		ActivityCapturedAt string     `json:"activity_captured_at,omitempty"`
+		ActivityOldestNode string     `json:"activity_oldest_node,omitempty"`
+		Hint               string     `json:"hint,omitempty"`
+		Next               []NextCall `json:"next,omitempty"`
 	}
 )
 
 func (s *Server) newMeta(hint string, next []NextCall) *toolMeta {
+	c := s.captureTimes()
 	return &toolMeta{
-		PgVersion: s.pgDisplay(),
-		Database:  s.databaseName(),
-		Mode:      s.modeStr(),
-		Hint:      hint,
-		Next:      next,
+		PgVersion:          s.pgDisplay(),
+		Database:           s.databaseName(),
+		Mode:               s.modeStr(),
+		SchemaCapturedAt:   c.schema,
+		PlannerCapturedAt:  c.planner,
+		ActivityCapturedAt: c.activity,
+		ActivityOldestNode: c.activityNode,
+		Hint:               hint,
+		Next:               next,
 	}
 }
 
@@ -75,6 +87,9 @@ func (s *Server) injectMeta(val map[string]any, hint string, next []NextCall) {
 		"pg_version": s.pgDisplay(),
 		"database":   s.databaseName(),
 		"mode":       s.modeStr(),
+	}
+	for k, v := range s.captureTimes().fields() {
+		meta[k] = v
 	}
 	if hint != "" {
 		meta["hint"] = hint

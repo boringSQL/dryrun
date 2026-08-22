@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -18,15 +20,15 @@ import (
 
 type (
 	Server struct {
-		pool             *pgxpool.Pool
-		dbURL            string
-		annotated        *schema.AnnotatedSchema
-		mu               sync.RWMutex
-		history          *history.Store
-		snapshotKey      history.SnapshotKey
-		lintConfig       lint.Config
-		pgmustardClient  *pgmustard.Client
-		uninitialized    bool
+		pool            *pgxpool.Pool
+		dbURL           string
+		annotated       *schema.AnnotatedSchema
+		mu              sync.RWMutex
+		history         *history.Store
+		snapshotKey     history.SnapshotKey
+		lintConfig      lint.Config
+		pgmustardClient *pgmustard.Client
+		uninitialized   bool
 	}
 )
 
@@ -179,6 +181,98 @@ func (s *Server) databaseName() string {
 	return snap.Database
 }
 
+type (
+	// DDL, planner stats and activity reach history.db as separate rows on
+	// separate schedules, so each carries its own capture time.
+	captureStamps struct {
+		schema   string
+		planner  string
+		activity string
+		// which node is the laggard: "three weeks stale" is not actionable
+		// without knowing whose capture is old
+		activityNode string
+	}
+)
+
+// When each part of the snapshot was taken, so an agent can judge staleness
+// itself. No age and no threshold: dryrun does not know what stale means for a
+// given database.
+func (s *Server) captureTimes() captureStamps {
+	s.mu.RLock()
+	a := s.annotated
+	uninitialized := s.uninitialized
+	s.mu.RUnlock()
+	if a == nil || uninitialized {
+		return captureStamps{}
+	}
+
+	var c captureStamps
+	if a.Schema != nil {
+		c.schema = stamp(a.Schema.Timestamp)
+	}
+	if a.Planner != nil {
+		c.planner = stamp(a.Planner.Timestamp)
+	}
+	if a.Merged != nil {
+		// the oldest node, not the newest: a fresh primary beside a three-week
+		// replica is three weeks stale for anything read across nodes
+		var oldest time.Time
+		for _, n := range a.Merged.Nodes {
+			if n.Node.Timestamp.IsZero() {
+				continue
+			}
+			if oldest.IsZero() || n.Node.Timestamp.Before(oldest) {
+				oldest, c.activityNode = n.Node.Timestamp, n.Node.Source
+			}
+		}
+		c.activity = stamp(oldest)
+	}
+	return c
+}
+
+func stamp(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func (c captureStamps) fields() map[string]any {
+	out := map[string]any{}
+	for k, v := range map[string]string{
+		"schema_captured_at":   c.schema,
+		"planner_captured_at":  c.planner,
+		"activity_captured_at": c.activity,
+		"activity_oldest_node": c.activityNode,
+	} {
+		if v != "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// Thin clients read only the text body, so the header carries them too.
+func (c captureStamps) suffix() string {
+	var parts []string
+	for _, p := range []struct{ label, at string }{
+		{"schema", c.schema}, {"planner", c.planner}, {"activity", c.activity},
+	} {
+		if p.at == "" {
+			continue
+		}
+		part := p.label + " " + p.at
+		if p.label == "activity" && c.activityNode != "" {
+			part += " (" + c.activityNode + ")"
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " | captured: " + strings.Join(parts, ", ")
+}
+
 func (s *Server) requirePool() (*pgxpool.Pool, error) {
 	if s.pool == nil {
 		return nil, fmt.Errorf("this tool requires a live database connection (--db)")
@@ -187,7 +281,7 @@ func (s *Server) requirePool() (*pgxpool.Pool, error) {
 }
 
 func (s *Server) Instructions() string {
-	metaNote := "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint."
+	metaNote := "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint. _meta.schema_captured_at, _meta.planner_captured_at and _meta.activity_captured_at say when each part of the snapshot was taken -- DDL, planner stats and per-node counters are captured by separate commands, so they age at different rates. They describe the snapshot, not a live read. Activity is the oldest node, named in _meta.activity_oldest_node."
 
 	// surface a history.db compat problem here so MCP-only users see it
 	if note := s.historyNote(); note != nil {

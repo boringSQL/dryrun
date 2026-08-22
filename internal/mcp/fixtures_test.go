@@ -14,6 +14,9 @@ import (
 
 const testPageSize = 8192
 
+// a day after the schema, as separate cron entries would produce
+var fixtureActivityTime = time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+
 func testCol(name, typ string, nullable bool) schema.Column {
 	return schema.Column{Name: name, TypeName: typ, Nullable: nullable}
 }
@@ -210,13 +213,26 @@ func withColumnStats(a *schema.AnnotatedSchema, q schema.QualifiedName) *schema.
 
 // withActivity attaches one node's counters for a single table.
 func withActivity(a *schema.AnnotatedSchema, q schema.QualifiedName, act schema.TableActivity) *schema.AnnotatedSchema {
+	return withActivityAt(a, "primary", fixtureActivityTime, q, act)
+}
+
+// Activity is captured per node on its own schedule, so each node carries its
+// own timestamp and two nodes need not agree.
+func withActivityAt(a *schema.AnnotatedSchema, source string, at time.Time, q schema.QualifiedName, act schema.TableActivity) *schema.AnnotatedSchema {
 	if a.Merged == nil {
-		a.Merged = &schema.MergedActivity{Nodes: []schema.NodeActivity{{
-			Node: schema.NodeIdentity{Source: "primary"},
-		}}}
+		a.Merged = &schema.MergedActivity{}
 	}
-	n := &a.Merged.Nodes[0]
-	n.Tables = append(n.Tables, schema.TableActivityEntry{Table: q, Activity: act})
+	for i := range a.Merged.Nodes {
+		if a.Merged.Nodes[i].Node.Source == source {
+			a.Merged.Nodes[i].Tables = append(a.Merged.Nodes[i].Tables,
+				schema.TableActivityEntry{Table: q, Activity: act})
+			return a
+		}
+	}
+	a.Merged.Nodes = append(a.Merged.Nodes, schema.NodeActivity{
+		Node:   schema.NodeIdentity{Source: source, Timestamp: at},
+		Tables: []schema.TableActivityEntry{{Table: q, Activity: act}},
+	})
 	return a
 }
 

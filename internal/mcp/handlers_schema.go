@@ -228,7 +228,7 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 				}
 				nodeBreakdown = append(nodeBreakdown, map[string]any{
 					"source":    n.Node.Source,
-					"timestamp": n.Node.Timestamp.Format("2006-01-02T15:04:05Z07:00"),
+					"timestamp": stamp(n.Node.Timestamp),
 					"activity":  ts.Activity,
 				})
 			}

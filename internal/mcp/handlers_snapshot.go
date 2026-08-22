@@ -19,7 +19,9 @@ func (s *Server) handleReloadSchema(ctx context.Context, _ mcp.CallToolRequest) 
 		s.uninitialized = false
 		s.mu.Unlock()
 		t, v, f := s.SchemaCounts()
-		return textResult(fmt.Sprintf("Schema loaded from history.db: %d tables, %d views, %d functions", t, v, f)), nil
+		// what was just loaded, and when it was taken, is the whole question here
+		return textResult(s.wrapText(
+			fmt.Sprintf("Schema loaded from history.db: %d tables, %d views, %d functions", t, v, f), "")), nil
 	}
 
 	s.mu.RLock()
