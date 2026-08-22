@@ -295,6 +295,17 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 			break
 		}
 	}
+	if kinds := tableFindings(a, t); len(kinds) > 0 {
+		hint = joinHints(hint, findingsHint(kinds))
+		next = append(next, NextCall{
+			Tool: "detect",
+			Args: map[string]any{
+				"kind": findingsKind(kinds), "table": ref.Name, "schema": ref.Schema,
+				"threshold": findingsBloatThreshold, // pinned to what the hint promised
+			},
+		})
+	}
+
 	if capped := capHint(caps); capped != "" {
 		hint = joinHints(capped, hint)
 		args := map[string]any{"table": ref.Name, "schema": ref.Schema, "limit": 0}
