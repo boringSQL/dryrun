@@ -160,15 +160,14 @@ func srvFor(a *schema.AnnotatedSchema) *Server {
 	return NewOfflineServerAnnotated(a, lint.DefaultConfig())
 }
 
-// Thin clients read content[0].text and nothing else, and find_related and
-// check_drift's no-drift branch have no structured payload at all.
+// Thin clients read content[0].text and nothing else, so the tools that still
+// answer in prose have to carry the capture times in the first line.
 func TestTextHeaderCarriesCaptureTimes(t *testing.T) {
 	a := annotate(multiSchemaSnap(), 1000)
 	a.Planner.Timestamp = fixtureActivityTime
 	a = withActivity(a, schema.QualifiedName{Schema: "app", Name: "events"}, schema.TableActivity{SeqScan: 1})
-	c := serveOffline(t, srvFor(a))
 
-	header := strings.SplitN(callTool(t, c, "find_related", map[string]any{"table": "public.orders"}), "\n", 2)[0]
+	header := strings.SplitN(srvFor(a).wrapText("body", ""), "\n", 2)[0]
 	for _, want := range []string{"schema " + fixtureSchemaAt, "planner " + fixtureActivityAt, "activity " + fixtureActivityAt} {
 		if !strings.Contains(header, want) {
 			t.Errorf("header missing %q: %s", want, header)

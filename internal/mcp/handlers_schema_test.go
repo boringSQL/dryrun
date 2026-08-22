@@ -37,9 +37,8 @@ func TestSchemaHandlers_OfflineSmoke(t *testing.T) {
 
 	t.Run("find_related", func(t *testing.T) {
 		out := callTool(t, c, "find_related", map[string]any{"table": "users"})
-		if out == "" {
-			t.Fatal("empty result")
-		}
+		assertContains(t, out, `"table": "public.organizations"`)
+		assertContains(t, out, `"join": "JOIN public.organizations ON public.organizations.organization_id = public.users.organization_id"`)
 	})
 }
 

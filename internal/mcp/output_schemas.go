@@ -33,6 +33,34 @@ type (
 		Meta   *toolMeta        `json:"_meta,omitempty"`
 	}
 
+	// Columns are on the table asked about, RefColumns on Table.
+	relatedEdge struct {
+		Table            string   `json:"table"`
+		Constraint       string   `json:"constraint"`
+		Columns          []string `json:"columns"`
+		RefColumns       []string `json:"ref_columns"`
+		OnDelete         string   `json:"on_delete,omitempty"`
+		OnUpdate         string   `json:"on_update,omitempty"`
+		NotValid         bool     `json:"not_valid,omitempty"`
+		Join             string   `json:"join,omitempty"`
+		PartitionsFolded int      `json:"partitions_folded,omitempty"`
+
+		// unquoted identity, for a follow-up call that has to resolve it
+		target   edgeTarget
+		deferred bool
+	}
+
+	findRelatedResult struct {
+		Table           string        `json:"table"`
+		Outgoing        []relatedEdge `json:"outgoing"`
+		OutgoingCount   int           `json:"outgoing_count"`
+		OutgoingOmitted int           `json:"outgoing_omitted,omitempty"`
+		Incoming        []relatedEdge `json:"incoming"`
+		IncomingCount   int           `json:"incoming_count"`
+		IncomingOmitted int           `json:"incoming_omitted,omitempty"`
+		Meta            *toolMeta     `json:"_meta,omitempty"`
+	}
+
 	searchMatch struct {
 		Kind   string `json:"kind"`
 		Object string `json:"object"`

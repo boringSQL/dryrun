@@ -118,9 +118,11 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("find_related",
-			mcp.WithDescription("Before writing a JOIN, or a DELETE that might cascade: the incoming and outgoing foreign keys of one table. Needs no database connection. Declared FK constraints only -- relations enforced in application code do not appear -- one hop, and no ready-made JOIN text."),
+			mcp.WithDescription("Before writing a JOIN, or a DELETE that might cascade: the incoming and outgoing foreign keys of one table, each with a JOIN clause you can paste and the ON DELETE / ON UPDATE action it carries. Needs no database connection. Declared FK constraints only -- relations enforced in application code do not appear -- and one hop, so a table reached by a cascade may cascade further."),
 			mcp.WithString("table", mcp.Required(), mcp.Description("Table name, bare or schema-qualified.")),
 			mcp.WithString("schema", mcp.Description("Schema name. Without it a bare name resolves in public, or in the one schema that holds it.")),
+			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max relations per direction (default 50, 0 for all). Keys that cascade or clear on delete are kept past it, so a hub table can exceed the limit.")),
+			mcp.WithOutputSchema[findRelatedResult](),
 			annSnapshot,
 		),
 		s.handleFindRelated,

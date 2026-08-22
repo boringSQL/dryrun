@@ -89,7 +89,7 @@ func TestResolveTable(t *testing.T) {
 
 	t.Run("find_related_resolves_the_same_way", func(t *testing.T) {
 		assertContains(t, callTool(t, c, "find_related", map[string]any{"table": "public.foo.bar"}),
-			"Relationships for public.foo.bar")
+			`"table": "public.\"foo.bar\""`)
 	})
 }
 

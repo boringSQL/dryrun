@@ -132,6 +132,9 @@ func renderName(name string, quoteAll bool) string {
 	return strings.Join(parts, ".")
 }
 
+// QuoteIdent renders a catalog name for use in SQL text.
+func QuoteIdent(s string) string { return quoteIdent(s) }
+
 func quoteIdent(s string) string {
 	if !needsQuote(s) {
 		return s

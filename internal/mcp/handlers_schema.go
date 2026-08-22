@@ -424,44 +424,53 @@ func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (
 	if miss != nil {
 		return miss, nil
 	}
-	table := ref.Table
 	qualified := ref.Schema + "." + ref.Name
+	local := qualify(ref.Schema, ref.Name)
 
-	var lines []string
-	lines = append(lines, fmt.Sprintf("Relationships for %s:\n", qualified))
+	outgoing := outgoingEdges(ref.Table, local)
+	incoming := incomingEdges(snap, qualified, local)
 
-	var outgoing []string
-	for _, c := range table.Constraints {
-		if c.Kind != schema.ConstraintForeignKey || c.FKTable == nil {
-			continue
+	// keep delete-affecting keys past the cap; a hub table may exceed it
+	max := limitArgOr(req, defaultMaxItems)
+	keptOut, outOmitted, outKept := capRetainingBy(outgoing, destructive, max)
+	keptIn, inOmitted, inKept := capRetainingBy(incoming, destructive, max)
+
+	result := findRelatedResult{
+		Table:           local,
+		Outgoing:        keptOut,
+		OutgoingCount:   len(outgoing),
+		OutgoingOmitted: outOmitted,
+		Incoming:        keptIn,
+		IncomingCount:   len(incoming),
+		IncomingOmitted: inOmitted,
+	}
+	if result.Outgoing == nil {
+		result.Outgoing = []relatedEdge{}
+	}
+	if result.Incoming == nil {
+		result.Incoming = []relatedEdge{}
+	}
+
+	hint, cascades := deleteHint(incoming)
+	hint = joinHints(ref.Note, hint)
+	if outOmitted+inOmitted > 0 {
+		note := fmt.Sprintf("Omitted %d of %d relations. Re-run with limit=0 for all of them.",
+			outOmitted+inOmitted, len(outgoing)+len(incoming))
+		if outKept+inKept > 0 {
+			note += " Keys that cascade or clear on delete are kept past the cap."
 		}
-		outgoing = append(outgoing, fmt.Sprintf("  %s(%s) -> %s(%s)",
-			qualified, strings.Join(c.Columns, ", "), *c.FKTable, strings.Join(c.FKColumns, ", ")))
+		hint = joinHints(hint, note)
 	}
-	if len(outgoing) == 0 {
-		lines = append(lines, "Outgoing FKs: none")
-	} else {
-		lines = append(lines, "Outgoing FKs:")
-		lines = append(lines, outgoing...)
+	if len(outgoing)+len(incoming) == 0 {
+		hint = joinHints(hint, "No declared foreign keys. Relations enforced in application code do not appear here.")
 	}
 
-	var incoming []string
-	for _, other := range snap.Tables {
-		for _, fk := range other.Constraints {
-			if fk.Kind != schema.ConstraintForeignKey || fk.FKTable == nil || *fk.FKTable != qualified {
-				continue
-			}
-			incoming = append(incoming, fmt.Sprintf("  %s.%s(%s) -> %s(%s)",
-				other.Schema, other.Name, strings.Join(fk.Columns, ", "), qualified, strings.Join(fk.FKColumns, ", ")))
-		}
+	var next []NextCall
+	// the follow-up needs the unquoted catalog name, not SQL text
+	if len(cascades) > 0 {
+		next = append(next, NextCall{Tool: "find_related", Args: map[string]any{
+			"table": cascades[0].name, "schema": cascades[0].schema,
+		}})
 	}
-	lines = append(lines, "")
-	if len(incoming) == 0 {
-		lines = append(lines, "Incoming FKs: none")
-	} else {
-		lines = append(lines, "Incoming FKs:")
-		lines = append(lines, incoming...)
-	}
-
-	return textResult(s.wrapText(strings.Join(lines, "\n"), ref.Note)), nil
+	return s.metaJSONResult(result, "", hint, next), nil
 }

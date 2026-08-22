@@ -170,6 +170,23 @@ func capRetaining(rows []any, field string, retain map[string]bool, max int) (ke
 	return kept, omitted, retained, dropped
 }
 
+// capRetainingBy is capRetaining for a typed slice of struct rows.
+func capRetainingBy[T any](rows []T, retain func(T) bool, max int) (kept []T, omitted, retained int) {
+	if max <= 0 || len(rows) <= max {
+		return rows, 0, 0
+	}
+	kept = append(kept, rows[:max]...)
+	for _, r := range rows[max:] {
+		if retain(r) {
+			kept = append(kept, r)
+			retained++
+			continue
+		}
+		omitted++
+	}
+	return kept, omitted, retained
+}
+
 func filterByName(v any, field string, keep map[string]bool) any {
 	rows, ok := toRows(v)
 	if !ok {
