@@ -124,8 +124,10 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 	}
 	snap := a.Schema
 
-	tableName := getArg(req, "table")
-	schemaName := schemaArg(req)
+	ref, miss := resolveTable(snap, req)
+	if miss != nil {
+		return miss, nil
+	}
 	detail := argOr(req, "detail", "summary")
 
 	fields := getStringSliceArg(req, "fields")
@@ -149,148 +151,143 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 		}
 	}
 
-	for i := range snap.Tables {
-		t := &snap.Tables[i]
-		if t.Name == tableName && t.Schema == schemaName {
-			qual := t.Qual()
-			sizing := a.SizingFor(qual)
-			var tableRows float64
-			if sizing != nil {
-				tableRows = sizing.Reltuples
-			}
+	t := ref.Table
+	qual := t.Qual()
+	sizing := a.SizingFor(qual)
+	var tableRows float64
+	if sizing != nil {
+		tableRows = sizing.Reltuples
+	}
 
-			var profiles []map[string]any
-			for _, col := range t.Columns {
-				cs := a.ColumnStats(qual, col.Name)
-				if p := schema.ProfileColumn(col, cs, tableRows); p != nil {
-					profiles = append(profiles, map[string]any{
-						"column":  col.Name,
-						"profile": p,
-					})
-				}
-			}
-
-			result := map[string]any{}
-
-			bloat := a.TableBloatFor(qual)
-			switch detail {
-			case "full":
-				raw, err := json.Marshal(t)
-				if err != nil {
-					return errResult(fmt.Sprintf("serialization error: %v", err)), nil
-				}
-				_ = json.Unmarshal(raw, &result)
-				if sizing != nil {
-					result["stats"] = sizing
-				}
-				if bloat != nil {
-					result["bloat"] = bloat
-				}
-			case "stats":
-				result["schema"] = t.Schema
-				result["name"] = t.Name
-				if sizing != nil {
-					result["stats"] = sizing
-				}
-				if bloat != nil {
-					result["bloat"] = bloat
-				}
-				if act := a.PrimaryActivity(qual); act != nil {
-					result["activity"] = act
-				}
-			default:
-				raw, err := json.Marshal(toCompactTable(t, sizing))
-				if err != nil {
-					return errResult(fmt.Sprintf("serialization error: %v", err)), nil
-				}
-				_ = json.Unmarshal(raw, &result)
-			}
-
-			if len(profiles) > 0 {
-				result["column_profiles"] = profiles
-			}
-
-			wantNodeBreakdown := fields == nil
-			if !wantNodeBreakdown {
-				for _, f := range fields {
-					if f == "indexes" || f == "stats" {
-						wantNodeBreakdown = true
-						break
-					}
-				}
-			}
-			if wantNodeBreakdown && a.Merged != nil {
-				var nodeBreakdown []map[string]any
-				for _, n := range a.Merged.Nodes {
-					for _, ts := range n.Tables {
-						if ts.Table != qual {
-							continue
-						}
-						nodeBreakdown = append(nodeBreakdown, map[string]any{
-							"source":    n.Node.Source,
-							"timestamp": n.Node.Timestamp.Format("2006-01-02T15:04:05Z07:00"),
-							"activity":  ts.Activity,
-						})
-					}
-				}
-				if len(nodeBreakdown) > 0 {
-					result["node_breakdown"] = nodeBreakdown
-				}
-			}
-			if t.PartitionInfo != nil {
-				result["partition_summary"] = fmt.Sprintf(
-					"PARTITIONED BY %s (%s) - %d partitions. "+
-						"Always include '%s' in WHERE clauses for partition pruning.",
-					t.PartitionInfo.Strategy, t.PartitionInfo.Key,
-					len(t.PartitionInfo.Children), t.PartitionInfo.Key)
-
-				// per-partition child sizing — Rust 60ca7e3
-				var childSizing []map[string]any
-				for _, ch := range t.PartitionInfo.Children {
-					csz := a.SizingFor(schema.QualifiedName{Schema: ch.Schema, Name: ch.Name})
-					if csz != nil {
-						childSizing = append(childSizing, map[string]any{
-							"schema": ch.Schema, "name": ch.Name, "sizing": csz,
-						})
-					}
-				}
-				if len(childSizing) > 0 {
-					result["partition_child_sizing"] = childSizing
-				}
-			}
-
-			if fields != nil {
-				allowed := map[string]bool{"schema": true, "name": true}
-				for _, f := range fields {
-					allowed[f] = true
-				}
-				for k := range result {
-					if !allowed[k] {
-						delete(result, k)
-					}
-				}
-			}
-
-			hint := ""
-			var next []NextCall
-			for _, c := range t.Constraints {
-				if c.Kind == schema.ConstraintForeignKey {
-					hint = "This table has foreign keys — use find_related for the tables on both sides of them."
-					next = []NextCall{{
-						Tool: "find_related",
-						Args: map[string]any{
-							"table":  tableName,
-							"schema": schemaName,
-						},
-					}}
-					break
-				}
-			}
-			s.injectMeta(result, hint, next)
-			return jsonResult(result), nil
+	var profiles []map[string]any
+	for _, col := range t.Columns {
+		cs := a.ColumnStats(qual, col.Name)
+		if p := schema.ProfileColumn(col, cs, tableRows); p != nil {
+			profiles = append(profiles, map[string]any{
+				"column":  col.Name,
+				"profile": p,
+			})
 		}
 	}
-	return errResult(fmt.Sprintf("table '%s.%s' not found", schemaName, tableName)), nil
+
+	result := map[string]any{}
+
+	bloat := a.TableBloatFor(qual)
+	switch detail {
+	case "full":
+		raw, err := json.Marshal(t)
+		if err != nil {
+			return errResult(fmt.Sprintf("serialization error: %v", err)), nil
+		}
+		_ = json.Unmarshal(raw, &result)
+		if sizing != nil {
+			result["stats"] = sizing
+		}
+		if bloat != nil {
+			result["bloat"] = bloat
+		}
+	case "stats":
+		result["schema"] = t.Schema
+		result["name"] = t.Name
+		if sizing != nil {
+			result["stats"] = sizing
+		}
+		if bloat != nil {
+			result["bloat"] = bloat
+		}
+		if act := a.PrimaryActivity(qual); act != nil {
+			result["activity"] = act
+		}
+	default:
+		raw, err := json.Marshal(toCompactTable(t, sizing))
+		if err != nil {
+			return errResult(fmt.Sprintf("serialization error: %v", err)), nil
+		}
+		_ = json.Unmarshal(raw, &result)
+	}
+
+	if len(profiles) > 0 {
+		result["column_profiles"] = profiles
+	}
+
+	wantNodeBreakdown := fields == nil
+	if !wantNodeBreakdown {
+		for _, f := range fields {
+			if f == "indexes" || f == "stats" {
+				wantNodeBreakdown = true
+				break
+			}
+		}
+	}
+	if wantNodeBreakdown && a.Merged != nil {
+		var nodeBreakdown []map[string]any
+		for _, n := range a.Merged.Nodes {
+			for _, ts := range n.Tables {
+				if ts.Table != qual {
+					continue
+				}
+				nodeBreakdown = append(nodeBreakdown, map[string]any{
+					"source":    n.Node.Source,
+					"timestamp": n.Node.Timestamp.Format("2006-01-02T15:04:05Z07:00"),
+					"activity":  ts.Activity,
+				})
+			}
+		}
+		if len(nodeBreakdown) > 0 {
+			result["node_breakdown"] = nodeBreakdown
+		}
+	}
+	if t.PartitionInfo != nil {
+		result["partition_summary"] = fmt.Sprintf(
+			"PARTITIONED BY %s (%s) - %d partitions. "+
+				"Always include '%s' in WHERE clauses for partition pruning.",
+			t.PartitionInfo.Strategy, t.PartitionInfo.Key,
+			len(t.PartitionInfo.Children), t.PartitionInfo.Key)
+
+		// per-partition child sizing — Rust 60ca7e3
+		var childSizing []map[string]any
+		for _, ch := range t.PartitionInfo.Children {
+			csz := a.SizingFor(schema.QualifiedName{Schema: ch.Schema, Name: ch.Name})
+			if csz != nil {
+				childSizing = append(childSizing, map[string]any{
+					"schema": ch.Schema, "name": ch.Name, "sizing": csz,
+				})
+			}
+		}
+		if len(childSizing) > 0 {
+			result["partition_child_sizing"] = childSizing
+		}
+	}
+
+	if fields != nil {
+		allowed := map[string]bool{"schema": true, "name": true}
+		for _, f := range fields {
+			allowed[f] = true
+		}
+		for k := range result {
+			if !allowed[k] {
+				delete(result, k)
+			}
+		}
+	}
+
+	hint := ""
+	var next []NextCall
+	for _, c := range t.Constraints {
+		if c.Kind == schema.ConstraintForeignKey {
+			hint = "This table has foreign keys — use find_related for the tables on both sides of them."
+			next = []NextCall{{
+				Tool: "find_related",
+				Args: map[string]any{
+					"table":  ref.Name,
+					"schema": ref.Schema,
+				},
+			}}
+			break
+		}
+	}
+	s.injectMeta(result, joinHints(ref.Note, hint), next)
+	return jsonResult(result), nil
 }
 
 func (s *Server) handleSearchSchema(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -392,20 +389,12 @@ func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (
 		return errResult(err.Error()), nil
 	}
 
-	tableName := getArg(req, "table")
-	schemaName := schemaArg(req)
-	qualified := schemaName + "." + tableName
-
-	var table *schema.Table
-	for i := range snap.Tables {
-		if snap.Tables[i].Name == tableName && snap.Tables[i].Schema == schemaName {
-			table = &snap.Tables[i]
-			break
-		}
+	ref, miss := resolveTable(snap, req)
+	if miss != nil {
+		return miss, nil
 	}
-	if table == nil {
-		return errResult(fmt.Sprintf("table '%s' not found", qualified)), nil
-	}
+	table := ref.Table
+	qualified := ref.Schema + "." + ref.Name
 
 	var lines []string
 	lines = append(lines, fmt.Sprintf("Relationships for %s:\n", qualified))
@@ -443,5 +432,5 @@ func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (
 		lines = append(lines, incoming...)
 	}
 
-	return textResult(s.wrapText(strings.Join(lines, "\n"), "")), nil
+	return textResult(s.wrapText(strings.Join(lines, "\n"), ref.Note)), nil
 }

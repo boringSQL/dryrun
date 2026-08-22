@@ -81,8 +81,8 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
 		mcp.NewTool("describe_table",
 			mcp.WithDescription("Before writing SQL against a table you have not read in this session: its columns and types, constraints, indexes, and planner stats. Needs no database connection; answers from the snapshot. Structure as of the last capture: no row data, and nothing a later migration changed."),
-			mcp.WithString("table", mcp.Required(), mcp.Description("Table name.")),
-			mcp.WithString("schema", mcp.Description("Schema name (default: public).")),
+			mcp.WithString("table", mcp.Required(), mcp.Description("Table name, bare or schema-qualified.")),
+			mcp.WithString("schema", mcp.Description("Schema name. Without it a bare name resolves in public, or in the one schema that holds it.")),
 			mcp.WithString("detail",
 				mcp.Enum("summary", "full", "stats"),
 				mcp.DefaultString("summary"),
@@ -111,8 +111,8 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
 		mcp.NewTool("find_related",
 			mcp.WithDescription("Before writing a JOIN, or a DELETE that might cascade: the incoming and outgoing foreign keys of one table. Needs no database connection. Declared FK constraints only -- relations enforced in application code do not appear -- one hop, and no ready-made JOIN text."),
-			mcp.WithString("table", mcp.Required(), mcp.Description("Table name.")),
-			mcp.WithString("schema", mcp.Description("Schema name (default: public).")),
+			mcp.WithString("table", mcp.Required(), mcp.Description("Table name, bare or schema-qualified.")),
+			mcp.WithString("schema", mcp.Description("Schema name. Without it a bare name resolves in public, or in the one schema that holds it.")),
 			annSnapshot,
 		),
 		s.handleFindRelated,

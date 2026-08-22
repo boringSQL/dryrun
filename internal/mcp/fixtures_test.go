@@ -88,7 +88,16 @@ func multiSchemaSnap() *schema.SchemaSnapshot {
 			testTable("public", "foo.bar", testCol("note", "text", true)),
 			testTable("app", "orders", testCol("tenant_id", "integer", false)),
 			testTable("app", "events", testCol("payload", "jsonb", true)),
+			// same name, neither in public: a bare lookup cannot pick one
+			testTable("billing", "invoices", testCol("total", "numeric", false)),
+			testTable("archive", "invoices", testCol("total", "numeric", false)),
+			// with public."foo.bar" above, "foo.bar" reads two ways
+			testTable("foo", "bar", testCol("note", "text", true)),
 		},
+		Views: []schema.View{{
+			Schema: "app", Name: "order_summary",
+			Definition: "SELECT id FROM app.orders",
+		}},
 	})
 }
 
