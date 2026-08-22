@@ -128,21 +128,57 @@ func (s *Server) handleCheckDrift(ctx context.Context, _ mcp.CallToolRequest) (*
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-	savedSnap, err := s.getSchema()
-	if err != nil {
-		return errResult(err.Error()), nil
-	}
-
 	liveSnap, err := schema.IntrospectSchema(ctx, pool)
 	if err != nil {
 		return errResult(fmt.Sprintf("introspection failed: %v", err)), nil
 	}
+	return s.driftAgainst(ctx, liveSnap), nil
+}
 
-	report := diff.ClassifyDrift(savedSnap, liveSnap)
+// driftAgainst is pool-free so the baseline choice is testable without a database.
+func (s *Server) driftAgainst(ctx context.Context, liveSnap *schema.SchemaSnapshot) *mcp.CallToolResult {
 
-	if report.Direction == diff.DriftIdentical {
-		return textResult(s.wrapText(fmt.Sprintf("No drift detected. Schema hash: %s", report.LiveHash), "")), nil
+	savedSnap, baseline, err := s.driftBaseline(ctx)
+	if err != nil {
+		return errResult(err.Error())
+	}
+	if msg := databaseMismatch(savedSnap, liveSnap); msg != "" {
+		return errResult(msg)
 	}
 
-	return s.metaJSONResult(report, "", "", nil), nil
+	hint := ""
+	if baseline == baselineLoaded {
+		// "no drift" here only means nothing changed since startup
+		hint = "No stored snapshot for this project and database, so the comparison is against the schema this server read at startup -- it cannot show a migration that ran before it. Run `dryrun snapshot take`."
+	}
+
+	report := diff.ClassifyDrift(savedSnap, liveSnap)
+	if report.Direction == diff.DriftIdentical {
+		return textResult(s.wrapText(fmt.Sprintf("No drift detected against the %s baseline. Schema hash: %s", baseline, report.LiveHash), hint))
+	}
+
+	return s.metaJSONResult(driftResult{
+		DriftReport:     report,
+		Baseline:        baseline,
+		BaselineTakenAt: stamp(savedSnap.Timestamp),
+	}, "", hint, nil)
 }
+
+// databaseMismatch: the stored snapshot can be of another database entirely;
+// reporting that as drift is worse than refusing.
+func databaseMismatch(saved, live *schema.SchemaSnapshot) string {
+	if saved.Database == "" || live.Database == "" || saved.Database == live.Database {
+		return ""
+	}
+	return fmt.Sprintf("the stored snapshot is of database %q but the connection is to %q; a difference between two databases is not drift",
+		saved.Database, live.Database)
+}
+
+type (
+	// names the baseline the live database was compared against
+	driftResult struct {
+		*diff.DriftReport
+		Baseline        string `json:"baseline"`
+		BaselineTakenAt string `json:"baseline_taken_at,omitempty"`
+	}
+)

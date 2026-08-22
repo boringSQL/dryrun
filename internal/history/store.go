@@ -505,13 +505,29 @@ func (s *Store) ListSchema(ctx context.Context, key SnapshotKey, rng TimeRange) 
 	return out, rows.Err()
 }
 
+// LatestSchema is on the MCP freshness path, so it reads one row instead of scanning the history.
 func (s *Store) LatestSchema(ctx context.Context, key SnapshotKey) (*SnapshotSummary, error) {
-	list, err := s.ListSchema(ctx, key, TimeRange{})
-	if err != nil || len(list) == 0 {
+	var (
+		out SnapshotSummary
+		ts  string
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, db_url_hash, timestamp, content_hash, database_name
+		   FROM snapshots WHERE project_id = ? AND database_id = ?
+		  ORDER BY timestamp DESC, id DESC LIMIT 1`,
+		string(key.ProjectID), string(key.DatabaseID),
+	).Scan(&out.ID, &out.DBURLHash, &ts, &out.ContentHash, &out.Database)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
-	first := list[0]
-	return &first, nil
+	if out.Timestamp, err = time.Parse(time.RFC3339, ts); err != nil {
+		return nil, fmt.Errorf("bad timestamp %q: %w", ts, err)
+	}
+	out.Kind = SchemaKind()
+	return &out, nil
 }
 
 // ResolveSchemaSnapshot maps a content-hash prefix to one schema row.

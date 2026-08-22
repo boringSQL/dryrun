@@ -132,7 +132,7 @@ type (
 var (
 	metaProperty = `"_meta": {
 		"type": "object",
-		"description": "pg_version/database/mode envelope, plus schema_captured_at, planner_captured_at and activity_captured_at (oldest node, named in activity_oldest_node) where the answer comes from a snapshot; may carry hint (prose) and next (pre-validated follow-up calls)."
+		"description": "pg_version/database/mode envelope, plus schema_captured_at, planner_captured_at and activity_captured_at (oldest node, named in activity_oldest_node) where the answer comes from a snapshot; newer_snapshot_at when the local history holds a newer one than the one being served; may carry hint (prose) and next (pre-validated follow-up calls)."
 	}`
 
 	describeTableOutputSchema = json.RawMessage(`{

@@ -29,6 +29,7 @@ type (
 		lintConfig      lint.Config
 		pgmustardClient *pgmustard.Client
 		uninitialized   bool
+		freshness       freshness
 	}
 )
 
@@ -281,7 +282,7 @@ func (s *Server) requirePool() (*pgxpool.Pool, error) {
 }
 
 func (s *Server) Instructions() string {
-	metaNote := "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint. _meta.schema_captured_at, _meta.planner_captured_at and _meta.activity_captured_at say when each part of the snapshot was taken -- DDL, planner stats and per-node counters are captured by separate commands, so they age at different rates. They describe the snapshot, not a live read. Activity is the oldest node, named in _meta.activity_oldest_node."
+	metaNote := "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint. _meta.schema_captured_at, _meta.planner_captured_at and _meta.activity_captured_at say when each part of the snapshot was taken -- DDL, planner stats and per-node counters are captured by separate commands, so they age at different rates. They describe the snapshot, not a live read. Activity is the oldest node, named in _meta.activity_oldest_node. _meta.newer_snapshot_at appears when the local history holds a schema snapshot newer than the one being served: call reload_schema to move to it."
 
 	// surface a history.db compat problem here so MCP-only users see it
 	if note := s.historyNote(); note != nil {

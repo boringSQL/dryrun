@@ -11,7 +11,7 @@ import (
 // openWorld=true -- the opposite of what all but two of ours do. Each tool must
 // state its own.
 var (
-	// reads the loaded snapshot only: no DB, no disk, same answer every call
+	// answers from the loaded snapshot, never the database; _meta may add a freshness note from the local history
 	annSnapshot = mcp.WithToolAnnotation(mcp.ToolAnnotation{
 		ReadOnlyHint:    mcp.ToBoolPtr(true),
 		DestructiveHint: mcp.ToBoolPtr(false),
@@ -303,7 +303,7 @@ func (s *Server) registerLiveTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("check_drift",
-			mcp.WithDescription("When a migration may have run since the snapshot, or before acting on an offline answer that is expensive to get wrong: compares the live database against the loaded snapshot and reports ahead, behind, or diverged with the objects that differ. Requires a connection, so it is absent in offline mode. Read-only: it refreshes nothing (reload_schema, `dryrun snapshot take`) and changes nothing."),
+			mcp.WithDescription("When a migration may have run since the snapshot, or before acting on an offline answer that is expensive to get wrong: compares the live database against the newest snapshot in the local history and reports ahead, behind, or diverged with the objects that differ, naming the baseline it used. Requires a connection, so it is absent in offline mode. Read-only: it refreshes nothing (reload_schema, `dryrun snapshot take`) and changes nothing."),
 			annLiveRead,
 		),
 		s.handleCheckDrift,
