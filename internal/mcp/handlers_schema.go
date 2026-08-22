@@ -259,6 +259,13 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 		}
 	}
 
+	selected := len(getStringSliceArg(req, "columns")) > 0
+	if selected {
+		if err := selectColumns(result, t, getStringSliceArg(req, "columns")); err != nil {
+			return errResult(err.Error()), nil
+		}
+	}
+
 	if fields != nil {
 		allowed := map[string]bool{"schema": true, "name": true}
 		for _, f := range fields {
@@ -270,6 +277,8 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 			}
 		}
 	}
+
+	caps := capTableSections(result, t, limitArgOr(req, defaultMaxItems), selected)
 
 	hint := ""
 	var next []NextCall
@@ -285,6 +294,17 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 			}}
 			break
 		}
+	}
+	if capped := capHint(caps); capped != "" {
+		hint = joinHints(capped, hint)
+		args := map[string]any{"table": ref.Name, "schema": ref.Schema, "limit": 0}
+		if d := getArg(req, "detail"); d != "" {
+			args["detail"] = d
+		}
+		if fields != nil {
+			args["fields"] = fields
+		}
+		next = append(next, NextCall{Tool: "describe_table", Args: args})
 	}
 	s.injectMeta(result, joinHints(ref.Note, hint), next)
 	return jsonResult(result), nil

@@ -190,6 +190,24 @@ func annotate(snap *schema.SchemaSnapshot, rows float64) *schema.AnnotatedSchema
 	return &schema.AnnotatedSchema{Schema: snap, Planner: planner}
 }
 
+// withColumnStats gives every column of one table a pg_stats row, which is
+// what makes describe_table emit column_profiles.
+func withColumnStats(a *schema.AnnotatedSchema, q schema.QualifiedName) *schema.AnnotatedSchema {
+	nullFrac, nDistinct := 0.0, -1.0
+	for _, t := range a.Schema.Tables {
+		if t.Qual() != q {
+			continue
+		}
+		for _, c := range t.Columns {
+			a.Planner.Columns = append(a.Planner.Columns, schema.ColumnStatsEntry{
+				Table: q, Column: c.Name,
+				Stats: schema.ColumnStats{NullFrac: &nullFrac, NDistinct: &nDistinct},
+			})
+		}
+	}
+	return a
+}
+
 // withActivity attaches one node's counters for a single table.
 func withActivity(a *schema.AnnotatedSchema, q schema.QualifiedName, act schema.TableActivity) *schema.AnnotatedSchema {
 	if a.Merged == nil {
