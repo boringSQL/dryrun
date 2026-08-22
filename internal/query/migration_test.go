@@ -22,6 +22,33 @@ func migrationTestSchema() *schema.SchemaSnapshot {
 					{Name: "email", TypeName: "text"},
 				},
 			},
+			{
+				Schema: "public", Name: "orders",
+				Columns: []schema.Column{
+					{Name: "id", TypeName: "bigint"},
+					{Name: "user_id", TypeName: "bigint"},
+					{Name: "status", TypeName: "text"},
+					{Name: "total", TypeName: "numeric"},
+				},
+				Indexes: []schema.Index{{Name: "orders_user_id_idx", Columns: []string{"user_id"}}},
+			},
+			{
+				Schema: "app", Name: "orders",
+				Columns: []schema.Column{{Name: "status", TypeName: "text"}},
+			},
+			{
+				Schema: "public", Name: "legacy",
+				Columns:     []schema.Column{{Name: "total", TypeName: "numeric"}},
+				Constraints: []schema.Constraint{{Name: "legacy_total_check", Kind: schema.ConstraintCheck}},
+			},
+			{
+				Schema: "public", Name: "events",
+				Columns: []schema.Column{{Name: "created_at", TypeName: "timestamptz"}},
+				PartitionInfo: &schema.PartitionInfo{
+					Strategy: schema.PartitionRange,
+					Key:      "RANGE (created_at)",
+				},
+			},
 		},
 	}
 }

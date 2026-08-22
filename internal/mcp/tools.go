@@ -135,7 +135,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("check_migration",
-			mcp.WithDescription("Before any ALTER TABLE, CREATE INDEX, DROP, or other DDL reaches a database: the lock level each statement takes, whether it rewrites the table, and a safer alternative where one exists, with rollback_ddl where one applies. Needs no database connection and applies nothing. It does not estimate wall-clock duration and does not emit a ready-to-commit rewrite."),
+			mcp.WithDescription("Before any ALTER TABLE, CREATE INDEX, DROP, or other DDL reaches a database: the lock level each statement takes, whether it rewrites the table, and rollback_ddl where one applies. Where the safe form is mechanical it returns safer_sql -- the rewrite as statements to run in order, each on its own rather than wrapped in one transaction. Needs no database connection and applies nothing. It does not estimate wall-clock duration, and not every unsafe statement has a rewrite: a column type change or a backfill needs a batch size and a deploy order this tool cannot decide for you."),
 			mcp.WithString("ddl", mcp.Required(), mcp.Description("DDL statement.")),
 			annSnapshot,
 		),

@@ -132,13 +132,43 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 		return textResult("Could not identify a specific DDL operation to check."), nil
 	}
 
-	hint := ""
+	var unsafe, rewritten, multiStep int
+	concurrentIndex := false
 	for _, c := range checks {
-		if c.Safety == query.SafetyDangerous {
-			hint = "DANGEROUS operations detected. Check the recommendation and rollback_ddl fields for safe alternatives."
-			break
+		if c.Safety == query.SafetySafe {
+			continue
+		}
+		unsafe++
+		if len(c.SaferSQL) == 0 {
+			continue
+		}
+		rewritten++
+		if len(c.SaferSQL) > 1 {
+			multiStep++
+		}
+		if c.Operation == "CREATE INDEX" {
+			concurrentIndex = true
 		}
 	}
+
+	hint := ""
+	switch {
+	case rewritten > 0 && rewritten == unsafe:
+		hint = "safer_sql holds the rewrite: run those statements, in that order, instead of the input."
+	case rewritten > 0:
+		hint = "safer_sql holds the rewrite for the statements that have a mechanical one. The rest carry a recommendation only, because the safe form needs a decision this tool cannot make -- a batch size, a backfill window, a deploy order."
+	case unsafe > 0:
+		hint = "No mechanical rewrite for these. Read recommendation and rollback_ddl before applying anything."
+	}
+	// one wrapping transaction would hold the first statement's lock across the
+	// scan in the second
+	if multiStep > 0 {
+		hint = joinHints(hint, "Run each statement in safer_sql in its own transaction. A migration runner that wraps the file in one holds the ACCESS EXCLUSIVE taken by the first statement across the scan in the second, which is worse than the input.")
+	}
+	if concurrentIndex {
+		hint = joinHints(hint, "CREATE INDEX CONCURRENTLY cannot run inside a transaction at all, so that statement has to be outside whatever the runner wraps.")
+	}
+
 	wrapper := map[string]any{"checks": checks}
 	s.injectMeta(wrapper, hint, nil)
 	return jsonResult(wrapper), nil

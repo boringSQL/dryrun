@@ -123,11 +123,20 @@ func applyFixes(sql string, fixes []pendingFix, quoteAll bool) (string, bool) {
 func renderName(name string, quoteAll bool) string {
 	parts := strings.Split(name, ".")
 	for i, p := range parts {
-		if quoteAll || needsQuote(p) {
+		if quoteAll {
 			parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+			continue
 		}
+		parts[i] = quoteIdent(p)
 	}
 	return strings.Join(parts, ".")
+}
+
+func quoteIdent(s string) string {
+	if !needsQuote(s) {
+		return s
+	}
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 func needsQuote(s string) bool {

@@ -10,6 +10,16 @@ type Entry struct {
 	Note   string `json:"note,omitempty"`
 }
 
+// Warning renders status and reason without the fix, for callers that return
+// a real rewrite instead.
+func (e Entry) Warning() string {
+	s := fmt.Sprintf("STATUS: %s\nREASON: %s", e.Status, e.Reason)
+	if e.Note != "" {
+		s += "\nNOTE: " + e.Note
+	}
+	return s
+}
+
 func (e Entry) String() string {
 	s := fmt.Sprintf("STATUS: %s\nREASON: %s\nFIX:\n%s", e.Status, e.Reason, e.Fix)
 	if e.Note != "" {
@@ -118,6 +128,27 @@ func AddCheckConstraintUnsafe(table, constraintExpr string) Entry {
 			table, table, constraintExpr,
 			table, table),
 	}
+}
+
+// PRIMARY KEY, UNIQUE and EXCLUDE build an index while holding the lock; none
+// accepts NOT VALID, so the constraint must attach to an existing index.
+func AddIndexBackedConstraint(table, kind, columns string) Entry {
+	e := Entry{
+		Status: fmt.Sprintf("DANGEROUS: builds an index on %s under ACCESS EXCLUSIVE", table),
+		Reason: fmt.Sprintf("ADD %s builds the backing index with the table locked against reads and writes for the whole build. There is no NOT VALID form.", kind),
+		Fix: fmt.Sprintf(
+			"  1. CREATE UNIQUE INDEX CONCURRENTLY %s_idx ON %s (%s);\n"+
+				"  2. ALTER TABLE %s ADD CONSTRAINT %s_idx %s USING INDEX %s_idx;",
+			stripSchema(table), table, columns,
+			table, stripSchema(table), kind, stripSchema(table)),
+	}
+	if kind == "PRIMARY KEY" {
+		e.Note = "Step 2 also sets NOT NULL on the columns, which scans the table under ACCESS EXCLUSIVE unless they are NOT NULL already. Make them NOT NULL first."
+	}
+	if kind == "EXCLUDE" {
+		e.Fix = "  Build the backing index with CREATE INDEX CONCURRENTLY first, then ADD CONSTRAINT ... USING INDEX. The operator classes must match the exclusion elements exactly."
+	}
+	return e
 }
 
 func CreateIndexBlocking(table, idxName, method, columns string) Entry {

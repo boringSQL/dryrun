@@ -153,3 +153,110 @@ func TestValidateQuery_HintsWhenNothingIsGuessable(t *testing.T) {
 		t.Fatalf("expected the hint to point at search_schema, got %q", hint)
 	}
 }
+
+// The point of safer_sql: the agent gets statements to put in a migration,
+// not a paragraph telling it how to write them.
+func TestCheckMigration_ReturnsSaferSQL(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "check_migration", map[string]any{
+		"ddl": "ALTER TABLE tasks ADD CONSTRAINT tasks_project_fk FOREIGN KEY (project_id) REFERENCES projects(project_id)",
+	})
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("expected JSON output: %v\n%s", err, out)
+	}
+	checks, _ := decoded["checks"].([]any)
+	if len(checks) != 1 {
+		t.Fatalf("expected one check, got %v", decoded["checks"])
+	}
+	check, _ := checks[0].(map[string]any)
+	if check["safety"] != "dangerous" {
+		t.Fatalf("expected dangerous, got %v", check["safety"])
+	}
+
+	safer, _ := check["safer_sql"].([]any)
+	if len(safer) != 2 {
+		t.Fatalf("expected the two-step rewrite, got %v", check["safer_sql"])
+	}
+	if !strings.Contains(safer[0].(string), "NOT VALID") {
+		t.Errorf("first statement should add the constraint NOT VALID: %v", safer[0])
+	}
+	if !strings.Contains(safer[1].(string), "VALIDATE CONSTRAINT tasks_project_fk") {
+		t.Errorf("second statement should validate it by name: %v", safer[1])
+	}
+
+	meta, _ := decoded["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if !strings.Contains(hint, "safer_sql") {
+		t.Errorf("hint should point at safer_sql, got %q", hint)
+	}
+	if strings.Contains(hint, "CONCURRENTLY") {
+		t.Errorf("transaction caveat fired without an index rewrite: %q", hint)
+	}
+}
+
+// The hint is where the statement-boundary contract lives, and a rewrite split
+// into steps is worthless if the runner wraps it in one transaction.
+func TestCheckMigration_Hints(t *testing.T) {
+	tests := []struct {
+		name    string
+		ddl     string
+		wants   []string
+		unwants []string
+	}{
+		{
+			name:    "multi-step rewrite",
+			ddl:     "ALTER TABLE tasks ADD CONSTRAINT tasks_project_fk FOREIGN KEY (project_id) REFERENCES projects(project_id)",
+			wants:   []string{"safer_sql holds the rewrite", "its own transaction"},
+			unwants: []string{"CONCURRENTLY"},
+		},
+		{
+			name:    "index rewrite",
+			ddl:     "CREATE INDEX idx_tasks_status ON tasks (status)",
+			wants:   []string{"safer_sql holds the rewrite", "cannot run inside a transaction"},
+			unwants: []string{"its own transaction"},
+		},
+		{
+			name:    "some rewritten, some not",
+			ddl:     "ALTER TABLE tasks ADD CHECK (priority > 0); ALTER TABLE tasks ALTER COLUMN title TYPE varchar(200)",
+			wants:   []string{"The rest carry a recommendation only"},
+			unwants: []string{},
+		},
+		{
+			name:    "nothing rewritable",
+			ddl:     "ALTER TABLE tasks ALTER COLUMN title TYPE varchar(200)",
+			wants:   []string{"No mechanical rewrite"},
+			unwants: []string{"safer_sql holds"},
+		},
+		{
+			name:    "nothing unsafe",
+			ddl:     "ALTER TABLE tasks ADD COLUMN note text",
+			wants:   []string{},
+			unwants: []string{"safer_sql", "rewrite"},
+		},
+	}
+
+	c := setupOfflineTest(t)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := callTool(t, c, "check_migration", map[string]any{"ddl": tc.ddl})
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			meta, _ := decoded["_meta"].(map[string]any)
+			hint, _ := meta["hint"].(string)
+			for _, w := range tc.wants {
+				if !strings.Contains(hint, w) {
+					t.Errorf("hint missing %q: %q", w, hint)
+				}
+			}
+			for _, w := range tc.unwants {
+				if strings.Contains(hint, w) {
+					t.Errorf("hint should not mention %q: %q", w, hint)
+				}
+			}
+		})
+	}
+}

@@ -23,6 +23,9 @@ type (
 		Recommendation  string       `json:"recommendation"`
 		VersionBehavior *string      `json:"version_behavior,omitempty"`
 		RollbackDDL     *string      `json:"rollback_ddl,omitempty"`
+
+		// SaferSQL is the mechanical rewrite as runnable statements, in order.
+		SaferSQL []string `json:"safer_sql,omitempty"`
 	}
 
 	SafetyRating string
@@ -42,6 +45,7 @@ func CheckMigration(ddl string, snap *schema.SchemaSnapshot, pgVersion *dryrun.P
 	}
 
 	var checks []MigrationCheck
+	names := newNameAllocator(snap)
 
 	for _, stmt := range result.Stmts {
 		if stmt.Stmt == nil {
@@ -51,13 +55,13 @@ func CheckMigration(ddl string, snap *schema.SchemaSnapshot, pgVersion *dryrun.P
 		case *pg_query.Node_AlterTableStmt:
 			for _, cmdNode := range n.AlterTableStmt.Cmds {
 				if cmd, ok := cmdNode.Node.(*pg_query.Node_AlterTableCmd); ok {
-					if check := analyzeAlterTableCmd(cmd.AlterTableCmd, n.AlterTableStmt, snap, pgVersion); check != nil {
+					if check := analyzeAlterTableCmd(cmd.AlterTableCmd, n.AlterTableStmt, snap, pgVersion, names); check != nil {
 						checks = append(checks, *check)
 					}
 				}
 			}
 		case *pg_query.Node_IndexStmt:
-			checks = append(checks, analyzeCreateIndex(n.IndexStmt, snap, pgVersion))
+			checks = append(checks, analyzeCreateIndex(n.IndexStmt, snap, pgVersion, names))
 		case *pg_query.Node_RenameStmt:
 			checks = append(checks, analyzeRename(snap))
 		}
@@ -72,7 +76,7 @@ func CheckMigration(ddl string, snap *schema.SchemaSnapshot, pgVersion *dryrun.P
 	return checks, nil
 }
 
-func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion) *MigrationCheck {
+func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion, names *nameAllocator) *MigrationCheck {
 	tableName := ""
 	if stmt.Relation != nil {
 		if stmt.Relation.Schemaname != "" {
@@ -96,7 +100,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			Recommendation: "Metadata-only operation. Column space reclaimed by VACUUM.",
 		}
 	case pg_query.AlterTableType_AT_SetNotNull:
-		return analyzeSetNotNull(cmd.Name, tableName, tableSize, rowEstimate, pgVersion, snap)
+		return analyzeSetNotNull(cmd.Name, tableName, tableSize, rowEstimate, pgVersion, snap, stmt, names)
 	case pg_query.AlterTableType_AT_AlterColumnType:
 		colName := cmd.Name
 		e := jit.AlterColumnType(tableName, colName, "<new_type>")
@@ -107,7 +111,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			Recommendation: e.String(),
 		}
 	case pg_query.AlterTableType_AT_AddConstraint:
-		return analyzeAddConstraint(cmd, tableName, tableSize, rowEstimate, pgVersion)
+		return analyzeAddConstraint(cmd, stmt, tableName, tableSize, rowEstimate, names)
 	case pg_query.AlterTableType_AT_ValidateConstraint:
 		return &MigrationCheck{
 			Operation: "VALIDATE CONSTRAINT", Table: strp(tableName), Safety: SafetySafe,
@@ -199,7 +203,7 @@ func deparse(typeName *pg_query.TypeName) string {
 	return strings.Join(parts, ".")
 }
 
-func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate *float64, pgVersion *dryrun.PgVersion, snap *schema.SchemaSnapshot) *MigrationCheck {
+func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate *float64, pgVersion *dryrun.PgVersion, snap *schema.SchemaSnapshot, stmt *pg_query.AlterTableStmt, names *nameAllocator) *MigrationCheck {
 	pgMajor := 0
 	if pgVersion != nil {
 		pgMajor = pgVersion.Major
@@ -216,10 +220,14 @@ func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate
 		safety = SafetyCaution
 	}
 
+	safer := rewriteSetNotNull(stmt, colName, pgVersion, names)
 	rec := e.String()
+	if len(safer) > 0 {
+		// two differently-named migrations in one response is worse than one
+		rec = e.Warning()
+	}
 
 	// column NULL-fraction refinement migrated to AnnotatedSchema; CheckMigration doesn't carry one yet
-	_ = colName
 	_ = snap
 
 	return &MigrationCheck{
@@ -230,10 +238,11 @@ func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate
 		Recommendation:  rec,
 		VersionBehavior: strp("PG 12+: skips scan if a valid CHECK (col IS NOT NULL) exists."),
 		RollbackDDL:     strp("ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL;"),
+		SaferSQL:        safer,
 	}
 }
 
-func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, tableName string, tableSize *string, rowEstimate *float64, pgVersion *dryrun.PgVersion) *MigrationCheck {
+func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, names *nameAllocator) *MigrationCheck {
 	isNotValid := false
 	operation := "ADD CONSTRAINT"
 
@@ -246,6 +255,12 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, tableName string, tableSi
 				operation = "ADD FOREIGN KEY"
 			case pg_query.ConstrType_CONSTR_CHECK:
 				operation = "ADD CHECK CONSTRAINT"
+			case pg_query.ConstrType_CONSTR_PRIMARY:
+				operation = "ADD PRIMARY KEY"
+			case pg_query.ConstrType_CONSTR_UNIQUE:
+				operation = "ADD UNIQUE CONSTRAINT"
+			case pg_query.ConstrType_CONSTR_EXCLUSION:
+				operation = "ADD EXCLUSION CONSTRAINT"
 			}
 		}
 	}
@@ -257,8 +272,11 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, tableName string, tableSi
 		recommendation = fmt.Sprintf("%s NOT VALID - metadata-only. Follow up with VALIDATE CONSTRAINT.", operation)
 		lockDuration = "brief (metadata-only)"
 		lockType = "ACCESS EXCLUSIVE (brief)"
-	} else {
+	}
+	safer := rewriteAddConstraint(stmt, cmd, names)
+	if !isNotValid {
 		safety = SafetyDangerous
+		con := constraintOf(cmd)
 		var e jit.Entry
 		switch operation {
 		case "ADD FOREIGN KEY":
@@ -266,9 +284,15 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, tableName string, tableSi
 		case "ADD CHECK CONSTRAINT":
 			e = jit.AddCheckConstraintUnsafe(tableName, "<expr>")
 		default:
-			e = jit.AddCheckConstraintUnsafe(tableName, "<expr>")
+			// PRIMARY KEY, UNIQUE and EXCLUDE have no NOT VALID form at all
+			e = jit.AddIndexBackedConstraint(tableName, indexBackedKind(operation),
+				strings.Join(constraintColumns(con), ", "))
 		}
 		recommendation = e.String()
+		if len(safer) > 0 {
+			// two differently-named migrations in one response is worse than one
+			recommendation = e.Warning()
+		}
 		lockDuration = "proportional to table size"
 		lockType = "ACCESS EXCLUSIVE"
 	}
@@ -279,10 +303,32 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, tableName string, tableSi
 		TableSize: tableSize, RowEstimate: rowEstimate,
 		Recommendation: recommendation,
 		RollbackDDL:    strp(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT <name>;", tableName)),
+		SaferSQL:       safer,
 	}
 }
 
-func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion) MigrationCheck {
+func indexBackedKind(operation string) string {
+	switch operation {
+	case "ADD PRIMARY KEY":
+		return "PRIMARY KEY"
+	case "ADD EXCLUSION CONSTRAINT":
+		return "EXCLUDE"
+	default:
+		return "UNIQUE"
+	}
+}
+
+func constraintColumns(con *pg_query.Constraint) []string {
+	if con == nil {
+		return []string{"<cols>"}
+	}
+	if cols := stringList(con.Keys); len(cols) > 0 {
+		return cols
+	}
+	return []string{"<cols>"}
+}
+
+func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion, names *nameAllocator) MigrationCheck {
 	tableName := ""
 	if idx.Relation != nil {
 		if idx.Relation.Schemaname != "" {
@@ -315,15 +361,26 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, pg
 			"Cannot run inside a transaction. If it fails, drop the INVALID index."
 		lockType = "SHARE UPDATE EXCLUSIVE"
 	} else {
-		e := jit.CreateIndexBlocking(tableName, idx.Idxname, idxMethod, colStr)
 		safety = SafetyDangerous
-		recommendation = e.String()
 		lockType = "SHARE (blocks writes)"
 	}
 
+	safer, builtName := rewriteCreateIndex(idx, names)
 	idxName := idx.Idxname
+	if builtName != "" {
+		idxName = builtName
+	}
 	if idxName == "" {
 		idxName = "<auto>"
+	}
+	if !idx.Concurrent {
+		e := jit.CreateIndexBlocking(tableName, idxName, idxMethod, colStr)
+		recommendation = e.String()
+		if len(safer) > 0 {
+			recommendation = e.Warning()
+		} else if t := lookupTable(snap, idx.GetRelation()); t != nil && t.PartitionInfo != nil {
+			recommendation += "\nNOTE: CONCURRENTLY is rejected on a partitioned table. Build the index on each partition concurrently, then CREATE INDEX on the parent and ATTACH them."
+		}
 	}
 
 	lockDuration := "proportional to table size (blocking)"
@@ -343,6 +400,7 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, pg
 		TableSize: tableSize, RowEstimate: rowEstimate,
 		Recommendation: recommendation,
 		RollbackDDL:    strp(fmt.Sprintf("DROP INDEX CONCURRENTLY %s;", idxName)),
+		SaferSQL:       safer,
 	}
 }
 
@@ -390,4 +448,14 @@ func versionBehaviorAddColumn(pgVersion *dryrun.PgVersion) *string {
 		return strp("PG 11+: Immutable DEFAULT is metadata-only (no table rewrite).")
 	}
 	return strp("PG <11: Any DEFAULT triggers a full table rewrite.")
+}
+
+func stringList(nodes []*pg_query.Node) []string {
+	var out []string
+	for _, n := range nodes {
+		if s, ok := n.GetNode().(*pg_query.Node_String_); ok {
+			out = append(out, s.String_.Sval)
+		}
+	}
+	return out
 }
