@@ -42,20 +42,20 @@ var (
 )
 
 // Register wires the full set: schema-only subset, history tools (snapshot_diff,
-// reload_schema), and live-only tools when a pool is set.
+// reload_schema, list_top_queries), and live-only tools when a pool is set.
 func (s *Server) Register(srv *mcpserver.MCPServer) {
 	s.registerSchemaTools(srv)
 	s.registerHistoryTools(srv)
 	if s.pool != nil {
 		s.registerLiveTools(srv)
 	} else {
-		slog.Info("offline mode: explain_query, check_drift not available")
+		slog.Info("offline mode: explain_query, check_drift, columnar_report not available")
 	}
 }
 
 // RegisterOffline wires only the schema-only subset (no history.db, no pool):
 // the surface a hosted endpoint serves per request. Omits snapshot_diff,
-// reload_schema, and the live tools.
+// reload_schema, list_top_queries, and the live tools.
 func (s *Server) RegisterOffline(srv *mcpserver.MCPServer) {
 	s.registerSchemaTools(srv)
 }
@@ -64,7 +64,7 @@ func (s *Server) RegisterOffline(srv *mcpserver.MCPServer) {
 func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
 		mcp.NewTool("list_tables",
-			mcp.WithDescription("List tables with row estimates, comments, and aggregated node statistics. Use limit/offset to paginate large schemas."),
+			mcp.WithDescription("Before sizing a query, a migration, or a backfill: how big each table is in production -- row estimates, on-disk size, comments -- for every table in the snapshot. Needs no database connection. Names and sizes only: no columns, no indexes (describe_table), no data. Paginate with limit/offset."),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("sort",
 				mcp.Enum("name", "rows", "size"),
@@ -80,7 +80,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("describe_table",
-			mcp.WithDescription("Full definition of one table from the snapshot: columns and types, constraints, indexes, and planner stats. Call before writing SQL against a table you have not seen."),
+			mcp.WithDescription("Before writing SQL against a table you have not read in this session: its columns and types, constraints, indexes, and planner stats. Needs no database connection; answers from the snapshot. Structure as of the last capture: no row data, and nothing a later migration changed."),
 			mcp.WithString("table", mcp.Required(), mcp.Description("Table name.")),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("detail",
@@ -99,7 +99,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("search_schema",
-			mcp.WithDescription("Substring search over tables, columns, views, functions, enums, indexes, comments."),
+			mcp.WithDescription("When you know a name fragment but not where it lives, or when the name lives in the database and not in the repo -- an index, a view, an enum type. Case-insensitive substring search over table, column, view, function, enum, and index names, plus index definitions. Needs no database connection. Names only: it does not search comments, enum labels, or view and function bodies, and never data values."),
 			mcp.WithString("query", mcp.Required(), mcp.Description("Case-insensitive substring.")),
 			mcp.WithNumber("limit", mcp.DefaultNumber(30), mcp.Description("Max results (default 30, 0 for all).")),
 			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Skip N results.")),
@@ -110,7 +110,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("find_related",
-			mcp.WithDescription("Incoming and outgoing foreign keys for a table, with sample JOINs."),
+			mcp.WithDescription("Before writing a JOIN, or a DELETE that might cascade: the incoming and outgoing foreign keys of one table. Needs no database connection. Declared FK constraints only -- relations enforced in application code do not appear -- one hop, and no ready-made JOIN text."),
 			mcp.WithString("table", mcp.Required(), mcp.Description("Table name.")),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			annSnapshot,
@@ -119,7 +119,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("validate_query",
-			mcp.WithDescription("Check SQL against the snapshot without executing it: reports unknown tables and columns, ambiguous references, and anti-patterns. Call before proposing a query."),
+			mcp.WithDescription("Before proposing or running any SQL: checks it against the snapshot and reports unknown tables and columns, ambiguous references, and anti-patterns. Needs no database connection and never executes the query. Names and shape only: not cost, not plan, not whether any rows match (advise, explain_query)."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
 			annSnapshot,
 		),
@@ -127,7 +127,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("check_migration",
-			mcp.WithDescription("Review DDL offline: reports the lock level each statement takes, whether it rewrites the table, and a safer rewrite where one exists. Call before applying a migration."),
+			mcp.WithDescription("Before any ALTER TABLE, CREATE INDEX, DROP, or other DDL reaches a database: the lock level each statement takes, whether it rewrites the table, and a safer alternative where one exists, with rollback_ddl where one applies. Needs no database connection and applies nothing. It does not estimate wall-clock duration and does not emit a ready-to-commit rewrite."),
 			mcp.WithString("ddl", mcp.Required(), mcp.Description("DDL statement.")),
 			annSnapshot,
 		),
@@ -135,7 +135,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("analyze_plan",
-			mcp.WithDescription("Interpret EXPLAIN JSON you already have against the snapshot: flags row misestimates, poor scan choices, and missing indexes. Use advise or explain_query to obtain a plan first."),
+			mcp.WithDescription("When you already hold an EXPLAIN plan -- pasted by the user, captured in CI, or returned by explain_query: interprets it against the snapshot and flags row misestimates, poor scan choices, and missing indexes. Needs no database connection. It does not produce a plan, and without a connection dryrun cannot produce one either -- the plan must come from outside."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("The original SQL query text.")),
 			// the handler accepts both the [{"Plan": ...}] array EXPLAIN (FORMAT JSON)
 			// returns and the unwrapped {"Plan": ...} object; the schema must say so
@@ -151,7 +151,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("advise",
-			mcp.WithDescription("One-shot review of a single query: plan shape, anti-patterns, and index suggestions. Offline by default; analyze=true runs EXPLAIN ANALYZE, executing the SQL on a live DB."),
+			mcp.WithDescription("One-shot review of a single query. With no database connection it returns validation and index suggestions only -- plan-shape advice needs a connection. With one it adds the plan review; analyze=true runs EXPLAIN ANALYZE, which EXECUTES the SQL in a rolled-back transaction. It suggests; it never rewrites the query."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
 			mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
 			mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query; live DB only).")),
@@ -161,7 +161,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("lint_schema",
-			mcp.WithDescription("Schema quality report: naming and convention violations plus an audit of missing keys, indexes, and unsafe defaults, each with a ddl_fix. Call when reviewing a schema as a whole."),
+			mcp.WithDescription("When reviewing a schema as a whole -- a design review, an inherited database, or the state a migration left behind: naming and convention violations plus an audit of missing keys, unindexed foreign keys, and unsafe defaults. Needs no database connection. Defaults to verbosity='summary', which returns per-rule counts only: pass verbosity='full' for the findings and their ddl_fix (not every finding has one). Whole-schema, not per-query (validate_query, advise); it applies nothing."),
 			mcp.WithString("scope",
 				mcp.Enum("conventions", "audit", "all"),
 				mcp.DefaultString("all"),
@@ -185,7 +185,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("detect",
-			mcp.WithDescription("Health checks: stale stats, unused/bloated indexes, anomalies. The anomalies flag 'unattributed_scans' means a table sees heavy scan traffic that no captured statement references while the capture holds top-level statements only (pg_stat_statements.track = 'top', or a toplevel-filtered capture) — statements inside functions and triggers are then invisible to query stats; auto_explain with log_nested_statements, or reading pg_stat_statements directly under track = 'all', will show it."),
+			mcp.WithDescription("When a query got slow, before a tuning change, or when asked what is wrong with this database: stale statistics, unused indexes, bloated indexes and tables, and per-table scan anomalies. Needs no database connection -- findings are as fresh as the last capture, and quiet where it carries no node statistics. It reports only: no VACUUM, no ANALYZE, nothing changed. Caveats for a finding arrive with it in _meta.hint."),
 			mcp.WithString("kind",
 				mcp.Enum("stale_stats", "unused_indexes", "anomalies", "bloated_indexes", "bloated_tables", "all"),
 				mcp.DefaultString("all"),
@@ -208,7 +208,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("vacuum_health",
-			mcp.WithDescription("Per-table autovacuum state from the snapshot: dead tuples, last (auto)vacuum and analyze times, and tuning hints for tables the autovacuumer is not keeping up with."),
+			mcp.WithDescription("When bloat, dead tuples, or autovacuum comes up -- or a table grows while its live row count does not: per-table dead tuples, last (auto)vacuum and analyze times, and tuning hints where autovacuum is not keeping up. Needs no database connection; counters are from capture time, not live. It runs no VACUUM and changes no settings."),
 			mcp.WithString("schema", mcp.Description("Schema filter.")),
 			mcp.WithString("table", mcp.Description("Table filter.")),
 			mcp.WithNumber("limit",
@@ -227,7 +227,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
 		mcp.NewTool("snapshot_diff",
-			mcp.WithDescription("What changed between two snapshots: schema DDL plus the correlated planner sizing/stats, activity and query-shape drift for the same capture window. Query deltas are per shape over the window, so their mean is comparable across captures -- unlike pg_stat_statements' own mean, which averages since its last reset. Snapshot-to-snapshot, read from .dryrun/history.db."),
+			mcp.WithDescription("When something changed and you need to know what: the schema DDL delta between two snapshots, plus planner sizing, activity, and query-shape drift correlated to the same capture window. Query deltas are per shape over that window, so their mean is comparable across captures -- unlike pg_stat_statements' own since-reset mean. Needs no database connection, but does need two snapshots in the local history. Snapshot-to-snapshot only, never against the live database (check_drift); it reports what moved, not why."),
 			mcp.WithString("from", mcp.Description("Base snapshot: 'latest~N' or a content-hash prefix. Default 'latest~1'.")),
 			mcp.WithString("to", mcp.Description("Target snapshot: 'latest' or a content-hash prefix. Default 'latest'.")),
 			mcp.WithString("kind",
@@ -252,14 +252,14 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("reload_schema",
-			mcp.WithDescription("Re-read the newest schema snapshot from .dryrun/history.db into the server. Call after `dryrun snapshot take` so the other tools stop answering from the stale schema."),
+			mcp.WithDescription("Call after `dryrun snapshot take`, or when a tool answers from a schema older than the one on disk: re-reads the newest snapshot from the local history into this server. It captures nothing and connects to nothing -- `dryrun snapshot take` is what produces a new snapshot."),
 			annHistory,
 		),
 		s.handleReloadSchema,
 	)
 	srv.AddTool(
 		mcp.NewTool("list_top_queries",
-			mcp.WithDescription("Captured pg_stat_statements query shapes, ranked by exec time/calls. Read from .dryrun/history.db (dryrun snapshot query-stats or init/take's best-effort capture); each entry is tagged with its reporting node and never averaged across nodes — a primary and a replica are different workloads. Canonical SQL is qshape-normalized/parameterized text, truncated for long queries. Counters are cumulative since the last pg_stat_statements reset, not a recent-activity rate. Current captures exclude statements executed inside functions and triggers wherever pg_stat_statements exposes the toplevel flag (1.9, PG14+), so no time is double counted even under track = 'all'; nested_exec_time_ms appears only on captures predating that filter, where it reports the nested part excluded from the pct_of_total_exec_time denominator. Each entry carries capture_rule_version: which predicate decided whether a statement was captured at all. Entries with different values describe different populations and must not be compared or differenced; 0 means the capture predates the field, so unknown rather than matching."),
+			mcp.WithDescription("When asked what this database spends its time on: captured pg_stat_statements query shapes ranked by exec time, calls, or mean. Needs no database connection; reads the local history (dryrun snapshot query-stats, or init/take's best-effort capture) and is empty when no capture carries query stats. Each entry is tagged with its reporting node and never averaged across nodes: a primary and a replica are different workloads. SQL is qshape-normalized and parameterized, never the literal text or parameter values a user ran. Counters are cumulative since the last reset, not a recent-activity rate. Before comparing or differencing any two numbers, read _meta.hint -- it carries the caveats that decide whether they are comparable at all."),
 			mcp.WithString("node", mcp.Description("Filter to one node label. Omit to see all nodes' queries together (each entry still tagged with its own node).")),
 			mcp.WithString("sort",
 				mcp.Enum("total_time", "calls", "mean_time"),
@@ -278,10 +278,10 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 
 // registerLiveTools registers the tools that need a live db connection.
 func (s *Server) registerLiveTools(srv *mcpserver.MCPServer) {
-	slog.Debug("registering online-only tools", "tools", "explain_query,check_drift")
+	slog.Debug("registering online-only tools", "tools", "explain_query,check_drift,columnar_report")
 	srv.AddTool(
 		mcp.NewTool("explain_query",
-			mcp.WithDescription("EXPLAIN a query (analyze=true runs EXPLAIN ANALYZE). Snapshot planner GUCs are replayed via SET LOCAL for plan parity; with analyze=true the query also executes under those settings (e.g. prod work_mem)."),
+			mcp.WithDescription("When you need the real plan for one query: runs EXPLAIN against the connected database. analyze=true runs EXPLAIN ANALYZE, which EXECUTES the query inside a transaction that is always rolled back -- writes do not persist, but their work and any triggers still run. Planner GUCs are replayed via SET LOCAL for plan parity where the snapshot captured them, so the query runs under them (e.g. prod work_mem); older snapshots carry none and get the server's own settings. Requires a connection, so it is absent in offline mode. It returns the plan; analyze_plan interprets it."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
 			mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query).")),
 			mcp.WithBoolean("with_stats", mcp.Description("Inject snapshot stats before EXPLAIN.")),
@@ -293,14 +293,14 @@ func (s *Server) registerLiveTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("check_drift",
-			mcp.WithDescription("Compare the live database against the loaded snapshot and report ahead, behind, or diverged, listing the objects that differ. Call when tool output looks out of date."),
+			mcp.WithDescription("When a migration may have run since the snapshot, or before acting on an offline answer that is expensive to get wrong: compares the live database against the loaded snapshot and reports ahead, behind, or diverged with the objects that differ. Requires a connection, so it is absent in offline mode. Read-only: it refreshes nothing (reload_schema, `dryrun snapshot take`) and changes nothing."),
 			annLiveRead,
 		),
 		s.handleCheckDrift,
 	)
 	srv.AddTool(
 		mcp.NewTool("columnar_report",
-			mcp.WithDescription("AlloyDB only: columnar-engine state -- resident columns, empty column store, stale blocks -- with findings. Returns unsupported on stock PostgreSQL."),
+			mcp.WithDescription("AlloyDB only, when a scan should be served by the columnar engine and is not: resident columns, empty column store, stale blocks, with findings. Needs a live AlloyDB connection: it errors on stock PostgreSQL and is absent in offline mode. Read-only; it populates and configures nothing."),
 			annLiveRead,
 		),
 		s.handleColumnarReport,

@@ -275,7 +275,7 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 			var next []NextCall
 			for _, c := range t.Constraints {
 				if c.Kind == schema.ConstraintForeignKey {
-					hint = "This table has foreign keys — use find_related for JOIN patterns with related tables."
+					hint = "This table has foreign keys — use find_related for the tables on both sides of them."
 					next = []NextCall{{
 						Tool: "find_related",
 						Args: map[string]any{

@@ -226,6 +226,39 @@ func buildAnomalies(a *schema.AnnotatedSchema) ([]map[string]any, string) {
 	return anomalies, note
 }
 
+// Interpretation of the unattributed_scans flag, emitted with the finding
+// rather than in the tool description.
+func unattributedScansHint(anomalies []map[string]any) string {
+	for _, a := range anomalies {
+		for _, f := range anomalyFlags(a) {
+			if f == string(schema.FlagUnattributedScans) {
+				return "unattributed_scans: the table sees heavy scan traffic that no captured statement references. " +
+					"dryrun's capture holds top-level statements only (as does pg_stat_statements.track = 'top'), " +
+					"so scans issued inside functions and triggers are invisible to query stats, not absent. " +
+					"auto_explain with log_nested_statements, or reading pg_stat_statements directly under track = 'all', will show them."
+			}
+		}
+	}
+	return ""
+}
+
+// Anomalies carry []string in-process; a JSON round trip turns it into []any.
+func anomalyFlags(a map[string]any) []string {
+	switch v := a["flags"].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, f := range v {
+			if s, ok := f.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 type (
 	compactColumn struct {
 		Name             string  `json:"name"`

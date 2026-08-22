@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -317,5 +318,95 @@ func TestDetect_TableFilter(t *testing.T) {
 	var any map[string]any
 	if err := json.Unmarshal([]byte(out), &any); err != nil {
 		return
+	}
+}
+
+// The unattributed_scans interpretation used to live in the detect tool
+// description, where every agent saw it before deciding to call detect at all.
+// It is now emitted with the finding: absent unless a returned anomaly carries
+// the flag, present (and naming the top-level-only capture) when one does.
+func TestUnattributedScansHint(t *testing.T) {
+	if got := unattributedScansHint(nil); got != "" {
+		t.Errorf("no anomalies: want empty hint, got %q", got)
+	}
+
+	other := []map[string]any{{"table": "orders", "flags": []string{"seq_scan_only"}}}
+	if got := unattributedScansHint(other); got != "" {
+		t.Errorf("unrelated flag: want empty hint, got %q", got)
+	}
+
+	flagged := []map[string]any{
+		{"table": "orders", "flags": []string{"seq_scan_only"}},
+		{"table": "events", "flags": []string{string(schema.FlagUnattributedScans)}},
+	}
+	got := unattributedScansHint(flagged)
+	if got == "" {
+		t.Fatal("flagged anomaly: want the interpretation hint, got empty")
+	}
+	for _, want := range []string{"unattributed_scans", "pg_stat_statements.track", "log_nested_statements"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hint missing %q: %s", want, got)
+		}
+	}
+}
+
+// anomalySchema builds the narrowest snapshot that trips (or does not trip)
+// unattributed_scans: one very hot table, and a top-level-only pg_stat_statements
+// capture whose statements reference referenced instead.
+func anomalySchema(referenced string) *schema.AnnotatedSchema {
+	track := "top"
+	return &schema.AnnotatedSchema{
+		Schema: &schema.SchemaSnapshot{},
+		Merged: &schema.MergedActivity{Nodes: []schema.NodeActivity{{
+			Node: schema.NodeIdentity{Source: "primary"},
+			Tables: []schema.TableActivityEntry{{
+				Table:    schema.QualifiedName{Schema: "public", Name: "events"},
+				Activity: schema.TableActivity{SeqScan: 200_000, IdxScan: 1},
+			}},
+		}}},
+		QueryStats: []schema.QueryStatsSnapshot{{
+			PgssTrack: &track,
+			RawRows:   1,
+			Queries:   []schema.QueryStatsEntry{{Canonical: "SELECT id FROM " + referenced + " WHERE x = $1"}},
+		}},
+	}
+}
+
+// detect must carry the interpretation in _meta.hint when a returned anomaly
+// is flagged, and stay silent when the captured statements account for the
+// scans.
+func TestDetect_AnomaliesCarriesUnattributedScansHint(t *testing.T) {
+	hintFor := func(t *testing.T, referenced string) string {
+		t.Helper()
+		srv := NewOfflineServerAnnotated(anomalySchema(referenced), lint.DefaultConfig())
+
+		var req mcp.CallToolRequest
+		req.Params.Name = "detect"
+		req.Params.Arguments = map[string]any{"kind": "anomalies"}
+		res, err := srv.handleDetect(context.Background(), req)
+		if err != nil {
+			t.Fatalf("handleDetect: %v", err)
+		}
+		text, ok := res.Content[0].(mcp.TextContent)
+		if !ok {
+			t.Fatalf("expected TextContent, got %T", res.Content[0])
+		}
+
+		var decoded struct {
+			Meta struct {
+				Hint string `json:"hint"`
+			} `json:"_meta"`
+		}
+		if err := json.Unmarshal([]byte(text.Text), &decoded); err != nil {
+			t.Fatalf("unmarshal detect result: %v\n%s", err, text.Text)
+		}
+		return decoded.Meta.Hint
+	}
+
+	if got := hintFor(t, "orders"); !strings.Contains(got, "unattributed_scans") {
+		t.Errorf("flagged anomaly: _meta.hint must explain the flag, got %q", got)
+	}
+	if got := hintFor(t, "events"); strings.Contains(got, "unattributed_scans") {
+		t.Errorf("statements account for the scans: want no interpretation, got %q", got)
 	}
 }

@@ -90,10 +90,12 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	anomalies := filterByQual(rawAnomalies, schemaF, tableF, anomalyKey)
 
 	staleKept, staleOmitted := capStaleStats(staleEntries, max)
+	// cap before the hint so unattributedScansHint covers only shown rows
+	anomaliesKept, anomaliesOmitted := capItems(anomalies, max)
 	wrapper := map[string]any{
 		"stale_stats":     cappedBlock(staleKept, staleOmitted, len(staleEntries)),
 		"unused_indexes":  entryBlock(unusedEntries, max),
-		"anomalies":       entryBlock(anomalies, max),
+		"anomalies":       cappedBlock(anomaliesKept, anomaliesOmitted, len(anomalies)),
 		"bloated_indexes": entryBlock(bloatEntries, max),
 		"bloated_tables":  entryBlock(bloatTableEntries, max),
 	}
@@ -107,7 +109,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	case len(unusedEntries) > 0:
 		hint = "Unused indexes add write overhead. Verify index scans across all replicas before dropping."
 	}
-	hint = joinHints(hint, anomalyNote)
+	hint = joinHints(hint, anomalyNote, unattributedScansHint(anomaliesKept))
 
 	// point next at the truncated categories only
 	var next []NextCall
@@ -217,7 +219,9 @@ func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolReques
 	if len(anomalies) == 0 {
 		return s.emptyKindResult("anomalies", "No anomalies detected.", anomalyNote), nil
 	}
-	return cappedKindResult(s, "anomalies", anomalies, limitArg(req), schemaF, tableF, anomalyNote), nil
+	max := limitArg(req)
+	shown, _ := capItems(anomalies, max)
+	return cappedKindResult(s, "anomalies", anomalies, max, schemaF, tableF, anomalyNote, unattributedScansHint(shown)), nil
 }
 
 func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

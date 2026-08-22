@@ -263,19 +263,22 @@ Connect your MCP client to `http://host:3000/sse`.
 | `list_tables` | No | List all tables with row estimates and comments |
 | `describe_table` | No | Full table detail: columns, constraints, indexes, stats |
 | `search_schema` | No | Search across table/column names, comments, constraints |
-| `find_related` | No | Foreign key relationships with sample JOIN patterns |
+| `find_related` | No | Incoming and outgoing foreign keys for a table |
 | `validate_query` | No | Parse SQL, check table/column existence, detect anti-patterns |
 | `check_migration` | No | Migration safety: lock types, rewrite risk, safe alternatives |
 | `lint_schema` | No | Convention checks: naming, types, constraints, timestamps |
-| `schema_diff` | No\* | Compare snapshots for schema changes |
+| `snapshot_diff` | No\* | Compare two snapshots: schema, planner, activity, query drift |
 | `vacuum_health` | No | Autovacuum analysis with effective settings and recommendations |
 | `detect` | No | Health checks: stale stats, unused indexes, seq-scan anomalies |
 | `analyze_plan` | No | Analyze a pre-existing EXPLAIN JSON plan |
-| `advise` | Hybrid | Comprehensive query analysis: EXPLAIN + anti-patterns + index suggestions |
+| `advise` | Hybrid | Query review: validation + index suggestions offline, plus plan review with a DB |
+| `list_top_queries` | No | Captured pg_stat_statements shapes, ranked, per node |
+| `reload_schema` | No | Re-read the newest snapshot from history.db |
 | `explain_query` | **Yes** | EXPLAIN with structured plan and warnings |
 | `check_drift` | **Yes** | Compare live database schema against saved snapshot |
+| `columnar_report` | **Yes** | AlloyDB only: columnar-engine state and findings |
 
-\* `schema_diff` needs snapshot history; without live DB it compares saved snapshots only.
+\* `snapshot_diff` needs snapshot history; without a live DB it compares saved snapshots only.
 
 ---
 
