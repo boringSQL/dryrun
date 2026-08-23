@@ -2,8 +2,6 @@ package mcp
 
 import (
 	"encoding/json"
-
-	"github.com/boringsql/dryrun/pkg/vacuum"
 )
 
 // Typed output envelopes for tools with a stable result shape. Their output
@@ -73,14 +71,6 @@ type (
 		Count   int           `json:"count"`
 		Offset  int           `json:"offset,omitempty"`
 		Meta    *toolMeta     `json:"_meta,omitempty"`
-	}
-
-	vacuumHealthResult struct {
-		Entries   []vacuum.VacuumHealth `json:"vacuum_health"`
-		Count     int                   `json:"count"`
-		Truncated bool                  `json:"truncated,omitempty"`
-		Omitted   int                   `json:"omitted,omitempty"`
-		Meta      *toolMeta             `json:"_meta,omitempty"`
 	}
 
 	// Key-only observation of a withheld tag key (deny-listed or literal-shaped value).
@@ -155,7 +145,7 @@ var (
 
 	detectOutputSchema = json.RawMessage(`{
 		"type": "object",
-		"description": "kind=all: one {entries, count, truncated?, omitted?} block per category (stale_stats, unused_indexes, anomalies, bloated_indexes, bloated_tables). Single kind: the entries under the kind's key plus count/truncated/omitted at the top level.",
+		"description": "kind=all: one {entries, count, truncated?, omitted?} block per category (stale_stats, unused_indexes, anomalies, bloated_indexes, bloated_tables, vacuum_health). Single kind: the entries under the kind's key plus count/truncated/omitted at the top level.",
 		"properties": {
 			"count": {"type": "integer"},
 			"truncated": {"type": "boolean"},

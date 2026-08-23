@@ -134,7 +134,6 @@ func TestToolsRegistration_OutputSchemas(t *testing.T) {
 		"describe_table": true,
 		"search_schema":  true,
 		"detect":         true,
-		"vacuum_health":  true,
 		"lint_schema":    true,
 		"snapshot_diff":  true,
 	}
@@ -167,19 +166,24 @@ func TestToolsRegistration_OutputSchemas(t *testing.T) {
 func TestToolsRegistration_StructuredContentPresent(t *testing.T) {
 	c := setupOfflineTest(t)
 
-	calls := map[string]map[string]any{
-		"list_tables":    nil,
-		"describe_table": {"table": "users"},
-		"search_schema":  {"query": "users"},
-		"detect":         nil,
-		"vacuum_health":  nil,
-		"lint_schema":    nil,
+	calls := []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{"list_tables", "list_tables", nil},
+		{"describe_table", "describe_table", map[string]any{"table": "users"}},
+		{"search_schema", "search_schema", map[string]any{"query": "users"}},
+		{"detect", "detect", nil},
+		{"detect_vacuum_health", "detect", map[string]any{"kind": "vacuum_health"}},
+		{"lint_schema", "lint_schema", nil},
 	}
 
-	for name, args := range calls {
+	for _, tc := range calls {
+		name, args := tc.name, tc.args
 		t.Run(name, func(t *testing.T) {
 			var req mcp.CallToolRequest
-			req.Params.Name = name
+			req.Params.Name = tc.tool
 			req.Params.Arguments = args
 
 			result, err := c.CallTool(context.Background(), req)
@@ -216,7 +220,6 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 		"check_migration": true,
 		"lint_schema":     true,
 		"detect":          true,
-		"vacuum_health":   true,
 		"reload_schema":   true,
 		"advise":          true,
 		"analyze_plan":    true,

@@ -261,15 +261,14 @@ Connect your MCP client to `http://host:3000/sse`.
 | Tool | Needs DB? | Description |
 |------|-----------|-------------|
 | `list_tables` | No | List all tables with row estimates and comments |
-| `describe_table` | No | Full table detail: columns, constraints, indexes, stats |
+| `describe_table` | No | One table in full: columns, constraints, indexes, stats; `detail=stats` adds vacuum |
 | `search_schema` | No | Search across table/column names, comments, constraints |
 | `find_related` | No | Incoming and outgoing foreign keys for a table |
 | `validate_query` | No | Parse SQL, check table/column existence, detect anti-patterns |
 | `check_migration` | No | Migration safety: lock types, rewrite risk, safe alternatives |
 | `lint_schema` | No | Convention checks: naming, types, constraints, timestamps |
 | `snapshot_diff` | No\* | Compare two snapshots: schema, planner, activity, query drift |
-| `vacuum_health` | No | Autovacuum analysis with effective settings and recommendations |
-| `detect` | No | Health checks: stale stats, unused indexes, seq-scan anomalies |
+| `detect` | No | Health checks: stale stats, unused indexes, seq-scan anomalies, bloat, vacuum health |
 | `analyze_plan` | No | Analyze a pre-existing EXPLAIN JSON plan |
 | `advise` | Hybrid | Query review: validation + index suggestions offline, plus plan review with a DB |
 | `list_top_queries` | No | Captured pg_stat_statements shapes, ranked, per node |

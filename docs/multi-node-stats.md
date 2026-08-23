@@ -102,6 +102,8 @@ detect(kind = "stale_stats")
 detect(kind = "unused_indexes")
 detect(kind = "anomalies")
 detect(kind = "bloated_indexes")
+detect(kind = "bloated_tables")
+detect(kind = "vacuum_health")
 ```
 
 **stale_stats** finds tables where `ANALYZE` hasn't run recently, broken down by node (7-day threshold):
@@ -131,9 +133,9 @@ Seq scan imbalance:
 
 **bloated_indexes** estimates index bloat from `relpages` vs expected pages (default threshold: 1.5x).
 
-### vacuum_health
+### detect kind=vacuum_health
 
-Autovacuum analysis using aggregated dead tuple counts but primary-only vacuum timestamps. Replicas don't run autovacuum, so their timestamps are always null. Using dead tuple counts from all nodes and vacuum timing from the primary gives accurate distance-to-trigger calculations.
+Reports only tables with an autovacuum concern; a table with nothing wrong does not appear. Analysis uses aggregated dead tuple counts but primary-only vacuum timestamps. Replicas don't run autovacuum, so their timestamps are always null. Using dead tuple counts from all nodes and vacuum timing from the primary gives accurate distance-to-trigger calculations.
 
 ## Practical scenarios
 

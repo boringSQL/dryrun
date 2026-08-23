@@ -86,7 +86,7 @@ func snapshotDiffFollowups(res *snapdiff.Result, opt snapdiff.Options, view stri
 		}
 	}
 	if res.Summary.PlannerMovers > 0 {
-		next = append(next, NextCall{Tool: "vacuum_health", Args: map[string]any{}})
+		next = append(next, NextCall{Tool: "detect", Args: map[string]any{"kind": "vacuum_health"}})
 	}
 	if res.Summary.ActivityMovers > 0 {
 		next = append(next, NextCall{Tool: "detect", Args: map[string]any{"kind": "anomalies"}})

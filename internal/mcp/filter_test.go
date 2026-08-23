@@ -86,7 +86,7 @@ func TestTableFilterAcceptsQualifiedNames(t *testing.T) {
 	})
 
 	t.Run("vacuum_health_and_lint_schema_split_too", func(t *testing.T) {
-		assertContains(t, callTool(t, c, "vacuum_health", map[string]any{"table": "nosuch"}), "matched nothing")
+		assertContains(t, callTool(t, c, "detect", map[string]any{"kind": "vacuum_health", "table": "nosuch"}), "matched nothing")
 		assertContains(t, callTool(t, c, "lint_schema", map[string]any{"table": "nosuch"}), "matched nothing")
 	})
 }

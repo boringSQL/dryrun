@@ -12,8 +12,8 @@ import (
 	mcpproto "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
-	drmcp "github.com/boringsql/dryrun/pkg/mcp"
 	"github.com/boringsql/dryrun/pkg/lint"
+	drmcp "github.com/boringsql/dryrun/pkg/mcp"
 	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
@@ -36,12 +36,12 @@ func TestBuildOfflineMCPServer_ListsSchemaSubset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(list.Tools) != 11 {
+	if len(list.Tools) != 10 {
 		names := make([]string, len(list.Tools))
 		for i, tl := range list.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("offline server exposed %d tools, want 11: %v", len(list.Tools), names)
+		t.Fatalf("offline server exposed %d tools, want 10: %v", len(list.Tools), names)
 	}
 
 	for _, tl := range list.Tools {

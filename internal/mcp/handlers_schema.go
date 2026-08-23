@@ -11,12 +11,25 @@ import (
 
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/ddl"
+	"github.com/boringsql/dryrun/pkg/vacuum"
 )
 
 var describeTableFields = []string{
 	"columns", "indexes", "constraints", "stats", "partition_info",
 	"column_profiles", "comment", "policies", "triggers", "reloptions",
-	"rls_enabled", "ddl",
+	"rls_enabled", "ddl", "vacuum",
+}
+
+// detect reports vacuum offenders only, so a table with no concern has no other
+// home for its trigger points, effective knobs and last-vacuum times. Nil below
+// the analyzer's 10k-row floor, where autovacuum's defaults are not interesting.
+func vacuumFor(a *schema.AnnotatedSchema, qual schema.QualifiedName) *vacuum.VacuumHealth {
+	for _, vh := range vacuum.AnalyzeVacuumHealth(a) {
+		if vh.Schema == qual.Schema && vh.Table == qual.Name {
+			return &vh
+		}
+	}
+	return nil
 }
 
 type (
@@ -209,6 +222,14 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 
 	if len(profiles) > 0 {
 		result["column_profiles"] = profiles
+	}
+
+	// not in the summary default: it is a derived view, and the default response
+	// is already the widest in the product
+	if detail == "stats" || detail == "full" || wantsField(fields, "vacuum") {
+		if vh := vacuumFor(a, qual); vh != nil {
+			result["vacuum"] = vh
+		}
 	}
 
 	wantNodeBreakdown := fields == nil || wantsField(fields, "indexes") || wantsField(fields, "stats")

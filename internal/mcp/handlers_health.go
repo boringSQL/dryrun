@@ -25,6 +25,8 @@ func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return s.handleDetectBloatedIndexes(ctx, req)
 	case "bloated_tables":
 		return s.handleDetectBloatedTables(ctx, req)
+	case "vacuum_health":
+		return s.handleDetectVacuumHealth(ctx, req)
 	case "all":
 		return s.handleDetectAll(ctx, req)
 	default:
@@ -87,6 +89,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	unusedEntries := filterByQual(schema.DetectUnusedIndexes(a), schemaF, tableF, unusedKey)
 	bloatEntries := filterByQual(schema.DetectBloatedIndexes(a, threshold), schemaF, tableF, bloatKey)
 	bloatTableEntries := filterByQual(schema.DetectBloatedTables(a, threshold), schemaF, tableF, bloatTableKey)
+	vacuumEntries := withFindings(filterByQual(vacuum.AnalyzeVacuumHealth(a), schemaF, tableF, vacuumKey))
 	rawAnomalies, anomalyNote := buildAnomalies(a)
 	anomalies := filterByQual(rawAnomalies, schemaF, tableF, anomalyKey)
 
@@ -99,6 +102,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 		"anomalies":       cappedBlock(anomaliesKept, anomaliesOmitted, len(anomalies)),
 		"bloated_indexes": entryBlock(bloatEntries, max),
 		"bloated_tables":  entryBlock(bloatTableEntries, max),
+		"vacuum_health":   entryBlock(vacuumEntries, max),
 	}
 
 	hint := ""
@@ -109,15 +113,17 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 		hint = "Stale stats may cause bad query plans; consider running ANALYZE."
 	case len(unusedEntries) > 0:
 		hint = "Unused indexes add write overhead. Verify index scans across all replicas before dropping."
+	case len(vacuumEntries) > 0:
+		hint = "Autovacuum is not keeping up on some tables; dead tuples and last-vacuum times are on each vacuum_health entry."
 	}
-	if len(staleEntries)+len(unusedEntries)+len(bloatEntries)+len(bloatTableEntries)+len(anomalies) > 0 {
+	if len(staleEntries)+len(unusedEntries)+len(bloatEntries)+len(bloatTableEntries)+len(anomalies)+len(vacuumEntries) > 0 {
 		filterNote = ""
 	}
 	hint = joinHints(hint, filterNote, anomalyNote, unattributedScansHint(anomaliesKept))
 
 	// point next at the truncated categories only
 	var next []NextCall
-	for _, k := range []string{"stale_stats", "unused_indexes", "anomalies", "bloated_indexes", "bloated_tables"} {
+	for _, k := range []string{"stale_stats", "unused_indexes", "anomalies", "bloated_indexes", "bloated_tables", "vacuum_health"} {
 		if block, ok := wrapper[k].(map[string]any); ok && block["truncated"] == true {
 			next = append(next, narrowNext(k, schemaF, tableF)...)
 		}
@@ -159,14 +165,16 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 	}
 	body := fmt.Sprintf("Stale statistics (%d entries):\n%s", total, strings.Join(lines, "\n"))
 	wrapper := map[string]any{"stale_stats": kept, "count": total}
+	hint, next := "", []NextCall(nil)
 	if omitted > 0 {
 		body += fmt.Sprintf("\n\n%d more not shown; narrow with schema=/table= or re-run with limit=0.", omitted)
 		wrapper["truncated"] = true
 		wrapper["omitted"] = omitted
-		s.injectMeta(wrapper,
-			fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), total, omitted),
-			narrowNext("stale_stats", schemaF, tableF))
+		hint = fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), total, omitted)
+		next = narrowNext("stale_stats", schemaF, tableF)
 	}
+	// same invariant as cappedKindResult: _meta carries the capture stamps
+	s.injectMeta(wrapper, hint, next)
 	return structuredTextResult(wrapper, body), nil
 }
 
@@ -282,13 +290,27 @@ func cappedKindResult[T any](s *Server, kind string, entries []T, max int, schem
 		next = narrowNext(kind, schemaF, tableF)
 	}
 	hint = joinHints(append([]string{hint}, notes...)...)
-	if hint != "" || len(next) > 0 {
-		s.injectMeta(wrapper, hint, next)
-	}
+	// always: _meta carries the capture stamps the tool description promises,
+	// which the answer that has findings needs at least as much as an empty one
+	s.injectMeta(wrapper, hint, next)
 	return jsonResult(wrapper)
 }
 
-func (s *Server) handleVacuumHealth(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// AnalyzeVacuumHealth returns a row per large table whether or not it found
+// anything. detect reports offenders, so every path here filters to rows that
+// carry a finding; the per-table picture (trigger points, effective knobs, last
+// vacuum times) is describe_table's question, not a detection.
+func withFindings(entries []vacuum.VacuumHealth) []vacuum.VacuumHealth {
+	kept := make([]vacuum.VacuumHealth, 0, len(entries))
+	for _, e := range entries {
+		if len(e.Findings) > 0 {
+			kept = append(kept, e)
+		}
+	}
+	return kept
+}
+
+func (s *Server) handleDetectVacuumHealth(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	a, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
@@ -297,21 +319,9 @@ func (s *Server) handleVacuumHealth(_ context.Context, req mcp.CallToolRequest) 
 	schemaF := schemaFilterArg(req)
 	tableF := getArg(req, "table")
 	schemaF, tableF, filterNote := resolveTableFilter(a.Schema, schemaF, tableF)
-	results := filterByQual(vacuum.AnalyzeVacuumHealth(a), schemaF, tableF, vacuumKey)
-	if len(results) == 0 {
-		return structuredTextResult(
-			vacuumHealthResult{Entries: []vacuum.VacuumHealth{}, Meta: s.newMeta(filterNote, nil)},
-			s.wrapText("No vacuum health concerns found.", filterNote)), nil
+	entries := withFindings(filterByQual(vacuum.AnalyzeVacuumHealth(a), schemaF, tableF, vacuumKey))
+	if len(entries) == 0 {
+		return s.emptyKindResult("vacuum_health", "No vacuum health concerns found.", filterNote), nil
 	}
-
-	kept, omitted := capItems(results, limitArg(req))
-	out := vacuumHealthResult{Entries: kept, Count: len(results)}
-	hint := ""
-	if omitted > 0 {
-		out.Truncated = true
-		out.Omitted = omitted
-		hint = fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), len(results), omitted)
-	}
-	out.Meta = s.newMeta(hint, nil)
-	return jsonResult(out), nil
+	return cappedKindResult(s, "vacuum_health", entries, limitArg(req), schemaF, tableF), nil
 }

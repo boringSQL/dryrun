@@ -7,13 +7,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/lint"
+	"github.com/boringsql/dryrun/pkg/vacuum"
 )
 
-// Smoke tests for health-family tools: detect (all kinds), vacuum_health.
+// Smoke tests for the health family: detect, across every kind.
 // Each subtest exercises one kind or filter and asserts the expected JSON
 // keys or error text appear.
 func TestHealthHandlers_OfflineSmoke(t *testing.T) {
@@ -25,6 +27,8 @@ func TestHealthHandlers_OfflineSmoke(t *testing.T) {
 		assertContains(t, out, "unused_indexes")
 		assertContains(t, out, "anomalies")
 		assertContains(t, out, "bloated_indexes")
+		assertContains(t, out, "bloated_tables")
+		assertContains(t, out, "vacuum_health")
 	})
 
 	t.Run("detect_stale_stats", func(t *testing.T) {
@@ -87,21 +91,21 @@ func TestHealthHandlers_OfflineSmoke(t *testing.T) {
 	})
 
 	t.Run("vacuum_health", func(t *testing.T) {
-		out := callTool(t, c, "vacuum_health", nil)
+		out := callTool(t, c, "detect", map[string]any{"kind": "vacuum_health"})
 		if out == "" {
 			t.Fatal("empty result")
 		}
 	})
 
 	t.Run("vacuum_health_with_filter", func(t *testing.T) {
-		out := callTool(t, c, "vacuum_health", map[string]any{"table": "users"})
+		out := callTool(t, c, "detect", map[string]any{"kind": "vacuum_health", "table": "users"})
 		if out == "" {
 			t.Fatal("empty result")
 		}
 	})
 
 	t.Run("vacuum_health_nonexistent_table", func(t *testing.T) {
-		out := callTool(t, c, "vacuum_health", map[string]any{"table": "nonexistent_xyz"})
+		out := callTool(t, c, "detect", map[string]any{"kind": "vacuum_health", "table": "nonexistent_xyz"})
 		assertContains(t, out, "No vacuum health concerns")
 	})
 }
@@ -198,9 +202,36 @@ func TestCappedKindResult_NoTruncationWhenUnderCap(t *testing.T) {
 	if _, has := decoded["omitted"]; has {
 		t.Error("nothing hidden: omitted must be absent")
 	}
-	// _meta is only injected on the truncation branch, so it should be absent here.
-	if _, has := decoded["_meta"]; has {
-		t.Error("no truncation: _meta (and its next) must be absent")
+	// _meta rides every kind result -- it carries the capture stamps -- but with
+	// nothing truncated it must not carry a next.
+	meta, has := decoded["_meta"].(map[string]any)
+	if !has {
+		t.Fatal("_meta must be present: it carries the capture stamps")
+	}
+	if _, has := meta["next"]; has {
+		t.Error("no truncation: _meta.next must be absent")
+	}
+}
+
+// AnalyzeVacuumHealth returns a row per large table whether or not it found
+// anything, so the kind=all block must filter to rows that actually carry a
+// finding -- otherwise the default detect call ships a fat block of healthy
+// tables, which is the opposite of why vacuum_health was merged into detect.
+func TestWithFindings_DropsHealthyTables(t *testing.T) {
+	in := []vacuum.VacuumHealth{
+		{Schema: "public", Table: "healthy"},
+		{Schema: "public", Table: "sick", Findings: []vacuum.VacuumFinding{{Code: vacuum.CodeAutovacuumDisabled}}},
+		{Schema: "public", Table: "also_healthy", Findings: []vacuum.VacuumFinding{}},
+	}
+	got := withFindings(in)
+	if len(got) != 1 {
+		t.Fatalf("want only the table with findings, got %d: %+v", len(got), got)
+	}
+	if got[0].Table != "sick" {
+		t.Errorf("kept the wrong table: %q", got[0].Table)
+	}
+	if withFindings(nil) == nil {
+		t.Error("must return an empty slice, not nil, so it marshals as [] not null")
 	}
 }
 
@@ -296,11 +327,12 @@ func TestCapStaleStats_NeverFloodDoesNotStarveStale(t *testing.T) {
 	}
 }
 
-// Pins that vacuum_health with an unknown schema returns the friendly
-// "No vacuum health concerns" message rather than an error or empty payload.
+// Pins that detect kind=vacuum_health with an unknown schema returns the
+// friendly "No vacuum health concerns" message rather than an error or empty
+// payload.
 func TestVacuumHealth_SchemaFilter(t *testing.T) {
 	c := setupOfflineTest(t)
-	out := callTool(t, c, "vacuum_health", map[string]any{"schema": "nonexistent_schema_xyz"})
+	out := callTool(t, c, "detect", map[string]any{"kind": "vacuum_health", "schema": "nonexistent_schema_xyz"})
 	if !strings.Contains(out, "No vacuum health concerns") {
 		t.Errorf("expected empty vacuum health for unknown schema, got %s", out)
 	}
@@ -452,5 +484,88 @@ func TestDetect_NoSchemaArgCoversAllSchemas(t *testing.T) {
 	got := call(t, map[string]any{"kind": "anomalies", "schema": "public"})
 	if !strings.Contains(got, "No anomalies detected.") {
 		t.Errorf("explicit schema=public must exclude app, got %s", got)
+	}
+}
+
+// setupOfflineTest wraps a bare SchemaSnapshot, so Planner is nil, SizingFor
+// returns nil for every table and AnalyzeVacuumHealth bails before producing a
+// row -- every other vacuum assertion in this file only ever sees the empty
+// path. This builds a server with planner + activity so the filtering is
+// exercised for real: one table with a finding, one large and healthy.
+func setupVacuumOfflineTest(t *testing.T) *client.Client {
+	t.Helper()
+	// non-nil slices: describe_table detail=full marshals these straight through
+	// and its output schema requires arrays, so nil would fail validation
+	tbl := func(name string, reloptions []string) schema.Table {
+		return schema.Table{
+			Schema: "public", Name: name, Reloptions: reloptions,
+			Columns:     []schema.Column{col("id")},
+			Indexes:     []schema.Index{},
+			Constraints: []schema.Constraint{},
+		}
+	}
+	sick := tbl("sick", []string{"autovacuum_enabled=false"})
+	healthy := tbl("healthy", nil)
+	a := &schema.AnnotatedSchema{
+		Schema: &schema.SchemaSnapshot{
+			PgVersion: "PostgreSQL 17.0", Database: "test",
+			Timestamp: time.Now().UTC(), ContentHash: "test",
+			Tables: []schema.Table{sick, healthy},
+		},
+		Planner: &schema.PlannerStatsSnapshot{Tables: []schema.TableSizingEntry{
+			// >=10k so both enter the scan, <1M so "healthy" does not trip
+			// default_knobs_large_table just for being big
+			{Table: sick.Qual(), Sizing: schema.TableSizing{Reltuples: 50_000}},
+			{Table: healthy.Qual(), Sizing: schema.TableSizing{Reltuples: 50_000}},
+		}},
+		Merged: &schema.MergedActivity{Nodes: []schema.NodeActivity{{
+			Node: schema.NodeIdentity{Source: "primary"},
+			Tables: []schema.TableActivityEntry{
+				{Table: sick.Qual(), Activity: schema.TableActivity{NDeadTup: 10}},
+				{Table: healthy.Qual(), Activity: schema.TableActivity{NDeadTup: 0}},
+			},
+		}}},
+	}
+	return serveOffline(t, NewOfflineServerAnnotated(a, lint.DefaultConfig()))
+}
+
+// detect reports offenders. A large table with no vacuum concern must not ride
+// along -- that is the whole reason vacuum_health could be folded into detect
+// without inflating the default payload.
+func TestDetectVacuumHealth_ExcludesHealthyTables(t *testing.T) {
+	c := setupVacuumOfflineTest(t)
+
+	// scoped to the vacuum_health block: under kind=all the healthy table
+	// legitimately shows up in stale_stats (never analyzed), which is a
+	// different category's business
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		all  bool
+	}{
+		{"kind=vacuum_health", map[string]any{"kind": "vacuum_health"}, false},
+		{"kind=all", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(callTool(t, c, "detect", tc.args)), &decoded); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			block := decoded
+			if tc.all {
+				b, ok := decoded["vacuum_health"].(map[string]any)
+				if !ok {
+					t.Fatalf("kind=all must carry a vacuum_health block, got %v", decoded["vacuum_health"])
+				}
+				block = b
+			}
+			entries, _ := json.Marshal(block)
+			if !strings.Contains(string(entries), `"sick"`) {
+				t.Errorf("the table with a finding must appear: %s", entries)
+			}
+			if strings.Contains(string(entries), `"healthy"`) {
+				t.Errorf("a table with no vacuum finding must not appear: %s", entries)
+			}
+		})
 	}
 }

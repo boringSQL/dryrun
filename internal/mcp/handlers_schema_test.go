@@ -247,3 +247,48 @@ func TestDescribeTableDDLErrorKeepsTheRest(t *testing.T) {
 		t.Errorf("ddl returned alongside an error:\n%s", out)
 	}
 }
+
+// detect reports vacuum offenders only, so describe_table is the only place a
+// finding-free table's vacuum picture can be read. Uses the planner-bearing
+// fixture: the demo snapshot has no sizing, so SizingFor is nil and the
+// analyzer produces nothing for any table.
+func TestDescribeTable_CarriesVacuumForAHealthyTable(t *testing.T) {
+	c := setupVacuumOfflineTest(t)
+
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want bool
+	}{
+		{"detail=stats", map[string]any{"table": "healthy", "detail": "stats"}, true},
+		{"fields=vacuum", map[string]any{"table": "healthy", "fields": []string{"vacuum"}}, true},
+		{"detail=full", map[string]any{"table": "healthy", "detail": "full"}, true},
+		// the default response is already the widest in the product
+		{"summary default stays lean", map[string]any{"table": "healthy"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var payload map[string]any
+			out := callTool(t, c, "describe_table", tc.args)
+			if err := json.Unmarshal([]byte(out), &payload); err != nil {
+				t.Fatalf("not JSON: %v\n%s", err, out)
+			}
+			vac, has := payload["vacuum"].(map[string]any)
+			if has != tc.want {
+				t.Fatalf("vacuum present=%v, want %v: %s", has, tc.want, out)
+			}
+			if !tc.want {
+				return
+			}
+			// "healthy" carries no finding -- that is the whole point: detect
+			// would not show this table at all
+			if fs, _ := vac["findings"].([]any); len(fs) != 0 {
+				t.Errorf("fixture table should have no finding, got %v", fs)
+			}
+			for _, k := range []string{"dead_tuples", "vacuum_trigger_at"} {
+				if _, ok := vac[k]; !ok {
+					t.Errorf("vacuum section missing %q: %v", k, vac)
+				}
+			}
+		})
+	}
+}

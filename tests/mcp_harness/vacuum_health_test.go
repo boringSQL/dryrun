@@ -6,8 +6,9 @@ import (
 )
 
 // Regression guard for the offline-history wiring bug: NewOfflineServer used to
-// skip history.db, so Planner/Merged stayed nil and vacuum_health returned the
-// literal "No vacuum health concerns found." instead of a JSON wrapper.
+// skip history.db, so Planner/Merged stayed nil and detect kind=vacuum_health
+// returned the literal "No vacuum health concerns found." instead of a JSON
+// wrapper.
 func TestVacuumHealth_OfflineSurfacesAutovacuumTimestamps(t *testing.T) {
 	fx := buildFixture(t, true)
 	cli := startMCP(t, fx.ProjectDir)
@@ -22,8 +23,8 @@ func TestVacuumHealth_OfflineSurfacesAutovacuumTimestamps(t *testing.T) {
 		} `json:"vacuum_health"`
 		Count int `json:"count"`
 	}
-	// vacuum_health defaults to schema=public; the fixture table lives in auth
-	callJSON(t, cli, "vacuum_health", map[string]any{"schema": "auth"}, &payload)
+	// the kind defaults to schema=public; the fixture table lives in auth
+	callJSON(t, cli, "detect", map[string]any{"kind": "vacuum_health", "schema": "auth"}, &payload)
 
 	if payload.Count == 0 {
 		t.Fatal("count=0: offline mode did not load planner stats from history.db (regression)")
@@ -42,7 +43,7 @@ func TestVacuumHealth_OfflineSurfacesAutovacuumTimestamps(t *testing.T) {
 		}
 	}
 	if entry == nil {
-		t.Fatal("auth.oauth_token missing from vacuum_health output")
+		t.Fatal("auth.oauth_token missing from detect kind=vacuum_health output")
 	}
 	if entry.Reltuples < 1_000_000 {
 		t.Errorf("reltuples not surfaced from planner stats: got %v", entry.Reltuples)
