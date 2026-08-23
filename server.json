@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.boringsql/dryrun",
+  "name": "io.github.boringSQL/dryrun",
   "title": "dryrun",
   "description": "PostgreSQL schema intelligence from a committed snapshot. No connection, no credentials.",
   "repository": {

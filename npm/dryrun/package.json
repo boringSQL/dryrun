@@ -1,7 +1,7 @@
 {
   "name": "@boringsql/dryrun",
   "version": "0.0.0",
-  "mcpName": "io.github.boringsql/dryrun",
+  "mcpName": "io.github.boringSQL/dryrun",
   "description": "dryrun — PostgreSQL schema/query advisor and MCP server. npx launcher.",
   "bin": {
     "dryrun": "bin/dryrun.js"
