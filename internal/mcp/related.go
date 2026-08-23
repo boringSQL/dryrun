@@ -107,16 +107,18 @@ func partitionRoots(snap *schema.SchemaSnapshot) map[string]string {
 
 func edgeFrom(c schema.Constraint, other edgeTarget, cols, refCols []string, local, selfAlias string) relatedEdge {
 	return relatedEdge{
-		Table:      other.qualified(),
-		Constraint: c.Name,
-		Columns:    nonNil(cols),
-		RefColumns: nonNil(refCols),
-		OnDelete:   fkAction(c.Definition, "ON DELETE"),
-		OnUpdate:   fkAction(c.Definition, "ON UPDATE"),
-		NotValid:   hasClause(c.Definition, "NOT VALID"),
-		Join:       joinClause(other.qualified(), local, selfAlias, refCols, cols),
-		target:     other,
-		deferred:   hasClause(c.Definition, "DEFERRABLE") && hasClause(c.Definition, "INITIALLY DEFERRED"),
+		Table:       other.qualified(),
+		TableSchema: other.schema,
+		TableName:   other.name,
+		Constraint:  c.Name,
+		Columns:     nonNil(cols),
+		RefColumns:  nonNil(refCols),
+		OnDelete:    fkAction(c.Definition, "ON DELETE"),
+		OnUpdate:    fkAction(c.Definition, "ON UPDATE"),
+		NotValid:    hasClause(c.Definition, "NOT VALID"),
+		Join:        joinClause(other.qualified(), local, selfAlias, refCols, cols),
+		target:      other,
+		deferred:    hasClause(c.Definition, "DEFERRABLE") && hasClause(c.Definition, "INITIALLY DEFERRED"),
 	}
 }
 

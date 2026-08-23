@@ -232,6 +232,214 @@ func freshGUCs(a *snapshot.AnnotatedSchema) []snapshot.GucSetting {
 	return a.Schema.GUCs
 }
 
+// analyzeTable is the per-table body shared by the whole-database sweep and the
+// single-table lookup. Reports false for a table that has no heap of its own or
+// sits below the row floor.
+func analyzeTable(a *snapshot.AnnotatedSchema, t *snapshot.Table, defaults AutovacuumDefaults, caps snapshot.Capabilities) (VacuumHealth, bool) {
+
+	// skip partitioned table as they have no heap of its own
+	if t.PartitionInfo != nil {
+		return VacuumHealth{}, false
+	}
+	qual := t.Qual()
+	sizing := a.SizingFor(qual)
+	bloat := a.TableBloatFor(qual)
+	activity := a.PrimaryActivity(qual)
+	if sizing == nil || sizing.Reltuples < 10_000 {
+		return VacuumHealth{}, false
+	}
+	reltuples := sizing.Reltuples
+	var deadTuples, modSinceAnalyze int64
+	if activity != nil {
+		deadTuples = activity.NDeadTup
+		modSinceAnalyze = activity.NModSinceAnalyze
+	}
+
+	opts := parseReloptions(t.Reloptions)
+	hasOverrides := false
+	for k := range opts {
+		if strings.HasPrefix(k, "autovacuum_") {
+			hasOverrides = true
+			break
+		}
+	}
+
+	// effective settings
+	threshold := defaults.VacuumThreshold
+	scaleFactor := defaults.VacuumScaleFactor
+	analyzeThreshold := defaults.AnalyzeThreshold
+	analyzeScaleFactor := defaults.AnalyzeScaleFactor
+	avEnabled := defaults.Enabled
+
+	if v, ok := opts["autovacuum_vacuum_threshold"]; ok {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			threshold = parsed
+		}
+	}
+	if v, ok := opts["autovacuum_vacuum_scale_factor"]; ok {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+			scaleFactor = parsed
+		}
+	}
+	if v, ok := opts["autovacuum_analyze_threshold"]; ok {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			analyzeThreshold = parsed
+		}
+	}
+	if v, ok := opts["autovacuum_analyze_scale_factor"]; ok {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+			analyzeScaleFactor = parsed
+		}
+	}
+	if v, ok := opts["autovacuum_enabled"]; ok {
+		// An unparseable value (never valid DDL, but pg_class.reloptions is trusted
+		// verbatim) falls back to the cluster default rather than asserting disabled —
+		// same asserting-direction rule the cloud's reloptionBool documents for itself.
+		if enabled, valid := parsePGBool(v); valid {
+			avEnabled = enabled
+		}
+	}
+
+	triggerAt := float64(threshold) + scaleFactor*reltuples
+	analyzeTrigger := float64(analyzeThreshold) + analyzeScaleFactor*reltuples
+	var progress float64
+	if triggerAt > 0 {
+		progress = float64(deadTuples) / triggerAt
+	}
+	var analyzeProgress float64
+	if analyzeTrigger > 0 {
+		analyzeProgress = float64(modSinceAnalyze) / analyzeTrigger
+	}
+
+	vh := VacuumHealth{
+		Schema:                    t.Schema,
+		Table:                     t.Name,
+		Reltuples:                 reltuples,
+		DeadTuples:                deadTuples,
+		ModSinceAnalyze:           modSinceAnalyze,
+		VacuumTriggerAt:           triggerAt,
+		VacuumProgress:            progress,
+		HasOverrides:              hasOverrides,
+		EffectiveThreshold:        threshold,
+		EffectiveScale:            scaleFactor,
+		EffectiveAnalyzeThreshold: analyzeThreshold,
+		EffectiveAnalyzeScale:     analyzeScaleFactor,
+		AnalyzeTriggerAt:          analyzeTrigger,
+		AnalyzeProgress:           analyzeProgress,
+		AutovacuumEnabled:         avEnabled,
+		Bloat:                     bloat,
+	}
+	// anti-wraparound: age(relfrozenxid) vs the (possibly overridden) freeze_max_age.
+	// ok=false (partitioned parents, pre-feature snapshots) skips freeze analysis.
+	freezeMaxAge := defaults.FreezeMaxAge
+	if v, ok := opts["autovacuum_freeze_max_age"]; ok {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			freezeMaxAge = parsed
+		}
+	}
+	if age, ok := sizing.FrozenXidAge(a.Planner.DatabaseXid); ok {
+		vh.XidAge = age
+		vh.FreezeMaxAge = freezeMaxAge
+		vh.FailsafeAge = defaults.FailsafeAge
+		if freezeMaxAge > 0 {
+			vh.FreezeProgress = float64(age) / float64(freezeMaxAge)
+		}
+		if sev := freezeSeverity(age, freezeMaxAge, defaults.FailsafeAge); sev != "" {
+			vh.add(CodeFreezeAgeHigh, sev,
+				freezeMessage("relfrozenxid", "autovacuum_freeze_max_age", "vacuum_failsafe_age",
+					age, freezeMaxAge, defaults.FailsafeAge))
+		}
+	}
+
+	mxidFreezeMaxAge := defaults.MultixactFreezeMaxAge
+	if v, ok := opts["autovacuum_multixact_freeze_max_age"]; ok {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			mxidFreezeMaxAge = parsed
+		}
+	}
+	if age, ok := sizing.MinMxidAge(a.Planner.DatabaseMxid); ok {
+		vh.MxidAge = age
+		vh.MultixactFreezeMaxAge = mxidFreezeMaxAge
+		vh.MultixactFailsafeAge = defaults.MultixactFailsafeAge
+		if mxidFreezeMaxAge > 0 {
+			vh.MultixactFreezeProgress = float64(age) / float64(mxidFreezeMaxAge)
+		}
+		if sev := freezeSeverity(age, mxidFreezeMaxAge, defaults.MultixactFailsafeAge); sev != "" {
+			vh.add(CodeMxidAgeHigh, sev,
+				freezeMessage("relminmxid", "autovacuum_multixact_freeze_max_age", "vacuum_multixact_failsafe_age",
+					age, mxidFreezeMaxAge, defaults.MultixactFailsafeAge))
+		}
+	}
+
+	if activity != nil {
+		vh.LastVacuum = activity.LastVacuum
+		vh.LastAutovacuum = activity.LastAutovacuum
+		vh.LastAnalyze = activity.LastAnalyze
+		vh.LastAutoanalyze = activity.LastAutoanalyze
+		vh.VacuumCount = activity.VacuumCount
+		vh.AutovacuumCount = activity.AutovacuumCount
+		vh.AnalyzeCount = activity.AnalyzeCount
+		vh.AutoanalyzeCount = activity.AutoanalyzeCount
+	}
+
+	if !avEnabled {
+		vh.add(CodeAutovacuumDisabled, SeverityHigh,
+			"autovacuum is disabled for this table! This won't end good; you've been warned")
+	}
+	if reltuples >= 1_000_000 && !hasOverrides {
+		if caps.AdaptiveAutovacuum {
+			// AlloyDB schedules autovacuum by instance load, so the fixed scale-factor runbook misleads
+			msg := fmt.Sprintf("large table (%dk rows) on default autovacuum settings; %s runs adaptive autovacuum, which schedules by load rather than the fixed scale-factor knobs",
+				int64(reltuples)/1000, a.Schema.Flavor.Display())
+			if !caps.ConfigTunable {
+				msg += ", and those knobs are managed here, not yours to set"
+			}
+			vh.add(CodeDefaultKnobsLargeTable, SeverityInfo, msg)
+		} else {
+			vacSF, vacThresh, azSF, azThresh := suggestedVacuumKnobs(reltuples)
+			vh.addFix(CodeDefaultKnobsLargeTable, SeverityMedium,
+				fmt.Sprintf("large table (%dk rows) using default autovacuum settings", int64(reltuples)/1000),
+				fmt.Sprintf("ALTER TABLE %s.%s SET (autovacuum_vacuum_scale_factor = %g, "+
+					"autovacuum_vacuum_threshold = %d, autovacuum_analyze_scale_factor = %g, "+
+					"autovacuum_analyze_threshold = %d);",
+					vh.Schema, vh.Table, vacSF, vacThresh, azSF, azThresh))
+		}
+	}
+	if reltuples > 0 && float64(deadTuples)/reltuples > 0.10 {
+		vh.add(CodeHighDeadTupleRatio, SeverityMedium,
+			fmt.Sprintf("high dead tuple ratio: %d dead / %dk live (%.1f%%)",
+				deadTuples, int64(reltuples)/1000,
+				float64(deadTuples)/reltuples*100))
+	}
+	if triggerAt > 10_000_000 {
+		vh.add(CodeVacuumThresholdHigh, SeverityMedium,
+			fmt.Sprintf("vacuum won't trigger until %dk dead tuples. Threshold is very high",
+				int64(triggerAt)/1000))
+	}
+	return vh, true
+}
+
+// AnalyzeVacuumHealthFor answers about one table without sweeping the database.
+// SizingFor and friends are linear scans, so the whole-database sweep is
+// quadratic in table count -- too much to pay when describe_table wants one row.
+func AnalyzeVacuumHealthFor(a *snapshot.AnnotatedSchema, q snapshot.QualifiedName) *VacuumHealth {
+	if a == nil || a.Schema == nil {
+		return nil
+	}
+	for i := range a.Schema.Tables {
+		t := &a.Schema.Tables[i]
+		if t.Schema != q.Schema || t.Name != q.Name {
+			continue
+		}
+		vh, ok := analyzeTable(a, t, ParseAutovacuumDefaults(freshGUCs(a)), a.Schema.Flavor.Capabilities())
+		if !ok {
+			return nil
+		}
+		return &vh
+	}
+	return nil
+}
+
 func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 	if a == nil || a.Schema == nil {
 		return nil
@@ -241,186 +449,9 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 
 	var results []VacuumHealth
 	for i := range a.Schema.Tables {
-		t := &a.Schema.Tables[i]
-
-		// skip partitioned table as they have no heap of its own
-		if t.PartitionInfo != nil {
+		vh, ok := analyzeTable(a, &a.Schema.Tables[i], defaults, caps)
+		if !ok {
 			continue
-		}
-		qual := t.Qual()
-		sizing := a.SizingFor(qual)
-		bloat := a.TableBloatFor(qual)
-		activity := a.PrimaryActivity(qual)
-		if sizing == nil || sizing.Reltuples < 10_000 {
-			continue
-		}
-		reltuples := sizing.Reltuples
-		var deadTuples, modSinceAnalyze int64
-		if activity != nil {
-			deadTuples = activity.NDeadTup
-			modSinceAnalyze = activity.NModSinceAnalyze
-		}
-
-		opts := parseReloptions(t.Reloptions)
-		hasOverrides := false
-		for k := range opts {
-			if strings.HasPrefix(k, "autovacuum_") {
-				hasOverrides = true
-				break
-			}
-		}
-
-		// effective settings
-		threshold := defaults.VacuumThreshold
-		scaleFactor := defaults.VacuumScaleFactor
-		analyzeThreshold := defaults.AnalyzeThreshold
-		analyzeScaleFactor := defaults.AnalyzeScaleFactor
-		avEnabled := defaults.Enabled
-
-		if v, ok := opts["autovacuum_vacuum_threshold"]; ok {
-			if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
-				threshold = parsed
-			}
-		}
-		if v, ok := opts["autovacuum_vacuum_scale_factor"]; ok {
-			if parsed, err := strconv.ParseFloat(v, 64); err == nil {
-				scaleFactor = parsed
-			}
-		}
-		if v, ok := opts["autovacuum_analyze_threshold"]; ok {
-			if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
-				analyzeThreshold = parsed
-			}
-		}
-		if v, ok := opts["autovacuum_analyze_scale_factor"]; ok {
-			if parsed, err := strconv.ParseFloat(v, 64); err == nil {
-				analyzeScaleFactor = parsed
-			}
-		}
-		if v, ok := opts["autovacuum_enabled"]; ok {
-			// An unparseable value (never valid DDL, but pg_class.reloptions is trusted
-			// verbatim) falls back to the cluster default rather than asserting disabled —
-			// same asserting-direction rule the cloud's reloptionBool documents for itself.
-			if enabled, valid := parsePGBool(v); valid {
-				avEnabled = enabled
-			}
-		}
-
-		triggerAt := float64(threshold) + scaleFactor*reltuples
-		analyzeTrigger := float64(analyzeThreshold) + analyzeScaleFactor*reltuples
-		var progress float64
-		if triggerAt > 0 {
-			progress = float64(deadTuples) / triggerAt
-		}
-		var analyzeProgress float64
-		if analyzeTrigger > 0 {
-			analyzeProgress = float64(modSinceAnalyze) / analyzeTrigger
-		}
-
-		vh := VacuumHealth{
-			Schema:                    t.Schema,
-			Table:                     t.Name,
-			Reltuples:                 reltuples,
-			DeadTuples:                deadTuples,
-			ModSinceAnalyze:           modSinceAnalyze,
-			VacuumTriggerAt:           triggerAt,
-			VacuumProgress:            progress,
-			HasOverrides:              hasOverrides,
-			EffectiveThreshold:        threshold,
-			EffectiveScale:            scaleFactor,
-			EffectiveAnalyzeThreshold: analyzeThreshold,
-			EffectiveAnalyzeScale:     analyzeScaleFactor,
-			AnalyzeTriggerAt:          analyzeTrigger,
-			AnalyzeProgress:           analyzeProgress,
-			AutovacuumEnabled:         avEnabled,
-			Bloat:                     bloat,
-		}
-		// anti-wraparound: age(relfrozenxid) vs the (possibly overridden) freeze_max_age.
-		// ok=false (partitioned parents, pre-feature snapshots) skips freeze analysis.
-		freezeMaxAge := defaults.FreezeMaxAge
-		if v, ok := opts["autovacuum_freeze_max_age"]; ok {
-			if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
-				freezeMaxAge = parsed
-			}
-		}
-		if age, ok := sizing.FrozenXidAge(a.Planner.DatabaseXid); ok {
-			vh.XidAge = age
-			vh.FreezeMaxAge = freezeMaxAge
-			vh.FailsafeAge = defaults.FailsafeAge
-			if freezeMaxAge > 0 {
-				vh.FreezeProgress = float64(age) / float64(freezeMaxAge)
-			}
-			if sev := freezeSeverity(age, freezeMaxAge, defaults.FailsafeAge); sev != "" {
-				vh.add(CodeFreezeAgeHigh, sev,
-					freezeMessage("relfrozenxid", "autovacuum_freeze_max_age", "vacuum_failsafe_age",
-						age, freezeMaxAge, defaults.FailsafeAge))
-			}
-		}
-
-		mxidFreezeMaxAge := defaults.MultixactFreezeMaxAge
-		if v, ok := opts["autovacuum_multixact_freeze_max_age"]; ok {
-			if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
-				mxidFreezeMaxAge = parsed
-			}
-		}
-		if age, ok := sizing.MinMxidAge(a.Planner.DatabaseMxid); ok {
-			vh.MxidAge = age
-			vh.MultixactFreezeMaxAge = mxidFreezeMaxAge
-			vh.MultixactFailsafeAge = defaults.MultixactFailsafeAge
-			if mxidFreezeMaxAge > 0 {
-				vh.MultixactFreezeProgress = float64(age) / float64(mxidFreezeMaxAge)
-			}
-			if sev := freezeSeverity(age, mxidFreezeMaxAge, defaults.MultixactFailsafeAge); sev != "" {
-				vh.add(CodeMxidAgeHigh, sev,
-					freezeMessage("relminmxid", "autovacuum_multixact_freeze_max_age", "vacuum_multixact_failsafe_age",
-						age, mxidFreezeMaxAge, defaults.MultixactFailsafeAge))
-			}
-		}
-
-		if activity != nil {
-			vh.LastVacuum = activity.LastVacuum
-			vh.LastAutovacuum = activity.LastAutovacuum
-			vh.LastAnalyze = activity.LastAnalyze
-			vh.LastAutoanalyze = activity.LastAutoanalyze
-			vh.VacuumCount = activity.VacuumCount
-			vh.AutovacuumCount = activity.AutovacuumCount
-			vh.AnalyzeCount = activity.AnalyzeCount
-			vh.AutoanalyzeCount = activity.AutoanalyzeCount
-		}
-
-		if !avEnabled {
-			vh.add(CodeAutovacuumDisabled, SeverityHigh,
-				"autovacuum is disabled for this table! This won't end good; you've been warned")
-		}
-		if reltuples >= 1_000_000 && !hasOverrides {
-			if caps.AdaptiveAutovacuum {
-				// AlloyDB schedules autovacuum by instance load, so the fixed scale-factor runbook misleads
-				msg := fmt.Sprintf("large table (%dk rows) on default autovacuum settings; %s runs adaptive autovacuum, which schedules by load rather than the fixed scale-factor knobs",
-					int64(reltuples)/1000, a.Schema.Flavor.Display())
-				if !caps.ConfigTunable {
-					msg += ", and those knobs are managed here, not yours to set"
-				}
-				vh.add(CodeDefaultKnobsLargeTable, SeverityInfo, msg)
-			} else {
-				vacSF, vacThresh, azSF, azThresh := suggestedVacuumKnobs(reltuples)
-				vh.addFix(CodeDefaultKnobsLargeTable, SeverityMedium,
-					fmt.Sprintf("large table (%dk rows) using default autovacuum settings", int64(reltuples)/1000),
-					fmt.Sprintf("ALTER TABLE %s.%s SET (autovacuum_vacuum_scale_factor = %g, "+
-						"autovacuum_vacuum_threshold = %d, autovacuum_analyze_scale_factor = %g, "+
-						"autovacuum_analyze_threshold = %d);",
-						vh.Schema, vh.Table, vacSF, vacThresh, azSF, azThresh))
-			}
-		}
-		if reltuples > 0 && float64(deadTuples)/reltuples > 0.10 {
-			vh.add(CodeHighDeadTupleRatio, SeverityMedium,
-				fmt.Sprintf("high dead tuple ratio: %d dead / %dk live (%.1f%%)",
-					deadTuples, int64(reltuples)/1000,
-					float64(deadTuples)/reltuples*100))
-		}
-		if triggerAt > 10_000_000 {
-			vh.add(CodeVacuumThresholdHigh, SeverityMedium,
-				fmt.Sprintf("vacuum won't trigger until %dk dead tuples. Threshold is very high",
-					int64(triggerAt)/1000))
 		}
 		results = append(results, vh)
 	}

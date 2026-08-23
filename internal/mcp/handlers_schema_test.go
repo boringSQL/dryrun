@@ -14,7 +14,7 @@ import (
 )
 
 // Smoke tests for the schema-family tools (list_tables, describe_table,
-// search_schema, find_related). Each subtest exercises one tool against the
+// search_schema, describe_table detail=relations). Each subtest exercises one tool against the
 // offline demo snapshot and asserts the expected substrings appear in the
 // rendered text/JSON output.
 func TestSchemaHandlers_OfflineSmoke(t *testing.T) {
@@ -39,8 +39,8 @@ func TestSchemaHandlers_OfflineSmoke(t *testing.T) {
 		assertContains(t, out, "email")
 	})
 
-	t.Run("find_related", func(t *testing.T) {
-		out := callTool(t, c, "find_related", map[string]any{"table": "users"})
+	t.Run("relations", func(t *testing.T) {
+		out := callTool(t, c, "describe_table", map[string]any{"table": "users", "detail": "relations"})
 		assertContains(t, out, `"table": "public.organizations"`)
 		assertContains(t, out, `"join": "JOIN public.organizations ON public.organizations.organization_id = public.users.organization_id"`)
 	})
@@ -111,10 +111,10 @@ func TestDescribeTable_DefaultShape(t *testing.T) {
 	}
 }
 
-// Tables with FKs surface a _meta.next pointing at find_related so chaining
-// clients can follow up without parsing the prose hint. Tables without FKs
-// must not surface _meta.next.
-func TestDescribeTable_FKSuggestsFindRelated(t *testing.T) {
+// Tables with FKs surface a _meta.next pointing at this tool's own relations
+// mode, so chaining clients can follow up without parsing the prose hint.
+// Tables without FKs must not surface _meta.next.
+func TestDescribeTable_FKSuggestsRelations(t *testing.T) {
 	c := setupOfflineTest(t)
 
 	t.Run("with_fk", func(t *testing.T) {
@@ -129,12 +129,12 @@ func TestDescribeTable_FKSuggestsFindRelated(t *testing.T) {
 			t.Fatalf("expected _meta.next with one entry, got: %v", meta)
 		}
 		first, _ := next[0].(map[string]any)
-		if first["tool"] != "find_related" {
-			t.Errorf("expected tool=find_related, got %v", first["tool"])
+		if first["tool"] != "describe_table" {
+			t.Errorf("expected tool=describe_table, got %v", first["tool"])
 		}
 		args, _ := first["args"].(map[string]any)
-		if args["table"] != "users" || args["schema"] != "public" {
-			t.Errorf("expected args{table:users, schema:public}, got %v", args)
+		if args["table"] != "users" || args["schema"] != "public" || args["detail"] != "relations" {
+			t.Errorf("expected args{table:users, schema:public, detail:relations}, got %v", args)
 		}
 	})
 
@@ -287,6 +287,122 @@ func TestDescribeTable_CarriesVacuumForAHealthyTable(t *testing.T) {
 			for _, k := range []string{"dead_tuples", "vacuum_trigger_at"} {
 				if _, ok := vac[k]; !ok {
 					t.Errorf("vacuum section missing %q: %v", k, vac)
+				}
+			}
+		})
+	}
+}
+
+// detail=relations answers the FK question without dragging anything else
+// along -- that is why it is a detail level and not just a fields entry. Pins
+// the WHOLE key set, not a few absences: public.events is partitioned, so a
+// leak of partition_summary/node_breakdown/column_profiles shows up here.
+func TestDescribeTable_RelationsCarriesNothingElse(t *testing.T) {
+	c := serveOffline(t, NewOfflineServerAnnotated(
+		&schema.AnnotatedSchema{Schema: relatedSnap()}, lint.DefaultConfig()))
+
+	for _, table := range []string{"users", "events"} {
+		t.Run(table, func(t *testing.T) {
+			var payload map[string]any
+			out := callTool(t, c, "describe_table", map[string]any{"table": table, "detail": "relations"})
+			if err := json.Unmarshal([]byte(out), &payload); err != nil {
+				t.Fatalf("not JSON: %v\n%s", err, out)
+			}
+			want := map[string]bool{"schema": true, "name": true, "relations": true, "_meta": true}
+			for k := range payload {
+				if !want[k] {
+					t.Errorf("detail=relations must not carry %q: %s", k, out)
+				}
+			}
+			if _, has := payload["relations"]; !has {
+				t.Errorf("expected a relations section: %s", out)
+			}
+		})
+	}
+}
+
+// The fields whitelist deletes sections after they are built. If relations is
+// filtered out, its delete-cascade hint and follow-up calls must go with it --
+// otherwise the response advertises a section it does not contain.
+func TestDescribeTable_RelationsFilteredOutTakesItsHintsAlong(t *testing.T) {
+	c := serveOffline(t, NewOfflineServerAnnotated(
+		&schema.AnnotatedSchema{Schema: relatedSnap()}, lint.DefaultConfig()))
+
+	var payload map[string]any
+	out := callTool(t, c, "describe_table", map[string]any{
+		"table": "users", "detail": "relations", "fields": []string{"columns"},
+	})
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if _, has := payload["relations"]; has {
+		t.Fatal("fields=[columns] must drop the relations section")
+	}
+	meta, _ := payload["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if strings.Contains(hint, "deletes matching rows") || strings.Contains(hint, "clears the referencing column") {
+		t.Errorf("cascade prose survived its section: %q", hint)
+	}
+	// one suggestion to go get relations is right -- the table has FKs and this
+	// response does not show them. What must not survive is the cascade
+	// follow-up, which chases a *different* table on behalf of a section that
+	// was never returned.
+	next, _ := meta["next"].([]any)
+	if len(next) != 1 {
+		t.Fatalf("want exactly one follow-up, got %v", next)
+	}
+	call, _ := next[0].(map[string]any)
+	args, _ := call["args"].(map[string]any)
+	if args["table"] != "users" {
+		t.Errorf("the surviving follow-up should point back at this table, not a cascade target: %v", call)
+	}
+}
+
+// A table with no indexes and no constraints is ordinary (a log table with no
+// primary key). Those fields carry no omitempty, so nil marshals as null while
+// describeTableOutputSchema requires arrays, and the tool returns a validation
+// error instead of the table. It bites hardest on the hosted endpoint, where
+// WithOutputSchemaValidation replaces the whole result -- _meta and the
+// snapshot identity go with it.
+func TestDescribeTable_TableWithNoIndexesOrConstraints(t *testing.T) {
+	snap := &schema.SchemaSnapshot{
+		PgVersion: "PostgreSQL 17.0", Database: "test",
+		Timestamp: time.Now().UTC(), ContentHash: "test",
+		Tables: []schema.Table{{
+			Schema: "public", Name: "audit_log",
+			Columns: []schema.Column{col("id")},
+			// Indexes and Constraints deliberately nil
+		}},
+	}
+	c := serveOffline(t, NewOfflineServerAnnotated(
+		&schema.AnnotatedSchema{Schema: snap}, lint.DefaultConfig()))
+
+	// every detail level, because they build the payload three different ways:
+	// summary through toCompactTable, full by marshalling the raw Table, stats
+	// and relations field by field. Pinning only one is how the summary path --
+	// the default, and the one the hosted endpoint serves most -- stayed broken
+	// after the full path was fixed.
+	for _, detail := range []string{"summary", "full", "stats", "relations"} {
+		t.Run(detail, func(t *testing.T) {
+			args := map[string]any{"table": "audit_log"}
+			if detail != "summary" {
+				args["detail"] = detail
+			}
+			out := callTool(t, c, "describe_table", args)
+			if strings.Contains(out, "output schema validation failed") {
+				t.Fatalf("detail=%s must not fail validation on nil arrays: %s", detail, out)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(out), &payload); err != nil {
+				t.Fatalf("not JSON: %v\n%s", err, out)
+			}
+			// only the levels that carry the sections at all
+			if detail != "summary" && detail != "full" {
+				return
+			}
+			for _, k := range []string{"columns", "indexes", "constraints"} {
+				if v, ok := payload[k]; !ok || v == nil {
+					t.Errorf("%q must be an empty array, not null/absent: %v", k, v)
 				}
 			}
 		})

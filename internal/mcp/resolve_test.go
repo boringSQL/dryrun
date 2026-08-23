@@ -87,8 +87,8 @@ func TestResolveTable(t *testing.T) {
 		}
 	})
 
-	t.Run("find_related_resolves_the_same_way", func(t *testing.T) {
-		assertContains(t, callTool(t, c, "find_related", map[string]any{"table": "public.foo.bar"}),
+	t.Run("relations_resolves_the_same_way", func(t *testing.T) {
+		assertContains(t, callTool(t, c, "describe_table", map[string]any{"table": "public.foo.bar", "detail": "relations"}),
 			`"table": "public.\"foo.bar\""`)
 	})
 }
@@ -111,11 +111,12 @@ func TestResolveTable_NextCallCarriesResolvedName(t *testing.T) {
 		t.Fatalf("unmarshal: %v\n%.500s", err, out)
 	}
 	if len(decoded.Meta.Next) == 0 {
-		t.Fatalf("want a find_related follow-up, got:\n%.500s", out)
+		t.Fatalf("want a relations follow-up, got:\n%.500s", out)
 	}
 	got := decoded.Meta.Next[0]
-	if got.Tool != "find_related" || got.Args["table"] != "orders" || got.Args["schema"] != "public" {
-		t.Errorf("want find_related{table: orders, schema: public}, got %s%v", got.Tool, got.Args)
+	if got.Tool != "describe_table" || got.Args["table"] != "orders" ||
+		got.Args["schema"] != "public" || got.Args["detail"] != "relations" {
+		t.Errorf("want describe_table{table: orders, schema: public, detail: relations}, got %s%v", got.Tool, got.Args)
 	}
 }
 

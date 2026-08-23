@@ -24,7 +24,7 @@ func TestFixturesServeThroughMCP(t *testing.T) {
 
 		// FKTable is nspname.relname, so an FK to public."foo.bar" and one to a
 		// table bar in a schema public.foo are the same string
-		assertContains(t, callTool(t, c, "find_related", map[string]any{"table": "foo.bar"}),
+		assertContains(t, callTool(t, c, "describe_table", map[string]any{"table": "foo.bar", "detail": "relations"}),
 			`"join": "JOIN public.orders ON public.orders.ref_id = public.\"foo.bar\".id"`)
 	})
 

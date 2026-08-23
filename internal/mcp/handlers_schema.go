@@ -17,19 +17,7 @@ import (
 var describeTableFields = []string{
 	"columns", "indexes", "constraints", "stats", "partition_info",
 	"column_profiles", "comment", "policies", "triggers", "reloptions",
-	"rls_enabled", "ddl", "vacuum",
-}
-
-// detect reports vacuum offenders only, so a table with no concern has no other
-// home for its trigger points, effective knobs and last-vacuum times. Nil below
-// the analyzer's 10k-row floor, where autovacuum's defaults are not interesting.
-func vacuumFor(a *schema.AnnotatedSchema, qual schema.QualifiedName) *vacuum.VacuumHealth {
-	for _, vh := range vacuum.AnalyzeVacuumHealth(a) {
-		if vh.Schema == qual.Schema && vh.Table == qual.Name {
-			return &vh
-		}
-	}
-	return nil
+	"rls_enabled", "ddl", "vacuum", "relations",
 }
 
 type (
@@ -194,12 +182,22 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 			return errResult(fmt.Sprintf("serialization error: %v", err)), nil
 		}
 		_ = json.Unmarshal(raw, &result)
+		// a table with no indexes or constraints is ordinary, and these fields
+		// carry no omitempty, so nil arrives as null and fails the array type
+		for _, k := range []string{"columns", "indexes", "constraints"} {
+			if v, ok := result[k]; ok && v == nil {
+				result[k] = []any{}
+			}
+		}
 		if sizing != nil {
 			result["stats"] = sizing
 		}
 		if bloat != nil {
 			result["bloat"] = bloat
 		}
+	case "relations":
+		result["schema"] = t.Schema
+		result["name"] = t.Name
 	case "stats":
 		result["schema"] = t.Schema
 		result["name"] = t.Name
@@ -220,19 +218,34 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 		_ = json.Unmarshal(raw, &result)
 	}
 
-	if len(profiles) > 0 {
+	if len(profiles) > 0 && detail != "relations" {
 		result["column_profiles"] = profiles
 	}
 
 	// not in the summary default: it is a derived view, and the default response
 	// is already the widest in the product
 	if detail == "stats" || detail == "full" || wantsField(fields, "vacuum") {
-		if vh := vacuumFor(a, qual); vh != nil {
+		// detect reports offenders only, so this is the only home for the
+		// trigger points, effective knobs and last-vacuum times of a table with
+		// no concern. Nil below the analyzer's 10k-row floor.
+		if vh := vacuum.AnalyzeVacuumHealthFor(a, qual); vh != nil {
 			result["vacuum"] = vh
 		}
 	}
 
-	wantNodeBreakdown := fields == nil || wantsField(fields, "indexes") || wantsField(fields, "stats")
+	var relCascades []edgeTarget
+	relHint := ""
+	// build it only if it will survive the fields whitelist below, or the hint
+	// and follow-ups would describe a section that is not in the response
+	if (detail == "relations" || wantsField(fields, "relations")) &&
+		(fields == nil || wantsField(fields, "relations")) {
+		var rel findRelatedResult
+		rel, relHint, relCascades = buildRelations(snap, ref, limitArgOr(req, defaultMaxItems))
+		result["relations"] = rel
+	}
+
+	wantNodeBreakdown := detail != "relations" &&
+		(fields == nil || wantsField(fields, "indexes") || wantsField(fields, "stats"))
 	if wantNodeBreakdown && a.Merged != nil {
 		var nodeBreakdown []map[string]any
 		for _, n := range a.Merged.Nodes {
@@ -251,7 +264,7 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 			result["node_breakdown"] = nodeBreakdown
 		}
 	}
-	if t.PartitionInfo != nil {
+	if t.PartitionInfo != nil && detail != "relations" {
 		result["partition_summary"] = fmt.Sprintf(
 			"PARTITIONED BY %s (%s) - %d partitions. "+
 				"Always include '%s' in WHERE clauses for partition pruning.",
@@ -294,19 +307,29 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 
 	caps := capTableSections(result, t, limitArgOr(req, defaultMaxItems), selected)
 
-	hint := ""
+	hint := relHint
 	var next []NextCall
-	for _, c := range t.Constraints {
-		if c.Kind == schema.ConstraintForeignKey {
-			hint = "This table has foreign keys — use find_related for the tables on both sides of them."
-			next = []NextCall{{
-				Tool: "find_related",
-				Args: map[string]any{
-					"table":  ref.Name,
-					"schema": ref.Schema,
-				},
-			}}
-			break
+	// the follow-up needs the unquoted catalog name, not SQL text
+	if len(relCascades) > 0 {
+		next = append(next, NextCall{Tool: "describe_table", Args: map[string]any{
+			"table": relCascades[0].name, "schema": relCascades[0].schema, "detail": "relations",
+		}})
+	}
+	if rel, shown := result["relations"].(findRelatedResult); shown &&
+		rel.OutgoingOmitted+rel.IncomingOmitted > 0 {
+		next = append(next, NextCall{Tool: "describe_table", Args: map[string]any{
+			"table": ref.Name, "schema": ref.Schema, "detail": "relations", "limit": 0,
+		}})
+	}
+	if _, shown := result["relations"]; !shown {
+		for _, c := range t.Constraints {
+			if c.Kind == schema.ConstraintForeignKey {
+				hint = joinHints(hint, "This table has foreign keys — detail=relations lists both sides with a pasteable JOIN and each ON DELETE action.")
+				next = append(next, NextCall{Tool: "describe_table", Args: map[string]any{
+					"table": ref.Name, "schema": ref.Schema, "detail": "relations",
+				}})
+				break
+			}
 		}
 	}
 	// asked for by name, and never capped: ddl missing a column would not
@@ -450,16 +473,10 @@ func (s *Server) handleSearchSchema(_ context.Context, req mcp.CallToolRequest) 
 		s.wrapText(body, "")), nil
 }
 
-func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
-	if err != nil {
-		return errResult(err.Error()), nil
-	}
-
-	ref, miss := resolveTable(snap, req)
-	if miss != nil {
-		return miss, nil
-	}
+// buildRelations is describe_table's relations section: the FK neighbourhood of
+// one table, each edge with a pasteable JOIN and its ON DELETE action. Returns
+// the section, its hint, and the cascade to chase next if there is one.
+func buildRelations(snap *schema.SchemaSnapshot, ref tableRef, max int) (findRelatedResult, string, []edgeTarget) {
 	qualified := ref.Schema + "." + ref.Name
 	local := qualify(ref.Schema, ref.Name)
 
@@ -467,7 +484,6 @@ func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (
 	incoming := incomingEdges(snap, qualified, local)
 
 	// keep delete-affecting keys past the cap; a hub table may exceed it
-	max := limitArgOr(req, defaultMaxItems)
 	keptOut, outOmitted, outKept := capRetainingBy(outgoing, destructive, max)
 	keptIn, inOmitted, inKept := capRetainingBy(incoming, destructive, max)
 
@@ -488,7 +504,6 @@ func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (
 	}
 
 	hint, cascades := deleteHint(incoming)
-	hint = joinHints(ref.Note, hint)
 	if outOmitted+inOmitted > 0 {
 		note := fmt.Sprintf("Omitted %d of %d relations. Re-run with limit=0 for all of them.",
 			outOmitted+inOmitted, len(outgoing)+len(incoming))
@@ -500,15 +515,7 @@ func (s *Server) handleFindRelated(_ context.Context, req mcp.CallToolRequest) (
 	if len(outgoing)+len(incoming) == 0 {
 		hint = joinHints(hint, "No declared foreign keys. Relations enforced in application code do not appear here.")
 	}
-
-	var next []NextCall
-	// the follow-up needs the unquoted catalog name, not SQL text
-	if len(cascades) > 0 {
-		next = append(next, NextCall{Tool: "find_related", Args: map[string]any{
-			"table": cascades[0].name, "schema": cascades[0].schema,
-		}})
-	}
-	return s.metaJSONResult(result, "", hint, next), nil
+	return result, hint, cascades
 }
 
 func wantsField(fields []string, name string) bool {

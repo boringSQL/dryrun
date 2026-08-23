@@ -80,17 +80,17 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("describe_table",
-			mcp.WithDescription("Before writing SQL against a table you have not read in this session: one table in full -- its columns and types, constraints, indexes, and planner stats. Needs no database connection; answers from the snapshot, and points at detect when the table has findings. detail=stats adds vacuum: dead tuples, trigger points, effective autovacuum knobs and last vacuum/analyze times, for any table over 10k rows whether or not detect flagged it. Ask for the ddl field to get the CREATE TABLE that would rebuild it, with whatever the snapshot cannot reproduce listed beside it. Structure as of the last capture: no row data, and nothing a later migration changed."),
+			mcp.WithDescription("Before writing SQL against a table you have not read in this session, before a JOIN, or before a DELETE that might cascade: one table in full -- its columns and types, constraints, indexes, and planner stats. Needs no database connection; answers from the snapshot, and points at detect when the table has findings. detail=relations gives the incoming and outgoing foreign keys, each with a JOIN clause you can paste and the ON DELETE / ON UPDATE action it carries (declared constraints only, one hop, so a table reached by a cascade may cascade further). detail=stats adds vacuum: dead tuples, trigger points, effective autovacuum knobs and last vacuum/analyze times, for any table over 10k rows whether or not detect flagged it. Ask for the ddl field to get the CREATE TABLE that would rebuild it, with whatever the snapshot cannot reproduce listed beside it. Structure as of the last capture: no row data, and nothing a later migration changed."),
 			mcp.WithString("table", mcp.Required(), mcp.Description("Table name, bare or schema-qualified.")),
 			mcp.WithString("schema", mcp.Description("Schema name. Without it a bare name resolves in public, or in the one schema that holds it.")),
 			mcp.WithString("detail",
-				mcp.Enum("summary", "full", "stats"),
+				mcp.Enum("summary", "full", "stats", "relations"),
 				mcp.DefaultString("summary"),
-				mcp.Description("Detail level: 'summary' (default), 'full' (raw stats), 'stats' (profiles, stats and vacuum only)."),
+				mcp.Description("Detail level: 'summary' (default), 'full' (raw stats), 'stats' (profiles, stats and vacuum only), 'relations' (foreign keys on both sides, no columns)."),
 			),
 			mcp.WithArray("fields",
 				mcp.Items(map[string]any{"type": "string"}),
-				mcp.Description("Whitelist of sections: columns, indexes, constraints, stats, partition_info, column_profiles, comment, policies, triggers, reloptions, rls_enabled, ddl, vacuum. Ask for ddl to get the CREATE TABLE."),
+				mcp.Description("Whitelist of sections: columns, indexes, constraints, stats, partition_info, column_profiles, comment, policies, triggers, reloptions, rls_enabled, ddl, vacuum, relations. Ask for ddl to get the CREATE TABLE."),
 			),
 			mcp.WithArray("columns",
 				mcp.Items(map[string]any{"type": "string"}),
@@ -98,7 +98,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			),
 			mcp.WithNumber("limit",
 				mcp.DefaultNumber(50),
-				mcp.Description("Max columns, indexes, constraints and partition children (default 50, 0 for all). Key, unique and indexed columns are kept past it."),
+				mcp.Description("Max columns, indexes, constraints, partition children and relations per direction (default 50, 0 for all). Key, unique and indexed columns are kept past it, as are relations that cascade or clear on delete."),
 			),
 			mcp.WithRawOutputSchema(describeTableOutputSchema),
 			annSnapshot,
@@ -115,17 +115,6 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			annSnapshot,
 		),
 		s.handleSearchSchema,
-	)
-	srv.AddTool(
-		mcp.NewTool("find_related",
-			mcp.WithDescription("Before writing a JOIN, or a DELETE that might cascade: the incoming and outgoing foreign keys of one table, each with a JOIN clause you can paste and the ON DELETE / ON UPDATE action it carries. Needs no database connection. Declared FK constraints only -- relations enforced in application code do not appear -- and one hop, so a table reached by a cascade may cascade further."),
-			mcp.WithString("table", mcp.Required(), mcp.Description("Table name, bare or schema-qualified.")),
-			mcp.WithString("schema", mcp.Description("Schema name. Without it a bare name resolves in public, or in the one schema that holds it.")),
-			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max relations per direction (default 50, 0 for all). Keys that cascade or clear on delete are kept past it, so a hub table can exceed the limit.")),
-			mcp.WithOutputSchema[findRelatedResult](),
-			annSnapshot,
-		),
-		s.handleFindRelated,
 	)
 	srv.AddTool(
 		mcp.NewTool("validate_query",
@@ -195,7 +184,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("detect",
-			mcp.WithDescription("When a query got slow, before a tuning change, when autovacuum or dead tuples come up, or when asked what is wrong with this database: stale statistics, unused indexes, bloated indexes and tables, per-table scan anomalies, and vacuum health. kind=vacuum_health reports autovacuum_disabled, default_knobs_large_table, high_dead_tuple_ratio, vacuum_threshold_too_high, freeze_age_high and mxid_age_high, each with the dead-tuple counts and last (auto)vacuum and analyze times behind it. Every kind reports offenders only -- a table with nothing wrong does not appear. Needs no database connection: findings are as fresh as the last capture, and quiet where it carries no node statistics. It reports only -- no VACUUM, no ANALYZE, no settings changed. Caveats for a finding arrive with it in _meta.hint."),
+			mcp.WithDescription("When a query got slow, before a tuning change, when autovacuum or dead tuples come up, or when asked what is wrong with this database: stale statistics, unused indexes, bloated indexes and tables, per-table scan anomalies, and vacuum health. kind=vacuum_health reports autovacuum_disabled, default_knobs_large_table, high_dead_tuple_ratio, vacuum_threshold_too_high, freeze_age_high and mxid_age_high, each with the dead-tuple counts and last (auto)vacuum and analyze times behind it. Every kind reports offenders only: a table with nothing wrong does not appear, here or in kind=all. For a table with no finding, describe_table detail=stats carries its raw counters and last vacuum/analyze times. Needs no database connection: findings are as fresh as the last capture, and quiet where it carries no node statistics. It reports only -- no VACUUM, no ANALYZE, no settings changed. Caveats for a finding arrive with it in _meta.hint."),
 			mcp.WithString("kind",
 				mcp.Enum("stale_stats", "unused_indexes", "anomalies", "bloated_indexes", "bloated_tables", "vacuum_health", "all"),
 				mcp.DefaultString("all"),

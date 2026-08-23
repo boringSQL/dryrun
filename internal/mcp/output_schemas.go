@@ -33,7 +33,13 @@ type (
 
 	// Columns are on the table asked about, RefColumns on Table.
 	relatedEdge struct {
+		// Table is the quoted SQL identity, for pasting. TableSchema/TableName
+		// are the catalog identity: a consumer joining these edges to anything
+		// else needs them, and un-quoting Table gets mixed-case and dotted
+		// names wrong.
 		Table            string   `json:"table"`
+		TableSchema      string   `json:"table_schema"`
+		TableName        string   `json:"table_name"`
 		Constraint       string   `json:"constraint"`
 		Columns          []string `json:"columns"`
 		RefColumns       []string `json:"ref_columns"`
@@ -127,13 +133,15 @@ var (
 
 	describeTableOutputSchema = json.RawMessage(`{
 		"type": "object",
-		"description": "Table detail. Sections vary with detail= and fields=: columns, indexes, constraints, stats, bloat, column_profiles, node_breakdown, partition_summary, partition_child_sizing. fields=[ddl] adds ddl (the CREATE TABLE and what finishes it), ddl_omitted (what the snapshot cannot reproduce) and, where the render failed, ddl_error.",
+		"description": "Table detail. Sections vary with detail= and fields=: columns, indexes, constraints, stats, bloat, column_profiles, node_breakdown, partition_summary, partition_child_sizing. detail=stats and detail=full add vacuum (dead tuples, trigger points, effective autovacuum knobs, last vacuum/analyze) for a table over 10k rows. detail=relations returns schema, name and relations only -- outgoing and incoming foreign keys, each with a pasteable JOIN and its ON DELETE/ON UPDATE action. fields=[ddl] adds ddl (the CREATE TABLE and what finishes it), ddl_omitted (what the snapshot cannot reproduce) and, where the render failed, ddl_error.",
 		"properties": {
 			"schema": {"type": "string"},
 			"name": {"type": "string"},
 			"columns": {"type": "array"},
 			"indexes": {"type": "array"},
 			"constraints": {"type": "array"},
+			"vacuum": {"type": "object"},
+			"relations": {"type": "object"},
 			"column_profiles": {"type": "array"},
 			"ddl": {"type": "string"},
 			"ddl_omitted": {"type": "array"},

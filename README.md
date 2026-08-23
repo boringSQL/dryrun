@@ -35,7 +35,7 @@ Once you have the snapshot, the CLI works offline:
 
 ### MCP server - give your AI assistant a schema brain
 
-The MCP server reads the same snapshot. It exposes 13 tools over stdio or SSE: schema exploration, query validation, plan analysis, migration checks, linting, vacuum health, and captured `pg_stat_statements` top queries. Three more (`explain_query`, `check_drift`, `columnar_report`) join when a live database is connected. Your AI assistant understands your database while it writes SQL.
+The MCP server reads the same snapshot. It exposes 12 tools over stdio or SSE: schema exploration, query validation, plan analysis, migration checks, linting, vacuum health, and captured `pg_stat_statements` top queries. Three more (`explain_query`, `check_drift`, `columnar_report`) join when a live database is connected. Your AI assistant understands your database while it writes SQL.
 
 No database connection needed. The assistant never sees credentials.
 

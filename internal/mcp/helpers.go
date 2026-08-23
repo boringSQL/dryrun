@@ -339,6 +339,13 @@ func toCompactTable(t *schema.Table, sizing *schema.TableSizing) compactTable {
 		Comment: t.Comment, Sizing: sizing,
 		Policies: t.Policies, Triggers: t.Triggers, Reloptions: t.Reloptions,
 	}
+	// a table with no PK, FK, unique or check is ordinary, and introspection
+	// leaves the slice nil there. The field carries no omitempty, so nil would
+	// marshal as null and fail describeTableOutputSchema's array type -- the
+	// same reason Columns and Indexes below are made rather than copied.
+	if out.Constraints == nil {
+		out.Constraints = []schema.Constraint{}
+	}
 	out.Columns = make([]compactColumn, len(t.Columns))
 	for i, c := range t.Columns {
 		out.Columns[i] = compactColumn{

@@ -92,15 +92,36 @@ func relatedSnap() *schema.SchemaSnapshot {
 	}
 }
 
+// relations used to be its own find_related tool; it is now describe_table's
+// relations section, with the same shape one level down.
+func relationsSectionOf(t *testing.T, out string) findRelatedResult {
+	t.Helper()
+	var envelope struct {
+		Relations findRelatedResult `json:"relations"`
+		Meta      *toolMeta         `json:"_meta"`
+	}
+	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+		t.Fatalf("expected the declared shape: %v\n%s", err, out)
+	}
+	// the hint and next now ride the describe_table envelope, one level up from
+	// the section; lift them so the assertions below still read one object
+	res := envelope.Relations
+	res.Meta = envelope.Meta
+	return res
+}
+
+func relationArgs(args map[string]any) map[string]any {
+	merged := map[string]any{"detail": "relations"}
+	for k, v := range args {
+		merged[k] = v
+	}
+	return merged
+}
+
 func related(t *testing.T, args map[string]any) findRelatedResult {
 	t.Helper()
 	c := serveOffline(t, NewOfflineServerAnnotated(&schema.AnnotatedSchema{Schema: relatedSnap()}, lint.DefaultConfig()))
-	out := callTool(t, c, "find_related", args)
-	var res findRelatedResult
-	if err := json.Unmarshal([]byte(out), &res); err != nil {
-		t.Fatalf("expected the declared shape: %v\n%s", err, out)
-	}
-	return res
+	return relationsSectionOf(t, callTool(t, c, "describe_table", relationArgs(args)))
 }
 
 func edgeFor(t *testing.T, edges []relatedEdge, table string) relatedEdge {
@@ -171,7 +192,7 @@ func TestFindRelatedCompositeAndQuotedNames(t *testing.T) {
 // The one question this tool exists to answer.
 func TestFindRelatedSaysWhatADeleteDoes(t *testing.T) {
 	c := serveOffline(t, NewOfflineServerAnnotated(&schema.AnnotatedSchema{Schema: relatedSnap()}, lint.DefaultConfig()))
-	out := callTool(t, c, "find_related", map[string]any{"table": "users"})
+	out := callTool(t, c, "describe_table", map[string]any{"table": "users", "detail": "relations"})
 
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
@@ -197,12 +218,13 @@ func TestFindRelatedSaysWhatADeleteDoes(t *testing.T) {
 	}
 	call, _ := next[0].(map[string]any)
 	args, _ := call["args"].(map[string]any)
-	if call["tool"] != "find_related" || args["table"] != "Memberships" || args["schema"] != "app" {
+	if call["tool"] != "describe_table" || args["table"] != "Memberships" ||
+		args["schema"] != "app" || args["detail"] != "relations" {
 		t.Errorf("follow-up should chase a cascade target, got %v", call)
 	}
 
 	// the follow-up is advertised as pre-validated, so it has to resolve
-	chased := callTool(t, c, "find_related", args)
+	chased := callTool(t, c, "describe_table", args)
 	if !strings.Contains(chased, `"table": "app.\"Memberships\""`) {
 		t.Errorf("the follow-up call does not resolve:\n%.400s", chased)
 	}
@@ -210,7 +232,7 @@ func TestFindRelatedSaysWhatADeleteDoes(t *testing.T) {
 
 func TestFindRelatedQuietWithoutForeignKeys(t *testing.T) {
 	c := serveOffline(t, NewOfflineServerAnnotated(&schema.AnnotatedSchema{Schema: relatedSnap()}, lint.DefaultConfig()))
-	out := callTool(t, c, "find_related", map[string]any{"table": "loners"})
+	out := callTool(t, c, "describe_table", map[string]any{"table": "loners", "detail": "relations"})
 	if !strings.Contains(out, "Relations enforced in application code do not appear") {
 		t.Errorf("expected the no-FK note:\n%s", out)
 	}
@@ -267,11 +289,7 @@ func TestFindRelatedLimitZeroReturnsEverything(t *testing.T) {
 func relatedFor(t *testing.T, snap *schema.SchemaSnapshot, args map[string]any) findRelatedResult {
 	t.Helper()
 	c := serveOffline(t, NewOfflineServerAnnotated(&schema.AnnotatedSchema{Schema: snap}, lint.DefaultConfig()))
-	var res findRelatedResult
-	if err := json.Unmarshal([]byte(callTool(t, c, "find_related", args)), &res); err != nil {
-		t.Fatalf("expected the declared shape: %v", err)
-	}
-	return res
+	return relationsSectionOf(t, callTool(t, c, "describe_table", relationArgs(args)))
 }
 
 // A table that references itself is one relation, and Postgres will not accept
@@ -498,5 +516,28 @@ func TestFindRelatedKeepsAPartitionWithItsOwnAction(t *testing.T) {
 	}
 	if !strings.Contains(res.Meta.Hint, "deletes matching rows in public.events") {
 		t.Errorf("the cascading partition should still reach the hint: %s", res.Meta.Hint)
+	}
+}
+
+// Table is the quoted SQL identity, for pasting into a query. A consumer that
+// wants to join these edges to anything else -- a cascade cost annotator, say --
+// needs the catalog identity, and un-quoting Table gets mixed-case and dotted
+// names wrong. Both must ride the wire.
+func TestRelatedEdgeCarriesCatalogIdentityBesideTheQuotedOne(t *testing.T) {
+	res := related(t, map[string]any{"table": "users", "limit": 0})
+
+	e := edgeFor(t, res.Incoming, `app."Memberships"`)
+	if e.TableSchema != "app" || e.TableName != "Memberships" {
+		t.Errorf("want the unquoted catalog identity, got schema=%q name=%q", e.TableSchema, e.TableName)
+	}
+	if e.Table != `app."Memberships"` {
+		t.Errorf("the quoted identity must stay as it was: %q", e.Table)
+	}
+	// and it must be the identity a follow-up call actually resolves
+	chased := relatedFor(t, relatedSnap(), map[string]any{
+		"schema": e.TableSchema, "table": e.TableName,
+	})
+	if chased.Table != `app."Memberships"` {
+		t.Errorf("catalog identity does not resolve: %q", chased.Table)
 	}
 }
