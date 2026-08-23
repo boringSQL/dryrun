@@ -30,11 +30,12 @@ Once you have the snapshot, the CLI works offline:
 - **Migration safety** - lock type analysis, duration estimates, table rewrite detection, safe alternatives for each DDL statement
 - **Query validation** - SQL parsing via libpg_query, column reference checks against the actual schema, anti-pattern detection
 - **Snapshot diff** - compare schema, planner stats, or activity between snapshots; detect drift against the live database
+- **[Query stats](docs/query-stats.md)** - captures `pg_stat_statements` per node, collapses ORM query variants into shapes, diffs two captures to surface new or slowed queries
 - **[Multi-node stats](docs/multi-node-stats.md)** - per-replica statistics, seq_scan hotspots, routing imbalances
 
 ### MCP server - give your AI assistant a schema brain
 
-The MCP server reads the same snapshot. It exposes 14 tools over stdio or SSE: schema exploration, query validation, migration checks, linting, vacuum health. Your AI assistant understands your database while it writes SQL.
+The MCP server reads the same snapshot. It exposes 17 tools over stdio or SSE: schema exploration, query validation, plan analysis, migration checks, linting, vacuum health, and captured `pg_stat_statements` top queries. Your AI assistant understands your database while it writes SQL.
 
 No database connection needed. The assistant never sees credentials.
 
@@ -120,6 +121,71 @@ dryrun lint
 ```
 
 No database needed. Works entirely from the offline snapshot.
+
+The same demo works over MCP. From `examples/demo`, register the server with your assistant:
+
+```sh
+claude mcp add dryrun -- npx -y @boringsql/dryrun mcp-serve
+```
+
+Then ask, from that directory: "what tables do I have, and what's wrong with them?"
+
+## MCP server
+
+One command wires the server into your AI agent. `setup` detects Claude Code, Cursor, Codex, and Zed, writes the agent's MCP config, and adds a directive to `AGENTS.md`/`CLAUDE.md` so the agent checks the schema before writing SQL:
+
+```sh
+dryrun setup
+```
+
+To pick the agents yourself, or from a non-interactive shell, pass `--agents`:
+
+```sh
+dryrun setup --agents=claude,cursor   # or: all
+```
+
+To register the server manually:
+
+```sh
+# for claude code
+claude mcp add dryrun -- dryrun mcp-serve
+
+# for codex
+codex mcp add dryrun -- dryrun mcp-serve
+```
+
+If you built from source, use the full path to the binary:
+
+```sh
+claude mcp add dryrun -- /path/to/dryrun mcp-serve
+```
+
+Or, with no install at all, point the client at `npx`:
+
+```sh
+claude mcp add dryrun -- npx -y @boringsql/dryrun mcp-serve
+```
+
+The raw client config for this form is:
+
+```json
+{
+  "mcpServers": {
+    "dryrun": {
+      "command": "npx",
+      "args": ["-y", "@boringsql/dryrun", "mcp-serve"]
+    }
+  }
+}
+```
+
+The server reads the newest snapshot from `.dryrun/history.db` in the current project. No database credentials needed; the assistant gets full schema intelligence from the offline snapshot.
+
+Without a snapshot the server still starts, and its tools answer that no schema is loaded. Capture one with `dryrun init --db "$DATABASE_URL"` or pull one a teammate pushed (`dryrun snapshot pull --from-path ./snapshots`, see [Quickstart](#quickstart)), then call the `reload_schema` tool from the assistant. The new schema is picked up without restarting the server.
+
+For projects with multiple databases, run one `dryrun mcp-serve` per database and add an entry per server in your client config. Native multi-database serving inside one MCP process is tracked in [#7](https://github.com/boringSQL/dryrun/issues/7).
+
+See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Claude Desktop configuration.
 
 ## Quickstart
 
@@ -225,7 +291,7 @@ To publish the snapshots you need
 ```sh
 cd project_name
 
-# apture from the live DB (use cwd name for project name)
+# capture from the live DB (use cwd name for project name)
 dryrun init --db "$DATABASE_URL"
 dryrun snapshot take --db "$DATABASE_URL"
 dryrun snapshot push --to-path ./snapshots --all
@@ -239,7 +305,7 @@ dryrun snapshot pull --from-path ./shared/snapshots --all
 
 Snapshots are content-addressed (`{project}/{database}/{ts}-{hash}.json.zst`) and idempotent: pushing the same snapshot twice won't change it.
 
-The simplest deployment is a dedicated git repo. Create the snapshots repo and add `*.json.zst binary` to `.gitattributes` so git stops trying to diff bundles.`
+The simplest deployment is a dedicated git repo. Create the snapshots repo and add `*.json.zst binary` to `.gitattributes` so git stops trying to diff bundles.
 
 Offline tools (`lint`, `check_migration`, `drift`) work immediately after the pull.
 
@@ -274,53 +340,11 @@ dryrun snapshot pull --remote ghcr
 
 See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for per-profile remotes and sharing one stream across projects.
 
-## MCP server
-
-Add `dryrun` to your AI assistant. If you installed via Homebrew, `dryrun` is already on your PATH:
-
-```sh
-# for claude code
-claude mcp add dryrun -- dryrun mcp-serve
-
-# for codex
-codex mcp add dryrun -- dryrun mcp-serve
-```
-
-If you built from source, use the full path to the binary:
-
-```sh
-claude mcp add dryrun -- /path/to/dryrun mcp-serve
-```
-
-Or, with no install at all, point the client at `npx`:
-
-```sh
-claude mcp add dryrun -- npx -y @boringsql/dryrun mcp-serve
-```
-
-The raw client config for this form is:
-
-```json
-{
-  "mcpServers": {
-    "dryrun": {
-      "command": "npx",
-      "args": ["-y", "@boringsql/dryrun", "mcp-serve"]
-    }
-  }
-}
-```
-
-That's it. The server reads the newest snapshot from `.dryrun/history.db` in the current project. No database credentials needed, your AI assistant gets full schema intelligence from the offline snapshot.
-
-For projects with multiple databases, run one `dryrun mcp-serve` per database and add an entry per server in your client config. Native multi-database serving inside one MCP process is tracked in [#4](https://github.com/boringSQL/dryrun/issues/4).
-
-See the [Tutorial](TUTORIAL.md) for live database setup, SSE transport, and Claude Desktop configuration.
-
 ## More
 
 - **[Tutorial](TUTORIAL.md)** for offline, online, and multi-node workflows with full tool reference
 - **[Multi-node statistics](docs/multi-node-stats.md)** for cluster-wide stats collection, aggregation rules, and replica imbalance detection
+- **[Query stats](docs/query-stats.md)** for `pg_stat_statements` capture, shape grouping, and diffing
 - **[Configuration reference](docs/dryrun-toml.md)** for `dryrun.toml` profiles, conventions, remotes, and lint rules
 - **[CLI stability](docs/cli-stability.md)** for which commands are stable versus experimental
 - **[Security overview](SECURITY.md)** for the CLI/MCP split and masking

@@ -21,7 +21,7 @@
       "packageArguments": [
         {
           "type": "positional",
-          "value": "mcp"
+          "value": "mcp-serve"
         }
       ]
     }
