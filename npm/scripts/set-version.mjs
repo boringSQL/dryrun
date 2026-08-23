@@ -1,5 +1,6 @@
-// Stamp one version across the main package, its platform packages, and the
-// optionalDependencies pins (which must match exactly). Run in CI from the tag:
+// Stamp one version across the main package, its platform packages, the
+// optionalDependencies pins (which must match exactly), and server.json, whose
+// package version the MCP registry resolves on npm. Run in CI from the tag:
 //   node npm/scripts/set-version.mjs 0.8.2
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -33,4 +34,11 @@ patch(join(root, "dryrun", "package.json"), (pkg) => {
   }
 });
 
-console.log(`set npm packages to ${version}`);
+patch(join(root, "..", "server.json"), (srv) => {
+  srv.version = version;
+  for (const pkg of srv.packages ?? []) {
+    pkg.version = version;
+  }
+});
+
+console.log(`set npm packages and server.json to ${version}`);

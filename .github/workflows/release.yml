@@ -126,3 +126,35 @@ jobs:
         run: npm publish --access public ./npm/dryrun
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Metadata only: the registry resolves @boringsql/dryrun on npm and checks its
+  # mcpName against server.json's name, so npm-publish must land first.
+  mcp-registry:
+    needs: npm-publish
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC; no stored registry credential
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Stamp version into server.json
+        run: node npm/scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+      - name: Validate server.json
+        run: ./mcp-publisher validate
+      - name: Authenticate to MCP registry
+        run: ./mcp-publisher login github-oidc
+      - name: Publish to MCP registry
+        # npm needs a moment to serve the version the registry is about to fetch
+        run: |
+          for attempt in 1 2 3; do
+            ./mcp-publisher publish && exit 0
+            echo "publish attempt $attempt failed; retrying in 30s"
+            sleep 30
+          done
+          exit 1
