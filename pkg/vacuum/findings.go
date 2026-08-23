@@ -17,7 +17,7 @@ func toLintSeverity(s Severity) lint.Severity {
 	}
 }
 
-// check ids for policy gating; no high_bloat, tables/bloated owns that
+// check ids for policy gating; every code maps, unmapped codes are dropped
 var codeRule = map[VacuumCode]string{
 	CodeAutovacuumDisabled:     "vacuum/autovacuum_disabled",
 	CodeDefaultKnobsLargeTable: "vacuum/large_table_defaults",

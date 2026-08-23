@@ -67,21 +67,21 @@ func TestToFindings_CodeToRuleID(t *testing.T) {
 	}
 }
 
-// high_bloat is deliberately not adapted: tables/bloated already owns bloat in
-// the lint pipeline, so surfacing it from vacuum too would double-report the
-// same table. The vacuum_health MCP tool still shows it; the lint path doesn't.
-func TestToFindings_DropsHighBloat(t *testing.T) {
+// A code with no entry in codeRule is dropped rather than adapted with an empty
+// rule. high_bloat used to be the standing example -- detect kind=bloated_tables
+// owns table bloat, and it was deleted outright rather than left un-gated here.
+func TestToFindings_DropsUnmappedCode(t *testing.T) {
 	health := []VacuumHealth{{
 		Schema: "public", Table: "orders",
 		Findings: []VacuumFinding{
-			{Code: CodeHighBloat, Severity: SeverityHigh, Message: "bloated"},
+			{Code: VacuumCode("not_a_real_code"), Severity: SeverityHigh, Message: "x"},
 			{Code: CodeAutovacuumDisabled, Severity: SeverityHigh, Message: "off"},
 		},
 	}}
 
 	findings := ToFindings(health)
 	if len(findings) != 1 {
-		t.Fatalf("expected high_bloat dropped, got %d findings: %+v", len(findings), findings)
+		t.Fatalf("expected the unmapped code dropped, got %d findings: %+v", len(findings), findings)
 	}
 	if findings[0].Rule != "vacuum/autovacuum_disabled" {
 		t.Errorf("expected only the autovacuum_disabled finding, got %q", findings[0].Rule)

@@ -28,7 +28,6 @@ const (
 	CodeAutovacuumDisabled     VacuumCode = "autovacuum_disabled"
 	CodeDefaultKnobsLargeTable VacuumCode = "default_knobs_large_table"
 	CodeHighDeadTupleRatio     VacuumCode = "high_dead_tuple_ratio"
-	CodeHighBloat              VacuumCode = "high_bloat"
 	CodeVacuumThresholdHigh    VacuumCode = "vacuum_threshold_too_high"
 	CodeFreezeAgeHigh          VacuumCode = "freeze_age_high"
 	CodeMxidAgeHigh            VacuumCode = "mxid_age_high"
@@ -58,8 +57,9 @@ type (
 		Action string `json:"action,omitempty"`
 	}
 
-	// Wire shape (incl. nested types) pinned by the vacuum_health MCP output
-	// schema (generated, additionalProperties:false); non-omitempty = required.
+	// Wire shape (incl. nested types) served as detect kind=vacuum_health under a
+	// permissive schema -- nothing generated pins it any more, so a field rename
+	// here is a silent client break.
 	VacuumHealth struct {
 		Schema                    string                  `json:"schema"`
 		Table                     string                  `json:"table"`
@@ -422,17 +422,6 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 				fmt.Sprintf("vacuum won't trigger until %dk dead tuples. Threshold is very high",
 					int64(triggerAt)/1000))
 		}
-		if bloat != nil && bloat.BloatRatio >= 4.0 {
-			sev := SeverityMedium
-			if bloat.BloatRatio >= 10.0 {
-				sev = SeverityHigh
-			}
-			vh.add(CodeHighBloat, sev,
-				fmt.Sprintf("table is %.1fx bloated: %d actual pages vs %d expected; "+
-					"autovacuum cannot reclaim this — consider VACUUM FULL or pg_repack",
-					bloat.BloatRatio, bloat.ActualPages, bloat.ExpectedPages))
-		}
-
 		results = append(results, vh)
 	}
 
