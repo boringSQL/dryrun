@@ -190,6 +190,45 @@ Both profiles resolve to one repository, so the schema is stored once. Two rules
 - One owner takes and pushes; everyone else pulls. If both projects take snapshots on a schedule, the schema blob deduplicates but the differing timestamps and activity rows do not, leaving two near-duplicate observations per interval. Designate one CI job as the owner.
 - Retention and access live on the shared repository. Cleanup policies and IAM are per repository: grant the owner write and consumers read on `shared/auth`.
 
+## Nodes
+
+Fleet members for `snapshot capture`:
+
+```toml
+[[node]]
+name     = "primary"
+role     = "primary"
+url      = "service=dryrun-primary"
+streams  = ["planner", "activity", "query"]
+interval = "1h"
+
+[[node]]
+name     = "read-pool"
+url      = "service=dryrun-read-pool"
+streams  = ["query"]
+interval = "15m"
+pool     = true
+```
+
+- `name` — the label the node's rows are stored under.
+- `role` is checked at capture time. The default `auto` accepts whatever it finds.
+- `url = "service=name"` is the preferred way to connect: it names an entry in a libpq service file (`~/.pg_service.conf`, or the file `PGSERVICEFILE` points to), with the password in `~/.pgpass`. Both live on the capture host only, so `dryrun.toml` carries no credentials and no per-environment variable names. Use the keyword DSN form — the `postgres://` URL form cannot express a service. Anything else in the string overrides the service entry (`url = "service=x dbname=other"`).
+- `url_env` names an environment variable, and `url` may hold a `${VAR}` reference — also committable, for environments where a service file is impractical. Set exactly one of `url` / `url_env` per node.
+- Without `streams`, the detected role decides. A standby has no schema of its own and its planner stats mirror the primary's, so it captures `activity` and `query`.
+- `interval` — the cadence enforced by `snapshot capture --all --due`.
+- `pool = true` marks a label that names a read pool rather than one machine, which suppresses the identity-drift warning. Don't set it on a single machine; that warning is how you find out two servers answer on one label.
+
+See [multi-node-stats.md](multi-node-stats.md) for the capture semantics.
+
+## Query stats
+
+```toml
+[query_stats]
+row_cap = 1000
+```
+
+`row_cap` limits how many `pg_stat_statements` rows one capture stores (default 500), and `--query-stats-limit` overrides it per run. [query-stats.md](query-stats.md) explains what the cap means at diff time.
+
 ## Conventions
 
 These control what `dryrun lint` checks. Skip the whole section to use the defaults.
