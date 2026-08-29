@@ -15,6 +15,10 @@ func getArg(req mcp.CallToolRequest, key string) string {
 	return s
 }
 
+// Non-positive values fall back rather than passing through, which is what
+// keeps a negative offset out of the page slices in the paged handlers
+// (entries[-1:total] panics). It also means zero cannot be asked for: limit=0,
+// which does mean something, goes through limitArgOr instead.
 func getFloatArg(req mcp.CallToolRequest, key string, fallback float64) float64 {
 	args := req.GetArguments()
 	if args == nil {
