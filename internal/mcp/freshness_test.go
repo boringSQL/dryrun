@@ -2,13 +2,15 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/boringsql/dryrun/internal/history"
@@ -108,7 +110,19 @@ func TestDriftBaselineFallsBackToTheLoadedSchema(t *testing.T) {
 	}
 }
 
-func TestNewerSnapshotAt(t *testing.T) {
+func servedTable(t *testing.T, srv *Server) string {
+	t.Helper()
+	snap, err := srv.getSchema()
+	if err != nil {
+		t.Fatalf("getSchema: %v", err)
+	}
+	if len(snap.Tables) == 0 {
+		t.Fatal("served snapshot has no tables")
+	}
+	return snap.Tables[0].Name
+}
+
+func TestAdoptNewerSnapshot(t *testing.T) {
 	older := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
 	newer := time.Now().Add(-1 * time.Hour).UTC().Truncate(time.Second)
 
@@ -116,8 +130,8 @@ func TestNewerSnapshotAt(t *testing.T) {
 		hist := historyStore(t)
 		put(t, hist, datedSnap(t, newer, "new"))
 		srv := serverWithHistory(t, datedSnap(t, older, "old"), hist)
-		if got := srv.newerSnapshotAt(); got != newer.Format(time.RFC3339) {
-			t.Errorf("got %q, want %s", got, newer.Format(time.RFC3339))
+		if got := servedTable(t, srv); got != "new" {
+			t.Errorf("still serving %q", got)
 		}
 	})
 
@@ -125,89 +139,87 @@ func TestNewerSnapshotAt(t *testing.T) {
 		hist := historyStore(t)
 		put(t, hist, datedSnap(t, older, "old"))
 		srv := serverWithHistory(t, datedSnap(t, newer, "new"), hist)
-		if got := srv.newerSnapshotAt(); got != "" {
-			t.Errorf("reported a newer snapshot that is older: %q", got)
-		}
-	})
-
-	t.Run("same snapshot", func(t *testing.T) {
-		hist := historyStore(t)
-		snap := datedSnap(t, newer, "same")
-		put(t, hist, snap)
-		srv := serverWithHistory(t, snap, hist)
-		if got := srv.newerSnapshotAt(); got != "" {
-			t.Errorf("reported the served snapshot as newer than itself: %q", got)
+		if got := servedTable(t, srv); got != "new" {
+			t.Errorf("adopted an older snapshot: %q", got)
 		}
 	})
 
 	t.Run("no history", func(t *testing.T) {
 		srv := NewOfflineServerAnnotated(&schema.AnnotatedSchema{Schema: datedSnap(t, older, "x")}, lint.DefaultConfig())
-		if got := srv.newerSnapshotAt(); got != "" {
+		if got := servedTable(t, srv); got != "x" {
 			t.Errorf("got %q with no history", got)
+		}
+	})
+
+	t.Run("nothing loaded yet", func(t *testing.T) {
+		hist := historyStore(t)
+		put(t, hist, datedSnap(t, newer, "new"))
+		srv := serverWithHistory(t, nil, hist)
+		srv.SetUninitialized()
+		if got := servedTable(t, srv); got != "new" {
+			t.Errorf("a server started before `dryrun init` never picked the snapshot up: %q", got)
 		}
 	})
 }
 
-// reload_schema swaps the served snapshot, and the answer has to change with
-// it rather than waiting out the cache.
-func TestNewerSnapshotClearsWhenTheServedSnapshotChanges(t *testing.T) {
-	older := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
-	newer := time.Now().Add(-1 * time.Hour).UTC().Truncate(time.Second)
-
+// Within freshnessTTL the served snapshot is pinned, so one call cannot answer from two.
+func TestAdoptFollowsSuccessiveSnapshots(t *testing.T) {
+	t0 := time.Now().Add(-3 * time.Hour).UTC().Truncate(time.Second)
 	hist := historyStore(t)
-	latest := datedSnap(t, newer, "new")
-	put(t, hist, latest)
+	put(t, hist, datedSnap(t, t0.Add(time.Hour), "second"))
 
-	srv := serverWithHistory(t, datedSnap(t, older, "old"), hist)
-	if srv.newerSnapshotAt() == "" {
-		t.Fatal("expected a newer snapshot before the reload")
+	srv := serverWithHistory(t, datedSnap(t, t0, "first"), hist)
+	if got := servedTable(t, srv); got != "second" {
+		t.Fatalf("first adoption failed: %q", got)
 	}
 
-	srv.mu.Lock()
-	srv.annotated = &schema.AnnotatedSchema{Schema: latest}
-	srv.mu.Unlock()
+	put(t, hist, datedSnap(t, t0.Add(2*time.Hour), "third"))
+	if got := servedTable(t, srv); got != "second" {
+		t.Errorf("snapshot changed inside the throttle window: %q", got)
+	}
 
-	if got := srv.newerSnapshotAt(); got != "" {
-		t.Errorf("still reporting %q after the newer snapshot was loaded", got)
+	srv.freshness.mu.Lock()
+	srv.freshness.checkedAt = time.Now().Add(-2 * freshnessTTL)
+	srv.freshness.mu.Unlock()
+	if got := servedTable(t, srv); got != "third" {
+		t.Errorf("second snapshot never picked up: %q", got)
 	}
 }
 
-// Both meta paths: newMeta for tools with generated output schemas, injectMeta
-// for the map-based ones.
-func TestNewerSnapshotReachesBothMetaPaths(t *testing.T) {
+// _meta must date the snapshot being served, not the one loaded at startup.
+func TestAdoptedSnapshotDatesTheMeta(t *testing.T) {
 	older := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
 	newer := time.Now().Add(-1 * time.Hour).UTC().Truncate(time.Second)
-	want := newer.Format(time.RFC3339)
 
 	hist := historyStore(t)
 	put(t, hist, datedSnap(t, newer, "new"))
 	srv := serverWithHistory(t, datedSnap(t, older, "old"), hist)
 
-	if got := srv.newMeta("", nil); got.NewerSnapshotAt != want {
-		t.Errorf("typed meta: got %q, want %q", got.NewerSnapshotAt, want)
+	if got := srv.newMeta("", nil).SchemaCapturedAt; got != newer.Format(time.RFC3339) {
+		t.Errorf("typed meta: got %q, want %q", got, newer.Format(time.RFC3339))
 	}
 
 	wrapper := map[string]any{}
 	srv.injectMeta(wrapper, "", nil)
 	meta, _ := wrapper["_meta"].(map[string]any)
-	if meta["newer_snapshot_at"] != want {
-		t.Errorf("map meta: got %v, want %q", meta["newer_snapshot_at"], want)
+	if meta["schema_captured_at"] != newer.Format(time.RFC3339) {
+		t.Errorf("map meta: got %v", meta["schema_captured_at"])
 	}
-
-	// and it must be absent, not empty, when there is nothing newer
-	quiet := serverWithHistory(t, datedSnap(t, newer, "new"), hist)
-	out, err := json.Marshal(quiet.newMeta("", nil))
+	if _, ok := meta["newer_snapshot_at"]; ok {
+		t.Error("the served snapshot cannot be behind history, so the field must be gone")
+	}
+	out, err := json.Marshal(srv.newMeta("", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(out), "newer_snapshot_at") {
-		t.Errorf("empty field serialized: %s", out)
+		t.Errorf("stale field serialized: %s", out)
 	}
 }
 
 // PutSchema only dedups against the newest row, so A -> B -> A stores a twin of
-// A. Reloading into a snapshot you already serve is wasted work.
-func TestNewerSnapshotIgnoresAContentTwin(t *testing.T) {
+// A. Reloading into a snapshot already served is wasted work.
+func TestAdoptIgnoresAContentTwin(t *testing.T) {
 	t0 := time.Now().Add(-3 * time.Hour).UTC().Truncate(time.Second)
 	hist := historyStore(t)
 
@@ -219,78 +231,156 @@ func TestNewerSnapshotIgnoresAContentTwin(t *testing.T) {
 	put(t, hist, twin)
 
 	srv := serverWithHistory(t, served, hist)
-	if got := srv.newerSnapshotAt(); got != "" {
-		t.Errorf("sent the agent to reload the snapshot it already has: %q", got)
+	if got := servedTable(t, srv); got != "a" {
+		t.Errorf("reloaded the snapshot it already had: %q", got)
 	}
 }
 
-// The stored timestamp is second-granularity RFC3339, and imported snapshots
-// need not be UTC.
-func TestNewerSnapshotToleratesOddTimestamps(t *testing.T) {
+// The common take stores no new schema row; planner and activity land under the same ref hash.
+func TestAdoptPicksUpStatsUnderAnUnchangedSchema(t *testing.T) {
+	t0 := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
+	hist := historyStore(t)
+
+	snap := datedSnap(t, t0, "t")
+	put(t, hist, snap)
+
+	srv := serverWithHistory(t, snap, hist)
+	if got := srv.newMeta("", nil).PlannerCapturedAt; got != "" {
+		t.Fatalf("planner stats before any capture: %q", got)
+	}
+
+	plannerAt := t0.Add(time.Hour)
+	if _, err := hist.PutPlanner(context.Background(), testKey, &schema.PlannerStatsSnapshot{
+		SchemaRefHash: snap.ContentHash,
+		ContentHash:   "planner-1",
+		Database:      snap.Database,
+		Timestamp:     plannerAt,
+	}); err != nil {
+		t.Fatalf("PutPlanner: %v", err)
+	}
+
+	srv.freshness.mu.Lock()
+	srv.freshness.checkedAt = time.Now().Add(-2 * freshnessTTL)
+	srv.freshness.mu.Unlock()
+
+	if got := srv.newMeta("", nil).PlannerCapturedAt; got != plannerAt.Format(time.RFC3339) {
+		t.Errorf("planner capture not picked up: %q", got)
+	}
+}
+
+// "newest" is decided on the instant, not the string: stored timestamps need not be UTC.
+func TestAdoptToleratesOddTimestamps(t *testing.T) {
 	zone := time.FixedZone("CEST", 2*60*60)
-	older := time.Now().Add(-2 * time.Hour).In(zone)
-	newer := older.Add(90 * time.Minute)
+	older := time.Now().Add(-3 * time.Hour).UTC().Truncate(time.Second)
+	newer := older.Add(90 * time.Minute).In(zone)
 
 	hist := historyStore(t)
 	put(t, hist, datedSnap(t, newer, "new"))
+	// later text (+02:00 sorts after Z), earlier instant
+	put(t, hist, datedSnap(t, older.Add(time.Hour).UTC(), "middle"))
+
 	srv := serverWithHistory(t, datedSnap(t, older, "old"), hist)
-
-	if got := srv.newerSnapshotAt(); got != newer.UTC().Truncate(time.Second).Format(time.RFC3339) {
-		t.Errorf("got %q, want the newer snapshot in UTC", got)
+	if got := servedTable(t, srv); got != "new" {
+		t.Errorf("got %q, want the newest instant", got)
 	}
 }
 
-// A read failure must not read as "nothing stored": the fallback in live mode
-// is the very schema the drift is measured against.
-func TestDriftBaselineRefusesOnAReadError(t *testing.T) {
+// With --db the served schema is stamped now; fresher stats are no reason to serve older DDL.
+func TestAdoptNeverGoesBackwards(t *testing.T) {
+	stored := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Second)
 	hist := historyStore(t)
-	put(t, hist, datedSnap(t, time.Now().UTC(), "stored"))
-	if err := hist.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	old := datedSnap(t, stored, "from_history")
+	put(t, hist, old)
+	if _, err := hist.PutPlanner(context.Background(), testKey, &schema.PlannerStatsSnapshot{
+		SchemaRefHash: old.ContentHash,
+		ContentHash:   "planner-1",
+		Database:      old.Database,
+		Timestamp:     stored,
+	}); err != nil {
+		t.Fatalf("PutPlanner: %v", err)
 	}
 
-	srv := serverWithHistory(t, datedSnap(t, time.Now().UTC(), "loaded"), hist)
-	got, baseline, err := srv.driftBaseline(context.Background())
-	if err == nil {
-		t.Fatalf("a broken history read fell back to %q (%v)", baseline, got)
-	}
-	if !strings.Contains(err.Error(), "stored snapshot") {
-		t.Errorf("error should name what failed: %v", err)
+	srv := serverWithHistory(t, datedSnap(t, time.Now().UTC(), "from_startup_introspection"), hist)
+	if got := servedTable(t, srv); got != "from_startup_introspection" {
+		t.Errorf("adopted an older schema for its stats: %q", got)
 	}
 }
 
-// A history.db this build cannot read is not a baseline.
-func TestDriftBaselineRefusesOnIncompatibleHistory(t *testing.T) {
-	srv := serverWithHistory(t, datedSnap(t, time.Now().UTC(), "loaded"), legacyHistoryStore(t))
-	_, _, err := srv.driftBaseline(context.Background())
-	if err == nil {
-		t.Fatal("a legacy history.db was accepted as a drift baseline")
+// A newer dryrun's history.db reads without error, so only the explicit gate stops it.
+func TestAdoptRefusesNewerHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	hist, err := history.Open(path)
+	if err != nil {
+		t.Fatalf("history.Open: %v", err)
 	}
-	// the compat problem is the thing to report, not whatever the read did
-	if !strings.Contains(err.Error(), "older dryrun") {
-		t.Errorf("error should name the compatibility problem: %v", err)
+	put(t, hist, datedSnap(t, time.Now().UTC(), "from_the_future"))
+	hist.Close()
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 9999"); err != nil {
+		t.Fatalf("bump user_version: %v", err)
+	}
+	raw.Close()
+
+	hist, err = history.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { hist.Close() })
+	if hist.Compat() != history.CompatNewer {
+		t.Fatalf("fixture is %v, not CompatNewer", hist.Compat())
+	}
+
+	srv := serverWithHistory(t, datedSnap(t, time.Now().Add(-time.Hour).UTC(), "old"), hist)
+	if got := servedTable(t, srv); got != "old" {
+		t.Errorf("served from a history.db this build cannot read: %q", got)
 	}
 }
 
-// The snapshot key and the --db url resolve independently, so history can hold
-// another database entirely.
-func TestNewerSnapshotIsOfflineOnly(t *testing.T) {
+// Adoption swaps a pointer every handler reads. Run under -race.
+func TestAdoptUnderConcurrentReaders(t *testing.T) {
+	t0 := time.Now().Add(-4 * time.Hour).UTC().Truncate(time.Second)
+	hist := historyStore(t)
+	put(t, hist, datedSnap(t, t0.Add(time.Hour), "second"))
+	srv := serverWithHistory(t, datedSnap(t, t0, "first"), hist)
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for n := range 20 {
+				if i == 0 && n%5 == 0 {
+					put(t, hist, datedSnap(t, t0.Add(time.Duration(2+n)*time.Hour), fmt.Sprintf("s%d", n)))
+					srv.freshness.mu.Lock()
+					srv.freshness.checkedAt = time.Time{}
+					srv.freshness.mu.Unlock()
+				}
+				if _, err := srv.getSchema(); err != nil {
+					t.Errorf("getSchema: %v", err)
+					return
+				}
+				srv.newMeta("", nil)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+// The snapshot key and the --db url resolve independently, so history can hold another database.
+func TestAdoptRefusesAnotherDatabase(t *testing.T) {
 	older := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
 	hist := historyStore(t)
-	put(t, hist, datedSnap(t, time.Now().UTC(), "new"))
+	other := datedSnap(t, time.Now().UTC(), "new")
+	other.Database = "somewhere_else"
+	put(t, hist, other)
 
 	srv := serverWithHistory(t, datedSnap(t, older, "old"), hist)
-	if srv.newerSnapshotAt() == "" {
-		t.Fatal("expected the field offline")
-	}
-
-	// with a pool the served schema is a startup introspection stamped by the
-	// same clock every stored snapshot used, so the read is pure cost
-	srv.mu.Lock()
-	srv.pool = &pgxpool.Pool{}
-	srv.mu.Unlock()
-	if got := srv.newerSnapshotAt(); got != "" {
-		t.Errorf("read history in live mode: %q", got)
+	if got := servedTable(t, srv); got != "old" {
+		t.Errorf("adopted another database's snapshot: %q", got)
 	}
 }
 

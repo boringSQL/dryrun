@@ -58,14 +58,12 @@ type (
 		Mode      string `json:"mode"`
 		// DDL, planner stats and activity are captured by separate commands on
 		// separate schedules; one timestamp would misstate the other two
-		SchemaCapturedAt   string `json:"schema_captured_at,omitempty"`
-		PlannerCapturedAt  string `json:"planner_captured_at,omitempty"`
-		ActivityCapturedAt string `json:"activity_captured_at,omitempty"`
-		ActivityOldestNode string `json:"activity_oldest_node,omitempty"`
-		// history.db holds a newer snapshot than the one served; call reload_schema
-		NewerSnapshotAt string     `json:"newer_snapshot_at,omitempty"`
-		Hint            string     `json:"hint,omitempty"`
-		Next            []NextCall `json:"next,omitempty"`
+		SchemaCapturedAt   string     `json:"schema_captured_at,omitempty"`
+		PlannerCapturedAt  string     `json:"planner_captured_at,omitempty"`
+		ActivityCapturedAt string     `json:"activity_captured_at,omitempty"`
+		ActivityOldestNode string     `json:"activity_oldest_node,omitempty"`
+		Hint               string     `json:"hint,omitempty"`
+		Next               []NextCall `json:"next,omitempty"`
 	}
 )
 
@@ -79,7 +77,6 @@ func (s *Server) newMeta(hint string, next []NextCall) *toolMeta {
 		PlannerCapturedAt:  c.planner,
 		ActivityCapturedAt: c.activity,
 		ActivityOldestNode: c.activityNode,
-		NewerSnapshotAt:    s.newerSnapshotAt(),
 		Hint:               hint,
 		Next:               next,
 	}
@@ -93,9 +90,6 @@ func (s *Server) injectMeta(val map[string]any, hint string, next []NextCall) {
 	}
 	for k, v := range s.captureTimes().fields() {
 		meta[k] = v
-	}
-	if at := s.newerSnapshotAt(); at != "" {
-		meta["newer_snapshot_at"] = at
 	}
 	if hint != "" {
 		meta["hint"] = hint

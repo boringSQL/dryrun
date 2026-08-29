@@ -218,7 +218,6 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 		"check_migration": true,
 		"lint_schema":     true,
 		"detect":          true,
-		"reload_schema":   true,
 		"advise":          true,
 		"analyze_plan":    true,
 		"snapshot_diff":   true,

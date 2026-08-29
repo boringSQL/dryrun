@@ -42,7 +42,7 @@ var (
 )
 
 // Register wires the full set: schema-only subset, history tools (snapshot_diff,
-// reload_schema, list_top_queries), and live-only tools when a pool is set.
+// list_top_queries), and live-only tools when a pool is set.
 func (s *Server) Register(srv *mcpserver.MCPServer) {
 	s.registerSchemaTools(srv)
 	s.registerHistoryTools(srv)
@@ -55,7 +55,7 @@ func (s *Server) Register(srv *mcpserver.MCPServer) {
 
 // RegisterOffline wires only the schema-only subset (no history.db, no pool):
 // the surface a hosted endpoint serves per request. Omits snapshot_diff,
-// reload_schema, list_top_queries, and the live tools.
+// list_top_queries, and the live tools.
 func (s *Server) RegisterOffline(srv *mcpserver.MCPServer) {
 	s.registerSchemaTools(srv)
 }
@@ -207,8 +207,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 }
 
-// registerHistoryTools registers the snapshot-to-snapshot and reload tools that
-// read the local history.db.
+// registerHistoryTools registers the tools that read the local history.db.
 func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
 		mcp.NewTool("snapshot_diff",
@@ -234,13 +233,6 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 			annHistory,
 		),
 		s.handleSnapshotDiff,
-	)
-	srv.AddTool(
-		mcp.NewTool("reload_schema",
-			mcp.WithDescription("Call after `dryrun snapshot take`, or when a tool answers from a schema older than the one on disk: re-reads the newest snapshot from the local history into this server. It captures nothing and connects to nothing -- `dryrun snapshot take` is what produces a new snapshot."),
-			annHistory,
-		),
-		s.handleReloadSchema,
 	)
 	srv.AddTool(
 		mcp.NewTool("list_top_queries",
@@ -278,7 +270,7 @@ func (s *Server) registerLiveTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("check_drift",
-			mcp.WithDescription("When a migration may have run since the snapshot, or before acting on an offline answer that is expensive to get wrong: compares the live database against the newest snapshot in the local history and reports ahead, behind, or diverged with the objects that differ, naming the baseline it used. Requires a connection, so it is absent in offline mode. Read-only: it refreshes nothing (reload_schema, `dryrun snapshot take`) and changes nothing."),
+			mcp.WithDescription("When a migration may have run since the snapshot, or before acting on an offline answer that is expensive to get wrong: compares the live database against the newest snapshot in the local history and reports ahead, behind, or diverged with the objects that differ, naming the baseline it used. Requires a connection, so it is absent in offline mode. Read-only: it refreshes nothing (`dryrun snapshot take` does) and changes nothing."),
 			annLiveRead,
 		),
 		s.handleCheckDrift,

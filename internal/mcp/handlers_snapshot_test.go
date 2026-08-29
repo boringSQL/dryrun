@@ -8,35 +8,27 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
-
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/lint"
 )
 
-// Pins the fall-through behavior when history.db holds no schema for the key:
-// reload_schema reports the key it looked under, so an agent can tell an empty
-// history from a project/database mismatch.
-func TestReloadSchema_NoSchemaInHistory(t *testing.T) {
+// An empty history and a key mismatch fail identically, so the error names the key.
+func TestNoSchema_ReportsTheKey(t *testing.T) {
 	srv := &Server{lintConfig: lint.DefaultConfig(), snapshotKey: history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}}
 	srv.SetUninitialized()
-	res, err := srv.handleReloadSchema(context.Background(), mcp.CallToolRequest{})
-	if err != nil {
-		t.Fatal(err)
+	_, err := srv.getSchema()
+	if err == nil {
+		t.Fatal("expected an error with no schema loaded")
 	}
-	tc := res.Content[0].(mcp.TextContent)
-	if !strings.Contains(tc.Text, "no schema snapshot in history.db") {
-		t.Errorf("expected not-found message, got %s", tc.Text)
-	}
-	if !strings.Contains(tc.Text, "project=p") || !strings.Contains(tc.Text, "database=d") {
-		t.Errorf("expected the resolved key in the message, got %s", tc.Text)
+	if !strings.Contains(err.Error(), "project=p") || !strings.Contains(err.Error(), "database=d") {
+		t.Errorf("expected the resolved key in the message, got %s", err)
 	}
 }
 
 // history.db is the only schema source: a schema.json sitting next to it must
 // never be read, and the planner/activity streams must come along for the ride.
-func TestReloadSchema_HistoryOnlySchemaFileIgnored(t *testing.T) {
+func TestAutoReload_HistoryOnlySchemaFileIgnored(t *testing.T) {
 	dir := t.TempDir()
 	store, err := history.Open(filepath.Join(dir, "history.db"))
 	if err != nil {
@@ -72,15 +64,6 @@ func TestReloadSchema_HistoryOnlySchemaFileIgnored(t *testing.T) {
 
 	srv := &Server{lintConfig: lint.DefaultConfig(), history: store, snapshotKey: key}
 	srv.SetUninitialized()
-
-	res, err := srv.handleReloadSchema(context.Background(), mcp.CallToolRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tc := res.Content[0].(mcp.TextContent)
-	if !strings.Contains(tc.Text, "history.db") {
-		t.Errorf("expected history.db source in reload output, got: %s", tc.Text)
-	}
 
 	snap, err := srv.getSchema()
 	if err != nil {

@@ -12,30 +12,6 @@ import (
 	"github.com/boringsql/dryrun/pkg/diff"
 )
 
-func (s *Server) handleReloadSchema(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if a, ok := s.loadAnnotatedFromHistory(ctx); ok && a.Schema != nil {
-		s.mu.Lock()
-		s.annotated = a
-		s.uninitialized = false
-		s.mu.Unlock()
-		t, v, f := s.SchemaCounts()
-		// what was just loaded, and when it was taken, is the whole question here
-		return textResult(s.wrapText(
-			fmt.Sprintf("Schema loaded from history.db: %d tables, %d views, %d functions", t, v, f), "")), nil
-	}
-
-	s.mu.RLock()
-	key := s.snapshotKey
-	s.mu.RUnlock()
-
-	msg := fmt.Sprintf("no schema snapshot in history.db for project=%s database=%s", key.ProjectID, key.DatabaseID)
-	if note := s.historyNote(); note != nil {
-		msg += "\n\nNote: " + *note + "."
-	}
-	msg += "\n\nRun `dryrun init --db <DATABASE_URL>` or `dryrun snapshot take` first."
-	return errResult(msg), nil
-}
-
 // snapshot-to-snapshot only; MCP has no live DB
 func (s *Server) handleSnapshotDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	opt := snapdiff.Options{

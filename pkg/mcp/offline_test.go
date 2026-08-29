@@ -46,7 +46,7 @@ func TestBuildOfflineMCPServer_ListsSchemaSubset(t *testing.T) {
 
 	for _, tl := range list.Tools {
 		switch tl.Name {
-		case "snapshot_diff", "reload_schema", "explain_query", "check_drift", "columnar_report":
+		case "snapshot_diff", "explain_query", "check_drift", "columnar_report":
 			t.Errorf("hosted surface leaked %q", tl.Name)
 		}
 	}

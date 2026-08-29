@@ -71,7 +71,9 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("cannot create directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", path)
+	// the MCP server polls this file while the CLI writes it; the pragma rides
+	// the DSN so every pooled connection gets it, not just the first one
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("cannot open history db: %w", err)
 	}
@@ -505,7 +507,7 @@ func (s *Store) ListSchema(ctx context.Context, key SnapshotKey, rng TimeRange) 
 	return out, rows.Err()
 }
 
-// LatestSchema is on the MCP freshness path, so it reads one row instead of scanning the history.
+// Reads one row instead of scanning the history.
 func (s *Store) LatestSchema(ctx context.Context, key SnapshotKey) (*SnapshotSummary, error) {
 	var (
 		out SnapshotSummary

@@ -18,8 +18,8 @@ import (
 )
 
 // The hosted endpoint serves RegisterOffline. This locks its surface: exactly
-// the schema-only tools, and never the history-bound (snapshot_diff,
-// reload_schema) or live-only (explain_query, check_drift, columnar_report)
+// the schema-only tools, and never the history-bound (snapshot_diff) or
+// live-only (explain_query, check_drift, columnar_report)
 // tools, which would emit "run dryrun ..." nonsense or need a pool the hosted
 // caller does not have. A new tool added to registerSchemaTools must be added
 // here deliberately.
@@ -54,7 +54,7 @@ func TestRegisterOffline_ExactSubset(t *testing.T) {
 	}
 
 	forbidden := map[string]bool{
-		"snapshot_diff": true, "reload_schema": true,
+		"snapshot_diff": true,
 		"explain_query": true, "check_drift": true, "columnar_report": true,
 	}
 	for _, name := range got {

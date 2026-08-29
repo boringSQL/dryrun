@@ -271,7 +271,6 @@ Connect your MCP client to `http://host:3000/sse`.
 | `analyze_plan` | No | Analyze a pre-existing EXPLAIN JSON plan |
 | `advise` | Hybrid | Query review: validation + index suggestions offline, plus plan review with a DB |
 | `list_top_queries` | No | Captured pg_stat_statements shapes, ranked, per node |
-| `reload_schema` | No | Re-read the newest snapshot from history.db |
 | `explain_query` | **Yes** | EXPLAIN with structured plan and warnings |
 | `check_drift` | **Yes** | Compare live database schema against saved snapshot |
 | `columnar_report` | **Yes** | AlloyDB only: columnar-engine state and findings |
@@ -291,7 +290,7 @@ GRANT pg_monitor TO your_readonly_user;
 
 **EXPLAIN ANALYZE times out** - The query actually runs (rolled back). Use `analyze=false` (default) for cost estimates only.
 
-**Schema is stale** - Ask Claude to "refresh the schema", or re-run `dryrun snapshot take` (or `snapshot pull`) and call `reload_schema`.
+**Schema is stale** - Re-run `dryrun snapshot take` (or `snapshot pull`). The server picks the new snapshot up on the next tool call.
 
 **MCP connection issues** - Server logs to stderr, MCP protocol to stdout. For SSE mode, test with `curl http://host:port/sse`.
 

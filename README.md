@@ -35,7 +35,7 @@ Once you have the snapshot, the CLI works offline:
 
 ### MCP server - give your AI assistant a schema brain
 
-The MCP server reads the same snapshot. It exposes 12 tools over stdio or SSE: schema exploration, query validation, plan analysis, migration checks, linting, vacuum health, and captured `pg_stat_statements` top queries. Three more (`explain_query`, `check_drift`, `columnar_report`) join when a live database is connected. Your AI assistant understands your database while it writes SQL.
+The MCP server reads the same snapshot. It exposes 11 tools over stdio or SSE: schema exploration, query validation, plan analysis, migration checks, linting, vacuum health, and captured `pg_stat_statements` top queries. Three more (`explain_query`, `check_drift`, `columnar_report`) join when a live database is connected. Your AI assistant understands your database while it writes SQL.
 
 No database connection needed. The assistant never sees credentials.
 
@@ -181,7 +181,7 @@ The raw client config for this form is:
 
 The server reads the newest snapshot from `.dryrun/history.db` in the current project. No database credentials needed; the assistant gets full schema intelligence from the offline snapshot.
 
-Without a snapshot the server still starts, and its tools answer that no schema is loaded. Capture one with `dryrun init --db "$DATABASE_URL"` or pull one a teammate pushed (`dryrun snapshot pull --from-path ./snapshots`, see [Quickstart](#quickstart)), then call the `reload_schema` tool from the assistant. The new schema is picked up without restarting the server.
+Without a snapshot the server still starts, and its tools answer that no schema is loaded. Capture one with `dryrun init --db "$DATABASE_URL"` or pull one a teammate pushed (`dryrun snapshot pull --from-path ./snapshots`, see [Quickstart](#quickstart)), and the server picks it up on the next tool call, without a restart.
 
 For projects with multiple databases, run one `dryrun mcp-serve` per database and add an entry per server in your client config. Native multi-database serving inside one MCP process is tracked in [#7](https://github.com/boringSQL/dryrun/issues/7).
 

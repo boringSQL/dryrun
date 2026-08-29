@@ -37,7 +37,7 @@ npx @boringsql/dryrun setup
 The server reads the newest snapshot from `.dryrun/history.db` in the current
 project. Without one, its tools answer that no schema is loaded: capture with
 `dryrun init --db "$DATABASE_URL"`, or pull a snapshot a teammate pushed with
-`dryrun snapshot pull`, then call the `reload_schema` tool. No restart needed.
+`dryrun snapshot pull`. It is picked up on the next tool call, no restart needed.
 
 ## CLI
 

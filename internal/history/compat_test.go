@@ -1,6 +1,7 @@
 package history
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -156,5 +157,29 @@ func TestOpenAdoptsPreMarkerGoStore(t *testing.T) {
 	}
 	if got := userVersion(t, s2); got != HistorySchemaVersion {
 		t.Errorf("pre-marker store not re-stamped: user_version %d, want %d", got, HistorySchemaVersion)
+	}
+}
+
+// The pragma rides the DSN; set via db.Exec it would land on one pooled connection only.
+func TestOpenSetsBusyTimeoutOnEveryConnection(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	// hold one connection open so the second read cannot reuse it
+	held, err := s.db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer held.Close()
+
+	var ms int
+	if err := s.db.QueryRow("PRAGMA busy_timeout").Scan(&ms); err != nil {
+		t.Fatalf("read busy_timeout: %v", err)
+	}
+	if ms != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000", ms)
 	}
 }

@@ -826,7 +826,7 @@ func mcpServeCmd() *cobra.Command {
 				hist, err := openExistingHistoryStore()
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "dryrun: no history database (%v) — starting in uninitialized mode\n", err)
-					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot take', then call the reload_schema tool")
+					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot take'; the snapshot is picked up on the next tool call")
 					server.SetUninitialized()
 					break
 				}
@@ -838,7 +838,7 @@ func mcpServeCmd() *cobra.Command {
 				} else {
 					fmt.Fprintf(os.Stderr, "dryrun: no schema snapshot in history.db for project=%s database=%s — starting in uninitialized mode\n",
 						key.ProjectID, key.DatabaseID)
-					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot take', then call the reload_schema tool")
+					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot take'; the snapshot is picked up on the next tool call")
 					server.SetUninitialized()
 				}
 			}

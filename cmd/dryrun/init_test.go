@@ -145,7 +145,7 @@ func (s *stubWriter) PutQueryStats(_ context.Context, _ history.SnapshotKey, q *
 // Drives runInitCapture across the three v0.6 branches: primary, replica
 // (refused), and replica with --allow-replica. Each case pins exactly which
 // streams land in the store, which is the contract the rest of dryrun
-// (stats apply, reload_schema) depends on.
+// (stats apply, MCP snapshot pickup) depends on.
 //
 // This table also doubles as coverage for the newer query-stats capture path:
 // captureQueryStatsBestEffort is invoked on both non-refused branches (primary,

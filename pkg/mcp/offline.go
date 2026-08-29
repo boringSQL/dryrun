@@ -21,7 +21,7 @@ func NewOfflineServer(a *snapshot.AnnotatedSchema, lintCfg lint.Config) *Server 
 	return &Server{inner: internalmcp.NewOfflineServerAnnotated(a, lintCfg)}
 }
 
-// RegisterOffline registers the schema-only subset (no snapshot_diff, reload_schema, live).
+// RegisterOffline registers the schema-only subset (no snapshot_diff, no live tools).
 func (s *Server) RegisterOffline(srv *mcpserver.MCPServer) {
 	s.inner.RegisterOffline(srv)
 }

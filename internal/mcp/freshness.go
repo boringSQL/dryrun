@@ -21,12 +21,11 @@ const (
 )
 
 type (
-	// whether history.db holds a schema snapshot newer than the one served
+	// throttles the history.db read that picks up a newer snapshot
 	freshness struct {
 		mu        sync.Mutex
 		checkedAt time.Time
-		servedAt  string
-		newerAt   string
+		servedAt  time.Time
 	}
 )
 
@@ -65,51 +64,111 @@ func (s *Server) historyKey() (*history.Store, history.SnapshotKey) {
 	return s.history, s.snapshotKey
 }
 
-// newerSnapshotAt returns the RFC3339 timestamp of the newest history.db
-// snapshot when it is newer than the one served, else "". Offline only: with
-// --db the served schema shares the database clock, so it is never behind.
-func (s *Server) newerSnapshotAt() string {
-	s.mu.RLock()
-	live := s.pool != nil
-	s.mu.RUnlock()
-	if live {
-		return ""
-	}
-
+// adoptNewerSnapshot swaps in the newest history.db bundle when any stream
+// (schema, planner, activity, query stats) advanced. Throttled by freshnessTTL.
+func (s *Server) adoptNewerSnapshot(ctx context.Context) {
 	hist, key := s.historyKey()
-	if hist == nil {
-		return ""
-	}
-	loaded, err := s.getSchema()
-	if err != nil || loaded == nil || loaded.Timestamp.IsZero() {
-		return ""
+	// a history.db this build cannot read is not a source to serve from
+	if hist == nil || s.historyNote() != nil {
+		return
 	}
 
-	// keyed on what is served, so reload_schema clears the answer
-	servedAt := loaded.Timestamp.UTC().Format(time.RFC3339Nano)
-
+	// lock order: freshness.mu before s.mu, never the reverse
 	s.freshness.mu.Lock()
 	defer s.freshness.mu.Unlock()
-	if s.freshness.servedAt == servedAt && time.Since(s.freshness.checkedAt) < freshnessTTL {
-		return s.freshness.newerAt
+
+	served := s.servedBundle()
+	var servedAt time.Time
+	if served != nil {
+		servedAt = served.Schema.Timestamp
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	newerAt := ""
-	if latest, err := hist.LatestSchema(ctx, key); err == nil && latest != nil {
-		// A -> B -> A stores a content twin; a later timestamp alone would
-		// send the agent to reload the snapshot it already has
-		if latest.ContentHash != loaded.ContentHash && latest.Timestamp.After(loaded.Timestamp) {
-			newerAt = latest.Timestamp.UTC().Format(time.RFC3339)
-		}
-	} else if err != nil {
-		slog.Debug("history.LatestSchema miss", "error", err)
+	if s.freshness.servedAt.Equal(servedAt) && !s.freshness.checkedAt.IsZero() && time.Since(s.freshness.checkedAt) < freshnessTTL {
+		return
 	}
-
 	s.freshness.checkedAt = time.Now()
 	s.freshness.servedAt = servedAt
-	s.freshness.newerAt = newerAt
-	return newerAt
+
+	// shorter than the store's busy_timeout: the next tick retries a contended read
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	a, err := hist.GetAnnotated(ctx, key, history.NewRefLatest())
+	if err != nil || a == nil || a.Schema == nil {
+		if err != nil && !errors.Is(err, history.ErrSnapshotNotFound) {
+			slog.Warn("cannot read the newest snapshot from history", "error", err)
+		}
+		return
+	}
+	if served != nil {
+		if !bundleAdvanced(a, served) {
+			return
+		}
+		// key and --db url resolve independently; history can hold another database entirely
+		if served.Schema.Database != "" && a.Schema.Database != "" && a.Schema.Database != served.Schema.Database {
+			return
+		}
+	}
+
+	s.mu.Lock()
+	s.annotated = a
+	s.uninitialized = false
+	s.mu.Unlock()
+	s.freshness.servedAt = a.Schema.Timestamp
+	slog.Info("picked up a newer snapshot from history",
+		"captured_at", a.Schema.Timestamp.UTC().Format(time.RFC3339), "content_hash", a.Schema.ContentHash)
+}
+
+// a content twin (A -> B -> A) is not newer; fresh stats under an unchanged schema are
+func bundleAdvanced(cand, served *schema.AnnotatedSchema) bool {
+	if cand.Schema.ContentHash != served.Schema.ContentHash {
+		// with --db the served schema is stamped now; stats alone must not revert to older DDL
+		if cand.Schema.Timestamp.Before(served.Schema.Timestamp) {
+			return false
+		}
+		if cand.Schema.Timestamp.After(served.Schema.Timestamp) {
+			return true
+		}
+	}
+	if plannerAt(cand).After(plannerAt(served)) {
+		return true
+	}
+	return statsAt(cand).After(statsAt(served))
+}
+
+func plannerAt(a *schema.AnnotatedSchema) time.Time {
+	if a == nil || a.Planner == nil {
+		return time.Time{}
+	}
+	return a.Planner.Timestamp
+}
+
+// newest capture across activity nodes and query stats
+func statsAt(a *schema.AnnotatedSchema) time.Time {
+	var newest time.Time
+	if a == nil {
+		return newest
+	}
+	if a.Merged != nil {
+		for _, n := range a.Merged.Nodes {
+			if n.Node.Timestamp.After(newest) {
+				newest = n.Node.Timestamp
+			}
+		}
+	}
+	for _, q := range a.QueryStats {
+		if q.Node.Timestamp.After(newest) {
+			newest = q.Node.Timestamp
+		}
+	}
+	return newest
+}
+
+// what is loaded, without triggering a freshness check
+func (s *Server) servedBundle() *schema.AnnotatedSchema {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.uninitialized || s.annotated == nil || s.annotated.Schema == nil || s.annotated.Schema.Timestamp.IsZero() {
+		return nil
+	}
+	return s.annotated
 }
