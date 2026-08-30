@@ -175,7 +175,7 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 }
 
 type (
-	// planInsights is the plan-derived half shared by advise and analyze_plan.
+	// planInsights is the plan-derived half of advise.
 	planInsights struct {
 		warnings []query.PlanWarning
 		advice   []query.Advice
@@ -227,14 +227,16 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 	analyze := getBoolArg(req, "analyze")
 	pgVersion, _ := dryrun.ParsePgVersion(snap.PgVersion)
 
-	validation, vErr := query.ValidateQuery(sql, snap)
-	if vErr != nil {
-		return errResult(fmt.Sprintf("SQL parse error: %v", vErr)), nil
-	}
-
 	plan, supplied, err := suppliedPlan(req)
 	if err != nil {
 		return errResult(fmt.Sprintf("plan_json parse error: %v", err)), nil
+	}
+
+	validation, vErr := query.ValidateQuery(sql, snap)
+	// a plan is the evidence and the sql is context: sql the parser chokes on
+	// costs the validation half, not the plan review the caller asked for
+	if vErr != nil && !supplied {
+		return errResult(fmt.Sprintf("SQL parse error: %v", vErr)), nil
 	}
 	// analyze would re-run EXPLAIN ANALYZE and replace the plan the caller passed
 	if supplied && analyze && s.pool != nil {
@@ -247,19 +249,26 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 		if err != nil {
 			explainErr = err.Error()
 		} else {
-			// warnings and advice come from planInsightsFor, shared with analyze_plan
+			// warnings and advice come from planInsightsFor, so an EXPLAINed plan
+			// and a pasted one are read by the same code
 			plan = &result.Plan
 		}
 	}
 	insights := planInsightsFor(annotated, sql, plan, includeIdx, &pgVersion)
 
-	wrapper := map[string]any{
-		"valid":    validation.Valid,
-		"errors":   validation.Errors,
-		"warnings": validation.Warnings,
+	wrapper := map[string]any{}
+	if vErr != nil {
+		wrapper["validation_error"] = vErr.Error()
+	} else {
+		wrapper["valid"] = validation.Valid
+		wrapper["errors"] = orEmpty(validation.Errors)
+		wrapper["warnings"] = orEmpty(validation.Warnings)
 	}
-	if len(insights.warnings) > 0 {
-		wrapper["plan_warnings"] = insights.warnings
+	// present whenever a plan was read, empty or not: absence is how a caller
+	// tells "no problems found" from "no plan was looked at", and an empty
+	// array is what a caller can call len() on
+	if plan != nil {
+		wrapper["plan_warnings"] = orEmpty(insights.warnings)
 	}
 	if len(insights.advice) > 0 {
 		wrapper["advice"] = insights.advice
@@ -270,19 +279,21 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 	if explainErr != "" {
 		wrapper["explain_error"] = explainErr
 	}
-	if validation.CorrectedSQL != "" {
+	if vErr == nil && validation.CorrectedSQL != "" {
 		wrapper["corrected_sql"] = validation.CorrectedSQL
 		wrapper["fixes"] = validation.Fixes
 	}
 
 	hint := ""
 	switch {
-	case !validation.Valid && validation.CorrectedSQL != "":
+	case vErr == nil && !validation.Valid && validation.CorrectedSQL != "":
 		hint = "Query has validation errors, and every unknown name had one candidate: corrected_sql is the query with those names replaced. Re-run advise on it once you have checked the fixes."
-	case !validation.Valid:
+	case vErr == nil && !validation.Valid:
 		hint = "Query has validation errors. Fix referenced tables/columns before running advise again."
 	case len(insights.advice) > 0 || len(insights.indexes) > 0:
 		hint = "Review advice and index suggestions. Run any DDL through check_migration before applying."
+	case len(insights.warnings) > 0:
+		hint = "Plan warnings detected. Inspect plan_warnings for the problem nodes."
 	}
 	// not a case: the advice arm above also wins offline and would bury this
 	if plan == nil {
@@ -301,61 +312,15 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 	return jsonResult(wrapper), nil
 }
 
-func (s *Server) handleAnalyzePlan(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	annotated, err := s.getAnnotated()
-	if err != nil {
-		return errResult(err.Error()), nil
+// A nil slice marshals to null; a key whose presence is the contract has to
+// carry something a caller can take the length of.
+func orEmpty[T any](in []T) []T {
+	if in == nil {
+		return []T{}
 	}
-	snap := annotated.Schema
-
-	sql := getArg(req, "sql")
-	includeIdx := getBoolArgDefault(req, "include_index_suggestions", true)
-	pgVersion, _ := dryrun.ParsePgVersion(snap.PgVersion)
-
-	plan, supplied, err := suppliedPlan(req)
-	if err != nil {
-		return errResult(fmt.Sprintf("plan_json parse error: %v", err)), nil
-	}
-	if !supplied {
-		return errResult("plan_json is required"), nil
-	}
-
-	insights := planInsightsFor(annotated, sql, plan, includeIdx, &pgVersion)
-
-	// Unlike advise, the key is always present: "no warnings" is an answer.
-	wrapper := map[string]any{
-		"plan_warnings": insights.warnings,
-	}
-	if len(insights.advice) > 0 {
-		wrapper["advice"] = insights.advice
-	}
-	if sql != "" {
-		if validation, vErr := query.ValidateQuery(sql, snap); vErr == nil {
-			wrapper["valid"] = validation.Valid
-			if len(validation.Warnings) > 0 {
-				wrapper["warnings"] = validation.Warnings
-			}
-			if len(validation.Errors) > 0 {
-				wrapper["errors"] = validation.Errors
-			}
-		}
-	}
-	if len(insights.indexes) > 0 {
-		wrapper["index_suggestions"] = insights.indexes
-	}
-
-	hint := ""
-	switch {
-	case len(insights.advice) > 0:
-		hint = "Review advice and index suggestions. Run any DDL through check_migration before applying."
-	case len(insights.warnings) > 0:
-		hint = "Plan warnings detected. Inspect plan_warnings for problem nodes."
-	}
-	s.injectMeta(wrapper, hint, nil)
-	return jsonResult(wrapper), nil
+	return in
 }
 
-// Accepts both shapes Postgres emits: {"Plan": {...}} and [{"Plan": {...}, ...}].
 func extractPlanNode(v any) (json.RawMessage, error) {
 	// clients re-encode structured arguments as strings; a pasted text plan is not recoverable
 	if str, ok := v.(string); ok {

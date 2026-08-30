@@ -74,9 +74,9 @@ Install in Claude Code, it reads the newest snapshot from `.dryrun/history.db`:
 claude mcp add dryrun -- dryrun mcp-serve
 ```
 
-No DB credentials needed. Available tools: `find_objects`, `describe_table`, `validate_query`, `check_migration`, `lint_schema`.
+No DB credentials needed. Available tools: `find_objects`, `describe_table`, `validate_query`, `check_migration`, `lint_schema`, `detect`, `advise`, `snapshot_diff`, `list_top_queries`. `advise` reviews a plan you pass it as `plan_json` — a plan the user pasted or CI captured — so plan advice does not need credentials either.
 
-Not available without a live DB: `explain_query`, `advise`, `check_drift`.
+Not available without a live DB: `explain_query` (which runs EXPLAIN for you), `check_drift`, `columnar_report`.
 
 ---
 
@@ -267,7 +267,6 @@ Connect your MCP client to `http://host:3000/sse`.
 | `lint_schema` | No | Convention checks: naming, types, constraints, timestamps |
 | `snapshot_diff` | No\* | Compare two snapshots: schema, planner, activity, query drift |
 | `detect` | No | Health checks: stale stats, unused indexes, seq-scan anomalies, bloat, vacuum health |
-| `analyze_plan` | No | Analyze a pre-existing EXPLAIN JSON plan |
 | `advise` | Hybrid | Query review: validation + index suggestions offline, plus plan review with a DB |
 | `list_top_queries` | No | Captured pg_stat_statements shapes, ranked, per node |
 | `explain_query` | **Yes** | EXPLAIN with structured plan and warnings |

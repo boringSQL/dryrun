@@ -38,7 +38,7 @@ func TestRegisterOffline_ExactSubset(t *testing.T) {
 	sort.Strings(got)
 
 	want := []string{
-		"advise", "analyze_plan", "check_migration", "describe_table", "detect",
+		"advise", "check_migration", "describe_table", "detect",
 		"find_objects", "lint_schema",
 		"validate_query",
 	}

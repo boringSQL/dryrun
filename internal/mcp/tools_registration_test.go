@@ -47,11 +47,6 @@ func TestToolsRegistration_EveryListedToolHasHandler(t *testing.T) {
 				req.Params.Arguments = map[string]any{"ddl": "ALTER TABLE users ADD COLUMN x INT"}
 			case "advise":
 				req.Params.Arguments = map[string]any{"sql": "SELECT * FROM users"}
-			case "analyze_plan":
-				req.Params.Arguments = map[string]any{
-					"sql":       "SELECT * FROM users",
-					"plan_json": map[string]any{"Plan": map[string]any{"Node Type": "Seq Scan", "Relation Name": "users", "Plan Rows": 1.0}},
-				}
 			}
 
 			result, err := c.CallTool(context.Background(), req)
@@ -90,7 +85,6 @@ func TestToolsRegistration_InputSchemaShape(t *testing.T) {
 		"validate_query":  {"sql"},
 		"check_migration": {"ddl"},
 		"advise":          {"sql"},
-		"analyze_plan":    {"sql", "plan_json"},
 	}
 
 	for _, tool := range list.Tools {
@@ -218,7 +212,6 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 		"lint_schema":     true,
 		"detect":          true,
 		"advise":          true,
-		"analyze_plan":    true,
 		"snapshot_diff":   true,
 	}
 	got := map[string]bool{}
@@ -230,8 +223,9 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 			t.Errorf("expected tool %q to be registered (offline)", name)
 		}
 	}
-	// online-only tools must NOT be registered offline
-	for _, online := range []string{"explain_query", "check_drift"} {
+	// online-only tools must NOT be registered offline, and analyze_plan is
+	// gone entirely -- advise reads a supplied plan now
+	for _, online := range []string{"explain_query", "check_drift", "analyze_plan"} {
 		if got[online] {
 			t.Errorf("online-only tool %q should not be registered offline", online)
 		}

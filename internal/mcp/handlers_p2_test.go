@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -62,75 +61,6 @@ func TestAdvise_MalformedSQLReturnsParseError(t *testing.T) {
 	}
 }
 
-// analyze_plan accepts the bare {"Plan": {...}} shape and reports advice on
-// the embedded plan tree.
-func TestAnalyzePlan_AcceptsBareShape(t *testing.T) {
-	c := setupOfflineTest(t)
-	plan := map[string]any{
-		"Plan": map[string]any{
-			"Node Type":     "Seq Scan",
-			"Relation Name": "users",
-			"Schema":        "public",
-			"Plan Rows":     50000.0,
-			"Total Cost":    1234.0,
-		},
-	}
-	out := callTool(t, c, "analyze_plan", map[string]any{
-		"sql":       "SELECT * FROM users",
-		"plan_json": plan,
-	})
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
-		t.Fatalf("expected JSON output: %v\n%s", err, out)
-	}
-	if _, has := decoded["plan_warnings"]; !has {
-		t.Error("expected plan_warnings key in analyze_plan output")
-	}
-}
-
-// analyze_plan also accepts the array-wrapped [{"Plan": {...}}] shape that
-// EXPLAIN (FORMAT JSON) returns directly.
-func TestAnalyzePlan_AcceptsArrayShape(t *testing.T) {
-	c := setupOfflineTest(t)
-	plan := []any{
-		map[string]any{
-			"Plan": map[string]any{
-				"Node Type":     "Seq Scan",
-				"Relation Name": "users",
-				"Plan Rows":     1.0,
-			},
-		},
-	}
-	out := callTool(t, c, "analyze_plan", map[string]any{
-		"sql":       "SELECT 1",
-		"plan_json": plan,
-	})
-	if !strings.Contains(out, "plan_warnings") && !strings.Contains(out, "advice") {
-		t.Errorf("expected plan_warnings or advice key in array-shape output: %s", out)
-	}
-}
-
-// Missing plan_json must produce a typed error, not a panic.
-func TestAnalyzePlan_MissingPlanJSONErrors(t *testing.T) {
-	c := setupOfflineTest(t)
-	out := callTool(t, c, "analyze_plan", map[string]any{"sql": "SELECT 1"})
-	if !strings.Contains(out, "plan_json") {
-		t.Errorf("expected error mentioning plan_json, got: %s", out)
-	}
-}
-
-// Malformed plan_json (no Plan key, no Node Type) must surface a parse error.
-func TestAnalyzePlan_MalformedPlanJSONErrors(t *testing.T) {
-	c := setupOfflineTest(t)
-	out := callTool(t, c, "analyze_plan", map[string]any{
-		"sql":       "SELECT 1",
-		"plan_json": map[string]any{"unrelated": "garbage"},
-	})
-	if !strings.Contains(out, "parse error") {
-		t.Errorf("expected parse error, got: %s", out)
-	}
-}
-
 // snapshot_diff in pure-offline mode (no history store) must surface a helpful
 // error instead of panicking — there are no snapshots to diff.
 func TestSnapshotDiff_NoHistory(t *testing.T) {
@@ -172,13 +102,10 @@ func TestSnapshotDiff_HandlerReachable(t *testing.T) {
 	}
 }
 
-// The two handlers deliberately disagree about empty results, and a merge is
-// coming that will be tempted to harmonise them. advise omits plan_warnings
-// when there are none; analyze_plan always emits the key, because the caller
-// asked about a plan and "none" is the answer. Offline advise has no plan at
-// all, so advice and plan_warnings are both absent while index_suggestions
-// still are not.
-func TestPlanKeysDifferBetweenAdviseAndAnalyzePlan(t *testing.T) {
+// plan_warnings is how a caller tells "the plan is clean" from "no plan was
+// read" -- the key is present whenever a plan was looked at, empty or not.
+// analyze_plan always emitted it; advise now carries that for its callers.
+func TestAdvise_PlanWarningsPresenceMarksThatAPlanWasRead(t *testing.T) {
 	c := setupOfflineTest(t)
 	decode := func(t *testing.T, out string) map[string]any {
 		t.Helper()
@@ -189,37 +116,36 @@ func TestPlanKeysDifferBetweenAdviseAndAnalyzePlan(t *testing.T) {
 		return payload
 	}
 
-	// a plan with no problems in it: warnings come back empty either way
+	// a plan with nothing wrong in it: the key still has to be there
 	clean := map[string]any{"Plan": map[string]any{
 		"Node Type": "Index Scan", "Relation Name": "users", "Schema": "public",
 		"Plan Rows": 1.0, "Total Cost": 8.0,
 	}}
-
-	ap := decode(t, callTool(t, c, "analyze_plan", map[string]any{
+	withPlan := decode(t, callTool(t, c, "advise", map[string]any{
 		"sql": "SELECT * FROM users WHERE user_id = 1", "plan_json": clean,
 	}))
-	if _, ok := ap["plan_warnings"]; !ok {
-		t.Errorf("analyze_plan dropped the key it was asked about: %v", ap)
+	warnings, has := withPlan["plan_warnings"]
+	if !has {
+		t.Fatalf("a plan was read but plan_warnings is absent: %v", withPlan)
+	}
+	// null would satisfy "present" and break every caller that takes its length
+	if _, ok := warnings.([]any); !ok {
+		t.Errorf("plan_warnings is %#v, not an array", warnings)
 	}
 
-	adv := decode(t, callTool(t, c, "advise", map[string]any{
+	// no plan: absent, alongside the keys advise always carries
+	noPlan := decode(t, callTool(t, c, "advise", map[string]any{
 		"sql": "SELECT * FROM users WHERE user_id = 1",
 	}))
 	for _, key := range []string{"plan_warnings", "advice", "explain_error"} {
-		if _, ok := adv[key]; ok {
-			t.Errorf("offline advise emitted %q with no plan: %v", key, adv)
+		if _, has := noPlan[key]; has {
+			t.Errorf("offline advise emitted %q with no plan: %v", key, noPlan)
 		}
 	}
-	// validation keys are advise's, and unconditional
 	for _, key := range []string{"valid", "errors", "warnings"} {
-		if _, ok := adv[key]; !ok {
+		if _, has := noPlan[key]; !has {
 			t.Errorf("advise dropped %q", key)
 		}
-	}
-	// analyze_plan carries them only when sql parses, and never corrected_sql
-	noSQL := decode(t, callTool(t, c, "analyze_plan", map[string]any{"sql": "", "plan_json": clean}))
-	if _, ok := noSQL["valid"]; ok {
-		t.Errorf("analyze_plan validated an empty query: %v", noSQL)
 	}
 }
 
@@ -252,34 +178,6 @@ func TestAdvise_ReadsASuppliedPlanOffline(t *testing.T) {
 	}
 	if _, has := without["plan_warnings"]; has {
 		t.Errorf("plan_warnings without a plan: %v", without)
-	}
-}
-
-// advise and analyze_plan must read the same pasted plan the same way, or
-// folding one into the other later changes answers.
-func TestAdviseAndAnalyzePlanAgreeOnASuppliedPlan(t *testing.T) {
-	c := setupOfflineTest(t)
-	args := map[string]any{
-		"sql": "SELECT * FROM users WHERE email = 'a@b'",
-		"plan_json": map[string]any{"Plan": map[string]any{
-			"Node Type": "Seq Scan", "Relation Name": "users", "Schema": "public",
-			"Plan Rows": 50000.0, "Total Cost": 1234.0,
-		}},
-	}
-	decode := func(tool string) map[string]any {
-		t.Helper()
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(callTool(t, c, tool, args)), &payload); err != nil {
-			t.Fatalf("%s: not JSON: %v", tool, err)
-		}
-		return payload
-	}
-
-	adv, ap := decode("advise"), decode("analyze_plan")
-	for _, key := range []string{"plan_warnings", "advice", "index_suggestions"} {
-		if !reflect.DeepEqual(adv[key], ap[key]) {
-			t.Errorf("%s differs:\nadvise:       %v\nanalyze_plan: %v", key, adv[key], ap[key])
-		}
 	}
 }
 
@@ -357,9 +255,7 @@ func TestAdvise_MalformedPlanIsAnError(t *testing.T) {
 	}
 }
 
-// EXPLAIN (FORMAT JSON) returns an array, and that is what people paste. The
-// only coverage of the array shape today is analyze_plan's, and analyze_plan is
-// about to be folded away.
+// EXPLAIN (FORMAT JSON) returns an array, and that is what people paste.
 func TestAdvise_AcceptsArrayShapeAndEncodedPlan(t *testing.T) {
 	c := setupOfflineTest(t)
 	array := []any{map[string]any{"Plan": map[string]any{
@@ -435,5 +331,57 @@ func TestAdvise_RouteHintSurvivesIndexSuggestions(t *testing.T) {
 	hint, _ := meta["hint"].(string)
 	if !strings.Contains(hint, "plan_json") {
 		t.Errorf("index suggestions buried the route to plan advice: %q", hint)
+	}
+}
+
+// A plan is the evidence; the sql is context. dryrun's parser refusing the
+// statement must not cost the plan review the caller asked for -- analyze_plan
+// tolerated this, and its callers land here now.
+func TestAdvise_ReadsAPlanForSQLItCannotParse(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "advise", map[string]any{
+		"sql": "SELEKT broken",
+		"plan_json": map[string]any{"Plan": map[string]any{
+			"Node Type": "Seq Scan", "Relation Name": "users", "Schema": "public",
+			"Plan Rows": 50000.0, "Total Cost": 1234.0,
+		}},
+	})
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("expected a payload, got: %s", out)
+	}
+	if _, has := payload["plan_warnings"]; !has {
+		t.Errorf("the plan was not read: %v", payload)
+	}
+	if _, has := payload["validation_error"]; !has {
+		t.Errorf("the parse failure should be reported, not hidden: %v", payload)
+	}
+	// and without a plan there is nothing to fall back on, so it stays an error
+	if !strings.Contains(callTool(t, c, "advise", map[string]any{"sql": "SELEKT broken"}), "parse error") {
+		t.Error("unparseable sql with no plan should still be an error")
+	}
+}
+
+// A plan whose only finding is a warning must still say so in the hint.
+func TestAdvise_HintsOnPlanWarningsAlone(t *testing.T) {
+	c := setupOfflineTest(t)
+	var payload map[string]any
+	out := callTool(t, c, "advise", map[string]any{
+		"sql": "SELECT * FROM users",
+		"plan_json": map[string]any{"Plan": map[string]any{
+			"Node Type": "Seq Scan", "Relation Name": "users", "Schema": "public",
+			"Plan Rows": 50000.0, "Total Cost": 1234.0,
+		}},
+	})
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	warnings, _ := payload["plan_warnings"].([]any)
+	if len(warnings) == 0 {
+		t.Skip("fixture plan no longer produces warnings")
+	}
+	meta, _ := payload["_meta"].(map[string]any)
+	if hint, _ := meta["hint"].(string); hint == "" {
+		t.Errorf("plan warnings with no hint: %v", payload)
 	}
 }

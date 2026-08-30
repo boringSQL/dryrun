@@ -36,12 +36,12 @@ func TestBuildOfflineMCPServer_ListsSchemaSubset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(list.Tools) != 8 {
+	if len(list.Tools) != 7 {
 		names := make([]string, len(list.Tools))
 		for i, tl := range list.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("offline server exposed %d tools, want 8: %v", len(list.Tools), names)
+		t.Fatalf("offline server exposed %d tools, want 7: %v", len(list.Tools), names)
 	}
 
 	for _, tl := range list.Tools {

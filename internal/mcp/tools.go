@@ -155,22 +155,6 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 		),
 		s.handleCheckMigration,
 	)
-	srv.AddTool(
-		mcp.NewTool("analyze_plan",
-			mcp.WithDescription("When you already hold an EXPLAIN plan -- pasted by the user, captured in CI, or returned by explain_query: interprets it against the snapshot and flags row misestimates, poor scan choices, and missing indexes. Needs no database connection. It does not produce a plan, and without a connection dryrun cannot produce one either -- the plan must come from outside."),
-			mcp.WithString("sql", mcp.Required(), mcp.Description("The original SQL query text.")),
-			// the handler accepts both the [{"Plan": ...}] array EXPLAIN (FORMAT JSON)
-			// returns and the unwrapped {"Plan": ...} object; the schema must say so
-			// or input validation rejects the array shape
-			mcp.WithAny("plan_json", mcp.Required(),
-				mcp.Description("EXPLAIN output in JSON format (EXPLAIN (FORMAT JSON)): the [{\"Plan\": ...}] array or the unwrapped {\"Plan\": ...} object, or a JSON string of either."),
-				func(schema map[string]any) { schema["type"] = []string{"object", "array", "string"} },
-			),
-			mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
-			annSnapshot,
-		),
-		s.handleAnalyzePlan,
-	)
 	srv.AddTool(s.adviseTool(), s.handleAdvise)
 	srv.AddTool(
 		mcp.NewTool("lint_schema",
@@ -272,7 +256,7 @@ func (s *Server) registerLiveTools(srv *mcpserver.MCPServer) {
 	slog.Debug("registering online-only tools", "tools", "explain_query,check_drift,columnar_report")
 	srv.AddTool(
 		mcp.NewTool("explain_query",
-			mcp.WithDescription("When you need the real plan for one query: runs EXPLAIN against the connected database. analyze=true runs EXPLAIN ANALYZE, which EXECUTES the query inside a transaction that is always rolled back -- writes do not persist, but their work and any triggers still run. Planner GUCs are replayed via SET LOCAL for plan parity where the snapshot captured them, so the query runs under them (e.g. prod work_mem); older snapshots carry none and get the server's own settings. Requires a connection, so it is absent in offline mode. It returns the plan; analyze_plan interprets it."),
+			mcp.WithDescription("When you need the real plan for one query: runs EXPLAIN against the connected database. analyze=true runs EXPLAIN ANALYZE, which EXECUTES the query inside a transaction that is always rolled back -- writes do not persist, but their work and any triggers still run. Planner GUCs are replayed via SET LOCAL for plan parity where the snapshot captured them, so the query runs under them (e.g. prod work_mem); older snapshots carry none and get the server's own settings. Requires a connection, so it is absent in offline mode. It returns the plan; pass it to advise as plan_json to have it interpreted."),
 			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
 			mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query).")),
 			mcp.WithBoolean("with_stats", mcp.Description("Inject snapshot stats before EXPLAIN.")),
