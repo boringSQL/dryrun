@@ -9,7 +9,7 @@ import (
 )
 
 // A filter is not a lookup: it may legitimately match nothing. But an agent
-// that passes the qualified name list_tables printed used to get an empty
+// that passes the qualified name find_objects printed used to get an empty
 // result with no error and no hint, which reads as "nothing wrong here".
 func TestTableFilterAcceptsQualifiedNames(t *testing.T) {
 	a := withActivity(annotate(multiSchemaSnap(), 500_000),
@@ -55,7 +55,7 @@ func TestTableFilterAcceptsQualifiedNames(t *testing.T) {
 	t.Run("transposition_still_points_somewhere", func(t *testing.T) {
 		out := callTool(t, c, "detect", map[string]any{"kind": "anomalies", "table": "evnts"})
 		assertContains(t, out, "matched nothing")
-		assertContains(t, out, `search_schema {"query":"evnts"}`)
+		assertContains(t, out, `find_objects {"query":"evnts"}`)
 	})
 
 	t.Run("all_kinds_carry_it", func(t *testing.T) {

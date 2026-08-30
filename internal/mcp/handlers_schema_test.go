@@ -13,15 +13,15 @@ import (
 	"github.com/boringsql/dryrun/pkg/lint"
 )
 
-// Smoke tests for the schema-family tools (list_tables, describe_table,
-// search_schema, describe_table detail=relations). Each subtest exercises one tool against the
+// Smoke tests for the schema-family tools (find_objects, describe_table,
+// describe_table detail=relations). Each subtest exercises one tool against the
 // offline demo snapshot and asserts the expected substrings appear in the
 // rendered text/JSON output.
 func TestSchemaHandlers_OfflineSmoke(t *testing.T) {
 	c := setupOfflineTest(t)
 
-	t.Run("list_tables", func(t *testing.T) {
-		out := callTool(t, c, "list_tables", nil)
+	t.Run("find_objects_inventory", func(t *testing.T) {
+		out := callTool(t, c, "find_objects", nil)
 		assertContains(t, out, "PostgreSQL 18.3.0")
 		assertContains(t, out, "users")
 		assertContains(t, out, "tasks")
@@ -34,8 +34,8 @@ func TestSchemaHandlers_OfflineSmoke(t *testing.T) {
 		assertContains(t, out, "user_id")
 	})
 
-	t.Run("search_schema", func(t *testing.T) {
-		out := callTool(t, c, "search_schema", map[string]any{"query": "email"})
+	t.Run("find_objects_search", func(t *testing.T) {
+		out := callTool(t, c, "find_objects", map[string]any{"query": "email"})
 		assertContains(t, out, "email")
 	})
 

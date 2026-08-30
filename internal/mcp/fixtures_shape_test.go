@@ -13,7 +13,7 @@ func TestFixturesServeThroughMCP(t *testing.T) {
 	t.Run("multi_schema", func(t *testing.T) {
 		c := serveOffline(t, NewOfflineServerAnnotated(annotate(multiSchemaSnap(), 1000), lint.DefaultConfig()))
 
-		out := callTool(t, c, "list_tables", nil)
+		out := callTool(t, c, "find_objects", nil)
 		for _, want := range []string{"public.orders", "app.orders", "app.events", "public.foo.bar"} {
 			assertContains(t, out, want)
 		}

@@ -63,20 +63,24 @@ func (s *Server) RegisterOffline(srv *mcpserver.MCPServer) {
 // registerSchemaTools registers the schema-only subset (no history.db, no pool).
 func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
-		mcp.NewTool("list_tables",
-			mcp.WithDescription("Before sizing a query, a migration, or a backfill: how big each table is in production -- row estimates, on-disk size, comments -- for every table in the snapshot. Needs no database connection. Names and sizes only: no columns, no indexes (describe_table), no data. Paginate with limit/offset."),
+		mcp.NewTool("find_objects",
+			mcp.WithDescription("First call against an unfamiliar database, and the way to find where a name lives. With no query it inventories what exists and how big it is in production -- row estimates and table size (the heap: indexes and TOAST are not counted), partition children folded into their parent -- which the repo cannot tell you; kind= inventories views, functions or enums instead. With a query it searches names, table and column comments, index and view definitions, and enum labels, so a value like 'cancelled' finds the enum that carries it, not just an object named after it. Every hit is tagged with the field it matched (matched_on) and exact name matches rank first. Needs no database connection. Case-insensitive substring only -- no regex, no fuzzy matching, and never row data. Function bodies are not in the snapshot, so a name that appears only inside one is not findable here. One line per object: describe_table is what reads a table in full."),
+			mcp.WithString("query", mcp.Description("Case-insensitive substring. Omit to inventory rather than search.")),
+			mcp.WithString("kind",
+				mcp.Enum("table", "column", "index", "view", "materialized_view", "function", "enum"),
+				mcp.Description("Restrict to one kind. Default: tables when there is no query, every kind when there is one."),
+			),
 			mcp.WithString("schema", mcp.Description("Schema filter; omit for all schemas.")),
 			mcp.WithString("sort",
 				mcp.Enum("name", "rows", "size"),
-				mcp.DefaultString("name"),
-				mcp.Description("Sort by: 'name' (default), 'rows', or 'size'."),
+				mcp.Description("Order: 'name', or 'rows'/'size' biggest first (objects that have no table sort last). Default is name without a query, match quality with one."),
 			),
-			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max results (default 50, 0 for all).")),
+			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max results (default 50, 0 for all). Truncation sets _meta.next to re-run uncapped.")),
 			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Skip N results.")),
-			mcp.WithOutputSchema[listTablesResult](),
+			mcp.WithOutputSchema[findObjectsResult](),
 			annSnapshot,
 		),
-		s.handleListTables,
+		s.handleFindObjects,
 	)
 	srv.AddTool(
 		mcp.NewTool("describe_table",
@@ -104,17 +108,6 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			annSnapshot,
 		),
 		s.handleDescribeTable,
-	)
-	srv.AddTool(
-		mcp.NewTool("search_schema",
-			mcp.WithDescription("When you know a name fragment but not where it lives, or when the name lives in the database and not in the repo -- an index, a view, an enum type. Case-insensitive substring search over table, column, view, function, enum, and index names, plus index definitions. Needs no database connection. Names only: it does not search comments, enum labels, or view and function bodies, and never data values."),
-			mcp.WithString("query", mcp.Required(), mcp.Description("Case-insensitive substring.")),
-			mcp.WithNumber("limit", mcp.DefaultNumber(30), mcp.Description("Max results (default 30, 0 for all).")),
-			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Skip N results.")),
-			mcp.WithOutputSchema[searchSchemaResult](),
-			annSnapshot,
-		),
-		s.handleSearchSchema,
 	)
 	srv.AddTool(
 		mcp.NewTool("validate_query",

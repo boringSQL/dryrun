@@ -34,7 +34,7 @@ func (s *Server) handleValidateQuery(_ context.Context, req mcp.CallToolRequest)
 		hint = "Every unknown name had one candidate in the snapshot. corrected_sql is the query with those names replaced and it validates clean -- dryrun matched names, not intent, so read fixes before applying it."
 		next = []NextCall{{Tool: "advise", Args: map[string]any{"sql": result.CorrectedSQL}}}
 	default:
-		hint = "Unknown names with no single obvious candidate. Look them up with search_schema before rewriting the query."
+		hint = "Unknown names with no single obvious candidate. Look them up with find_objects before rewriting the query."
 	}
 	return s.metaJSONResult(result, "", hint, next), nil
 }

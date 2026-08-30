@@ -149,8 +149,8 @@ func TestValidateQuery_HintsWhenNothingIsGuessable(t *testing.T) {
 	}
 	meta, _ := decoded["_meta"].(map[string]any)
 	hint, _ := meta["hint"].(string)
-	if !strings.Contains(hint, "search_schema") {
-		t.Fatalf("expected the hint to point at search_schema, got %q", hint)
+	if !strings.Contains(hint, "find_objects") {
+		t.Fatalf("expected the hint to point at find_objects, got %q", hint)
 	}
 }
 

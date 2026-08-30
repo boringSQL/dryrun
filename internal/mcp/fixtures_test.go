@@ -31,7 +31,7 @@ func testCol(name, typ string, nullable bool) schema.Column {
 	return schema.Column{Name: name, TypeName: typ, Nullable: nullable}
 }
 
-// pg_get_indexdef qualifies and quotes; search_schema matches this text.
+// pg_get_indexdef qualifies and quotes; find_objects matches this text.
 func indexDef(unique bool, name, schemaName, table string, cols ...string) string {
 	kind := "INDEX"
 	if unique {
@@ -201,6 +201,14 @@ func annotate(snap *schema.SchemaSnapshot, rows float64) *schema.AnnotatedSchema
 		planner.Tables = append(planner.Tables, schema.TableSizingEntry{Table: t.Qual(), Sizing: sizing})
 	}
 	return &schema.AnnotatedSchema{Schema: snap, Planner: planner}
+}
+
+// The production paths (history.GetAnnotated, snapshot.AssembleAnnotated) roll
+// partition children up into their parent before anything reads the sizing, so
+// a fixture that skips it makes partitioned parents look empty.
+func annotateRolled(snap *schema.SchemaSnapshot, rows float64) *schema.AnnotatedSchema {
+	a := annotate(snap, rows)
+	return &schema.AnnotatedSchema{Schema: snap, Planner: schema.RollUpPartitionSizing(snap, a.Planner)}
 }
 
 // withColumnStats gives every column of one table a pg_stats row, which is

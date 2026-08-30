@@ -74,7 +74,7 @@ Install in Claude Code, it reads the newest snapshot from `.dryrun/history.db`:
 claude mcp add dryrun -- dryrun mcp-serve
 ```
 
-No DB credentials needed. Available tools: `list_tables`, `describe_table`, `search_schema`, `validate_query`, `check_migration`, `lint_schema`.
+No DB credentials needed. Available tools: `find_objects`, `describe_table`, `validate_query`, `check_migration`, `lint_schema`.
 
 Not available without a live DB: `explain_query`, `advise`, `check_drift`.
 
@@ -260,9 +260,8 @@ Connect your MCP client to `http://host:3000/sse`.
 
 | Tool | Needs DB? | Description |
 |------|-----------|-------------|
-| `list_tables` | No | List all tables with row estimates and comments |
+| `find_objects` | No | Inventory tables with row estimates and sizes; with a query, search names, comments, index and view definitions, and enum labels |
 | `describe_table` | No | One table in full: columns, constraints, indexes, stats; `detail=relations` for foreign keys, `detail=stats` adds vacuum |
-| `search_schema` | No | Search across table/column names, comments, constraints |
 | `validate_query` | No | Parse SQL, check table/column existence, detect anti-patterns |
 | `check_migration` | No | Migration safety: lock types, rewrite risk, safe alternatives |
 | `lint_schema` | No | Convention checks: naming, types, constraints, timestamps |

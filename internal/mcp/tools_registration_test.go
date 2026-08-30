@@ -37,8 +37,6 @@ func TestToolsRegistration_EveryListedToolHasHandler(t *testing.T) {
 			switch tool.Name {
 			case "describe_table":
 				req.Params.Arguments = map[string]any{"table": "users"}
-			case "search_schema":
-				req.Params.Arguments = map[string]any{"query": "users"}
 			case "validate_query":
 				req.Params.Arguments = map[string]any{"sql": "SELECT 1"}
 			case "check_migration":
@@ -85,7 +83,6 @@ func TestToolsRegistration_InputSchemaShape(t *testing.T) {
 
 	expectedRequired := map[string][]string{
 		"describe_table":  {"table"},
-		"search_schema":   {"query"},
 		"validate_query":  {"sql"},
 		"check_migration": {"ddl"},
 		"advise":          {"sql"},
@@ -129,9 +126,8 @@ func TestToolsRegistration_OutputSchemas(t *testing.T) {
 	}
 
 	wantOutputSchema := map[string]bool{
-		"list_tables":    true,
+		"find_objects":   true,
 		"describe_table": true,
-		"search_schema":  true,
 		"detect":         true,
 		"lint_schema":    true,
 		"snapshot_diff":  true,
@@ -170,9 +166,9 @@ func TestToolsRegistration_StructuredContentPresent(t *testing.T) {
 		tool string
 		args map[string]any
 	}{
-		{"list_tables", "list_tables", nil},
+		{"find_objects", "find_objects", nil},
+		{"find_objects_query", "find_objects", map[string]any{"query": "users"}},
 		{"describe_table", "describe_table", map[string]any{"table": "users"}},
-		{"search_schema", "search_schema", map[string]any{"query": "users"}},
 		{"detect", "detect", nil},
 		{"detect_vacuum_health", "detect", map[string]any{"kind": "vacuum_health"}},
 		{"lint_schema", "lint_schema", nil},
@@ -211,9 +207,8 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 	}
 
 	expected := map[string]bool{
-		"list_tables":     true,
+		"find_objects":    true,
 		"describe_table":  true,
-		"search_schema":   true,
 		"validate_query":  true,
 		"check_migration": true,
 		"lint_schema":     true,

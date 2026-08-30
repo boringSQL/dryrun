@@ -11,7 +11,7 @@ import (
 	"github.com/boringsql/dryrun/pkg/lint"
 )
 
-// list_tables prints schema.name, so an agent hands that string straight back
+// find_objects prints schema.name, so an agent hands that string straight back
 // to describe_table. Every case below is one an agent reaches by copying what
 // a previous call showed it.
 func TestResolveTable(t *testing.T) {
@@ -62,10 +62,10 @@ func TestResolveTable(t *testing.T) {
 	t.Run("miss_carries_somewhere_to_go", func(t *testing.T) {
 		out := callTool(t, c, "describe_table", map[string]any{"table": "order"})
 		assertContains(t, out, "did you mean app.orders, public.orders")
-		assertContains(t, out, `search_schema {"query":"order"}`)
+		assertContains(t, out, `find_objects {"query":"order"}`)
 	})
 
-	// a view read out of search_schema is a miss with a specific cause
+	// a view read out of find_objects is a miss with a specific cause
 	t.Run("view_says_why", func(t *testing.T) {
 		out := callTool(t, c, "describe_table", map[string]any{"table": "app.order_summary"})
 		assertContains(t, out, "app.order_summary is a view")

@@ -107,10 +107,10 @@ func notFoundMessage(snap *schema.SchemaSnapshot, schemaName, raw string) string
 	if near := nearMatches(snap, raw); len(near) > 0 {
 		msg += "; did you mean " + strings.Join(near, ", ")
 	}
-	return msg + fmt.Sprintf(`; search_schema {"query":"%s"} searches every schema`, searchTerm(raw))
+	return msg + fmt.Sprintf(`; find_objects {"query":"%s"} searches every schema`, searchTerm(raw))
 }
 
-// A view read out of search_schema is the likeliest remaining miss.
+// A view read out of find_objects is the likeliest remaining miss.
 func findView(snap *schema.SchemaSnapshot, raw string) string {
 	name := searchTerm(raw)
 	for _, v := range snap.Views {
@@ -134,11 +134,11 @@ func nearMatches(snap *schema.SchemaSnapshot, raw string) []string {
 	if term == "" {
 		return nil
 	}
-	type candidate struct {
+	type nearMatch struct {
 		qualified string
 		distance  int
 	}
-	var hits []candidate
+	var hits []nearMatch
 	for i := range snap.Tables {
 		name := strings.ToLower(snap.Tables[i].Name)
 		if !strings.Contains(name, term) && !strings.Contains(term, name) {
@@ -150,7 +150,7 @@ func nearMatches(snap *schema.SchemaSnapshot, raw string) []string {
 		if d < 0 {
 			d = -d
 		}
-		hits = append(hits, candidate{snap.Tables[i].Schema + "." + snap.Tables[i].Name, d})
+		hits = append(hits, nearMatch{snap.Tables[i].Schema + "." + snap.Tables[i].Name, d})
 	}
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].distance != hits[j].distance {
@@ -198,7 +198,7 @@ func missNote(snap *schema.SchemaSnapshot, schemaF, tableF string) string {
 	if near := nearMatches(snap, tableF); len(near) > 0 {
 		note += "; did you mean " + strings.Join(near, ", ")
 	}
-	return note + fmt.Sprintf(`; search_schema {"query":"%s"} searches every schema.`, searchTerm(tableF))
+	return note + fmt.Sprintf(`; find_objects {"query":"%s"} searches every schema.`, searchTerm(tableF))
 }
 
 func tableExists(snap *schema.SchemaSnapshot, schemaF, name string) bool {

@@ -68,20 +68,20 @@ func TestMetaOmitsActivityWhenThereIsNone(t *testing.T) {
 	}
 }
 
-// list_tables and vacuum_health answer through the typed toolMeta struct
-// rather than injectMeta, so the field has to be on both paths.
+// find_objects answers through the typed toolMeta struct rather than
+// injectMeta, so the field has to be on both paths.
 func TestTypedMetaCarriesCaptureTime(t *testing.T) {
 	srv := NewOfflineServerAnnotated(annotate(multiSchemaSnap(), 1000), lint.DefaultConfig())
 
 	var req mcp.CallToolRequest
-	req.Params.Name = "list_tables"
-	res, err := srv.handleListTables(context.Background(), req)
+	req.Params.Name = "find_objects"
+	res, err := srv.handleFindObjects(context.Background(), req)
 	if err != nil {
-		t.Fatalf("handleListTables: %v", err)
+		t.Fatalf("handleFindObjects: %v", err)
 	}
-	got, ok := res.StructuredContent.(listTablesResult)
+	got, ok := res.StructuredContent.(findObjectsResult)
 	if !ok {
-		t.Fatalf("want listTablesResult, got %T", res.StructuredContent)
+		t.Fatalf("want findObjectsResult, got %T", res.StructuredContent)
 	}
 	if got.Meta == nil || got.Meta.SchemaCapturedAt != fixtureSchemaAt {
 		t.Errorf("want schema_captured_at %s, got %+v", fixtureSchemaAt, got.Meta)

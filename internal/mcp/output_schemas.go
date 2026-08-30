@@ -14,23 +14,6 @@ type (
 		Children int    `json:"children"`
 	}
 
-	tableListEntry struct {
-		Schema       string                 `json:"schema"`
-		Name         string                 `json:"name"`
-		RowsEstimate *int64                 `json:"rows_estimate,omitempty"`
-		SizeBytes    *int64                 `json:"size_bytes,omitempty"`
-		Partitioned  *tablePartitionSummary `json:"partitioned,omitempty"`
-		Comment      *string                `json:"comment,omitempty"`
-	}
-
-	// Count is the pre-paging total, Tables the returned page.
-	listTablesResult struct {
-		Tables []tableListEntry `json:"tables"`
-		Count  int              `json:"count"`
-		Offset int              `json:"offset,omitempty"`
-		Meta   *toolMeta        `json:"_meta,omitempty"`
-	}
-
 	// Columns are on the table asked about, RefColumns on Table.
 	relatedEdge struct {
 		// Table is the quoted SQL identity, for pasting. TableSchema/TableName
@@ -65,15 +48,30 @@ type (
 		Meta            *toolMeta     `json:"_meta,omitempty"`
 	}
 
-	searchMatch struct {
+	// One object find_objects matched. Object is the qualified identity
+	// (schema.table, or schema.table.column for a column or index); Table is
+	// the owning table, so a caller can go straight to describe_table.
+	objectMatch struct {
 		Kind   string `json:"kind"`
+		Schema string `json:"schema"`
+		Name   string `json:"name"`
 		Object string `json:"object"`
-		Detail string `json:"detail,omitempty"`
+		Table  string `json:"table,omitempty"`
+		// type name, index definition, function signature, enum labels
+		Detail  string  `json:"detail,omitempty"`
+		Comment *string `json:"comment,omitempty"`
+		// which field the query hit: name, comment, definition or labels
+		MatchedOn    string                 `json:"matched_on,omitempty"`
+		RowsEstimate *int64                 `json:"rows_estimate,omitempty"`
+		SizeBytes    *int64                 `json:"size_bytes,omitempty"`
+		Partitioned  *tablePartitionSummary `json:"partitioned,omitempty"`
 	}
 
-	searchSchemaResult struct {
-		Query   string        `json:"query"`
-		Matches []searchMatch `json:"matches"`
+	// Count is the pre-paging total, Objects the returned page.
+	findObjectsResult struct {
+		Query   string        `json:"query,omitempty"`
+		Kind    string        `json:"kind,omitempty"`
+		Objects []objectMatch `json:"objects"`
 		Count   int           `json:"count"`
 		Offset  int           `json:"offset,omitempty"`
 		Meta    *toolMeta     `json:"_meta,omitempty"`
