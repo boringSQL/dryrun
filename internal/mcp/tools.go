@@ -60,6 +60,32 @@ func (s *Server) RegisterOffline(srv *mcpserver.MCPServer) {
 	s.registerSchemaTools(srv)
 }
 
+// advise executes only through analyze=true, which needs a connection. Without
+// one the parameter, the sentence describing it and the destructive annotation
+// all have to go, or the tool advertises an execution path it does not have.
+func (s *Server) adviseTool() mcp.Tool {
+	// both modes return it, so the claim is written once
+	const returns = "It returns corrected_sql when every unknown name has one obvious candidate; it never rewrites the query for performance."
+
+	opts := []mcp.ToolOption{
+		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
+		mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
+	}
+	if s.pool == nil {
+		opts = append(opts,
+			mcp.WithDescription("One-shot review of a single query: validation and index suggestions from the snapshot. Needs no database connection and executes nothing -- plan-shape advice does need one, and is absent here. "+returns),
+			annSnapshot,
+		)
+	} else {
+		opts = append(opts,
+			mcp.WithDescription("One-shot review of a single query: validation, plan shape, and index suggestions. analyze=true runs EXPLAIN ANALYZE, which EXECUTES the SQL in a rolled-back transaction -- writes do not persist, but their work and any triggers still run. "+returns),
+			mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query).")),
+			annLiveExec,
+		)
+	}
+	return mcp.NewTool("advise", opts...)
+}
+
 // registerSchemaTools registers the schema-only subset (no history.db, no pool).
 func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
@@ -141,16 +167,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 		),
 		s.handleAnalyzePlan,
 	)
-	srv.AddTool(
-		mcp.NewTool("advise",
-			mcp.WithDescription("One-shot review of a single query. With no database connection it returns validation and index suggestions only -- plan-shape advice needs a connection. With one it adds the plan review; analyze=true runs EXPLAIN ANALYZE, which EXECUTES the SQL in a rolled-back transaction. It suggests; it never rewrites the query."),
-			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
-			mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
-			mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query; live DB only).")),
-			annLiveExec,
-		),
-		s.handleAdvise,
-	)
+	srv.AddTool(s.adviseTool(), s.handleAdvise)
 	srv.AddTool(
 		mcp.NewTool("lint_schema",
 			mcp.WithDescription("When reviewing a schema as a whole -- a design review, an inherited database, or the state a migration left behind: naming and convention violations plus an audit of missing keys, unindexed foreign keys, and unsafe defaults. Needs no database connection. Defaults to verbosity='summary', which returns per-rule counts only: pass verbosity='full' for the findings and their ddl_fix (not every finding has one). Whole-schema, not per-query (validate_query, advise); it applies nothing."),

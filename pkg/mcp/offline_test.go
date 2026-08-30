@@ -49,6 +49,15 @@ func TestBuildOfflineMCPServer_ListsSchemaSubset(t *testing.T) {
 		case "snapshot_diff", "explain_query", "check_drift", "columnar_report":
 			t.Errorf("hosted surface leaked %q", tl.Name)
 		}
+		// the hosted endpoint has no pool at all, so nothing it serves may
+		// advertise itself as writing to a database
+		a := tl.Annotations
+		if a.ReadOnlyHint == nil || !*a.ReadOnlyHint {
+			t.Errorf("%s: readOnlyHint is not true on the hosted surface", tl.Name)
+		}
+		if a.DestructiveHint == nil || *a.DestructiveHint {
+			t.Errorf("%s: destructiveHint is not false on the hosted surface", tl.Name)
+		}
 	}
 }
 

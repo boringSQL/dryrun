@@ -247,6 +247,11 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 	case s.pool == nil:
 		hint = "Offline mode: only static analysis available. Connect with --db for plan-based advice."
 	}
+	// prepended rather than another case: a validation error is the bigger
+	// news, and would otherwise swallow the fact that analyze was dropped
+	if analyze && s.pool == nil {
+		hint = joinHints("analyze needs a database connection and was ignored.", hint)
+	}
 	s.injectMeta(wrapper, hint, nil)
 	return jsonResult(wrapper), nil
 }

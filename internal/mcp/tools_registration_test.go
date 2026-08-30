@@ -5,7 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
 // Round-trips the registered tool list through the client and asserts each
@@ -235,5 +239,144 @@ func TestToolsRegistration_OfflineToolSurface(t *testing.T) {
 	// schema_diff was dropped in favor of snapshot_diff
 	if got["schema_diff"] {
 		t.Error("schema_diff should no longer be registered")
+	}
+}
+
+func boolPtrValue(t *testing.T, p *bool, field string) bool {
+	t.Helper()
+	if p == nil {
+		t.Fatalf("%s is unset; mcp-go defaults it to the opposite of what our tools do", field)
+	}
+	return *p
+}
+
+// Nothing registered without a connection can reach a database, so every tool
+// on the offline surface has to say so. Clients gate on these hints and
+// inspectors grade on them, and the offline endpoint's whole claim is that it
+// touches nothing. Both registration paths: RegisterOffline is what a hosted
+// transport serves, and it is the one the claim is made about.
+func TestOfflineToolsAnnotateThemselvesReadOnly(t *testing.T) {
+	for name, c := range map[string]*client.Client{
+		"Register with no pool": setupOfflineTest(t),
+		"RegisterOffline":       setupOfflineRegisterTest(t),
+	} {
+		t.Run(name, func(t *testing.T) {
+			list, err := c.ListTools(context.Background(), mcp.ListToolsRequest{})
+			if err != nil {
+				t.Fatalf("ListTools: %v", err)
+			}
+			if len(list.Tools) == 0 {
+				t.Fatal("no tools registered")
+			}
+			for _, tool := range list.Tools {
+				a := tool.Annotations
+				if !boolPtrValue(t, a.ReadOnlyHint, tool.Name+".readOnlyHint") {
+					t.Errorf("%s: readOnlyHint false with no connection", tool.Name)
+				}
+				if boolPtrValue(t, a.DestructiveHint, tool.Name+".destructiveHint") {
+					t.Errorf("%s: destructiveHint true with no connection", tool.Name)
+				}
+			}
+		})
+	}
+}
+
+// One tool definition per mode: the parameter, the description and the
+// annotation all have to agree about whether advise can execute.
+func TestAdviseOffersAnalyzeOnlyWithAConnection(t *testing.T) {
+	adviseTool := func(t *testing.T, srv *Server) mcp.Tool {
+		t.Helper()
+		list, err := serveOffline(t, srv).ListTools(context.Background(), mcp.ListToolsRequest{})
+		if err != nil {
+			t.Fatalf("ListTools: %v", err)
+		}
+		for _, tool := range list.Tools {
+			if tool.Name == "advise" {
+				return tool
+			}
+		}
+		t.Fatal("advise is not registered")
+		return mcp.Tool{}
+	}
+
+	t.Run("offline", func(t *testing.T) {
+		tool := adviseTool(t, NewOfflineServer(loadDemoSchema(t), lint.DefaultConfig()))
+		if _, ok := tool.InputSchema.Properties["analyze"]; ok {
+			t.Error("analyze is declared on a server that cannot execute anything")
+		}
+		if strings.Contains(tool.Description, "EXPLAIN ANALYZE") {
+			t.Errorf("description promises execution: %q", tool.Description)
+		}
+		// "needs no database connection" is on every schema-only description;
+		// what has to survive is the clause naming what a connection adds
+		if !strings.Contains(tool.Description, "plan-shape") {
+			t.Errorf("description does not say what is missing: %q", tool.Description)
+		}
+		if !boolPtrValue(t, tool.Annotations.ReadOnlyHint, "readOnlyHint") {
+			t.Error("readOnlyHint false on a server that cannot execute anything")
+		}
+		if boolPtrValue(t, tool.Annotations.DestructiveHint, "destructiveHint") {
+			t.Error("destructiveHint true on a server that cannot execute anything")
+		}
+	})
+
+	// registration only reads whether the pool is set, so an unusable one is
+	// enough to pin the live branch
+	t.Run("with a connection", func(t *testing.T) {
+		srv := NewOfflineServer(loadDemoSchema(t), lint.DefaultConfig())
+		srv.pool = &pgxpool.Pool{}
+
+		tool := adviseTool(t, srv)
+		if _, ok := tool.InputSchema.Properties["analyze"]; !ok {
+			t.Error("analyze is missing where it can run")
+		}
+		if !strings.Contains(tool.Description, "EXECUTES") {
+			t.Errorf("description hides that analyze executes: %q", tool.Description)
+		}
+		if boolPtrValue(t, tool.Annotations.ReadOnlyHint, "readOnlyHint") {
+			t.Error("readOnlyHint true where analyze=true can execute the caller's SQL")
+		}
+		if !boolPtrValue(t, tool.Annotations.DestructiveHint, "destructiveHint") {
+			t.Error("destructiveHint false where analyze=true can execute the caller's SQL")
+		}
+	})
+
+	// the shared clause: both modes return corrected_sql, and a description
+	// that claims advise never rewrites anything sends the agent elsewhere
+	t.Run("both modes name corrected_sql", func(t *testing.T) {
+		live := NewOfflineServer(loadDemoSchema(t), lint.DefaultConfig())
+		live.pool = &pgxpool.Pool{}
+		for mode, srv := range map[string]*Server{
+			"offline": NewOfflineServer(loadDemoSchema(t), lint.DefaultConfig()),
+			"live":    live,
+		} {
+			if d := adviseTool(t, srv).Description; !strings.Contains(d, "corrected_sql") {
+				t.Errorf("%s: %q", mode, d)
+			}
+		}
+	})
+}
+
+// Passing analyze without a connection has to be told, not dropped: the
+// caller asked for the one thing this mode cannot do.
+func TestAdviseSaysWhenAnalyzeWasIgnored(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "advise", map[string]any{
+		"sql": "SELECT * FROM users WHERE email = 'x'", "analyze": true,
+	})
+	if !strings.Contains(out, "analyze needs a database connection") {
+		t.Errorf("no signal that analyze was dropped:\n%.400s", out)
+	}
+}
+
+// A validation error is the bigger news, but it must not swallow the fact that
+// the caller asked for the one thing this mode cannot do.
+func TestAdviseSaysAnalyzeWasIgnoredEvenOnInvalidSQL(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "advise", map[string]any{
+		"sql": "SELECT nosuchcolumn FROM nosuchtable", "analyze": true,
+	})
+	if !strings.Contains(out, "analyze needs a database connection") {
+		t.Errorf("no signal that analyze was dropped:\n%.400s", out)
 	}
 }
