@@ -13,8 +13,7 @@ import (
 )
 
 const (
-	// caps every free-text field on the wire: comments, view and index
-	// definitions, enum label lists. The row says why it matched, not what it says.
+	// maxMatchDetail caps every free-text field on the wire.
 	maxMatchDetail = 160
 
 	matchedName       = "name"
@@ -24,14 +23,11 @@ const (
 )
 
 type (
-	// One searchable field of an object, carrying the matched_on it reports.
 	matchField struct {
 		on   string
 		text string
 	}
 
-	// One candidate object plus what it took to match it. rank/kindRank/sortName
-	// order the page; rows/size sort it when the caller asks for size order.
 	candidate struct {
 		match     objectMatch
 		rank      int
@@ -43,8 +39,7 @@ type (
 	}
 )
 
-// match tiers: an exact name beats a prefix beats a substring beats a hit in
-// prose. Searching "users" must not bury the users table under user_id columns.
+// Match tiers: exact name > prefix > substring > prose hit.
 const (
 	rankExact = iota
 	rankPrefix
@@ -70,8 +65,7 @@ func (s *Server) handleFindObjects(_ context.Context, req mcp.CallToolRequest) (
 			return errResult(fmt.Sprintf("unknown kind %q; one of: %s", kind, strings.Join(sortedKinds(), ", "))), nil
 		}
 	}
-	// with nothing to search for this is an inventory, and an inventory of
-	// every column of every table is not orientation
+	// A bare call is a table inventory, not a dump of every column.
 	if kind == "" && query == "" {
 		kind = "table"
 	}
@@ -127,15 +121,13 @@ func (s *Server) handleFindObjects(_ context.Context, req mcp.CallToolRequest) (
 }
 
 // collect walks the snapshot once per object family. An empty query matches
-// everything of the requested kind, which is what makes this an inventory tool
-// as well as a search one.
+// everything of the requested kind.
 func collect(a *schema.AnnotatedSchema, q, kind, schemaFilter string) ([]candidate, int) {
 	snap := a.Schema
 	var out []candidate
 	want := func(k string) bool { return kind == "" || kind == k }
 
-	// An inventory of a daily-partitioned table is 365 rows of noise, and the
-	// parent already carries their rolled-up size. A search still finds them.
+	// Inventories fold partition children into their parent; a name search still finds them.
 	children := map[schema.QualifiedName]schema.QualifiedName{}
 	folded := 0
 	tabular := want("table") || want("column") || want("index")
@@ -148,8 +140,7 @@ func collect(a *schema.AnnotatedSchema, q, kind, schemaFilter string) ([]candida
 		if schemaFilter != "" && t.Schema != schemaFilter {
 			continue
 		}
-		// folding a child whose parent the filter excluded would drop it from
-		// every answer: pg_partman puts children in a schema of their own
+		// pg_partman children live in their own schema, so fold only when the parent passes the filter.
 		if parent, ok := children[t.Qual()]; ok && (schemaFilter == "" || parent.Schema == schemaFilter) {
 			folded++
 			continue
@@ -194,7 +185,6 @@ func collect(a *schema.AnnotatedSchema, q, kind, schemaFilter string) ([]candida
 				if !ok {
 					continue
 				}
-				// the definition is the useful payload even on a name match
 				c := candidate{
 					match: objectMatch{
 						Kind: "index", Schema: t.Schema, Name: idx.Name,
@@ -222,7 +212,6 @@ func collect(a *schema.AnnotatedSchema, q, kind, schemaFilter string) ([]candida
 		if !ok {
 			continue
 		}
-		// a definition hit is the only reason to ship SQL text back
 		detail := ""
 		if on == matchedDefinition {
 			detail = excerpt(flatDef, q, true)
@@ -241,12 +230,11 @@ func collect(a *schema.AnnotatedSchema, q, kind, schemaFilter string) ([]candida
 			if schemaFilter != "" && f.Schema != schemaFilter {
 				continue
 			}
-			// the snapshot carries signatures, never bodies
 			r, on, ok := matchNameOr(f.Name, q, comments(f.Comment))
 			if !ok {
 				continue
 			}
-			// overloads share schema.name, so the identity has to carry args
+			// Overloads share schema.name, so the identity carries the args.
 			identity := fmt.Sprintf("%s.%s(%s)", f.Schema, f.Name, f.IdentityArgs)
 			out = append(out, candidate{
 				match: objectMatch{
@@ -281,8 +269,7 @@ func collect(a *schema.AnnotatedSchema, q, kind, schemaFilter string) ([]candida
 	return out, folded
 }
 
-// Every table that is some other table's partition. Sub-partitioned children
-// are parents too, and are folded at whatever level they appear.
+// partitionChildren maps every partition child to its parent.
 func partitionChildren(snap *schema.SchemaSnapshot) map[schema.QualifiedName]schema.QualifiedName {
 	out := map[schema.QualifiedName]schema.QualifiedName{}
 	for i := range snap.Tables {
@@ -297,10 +284,7 @@ func partitionChildren(snap *schema.SchemaSnapshot) map[schema.QualifiedName]sch
 	return out
 }
 
-// matchNameOr ranks a name hit above a hit in any other field, and reports it
-// once: an object whose name and comment both match is a name match. Each
-// extra field names itself, so matched_on never has to be inferred from
-// argument order.
+// matchNameOr ranks a name hit above a hit in any extra field.
 func matchNameOr(name, q string, extras ...matchField) (rank int, on string, ok bool) {
 	if q == "" {
 		return rankSubstring, "", true
@@ -322,7 +306,6 @@ func matchNameOr(name, q string, extras ...matchField) (rank int, on string, ok 
 	return 0, "", false
 }
 
-// each label separately: joining them would match a query straddling two
 func enumFields(labels []string) []matchField {
 	out := make([]matchField, len(labels))
 	for i, l := range labels {
@@ -345,8 +328,7 @@ func applySizing(a *schema.AnnotatedSchema, t *schema.Table, c *candidate) {
 		return
 	}
 	c.rows, c.size, c.hasSizing = sizing.Reltuples, sizing.TableSize, true
-	// only the table row claims them as its own; a column's page position may
-	// depend on its table's size, but the column does not have a size
+	// Only the table row reports sizing as its own.
 	if c.match.Kind != "table" {
 		return
 	}
@@ -362,9 +344,7 @@ func applySizing(a *schema.AnnotatedSchema, t *schema.Table, c *candidate) {
 	}
 }
 
-// Explicit sort wins; otherwise a query orders by match quality and an
-// inventory orders by name. Every comparison falls through to the qualified
-// name, so the order is total and paging is stable.
+// Explicit sort wins; searches rank by match quality, inventories by name.
 func orderCandidates(cands []candidate, sortBy, query string) {
 	byName := func(i, j int) bool {
 		if cands[i].kindRank != cands[j].kindRank {
@@ -376,7 +356,7 @@ func orderCandidates(cands []candidate, sortBy, query string) {
 	switch sortBy {
 	case "rows", "size":
 		sort.SliceStable(cands, func(i, j int) bool {
-			// unsized objects (views, functions, enums) sort last rather than as zero
+			// Unsized objects (views, functions, enums) sort last.
 			if cands[i].hasSizing != cands[j].hasSizing {
 				return cands[i].hasSizing
 			}
@@ -409,8 +389,7 @@ func (s *Server) findFollowups(page []candidate, query, kind, schemaFilter, sort
 	var hint string
 	var next []NextCall
 
-	// only the first page of a search: an inventory has no top match, and page
-	// three's first row is not one either
+	// The top match of a search's first page gets a describe_table follow-up.
 	if query != "" && offset == 0 {
 		for _, c := range page {
 			if c.match.Kind != "table" && c.match.Kind != "column" && c.match.Kind != "index" {
@@ -440,8 +419,7 @@ func (s *Server) findFollowups(page []candidate, query, kind, schemaFilter, sort
 	return hint, next
 }
 
-// Folding is silent otherwise, and a count that excludes objects without
-// saying so is the kind of thing an agent cannot detect.
+// foldNote makes silent folding visible in the result's hint.
 func foldNote(folded int) string {
 	if folded == 0 {
 		return ""
@@ -453,7 +431,6 @@ func noMatchHint(query, kind, schemaFilter string) string {
 	if query == "" {
 		return ""
 	}
-	// the boundaries that explain a miss, in the order they cause one
 	var narrowed []string
 	if kind != "" {
 		narrowed = append(narrowed, "kind="+kind)
@@ -507,19 +484,16 @@ func renderMatch(m objectMatch) string {
 	if m.Detail != "" {
 		line += " — " + m.Detail
 	}
-	// sql comment syntax, so detail and comment stay tellable apart in text
 	if m.Comment != nil && *m.Comment != "" {
 		line += " -- " + *m.Comment
 	}
-	// why this row is here, when it is not obvious from the name
 	if m.MatchedOn != "" && m.MatchedOn != matchedName {
 		line += " [matched " + m.MatchedOn + "]"
 	}
 	return line
 }
 
-// A comment is unbounded text and rides every row of every page; a design doc
-// pasted into COMMENT ON TABLE must not become the response.
+// shortComment keeps unbounded COMMENT ON text from becoming the response.
 func shortComment(c *string) *string {
 	if c == nil {
 		return nil
@@ -528,9 +502,7 @@ func shortComment(c *string) *string {
 	return &short
 }
 
-// excerpt windows the text around the match. A hit at offset 3000 is invisible
-// in the first 160 runes, and a detail that does not show the match proves
-// nothing the matched_on field has not already said.
+// excerpt windows the text around the match so the hit stays visible.
 func excerpt(text, q string, atMatch bool) string {
 	flat := collapse(text)
 	r := []rune(flat)
@@ -545,8 +517,7 @@ func excerpt(text, q string, atMatch bool) string {
 		return truncate(flat)
 	}
 
-	// the ellipses come out of the budget, not on top of it
-	window := maxMatchDetail - 2
+	window := maxMatchDetail - 2 // the ellipses come out of the budget
 	start := max(hit-window/3, 0)
 	end := min(start+window, len(r))
 	start = max(end-window, 0)
@@ -561,11 +532,8 @@ func excerpt(text, q string, atMatch bool) string {
 	return out
 }
 
-// matchRuneIndex is where q starts in text, counted in text's own runes.
-// strings.ToLower maps rune for rune but not byte for byte (Ⱥ is two bytes and
-// lowers to three), so the byte offset of a hit in the lowered copy is not an
-// offset into the original -- it can point past its end. Rune indices do line
-// up, so count those.
+// matchRuneIndex returns where q starts in text, in runes; strings.ToLower can
+// change byte length, so a byte offset into the lowered copy is invalid.
 func matchRuneIndex(text, q string) int {
 	if q == "" {
 		return -1

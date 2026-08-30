@@ -114,6 +114,8 @@ func ExplainQuery(ctx context.Context, pool *pgxpool.Pool, sql string, analyze b
 		}
 	}
 
+	// Only DetectPlanWarnings here: MCP advise recomputes warnings from the
+	// plan itself, so anything else would be invisible there. Enrich at the caller.
 	warnings := DetectPlanWarnings(plan, snap)
 
 	return &ExplainResult{

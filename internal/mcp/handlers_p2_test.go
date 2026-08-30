@@ -164,3 +164,54 @@ func TestSnapshotDiff_HandlerReachable(t *testing.T) {
 		t.Fatal("expected non-empty result content")
 	}
 }
+
+// The two handlers deliberately disagree about empty results, and a merge is
+// coming that will be tempted to harmonise them. advise omits plan_warnings
+// when there are none; analyze_plan always emits the key, because the caller
+// asked about a plan and "none" is the answer. Offline advise has no plan at
+// all, so advice and plan_warnings are both absent while index_suggestions
+// still are not.
+func TestPlanKeysDifferBetweenAdviseAndAnalyzePlan(t *testing.T) {
+	c := setupOfflineTest(t)
+	decode := func(t *testing.T, out string) map[string]any {
+		t.Helper()
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(out), &payload); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, out)
+		}
+		return payload
+	}
+
+	// a plan with no problems in it: warnings come back empty either way
+	clean := map[string]any{"Plan": map[string]any{
+		"Node Type": "Index Scan", "Relation Name": "users", "Schema": "public",
+		"Plan Rows": 1.0, "Total Cost": 8.0,
+	}}
+
+	ap := decode(t, callTool(t, c, "analyze_plan", map[string]any{
+		"sql": "SELECT * FROM users WHERE user_id = 1", "plan_json": clean,
+	}))
+	if _, ok := ap["plan_warnings"]; !ok {
+		t.Errorf("analyze_plan dropped the key it was asked about: %v", ap)
+	}
+
+	adv := decode(t, callTool(t, c, "advise", map[string]any{
+		"sql": "SELECT * FROM users WHERE user_id = 1",
+	}))
+	for _, key := range []string{"plan_warnings", "advice", "explain_error"} {
+		if _, ok := adv[key]; ok {
+			t.Errorf("offline advise emitted %q with no plan: %v", key, adv)
+		}
+	}
+	// validation keys are advise's, and unconditional
+	for _, key := range []string{"valid", "errors", "warnings"} {
+		if _, ok := adv[key]; !ok {
+			t.Errorf("advise dropped %q", key)
+		}
+	}
+	// analyze_plan carries them only when sql parses, and never corrected_sql
+	noSQL := decode(t, callTool(t, c, "analyze_plan", map[string]any{"sql": "", "plan_json": clean}))
+	if _, ok := noSQL["valid"]; ok {
+		t.Errorf("analyze_plan validated an empty query: %v", noSQL)
+	}
+}

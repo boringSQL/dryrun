@@ -174,6 +174,30 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 	return jsonResult(wrapper), nil
 }
 
+type (
+	// planInsights is the plan-derived half shared by advise and analyze_plan.
+	planInsights struct {
+		warnings []query.PlanWarning
+		advice   []query.Advice
+		indexes  []query.IndexSuggestion
+	}
+)
+
+// A nil plan still leaves snapshot-based index suggestions.
+func planInsightsFor(annotated *schema.AnnotatedSchema, sql string, plan *query.PlanNode, includeIdx bool, pgVersion *dryrun.PgVersion) planInsights {
+	var out planInsights
+	if plan != nil {
+		out.warnings = query.DetectPlanWarnings(plan, annotated.Schema)
+		out.advice = query.Advise(plan, annotated, pgVersion)
+	}
+	if includeIdx {
+		if suggestions, err := query.SuggestIndex(sql, annotated.Schema, plan, pgVersion); err == nil {
+			out.indexes = suggestions
+		}
+	}
+	return out
+}
+
 func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	annotated, err := s.getAnnotated()
 	if err != nil {
@@ -192,41 +216,33 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}
 
 	var (
-		plan         *query.PlanNode
-		planWarnings []query.PlanWarning
-		advice       []query.Advice
-		explainErr   string
+		plan       *query.PlanNode
+		explainErr string
 	)
 	if s.pool != nil {
 		result, err := query.ExplainQuery(ctx, s.pool, sql, analyze, snap)
 		if err != nil {
 			explainErr = err.Error()
 		} else {
+			// warnings and advice come from planInsightsFor, shared with analyze_plan
 			plan = &result.Plan
-			planWarnings = result.Warnings
-			advice = query.Advise(plan, annotated, &pgVersion)
 		}
 	}
+	insights := planInsightsFor(annotated, sql, plan, includeIdx, &pgVersion)
 
 	wrapper := map[string]any{
 		"valid":    validation.Valid,
 		"errors":   validation.Errors,
 		"warnings": validation.Warnings,
 	}
-	if len(planWarnings) > 0 {
-		wrapper["plan_warnings"] = planWarnings
+	if len(insights.warnings) > 0 {
+		wrapper["plan_warnings"] = insights.warnings
 	}
-	if len(advice) > 0 {
-		wrapper["advice"] = advice
+	if len(insights.advice) > 0 {
+		wrapper["advice"] = insights.advice
 	}
-	var indexSuggestions []query.IndexSuggestion
-	if includeIdx {
-		if suggestions, err := query.SuggestIndex(sql, snap, plan, &pgVersion); err == nil {
-			indexSuggestions = suggestions
-		}
-	}
-	if len(indexSuggestions) > 0 {
-		wrapper["index_suggestions"] = indexSuggestions
+	if len(insights.indexes) > 0 {
+		wrapper["index_suggestions"] = insights.indexes
 	}
 	if explainErr != "" {
 		wrapper["explain_error"] = explainErr
@@ -242,7 +258,7 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 		hint = "Query has validation errors, and every unknown name had one candidate: corrected_sql is the query with those names replaced. Re-run advise on it once you have checked the fixes."
 	case !validation.Valid:
 		hint = "Query has validation errors. Fix referenced tables/columns before running advise again."
-	case len(advice) > 0 || len(indexSuggestions) > 0:
+	case len(insights.advice) > 0 || len(insights.indexes) > 0:
 		hint = "Review advice and index suggestions. Run any DDL through check_migration before applying."
 	case s.pool == nil:
 		hint = "Offline mode: only static analysis available. Connect with --db for plan-based advice."
@@ -281,14 +297,14 @@ func (s *Server) handleAnalyzePlan(_ context.Context, req mcp.CallToolRequest) (
 		return errResult(fmt.Sprintf("plan_json parse error: %v", err)), nil
 	}
 
-	planWarnings := query.DetectPlanWarnings(plan, snap)
-	advice := query.Advise(plan, annotated, &pgVersion)
+	insights := planInsightsFor(annotated, sql, plan, includeIdx, &pgVersion)
 
+	// Unlike advise, the key is always present: "no warnings" is an answer.
 	wrapper := map[string]any{
-		"plan_warnings": planWarnings,
+		"plan_warnings": insights.warnings,
 	}
-	if len(advice) > 0 {
-		wrapper["advice"] = advice
+	if len(insights.advice) > 0 {
+		wrapper["advice"] = insights.advice
 	}
 	if sql != "" {
 		if validation, vErr := query.ValidateQuery(sql, snap); vErr == nil {
@@ -301,17 +317,15 @@ func (s *Server) handleAnalyzePlan(_ context.Context, req mcp.CallToolRequest) (
 			}
 		}
 	}
-	if includeIdx {
-		if suggestions, err := query.SuggestIndex(sql, snap, plan, &pgVersion); err == nil && len(suggestions) > 0 {
-			wrapper["index_suggestions"] = suggestions
-		}
+	if len(insights.indexes) > 0 {
+		wrapper["index_suggestions"] = insights.indexes
 	}
 
 	hint := ""
 	switch {
-	case len(advice) > 0:
+	case len(insights.advice) > 0:
 		hint = "Review advice and index suggestions. Run any DDL through check_migration before applying."
-	case len(planWarnings) > 0:
+	case len(insights.warnings) > 0:
 		hint = "Plan warnings detected. Inspect plan_warnings for problem nodes."
 	}
 	s.injectMeta(wrapper, hint, nil)
