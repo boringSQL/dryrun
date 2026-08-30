@@ -198,6 +198,23 @@ func planInsightsFor(annotated *schema.AnnotatedSchema, sql string, plan *query.
 	return out
 }
 
+// suppliedPlan reads plan_json when passed; a malformed plan is an error, not a silent fallback.
+func suppliedPlan(req mcp.CallToolRequest) (plan *query.PlanNode, supplied bool, err error) {
+	raw, ok := req.GetArguments()["plan_json"]
+	if !ok || raw == nil {
+		return nil, false, nil
+	}
+	planRaw, err := extractPlanNode(raw)
+	if err != nil {
+		return nil, true, err
+	}
+	plan, err = query.ParsePlanJSON(planRaw)
+	if err != nil {
+		return nil, true, err
+	}
+	return plan, true, nil
+}
+
 func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	annotated, err := s.getAnnotated()
 	if err != nil {
@@ -215,11 +232,17 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return errResult(fmt.Sprintf("SQL parse error: %v", vErr)), nil
 	}
 
-	var (
-		plan       *query.PlanNode
-		explainErr string
-	)
-	if s.pool != nil {
+	plan, supplied, err := suppliedPlan(req)
+	if err != nil {
+		return errResult(fmt.Sprintf("plan_json parse error: %v", err)), nil
+	}
+	// analyze would re-run EXPLAIN ANALYZE and replace the plan the caller passed
+	if supplied && analyze && s.pool != nil {
+		return errResult("analyze runs EXPLAIN ANALYZE, which would replace the plan_json you passed; drop one of them"), nil
+	}
+
+	var explainErr string
+	if !supplied && s.pool != nil {
 		result, err := query.ExplainQuery(ctx, s.pool, sql, analyze, snap)
 		if err != nil {
 			explainErr = err.Error()
@@ -260,8 +283,14 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 		hint = "Query has validation errors. Fix referenced tables/columns before running advise again."
 	case len(insights.advice) > 0 || len(insights.indexes) > 0:
 		hint = "Review advice and index suggestions. Run any DDL through check_migration before applying."
-	case s.pool == nil:
-		hint = "Offline mode: only static analysis available. Connect with --db for plan-based advice."
+	}
+	// not a case: the advice arm above also wins offline and would bury this
+	if plan == nil {
+		if explainErr != "" {
+			hint = joinHints("EXPLAIN did not run, so this is validation and index suggestions only; see explain_error.", hint)
+		} else if s.pool == nil {
+			hint = joinHints("No plan was read: pass plan_json to interpret one you already have, or connect with --db to let advise run EXPLAIN itself.", hint)
+		}
 	}
 	// prepended rather than another case: a validation error is the bigger
 	// news, and would otherwise swallow the fact that analyze was dropped
@@ -283,18 +312,12 @@ func (s *Server) handleAnalyzePlan(_ context.Context, req mcp.CallToolRequest) (
 	includeIdx := getBoolArgDefault(req, "include_index_suggestions", true)
 	pgVersion, _ := dryrun.ParsePgVersion(snap.PgVersion)
 
-	args := req.GetArguments()
-	rawPlan, ok := args["plan_json"]
-	if !ok || rawPlan == nil {
+	plan, supplied, err := suppliedPlan(req)
+	if err != nil {
+		return errResult(fmt.Sprintf("plan_json parse error: %v", err)), nil
+	}
+	if !supplied {
 		return errResult("plan_json is required"), nil
-	}
-	planRaw, err := extractPlanNode(rawPlan)
-	if err != nil {
-		return errResult(fmt.Sprintf("plan_json parse error: %v", err)), nil
-	}
-	plan, err := query.ParsePlanJSON(planRaw)
-	if err != nil {
-		return errResult(fmt.Sprintf("plan_json parse error: %v", err)), nil
 	}
 
 	insights := planInsightsFor(annotated, sql, plan, includeIdx, &pgVersion)
@@ -334,6 +357,14 @@ func (s *Server) handleAnalyzePlan(_ context.Context, req mcp.CallToolRequest) (
 
 // Accepts both shapes Postgres emits: {"Plan": {...}} and [{"Plan": {...}, ...}].
 func extractPlanNode(v any) (json.RawMessage, error) {
+	// clients re-encode structured arguments as strings; a pasted text plan is not recoverable
+	if str, ok := v.(string); ok {
+		var decoded any
+		if err := json.Unmarshal([]byte(str), &decoded); err != nil {
+			return nil, fmt.Errorf("plan_json must be EXPLAIN (FORMAT JSON) output, not the text plan")
+		}
+		v = decoded
+	}
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return nil, err

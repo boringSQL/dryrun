@@ -3,14 +3,18 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/boringsql/dryrun/pkg/lint"
 )
 
-// Offline advise returns a JSON wrapper carrying validation results and a
-// hint nudging the user to connect a live DB for plan-based advice.
+// Offline advise with no plan returns validation plus a hint naming both ways
+// to get plan-based advice: bring a plan, or connect a database.
 func TestAdvise_OfflineReturnsValidationAndHint(t *testing.T) {
 	c := setupOfflineTest(t)
 	out := callTool(t, c, "advise", map[string]any{
@@ -25,8 +29,11 @@ func TestAdvise_OfflineReturnsValidationAndHint(t *testing.T) {
 		t.Error("expected `valid` key in advise output")
 	}
 	meta, _ := decoded["_meta"].(map[string]any)
-	if hint, _ := meta["hint"].(string); !strings.Contains(hint, "Offline") {
-		t.Errorf("expected offline-mode hint, got %q", hint)
+	hint, _ := meta["hint"].(string)
+	for _, want := range []string{"plan_json", "--db"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint does not mention %s: %q", want, hint)
+		}
 	}
 }
 
@@ -213,5 +220,220 @@ func TestPlanKeysDifferBetweenAdviseAndAnalyzePlan(t *testing.T) {
 	noSQL := decode(t, callTool(t, c, "analyze_plan", map[string]any{"sql": "", "plan_json": clean}))
 	if _, ok := noSQL["valid"]; ok {
 		t.Errorf("analyze_plan validated an empty query: %v", noSQL)
+	}
+}
+
+// The capability this adds: offline, dryrun cannot produce a plan, but it can
+// read one. A plan the user pasted turns advise from validation-plus-index-
+// suggestions into a plan review, with no connection anywhere.
+func TestAdvise_ReadsASuppliedPlanOffline(t *testing.T) {
+	c := setupOfflineTest(t)
+	seqScan := map[string]any{"Plan": map[string]any{
+		"Node Type": "Seq Scan", "Relation Name": "users", "Schema": "public",
+		"Plan Rows": 50000.0, "Total Cost": 1234.0,
+	}}
+
+	var withPlan map[string]any
+	out := callTool(t, c, "advise", map[string]any{
+		"sql": "SELECT * FROM users WHERE email = 'a@b'", "plan_json": seqScan,
+	})
+	if err := json.Unmarshal([]byte(out), &withPlan); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if _, has := withPlan["plan_warnings"]; !has {
+		t.Errorf("a supplied plan produced no plan_warnings: %v", withPlan)
+	}
+	// and the same call without it stays validation-only, so the plan is what
+	// made the difference
+	var without map[string]any
+	out = callTool(t, c, "advise", map[string]any{"sql": "SELECT * FROM users WHERE email = 'a@b'"})
+	if err := json.Unmarshal([]byte(out), &without); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if _, has := without["plan_warnings"]; has {
+		t.Errorf("plan_warnings without a plan: %v", without)
+	}
+}
+
+// advise and analyze_plan must read the same pasted plan the same way, or
+// folding one into the other later changes answers.
+func TestAdviseAndAnalyzePlanAgreeOnASuppliedPlan(t *testing.T) {
+	c := setupOfflineTest(t)
+	args := map[string]any{
+		"sql": "SELECT * FROM users WHERE email = 'a@b'",
+		"plan_json": map[string]any{"Plan": map[string]any{
+			"Node Type": "Seq Scan", "Relation Name": "users", "Schema": "public",
+			"Plan Rows": 50000.0, "Total Cost": 1234.0,
+		}},
+	}
+	decode := func(tool string) map[string]any {
+		t.Helper()
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(callTool(t, c, tool, args)), &payload); err != nil {
+			t.Fatalf("%s: not JSON: %v", tool, err)
+		}
+		return payload
+	}
+
+	adv, ap := decode("advise"), decode("analyze_plan")
+	for _, key := range []string{"plan_warnings", "advice", "index_suggestions"} {
+		if !reflect.DeepEqual(adv[key], ap[key]) {
+			t.Errorf("%s differs:\nadvise:       %v\nanalyze_plan: %v", key, adv[key], ap[key])
+		}
+	}
+}
+
+// Both flags name a plan, and they name different ones: a plan captured on
+// prod, and whatever EXPLAIN ANALYZE would produce here and now. Silently
+// picking one is worse than refusing.
+func TestAdvise_RejectsAnalyzeWithASuppliedPlan(t *testing.T) {
+	srv := NewOfflineServer(loadDemoSchema(t), lint.DefaultConfig())
+	srv.pool = &pgxpool.Pool{}
+
+	var req mcp.CallToolRequest
+	req.Params.Arguments = map[string]any{
+		"sql": "SELECT 1", "analyze": true,
+		"plan_json": map[string]any{"Plan": map[string]any{"Node Type": "Result"}},
+	}
+	res, err := srv.handleAdvise(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Fatal("analyze together with plan_json was accepted")
+	}
+	if txt, ok := res.Content[0].(mcp.TextContent); !ok || !strings.Contains(txt.Text, "plan_json") {
+		t.Errorf("error should name the conflict: %v", res.Content)
+	}
+}
+
+// A supplied plan wins over EXPLAIN. The proof is mechanical: the pool here is
+// a zero value, so taking the EXPLAIN path at all would panic.
+func TestAdvise_SuppliedPlanShortCircuitsExplain(t *testing.T) {
+	srv := NewOfflineServer(loadDemoSchema(t), lint.DefaultConfig())
+	srv.pool = &pgxpool.Pool{}
+
+	var req mcp.CallToolRequest
+	req.Params.Arguments = map[string]any{
+		"sql": "SELECT * FROM users",
+		"plan_json": map[string]any{"Plan": map[string]any{
+			"Node Type": "Seq Scan", "Relation Name": "users", "Schema": "public",
+			"Plan Rows": 50000.0,
+		}},
+	}
+	res, err := srv.handleAdvise(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("supplied plan rejected: %v", res.Content)
+	}
+
+	// advise records an EXPLAIN failure rather than returning an error, so the
+	// payload is what says which path ran
+	var payload map[string]any
+	if txt, ok := res.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(txt.Text), &payload); err != nil {
+			t.Fatalf("not JSON: %v", err)
+		}
+	}
+	if _, attempted := payload["explain_error"]; attempted {
+		t.Error("EXPLAIN was attempted despite plan_json")
+	}
+	if _, read := payload["plan_warnings"]; !read {
+		t.Errorf("the supplied plan was not read: %v", payload)
+	}
+}
+
+// A plan the caller meant to pass but malformed must fail loudly, not fall
+// back to "no plan" and answer a smaller question.
+func TestAdvise_MalformedPlanIsAnError(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "advise", map[string]any{
+		"sql": "SELECT 1", "plan_json": map[string]any{"unrelated": "garbage"},
+	})
+	if !strings.Contains(out, "parse error") {
+		t.Errorf("expected a parse error, got: %s", out)
+	}
+}
+
+// EXPLAIN (FORMAT JSON) returns an array, and that is what people paste. The
+// only coverage of the array shape today is analyze_plan's, and analyze_plan is
+// about to be folded away.
+func TestAdvise_AcceptsArrayShapeAndEncodedPlan(t *testing.T) {
+	c := setupOfflineTest(t)
+	array := []any{map[string]any{"Plan": map[string]any{
+		"Node Type": "Seq Scan", "Relation Name": "users", "Schema": "public",
+		"Plan Rows": 50000.0, "Total Cost": 1234.0,
+	}}}
+	encoded, err := json.Marshal(array)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, plan := range map[string]any{
+		"array":                        array,
+		"array re-encoded as a string": string(encoded),
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := callTool(t, c, "advise", map[string]any{
+				"sql": "SELECT * FROM users", "plan_json": plan,
+			})
+			if !strings.Contains(out, "plan_warnings") {
+				t.Errorf("plan not read: %s", out)
+			}
+		})
+	}
+}
+
+// A text plan is not JSON, and the unmarshal error it produces explains
+// nothing. Say what the field wants.
+func TestAdvise_TextPlanSaysWhatIsWanted(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "advise", map[string]any{
+		"sql":       "SELECT * FROM users",
+		"plan_json": "Seq Scan on users  (cost=0.00..1234.00 rows=50000 width=100)",
+	})
+	if !strings.Contains(out, "not the text plan") {
+		t.Errorf("unhelpful error for a pasted text plan: %s", out)
+	}
+}
+
+// Offline, analyze cannot produce a plan, so a caller passing both has asked
+// for something fully answerable. Refusing it would be pedantry.
+func TestAdvise_OfflineAcceptsAnalyzeBesideAPlan(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "advise", map[string]any{
+		"sql": "SELECT * FROM users", "analyze": true,
+		"plan_json": map[string]any{"Plan": map[string]any{
+			"Node Type": "Seq Scan", "Relation Name": "users", "Schema": "public",
+			"Plan Rows": 50000.0,
+		}},
+	})
+	if !strings.Contains(out, "plan_warnings") {
+		t.Errorf("the supplied plan was refused offline: %s", out)
+	}
+	if !strings.Contains(out, "analyze needs a database connection") {
+		t.Errorf("no note that analyze was ignored: %s", out)
+	}
+}
+
+// The route to plan advice must survive a query that already has index
+// suggestions -- offline those come from the query text alone, so they are the
+// common case, not the rare one.
+func TestAdvise_RouteHintSurvivesIndexSuggestions(t *testing.T) {
+	c := setupOfflineTest(t)
+	var decoded map[string]any
+	out := callTool(t, c, "advise", map[string]any{"sql": "SELECT * FROM tasks WHERE title = 'x'"})
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if _, has := decoded["index_suggestions"]; !has {
+		t.Fatal("fixture no longer produces index suggestions; pick another query")
+	}
+	meta, _ := decoded["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if !strings.Contains(hint, "plan_json") {
+		t.Errorf("index suggestions buried the route to plan advice: %q", hint)
 	}
 }

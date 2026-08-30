@@ -69,17 +69,21 @@ func (s *Server) adviseTool() mcp.Tool {
 
 	opts := []mcp.ToolOption{
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL query.")),
+		mcp.WithAny("plan_json",
+			mcp.Description("An EXPLAIN plan you already have, pasted by the user or captured in CI: the [{\"Plan\": ...}] array EXPLAIN (FORMAT JSON) returns, or the unwrapped {\"Plan\": ...} object. A JSON string of either is accepted too, since clients re-encode structured arguments. Read as given; advise never re-runs it."),
+			func(schema map[string]any) { schema["type"] = []string{"object", "array", "string"} },
+		),
 		mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
 	}
 	if s.pool == nil {
 		opts = append(opts,
-			mcp.WithDescription("One-shot review of a single query: validation and index suggestions from the snapshot. Needs no database connection and executes nothing -- plan-shape advice does need one, and is absent here. "+returns),
+			mcp.WithDescription("One-shot review of a single query: validation and index suggestions from the snapshot, plus plan-shape advice and plan warnings when you pass plan_json -- a plan the user pasted or CI captured. Needs no database connection and executes nothing; without plan_json there is simply no plan to read. "+returns),
 			annSnapshot,
 		)
 	} else {
 		opts = append(opts,
-			mcp.WithDescription("One-shot review of a single query: validation, plan shape, and index suggestions. analyze=true runs EXPLAIN ANALYZE, which EXECUTES the SQL in a rolled-back transaction -- writes do not persist, but their work and any triggers still run. "+returns),
-			mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query).")),
+			mcp.WithDescription("One-shot review of a single query: validation, plan shape, and index suggestions. Pass plan_json to interpret a plan you already hold; otherwise advise runs EXPLAIN itself. analyze=true runs EXPLAIN ANALYZE, which EXECUTES the SQL in a rolled-back transaction -- writes do not persist, but their work and any triggers still run, and it cannot be combined with plan_json. "+returns),
+			mcp.WithBoolean("analyze", mcp.Description("Run EXPLAIN ANALYZE (executes the query). Not with plan_json.")),
 			annLiveExec,
 		)
 	}
@@ -159,8 +163,8 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			// returns and the unwrapped {"Plan": ...} object; the schema must say so
 			// or input validation rejects the array shape
 			mcp.WithAny("plan_json", mcp.Required(),
-				mcp.Description("EXPLAIN output in JSON format (EXPLAIN (FORMAT JSON)): the [{\"Plan\": ...}] array or the unwrapped {\"Plan\": ...} object."),
-				func(schema map[string]any) { schema["type"] = []string{"object", "array"} },
+				mcp.Description("EXPLAIN output in JSON format (EXPLAIN (FORMAT JSON)): the [{\"Plan\": ...}] array or the unwrapped {\"Plan\": ...} object, or a JSON string of either."),
+				func(schema map[string]any) { schema["type"] = []string{"object", "array", "string"} },
 			),
 			mcp.WithBoolean("include_index_suggestions", mcp.DefaultBool(true), mcp.Description("Include index suggestions (default true).")),
 			annSnapshot,
