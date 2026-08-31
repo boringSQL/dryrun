@@ -9,7 +9,6 @@ import (
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
@@ -148,11 +147,10 @@ func rewriteCreateIndex(idx *pg_query.IndexStmt, names *nameAllocator) (steps []
 	return runnable([]string{s + ";"}), c.Idxname
 }
 
-// PG 12+ skips the scan when a validated CHECK proves no NULLs; below 12 there
-// is no such shortcut, so there is nothing to hand back.
-func rewriteSetNotNull(stmt *pg_query.AlterTableStmt, col string, pgVersion *dryrun.PgVersion, names *nameAllocator) []string {
+// A validated CHECK proves no NULLs, which lets SET NOT NULL skip the scan.
+func rewriteSetNotNull(stmt *pg_query.AlterTableStmt, col string, names *nameAllocator) []string {
 	rel := stmt.GetRelation()
-	if rel == nil || col == "" || pgVersion == nil || pgVersion.Major < 12 {
+	if rel == nil || col == "" {
 		return nil
 	}
 	// ONLY and IF EXISTS change what the rewrite can promise; both are

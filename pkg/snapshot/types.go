@@ -424,7 +424,7 @@ type IndexActivity struct {
 // pg_stat_database counters for current_database(). Nil means the read failed or was
 // never attempted, not a real zero. These are cluster facts riding a per-node,
 // per-database doc: repeated once per database, and a standby's slot list is normally
-// empty. ChecksumFailures is PG12+ (this repo's floor), so no version probe.
+// empty. ChecksumFailures is PG12+, below the supported floor, so no version probe.
 type DatabaseActivity struct {
 	Deadlocks        int64      `json:"deadlocks"`
 	TempFiles        int64      `json:"temp_files"`
@@ -439,8 +439,8 @@ type DatabaseActivity struct {
 }
 
 // One row of pg_replication_slots: an inactive/lost slot pins WAL until the disk fills.
-// WalStatus is nil pre-PG13 (no such column); SafeWalSize is also nil under the default
-// max_slot_wal_keep_size = -1, so nil is the modal case, not "couldn't check".
+// WalStatus is nil only below the supported floor; SafeWalSize is nil on any version
+// under the default max_slot_wal_keep_size = -1 — nil is the modal case.
 type ReplicationSlotActivity struct {
 	SlotName    string  `json:"slot_name"`
 	SlotType    string  `json:"slot_type"`
@@ -636,8 +636,8 @@ type (
 		ValueCardinalitySeen int    `json:"value_cardinality_seen"`
 	}
 
-	// One pg_stat_statements_info read. The view is PG14+; on PG13 the whole
-	// struct is absent (nil), never zero — a zero would invent a reset epoch.
+	// One pg_stat_statements_info read. The view is pgss 1.9+; below that the
+	// whole struct is absent (nil), never zero — a zero would invent a reset epoch.
 	QueryStatsInfo struct {
 		StatsReset time.Time `json:"stats_reset"`
 		Dealloc    int64     `json:"dealloc"`

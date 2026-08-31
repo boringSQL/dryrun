@@ -76,9 +76,9 @@ func queryStatsCaveats(latest, previous []schema.QueryStatsSnapshot) []string {
 					node, humanDuration(window), snap.InfoAfter.StatsReset.UTC().Format(time.RFC3339)))
 			}
 		} else if snap.InfoAfter == nil {
-			// PG13 has no info view; fetchPgssInfo also returns nil on read failure.
+			// pgss < 1.9 has no info view; fetchPgssInfo also returns nil on read failure.
 			scope = append(scope, fmt.Sprintf(
-				"reset epoch and eviction count are unknown for %s (pg_stat_statements_info is unreadable or the node predates PG14), so the counters' age cannot be established", node))
+				"reset epoch and eviction count are unknown for %s (pg_stat_statements_info is unreadable or pg_stat_statements is older than 1.9), so the counters' age cannot be established", node))
 		}
 
 		if c, ok := regresqlMetaCaveat(node, snap); ok {
@@ -153,7 +153,7 @@ func crossNodeWindowCaveat(latest []schema.QueryStatsSnapshot) string {
 }
 
 // trackAllCaveat qualifies a track = 'all' capture: filtered captures no
-// longer double count; the split-era fields and unfiltered paths (PG13,
+// longer double count; the split-era fields and unfiltered paths (pgss < 1.9,
 // pre-filter captures) still need the old warnings.
 func trackAllCaveat(node string, snap schema.QueryStatsSnapshot) string {
 	for _, q := range snap.Queries {
@@ -168,7 +168,7 @@ func trackAllCaveat(node string, snap schema.QueryStatsSnapshot) string {
 			"track = 'all' on %s: nested statements were excluded at capture (toplevel filter), so no time is double counted — but work done inside functions and triggers is invisible here, exactly as under track = 'top'; 'all' now only adds pg_stat_statements entry pressure", node)
 	}
 	return fmt.Sprintf(
-		"track = 'all' on %s but this capture carries no top-level split: either nothing ran nested, or pg_stat_statements predates 1.9 (PG14), or the capture predates the toplevel filter — in the latter two cases nested time is counted both in its own row and in the caller's, so shares are understated", node)
+		"track = 'all' on %s but this capture carries no top-level split: either nothing ran nested, or pg_stat_statements predates 1.9, or the capture predates the toplevel filter — in the latter two cases nested time is counted both in its own row and in the caller's, so shares are understated", node)
 }
 
 // changeCaveats reports settings that moved between a node's last two

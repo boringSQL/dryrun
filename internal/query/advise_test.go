@@ -45,7 +45,7 @@ func TestAdviseSeqScan_BloatedIndex(t *testing.T) {
 	filter := "(user_id = 42)"
 	node := &PlanNode{NodeType: "Seq Scan", RelationName: strp("orders"), Schema: strp("public"), PlanRows: 50000, Filter: &filter}
 
-	advice := Advise(node, a, nil)
+	advice := Advise(node, a)
 	var found bool
 	for _, ad := range advice {
 		if strings.Contains(ad.Issue, "bloated") {
@@ -70,7 +70,7 @@ func TestAdviseSeqScan_HealthyIndex(t *testing.T) {
 	filter := "(user_id = 42)"
 	node := &PlanNode{NodeType: "Seq Scan", RelationName: strp("orders"), Schema: strp("public"), PlanRows: 50000, Filter: &filter}
 
-	advice := Advise(node, a, nil)
+	advice := Advise(node, a)
 	for _, ad := range advice {
 		if strings.Contains(ad.Issue, "bloated") {
 			t.Error("should not report bloat for healthy index")
@@ -91,7 +91,7 @@ func TestAdviseIndexScanBloat(t *testing.T) {
 		NodeType: "Index Scan", RelationName: strp("orders"), Schema: strp("public"),
 		IndexName: strp("idx_orders_user_id"), PlanRows: 1000,
 	}
-	advice := Advise(node, a, nil)
+	advice := Advise(node, a)
 	var found bool
 	for _, ad := range advice {
 		if strings.Contains(ad.Issue, "bloated") && strings.Contains(ad.Issue, "idx_orders_user_id") {
@@ -117,7 +117,7 @@ func TestAdviseIndexScanBloat_NoBloat(t *testing.T) {
 		NodeType: "Index Scan", RelationName: strp("orders"), Schema: strp("public"),
 		IndexName: strp("idx_orders_user_id"), PlanRows: 1000,
 	}
-	for _, ad := range Advise(node, a, nil) {
+	for _, ad := range Advise(node, a) {
 		if strings.Contains(ad.Issue, "bloated") {
 			t.Error("should not report bloat for healthy index")
 		}
@@ -133,7 +133,7 @@ func TestAdviseIndexOnlyScanBloat(t *testing.T) {
 		IndexName: strp("idx_orders_user_id"), PlanRows: 1000,
 	}
 	var found bool
-	for _, ad := range Advise(node, a, nil) {
+	for _, ad := range Advise(node, a) {
 		if strings.Contains(ad.Issue, "bloated") {
 			found = true
 		}

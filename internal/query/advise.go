@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/bloat"
 	"github.com/boringsql/dryrun/pkg/jit"
@@ -21,12 +20,12 @@ type Advice struct {
 }
 
 // Walks plan tree, with per-node seq_scan breakdown when merged activity present
-func Advise(plan *PlanNode, a *schema.AnnotatedSchema, pgVersion *dryrun.PgVersion) []Advice {
+func Advise(plan *PlanNode, a *schema.AnnotatedSchema) []Advice {
 	var advice []Advice
 	snap := a.Schema
-	walkForAdvice(plan, a, pgVersion, &advice)
+	walkForAdvice(plan, a, &advice)
 
-	if suggestions, err := SuggestIndex("", snap, plan, pgVersion); err == nil && len(suggestions) > 0 {
+	if suggestions, err := SuggestIndex("", snap, plan); err == nil && len(suggestions) > 0 {
 		for i := range advice {
 			if advice[i].Table == nil {
 				continue
@@ -74,19 +73,19 @@ func perNodeBreakdown(a *schema.AnnotatedSchema, qualified string) string {
 	return strings.Join(lines, "\n")
 }
 
-func walkForAdvice(node *PlanNode, a *schema.AnnotatedSchema, pgVersion *dryrun.PgVersion, advice *[]Advice) {
-	adviseSeqScan(node, a, pgVersion, advice)
-	adviseNestedLoopSeqScan(node, pgVersion, advice)
-	adviseSort(node, a.Schema, pgVersion, advice)
+func walkForAdvice(node *PlanNode, a *schema.AnnotatedSchema, advice *[]Advice) {
+	adviseSeqScan(node, a, advice)
+	adviseNestedLoopSeqScan(node, advice)
+	adviseSort(node, a.Schema, advice)
 	adviseIndexScanBloat(node, a, advice)
 	adviseCTE(node, advice)
 
 	for i := range node.Children {
-		walkForAdvice(&node.Children[i], a, pgVersion, advice)
+		walkForAdvice(&node.Children[i], a, advice)
 	}
 }
 
-func adviseSeqScan(node *PlanNode, a *schema.AnnotatedSchema, pgVersion *dryrun.PgVersion, advice *[]Advice) {
+func adviseSeqScan(node *PlanNode, a *schema.AnnotatedSchema, advice *[]Advice) {
 	if node.NodeType != "Seq Scan" || node.RelationName == nil || node.PlanRows < 10_000 {
 		return
 	}
@@ -197,11 +196,11 @@ func adviseSeqScan(node *PlanNode, a *schema.AnnotatedSchema, pgVersion *dryrun.
 		Table:          strp(qualified),
 		Recommendation: recommendation,
 		DDL:            ddl,
-		VersionNote:    versionNoteForIndex(pgVersion),
+		VersionNote:    versionNoteForIndex(),
 	})
 }
 
-func adviseNestedLoopSeqScan(node *PlanNode, pgVersion *dryrun.PgVersion, advice *[]Advice) {
+func adviseNestedLoopSeqScan(node *PlanNode, advice *[]Advice) {
 	if node.NodeType != "Nested Loop" || len(node.Children) < 2 {
 		return
 	}
@@ -233,11 +232,11 @@ func adviseNestedLoopSeqScan(node *PlanNode, pgVersion *dryrun.PgVersion, advice
 		Table:          strp(qualified),
 		Recommendation: "Add an index on the join/filter column of the inner table to convert the seq scan to an index scan.",
 		DDL:            ddl,
-		VersionNote:    versionNoteForIndex(pgVersion),
+		VersionNote:    versionNoteForIndex(),
 	})
 }
 
-func adviseSort(node *PlanNode, _ *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion, advice *[]Advice) {
+func adviseSort(node *PlanNode, _ *schema.SchemaSnapshot, advice *[]Advice) {
 	if node.NodeType != "Sort" || node.PlanRows < 10_000 || len(node.SortKey) == 0 {
 		return
 	}
@@ -259,7 +258,7 @@ func adviseSort(node *PlanNode, _ *schema.SchemaSnapshot, pgVersion *dryrun.PgVe
 		Table:          strp(qualified),
 		Recommendation: "Consider an index matching the sort order to avoid an explicit sort step.",
 		DDL:            strp(ddl),
-		VersionNote:    versionNoteForIndex(pgVersion),
+		VersionNote:    versionNoteForIndex(),
 	})
 }
 
@@ -309,17 +308,10 @@ func suggestIndexType(table, colType, colName string) (string, string) {
 	}
 }
 
-func versionNoteForIndex(pgVersion *dryrun.PgVersion) *string {
-	if pgVersion == nil {
-		return nil
-	}
-	if pgVersion.Major >= 13 {
-		return strp("PG 13+: B-tree deduplication is enabled by default, reducing index size for low-cardinality columns.")
-	}
-	if pgVersion.Major >= 11 {
-		return strp("PG 11+: Use INCLUDE for covering indexes to enable index-only scans.")
-	}
-	return nil
+// Both facts hold on every supported major, so no version branching.
+func versionNoteForIndex() *string {
+	return strp("B-tree deduplication is on by default, which shrinks indexes on low-cardinality columns. " +
+		"Use INCLUDE for covering indexes to enable index-only scans.")
 }
 
 func adviseIndexScanBloat(node *PlanNode, a *schema.AnnotatedSchema, advice *[]Advice) {

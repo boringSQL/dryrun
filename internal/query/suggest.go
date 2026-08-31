@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
@@ -19,7 +18,7 @@ type IndexSuggestion struct {
 	EstimatedImpact  string   `json:"estimated_impact"`
 }
 
-func SuggestIndex(sql string, snap *schema.SchemaSnapshot, plan *PlanNode, pgVersion *dryrun.PgVersion) ([]IndexSuggestion, error) {
+func SuggestIndex(sql string, snap *schema.SchemaSnapshot, plan *PlanNode) ([]IndexSuggestion, error) {
 	parsed, err := ParseSQL(sql)
 	if err != nil {
 		return nil, err
@@ -28,15 +27,15 @@ func SuggestIndex(sql string, snap *schema.SchemaSnapshot, plan *PlanNode, pgVer
 	var suggestions []IndexSuggestion
 
 	if plan != nil {
-		suggestFromPlan(plan, snap, pgVersion, &suggestions)
+		suggestFromPlan(plan, snap, &suggestions)
 	}
-	suggestFromQueryStructure(parsed, snap, pgVersion, &suggestions)
+	suggestFromQueryStructure(parsed, snap, &suggestions)
 	dedupSuggestions(&suggestions)
 
 	return suggestions, nil
 }
 
-func suggestFromPlan(node *PlanNode, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion, suggestions *[]IndexSuggestion) {
+func suggestFromPlan(node *PlanNode, snap *schema.SchemaSnapshot, suggestions *[]IndexSuggestion) {
 	if node.NodeType == "Seq Scan" && node.PlanRows >= 1000 && node.RelationName != nil {
 		tableName := *node.RelationName
 		schemaName := "public"
@@ -94,11 +93,11 @@ func suggestFromPlan(node *PlanNode, snap *schema.SchemaSnapshot, pgVersion *dry
 	}
 
 	for i := range node.Children {
-		suggestFromPlan(&node.Children[i], snap, pgVersion, suggestions)
+		suggestFromPlan(&node.Children[i], snap, suggestions)
 	}
 }
 
-func suggestFromQueryStructure(parsed *ParsedQuery, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion, suggestions *[]IndexSuggestion) {
+func suggestFromQueryStructure(parsed *ParsedQuery, snap *schema.SchemaSnapshot, suggestions *[]IndexSuggestion) {
 	for _, fc := range parsed.Info.FilterColumns {
 		var ref *ReferencedTable
 		if fc.Table != nil {

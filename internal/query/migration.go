@@ -6,7 +6,6 @@ import (
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 
-	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/jit"
 )
@@ -38,7 +37,7 @@ const (
 )
 
 // parses DDL and returns safety assessments per statement
-func CheckMigration(ddl string, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion) ([]MigrationCheck, error) {
+func CheckMigration(ddl string, snap *schema.SchemaSnapshot) ([]MigrationCheck, error) {
 	result, err := pg_query.Parse(ddl)
 	if err != nil {
 		return nil, fmt.Errorf("DDL parse error: %w", err)
@@ -55,13 +54,13 @@ func CheckMigration(ddl string, snap *schema.SchemaSnapshot, pgVersion *dryrun.P
 		case *pg_query.Node_AlterTableStmt:
 			for _, cmdNode := range n.AlterTableStmt.Cmds {
 				if cmd, ok := cmdNode.Node.(*pg_query.Node_AlterTableCmd); ok {
-					if check := analyzeAlterTableCmd(cmd.AlterTableCmd, n.AlterTableStmt, snap, pgVersion, names); check != nil {
+					if check := analyzeAlterTableCmd(cmd.AlterTableCmd, n.AlterTableStmt, snap, names); check != nil {
 						checks = append(checks, *check)
 					}
 				}
 			}
 		case *pg_query.Node_IndexStmt:
-			checks = append(checks, analyzeCreateIndex(n.IndexStmt, snap, pgVersion, names))
+			checks = append(checks, analyzeCreateIndex(n.IndexStmt, snap, names))
 		case *pg_query.Node_RenameStmt:
 			checks = append(checks, analyzeRename(snap))
 		}
@@ -76,7 +75,7 @@ func CheckMigration(ddl string, snap *schema.SchemaSnapshot, pgVersion *dryrun.P
 	return checks, nil
 }
 
-func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion, names *nameAllocator) *MigrationCheck {
+func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, snap *schema.SchemaSnapshot, names *nameAllocator) *MigrationCheck {
 	tableName := ""
 	if stmt.Relation != nil {
 		if stmt.Relation.Schemaname != "" {
@@ -91,7 +90,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 
 	switch subtype {
 	case pg_query.AlterTableType_AT_AddColumn:
-		return analyzeAddColumn(cmd, tableName, tableSize, rowEstimate, pgVersion)
+		return analyzeAddColumn(cmd, tableName, tableSize, rowEstimate)
 	case pg_query.AlterTableType_AT_DropColumn:
 		return &MigrationCheck{
 			Operation: "DROP COLUMN", Table: strp(tableName), Safety: SafetySafe,
@@ -100,7 +99,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			Recommendation: "Metadata-only operation. Column space reclaimed by VACUUM.",
 		}
 	case pg_query.AlterTableType_AT_SetNotNull:
-		return analyzeSetNotNull(cmd.Name, tableName, tableSize, rowEstimate, pgVersion, snap, stmt, names)
+		return analyzeSetNotNull(cmd.Name, tableName, tableSize, rowEstimate, snap, stmt, names)
 	case pg_query.AlterTableType_AT_AlterColumnType:
 		colName := cmd.Name
 		e := jit.AlterColumnType(tableName, colName, "<new_type>")
@@ -124,7 +123,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 	return nil
 }
 
-func analyzeAddColumn(cmd *pg_query.AlterTableCmd, tableName string, tableSize *string, rowEstimate *float64, pgVersion *dryrun.PgVersion) *MigrationCheck {
+func analyzeAddColumn(cmd *pg_query.AlterTableCmd, tableName string, tableSize *string, rowEstimate *float64) *MigrationCheck {
 	hasDefault := false
 	colName := cmd.Name
 	colType := "unknown"
@@ -156,18 +155,13 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, tableName string, tableSize *
 		safety = SafetySafe
 		recommendation = "Nullable column without DEFAULT - metadata-only change."
 		lockDuration = "brief (milliseconds)"
-	} else if pgVersion != nil && pgVersion.Major >= 11 {
+	} else {
 		safety = SafetyCaution
 		e := jit.AddColumnVolatileDefault(tableName, colName, colType, "<default>")
-		recommendation = "Column with DEFAULT on PG 11+ - safe for immutable defaults (metadata-only). " +
+		recommendation = "Column with DEFAULT is safe for immutable defaults (metadata-only). " +
 			"Volatile defaults (now(), random()) still trigger a full table rewrite.\n\n" +
 			"If the default IS volatile:\n" + e.Fix
 		lockDuration = "brief for immutable default, long for volatile"
-	} else {
-		e := jit.AddColumnPrePG11(tableName, colName, colType, "<default>")
-		safety = SafetyDangerous
-		recommendation = e.String()
-		lockDuration = "proportional to table size"
 	}
 
 	var rollback *string
@@ -179,9 +173,8 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, tableName string, tableSize *
 		Operation: "ADD COLUMN", Table: strp(tableName), Safety: safety,
 		LockType: "ACCESS EXCLUSIVE", LockDuration: lockDuration,
 		TableSize: tableSize, RowEstimate: rowEstimate,
-		Recommendation:  recommendation,
-		VersionBehavior: versionBehaviorAddColumn(pgVersion),
-		RollbackDDL:     rollback,
+		Recommendation: recommendation,
+		RollbackDDL:    rollback,
 	}
 }
 
@@ -203,24 +196,16 @@ func deparse(typeName *pg_query.TypeName) string {
 	return strings.Join(parts, ".")
 }
 
-func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate *float64, pgVersion *dryrun.PgVersion, snap *schema.SchemaSnapshot, stmt *pg_query.AlterTableStmt, names *nameAllocator) *MigrationCheck {
-	pgMajor := 0
-	if pgVersion != nil {
-		pgMajor = pgVersion.Major
-	}
-
+func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate *float64, snap *schema.SchemaSnapshot, stmt *pg_query.AlterTableStmt, names *nameAllocator) *MigrationCheck {
 	displayCol := colName
 	if displayCol == "" {
 		displayCol = "<col>"
 	}
-	e := jit.SetNotNull(tableName, displayCol, pgMajor)
+	e := jit.SetNotNull(tableName, displayCol)
 
-	safety := SafetyDangerous
-	if pgMajor >= 12 {
-		safety = SafetyCaution
-	}
+	safety := SafetyCaution
 
-	safer := rewriteSetNotNull(stmt, colName, pgVersion, names)
+	safer := rewriteSetNotNull(stmt, colName, names)
 	rec := e.String()
 	if len(safer) > 0 {
 		// two differently-named migrations in one response is worse than one
@@ -233,10 +218,10 @@ func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate
 	return &MigrationCheck{
 		Operation: "SET NOT NULL", Table: strp(tableName), Safety: safety,
 		LockType:     "ACCESS EXCLUSIVE",
-		LockDuration: "scan duration (unless CHECK exists on PG 12+)",
+		LockDuration: "scan duration (skipped when a valid CHECK proves no NULLs)",
 		TableSize:    tableSize, RowEstimate: rowEstimate,
 		Recommendation:  rec,
-		VersionBehavior: strp("PG 12+: skips scan if a valid CHECK (col IS NOT NULL) exists."),
+		VersionBehavior: strp("Scan is skipped if a valid CHECK (col IS NOT NULL) exists."),
 		RollbackDDL:     strp("ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL;"),
 		SaferSQL:        safer,
 	}
@@ -328,7 +313,7 @@ func constraintColumns(con *pg_query.Constraint) []string {
 	return []string{"<cols>"}
 }
 
-func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, pgVersion *dryrun.PgVersion, names *nameAllocator) MigrationCheck {
+func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, names *nameAllocator) MigrationCheck {
 	tableName := ""
 	if idx.Relation != nil {
 		if idx.Relation.Schemaname != "" {
@@ -438,16 +423,6 @@ func lookupTableStats(snap *schema.SchemaSnapshot, tableName string) (*string, *
 	_ = schemaPart
 	_ = snap
 	return nil, nil
-}
-
-func versionBehaviorAddColumn(pgVersion *dryrun.PgVersion) *string {
-	if pgVersion == nil {
-		return nil
-	}
-	if pgVersion.Major >= 11 {
-		return strp("PG 11+: Immutable DEFAULT is metadata-only (no table rewrite).")
-	}
-	return strp("PG <11: Any DEFAULT triggers a full table rewrite.")
 }
 
 func stringList(nodes []*pg_query.Node) []string {

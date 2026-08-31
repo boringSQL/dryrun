@@ -1,6 +1,6 @@
 services:
   pg-a:
-    image: postgres:16-alpine
+    image: ${DRYRUN_TEST_PG:-postgres:16-alpine}
     environment:
       POSTGRES_PASSWORD: dryrun
       POSTGRES_DB: app
@@ -17,7 +17,7 @@ services:
       retries: 30
 
   pg-b:
-    image: postgres:16-alpine
+    image: ${DRYRUN_TEST_PG:-postgres:16-alpine}
     environment:
       POSTGRES_PASSWORD: dryrun
       POSTGRES_DB: app
@@ -30,7 +30,7 @@ services:
       retries: 30
 
   pg-c:
-    image: postgres:16-alpine
+    image: ${DRYRUN_TEST_PG:-postgres:16-alpine}
     environment:
       POSTGRES_PASSWORD: dryrun
       POSTGRES_DB: app

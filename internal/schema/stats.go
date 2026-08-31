@@ -328,8 +328,8 @@ func fetchPlannerColumnStats(ctx context.Context, pool Querier) ([]ColumnStatsEn
 	})
 }
 
-// pg_stat_statements_info, PG14+. nil on PG13 or any read failure: absent is
-// not zero, or every PG13 row would claim a reset epoch it never had.
+// pg_stat_statements_info, pgss 1.9+. nil when absent/unreadable — absent is
+// not zero, or the row would claim a reset epoch it never had.
 func fetchPgssInfo(ctx context.Context, pool Querier) *QueryStatsInfo {
 	var info QueryStatsInfo
 	if err := pool.QueryRow(ctx, q("fetch-pgss-info")).Scan(&info.StatsReset, &info.Dealloc); err != nil {
@@ -367,7 +367,7 @@ func fetchPgssTrack(ctx context.Context, pool Querier) *string {
 }
 
 // The toplevel variant filters nested rows in SQL (pgss 1.9+); the plain one
-// is for a pgss without the column (PG13, or < 1.9 after pg_upgrade).
+// is for a pgss without the column (< 1.9, e.g. left behind by pg_upgrade).
 func fetchQueryStats(ctx context.Context, pool Querier, hasToplevel, renamedBlkTime bool, ioTiming *bool, rowCap int) ([]qshape.Query, error) {
 	name := "fetch-query-stats"
 	if hasToplevel {
@@ -476,21 +476,10 @@ func fetchDatabaseActivity(ctx context.Context, pool Querier) *DatabaseActivity 
 	return &d
 }
 
-// wal_status/safe_wal_size (PG13+) are probed once, the same probe-then-branch shape
-// fetchQueryStats uses. ok=false only on read failure — a genuine "no slots" result is
-// ok=true with a nil slice, distinct from "never checked".
+// ok=false only on read failure — a genuine "no slots" result is ok=true with a
+// nil slice, distinct from "never checked".
 func fetchReplicationSlots(ctx context.Context, pool Querier) ([]ReplicationSlotActivity, bool) {
-	var hasWalStatus bool
-	if err := pool.QueryRow(ctx, q("fetch-has-wal-status")).Scan(&hasWalStatus); err != nil {
-		slog.Debug("replication slots unavailable; capturing without them", "error", err)
-		return nil, false
-	}
-
-	name := "fetch-replication-slots-no-wal-status"
-	if hasWalStatus {
-		name = "fetch-replication-slots"
-	}
-	rows, err := pool.Query(ctx, q(name))
+	rows, err := pool.Query(ctx, q("fetch-replication-slots"))
 	if err != nil {
 		slog.Debug("replication slots unavailable; capturing without them", "error", err)
 		return nil, false
@@ -498,10 +487,7 @@ func fetchReplicationSlots(ctx context.Context, pool Querier) ([]ReplicationSlot
 
 	slots, err := scanAll(rows, func(r pgx.Rows) (ReplicationSlotActivity, error) {
 		var s ReplicationSlotActivity
-		if hasWalStatus {
-			return s, r.Scan(&s.SlotName, &s.SlotType, &s.Active, &s.WalStatus, &s.SafeWalSize)
-		}
-		return s, r.Scan(&s.SlotName, &s.SlotType, &s.Active)
+		return s, r.Scan(&s.SlotName, &s.SlotType, &s.Active, &s.WalStatus, &s.SafeWalSize)
 	})
 	if err != nil {
 		slog.Debug("replication slots unavailable; capturing without them", "error", err)
@@ -510,9 +496,8 @@ func fetchReplicationSlots(ctx context.Context, pool Querier) ([]ReplicationSlot
 	return slots, true
 }
 
-// No version probe: pg_stat_replication predates the PG13 floor CapturePlannerStats
-// already enforces via pg_snapshot_xmax(). The single query branches primary/standby
-// in SQL — see fetch-replication-peers for why.
+// No version probe: pg_stat_replication predates every supported major. The
+// single query branches primary/standby in SQL — see fetch-replication-peers.
 func fetchReplicationPeers(ctx context.Context, pool Querier) ([]ReplicationPeerActivity, bool) {
 	rows, err := pool.Query(ctx, q("fetch-replication-peers"))
 	if err != nil {

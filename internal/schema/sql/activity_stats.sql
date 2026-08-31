@@ -59,17 +59,10 @@ SELECT d.deadlocks,
   FROM pg_catalog.pg_stat_database d
  WHERE d.datname = current_database()
 
--- name: fetch-has-wal-status
--- wal_status/safe_wal_size are PG13+; a pre-13 primary has neither column.
-SELECT current_setting('server_version_num')::int >= 130000
-
 -- name: fetch-replication-slots
+-- wal_status/safe_wal_size are PG13+, so no probe; safe_wal_size is still NULL
+-- under the default max_slot_wal_keep_size.
 SELECT slot_name, slot_type, active, wal_status, safe_wal_size
-  FROM pg_catalog.pg_replication_slots
- ORDER BY slot_name
-
--- name: fetch-replication-slots-no-wal-status
-SELECT slot_name, slot_type, active
   FROM pg_catalog.pg_replication_slots
  ORDER BY slot_name
 

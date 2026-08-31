@@ -123,8 +123,7 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 		return errResult(err.Error()), nil
 	}
 
-	pgVersion, _ := dryrun.ParsePgVersion(snap.PgVersion)
-	checks, err := query.CheckMigration(getArg(req, "ddl"), snap, &pgVersion)
+	checks, err := query.CheckMigration(getArg(req, "ddl"), snap)
 	if err != nil {
 		return errResult(fmt.Sprintf("DDL parse error: %v", err)), nil
 	}
@@ -184,14 +183,14 @@ type (
 )
 
 // A nil plan still leaves snapshot-based index suggestions.
-func planInsightsFor(annotated *schema.AnnotatedSchema, sql string, plan *query.PlanNode, includeIdx bool, pgVersion *dryrun.PgVersion) planInsights {
+func planInsightsFor(annotated *schema.AnnotatedSchema, sql string, plan *query.PlanNode, includeIdx bool) planInsights {
 	var out planInsights
 	if plan != nil {
 		out.warnings = query.DetectPlanWarnings(plan, annotated.Schema)
-		out.advice = query.Advise(plan, annotated, pgVersion)
+		out.advice = query.Advise(plan, annotated)
 	}
 	if includeIdx {
-		if suggestions, err := query.SuggestIndex(sql, annotated.Schema, plan, pgVersion); err == nil {
+		if suggestions, err := query.SuggestIndex(sql, annotated.Schema, plan); err == nil {
 			out.indexes = suggestions
 		}
 	}
@@ -225,8 +224,6 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 	sql := getArg(req, "sql")
 	includeIdx := getBoolArgDefault(req, "include_index_suggestions", true)
 	analyze := getBoolArg(req, "analyze")
-	pgVersion, _ := dryrun.ParsePgVersion(snap.PgVersion)
-
 	plan, supplied, err := suppliedPlan(req)
 	if err != nil {
 		return errResult(fmt.Sprintf("plan_json parse error: %v", err)), nil
@@ -254,7 +251,7 @@ func (s *Server) handleAdvise(ctx context.Context, req mcp.CallToolRequest) (*mc
 			plan = &result.Plan
 		}
 	}
-	insights := planInsightsFor(annotated, sql, plan, includeIdx, &pgVersion)
+	insights := planInsightsFor(annotated, sql, plan, includeIdx)
 
 	wrapper := map[string]any{}
 	if vErr != nil {

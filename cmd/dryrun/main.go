@@ -586,6 +586,10 @@ func connectDBProdFor(override string) (context.Context, *schema.DryRun, error) 
 		conn.Close()
 		return nil, nil, err
 	}
+	// Once per connect, so capture/take/mcp-serve warn too, not just probe.
+	if w := conn.FloorWarningFor(ctx); w != "" {
+		slog.Warn(w)
+	}
 	return ctx, conn, nil
 }
 

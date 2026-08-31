@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
@@ -55,8 +54,7 @@ func migrationTestSchema() *schema.SchemaSnapshot {
 
 func TestCheckMigrationAddColumn(t *testing.T) {
 	snap := migrationTestSchema()
-	pgVer := &dryrun.PgVersion{Major: 17, Minor: 0}
-	checks, err := CheckMigration("ALTER TABLE users ADD COLUMN age integer", snap, pgVer)
+	checks, err := CheckMigration("ALTER TABLE users ADD COLUMN age integer", snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,8 +71,7 @@ func TestCheckMigrationAddColumn(t *testing.T) {
 
 func TestCheckMigrationAddColumnWithDefault(t *testing.T) {
 	snap := migrationTestSchema()
-	pgVer := &dryrun.PgVersion{Major: 17, Minor: 0}
-	checks, err := CheckMigration("ALTER TABLE users ADD COLUMN age integer DEFAULT 0", snap, pgVer)
+	checks, err := CheckMigration("ALTER TABLE users ADD COLUMN age integer DEFAULT 0", snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +85,7 @@ func TestCheckMigrationAddColumnWithDefault(t *testing.T) {
 
 func TestCheckMigrationCreateIndex(t *testing.T) {
 	snap := migrationTestSchema()
-	checks, err := CheckMigration("CREATE INDEX idx_users_email ON users(email)", snap, nil)
+	checks, err := CheckMigration("CREATE INDEX idx_users_email ON users(email)", snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +99,7 @@ func TestCheckMigrationCreateIndex(t *testing.T) {
 
 func TestCheckMigrationCreateIndexConcurrently(t *testing.T) {
 	snap := migrationTestSchema()
-	checks, err := CheckMigration("CREATE INDEX CONCURRENTLY idx_users_email ON users(email)", snap, nil)
+	checks, err := CheckMigration("CREATE INDEX CONCURRENTLY idx_users_email ON users(email)", snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +113,7 @@ func TestCheckMigrationCreateIndexConcurrently(t *testing.T) {
 
 func TestCheckMigrationDropTable(t *testing.T) {
 	snap := migrationTestSchema()
-	checks, err := CheckMigration("DROP TABLE users", snap, nil)
+	checks, err := CheckMigration("DROP TABLE users", snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +127,7 @@ func TestCheckMigrationDropTable(t *testing.T) {
 
 func TestCheckMigrationRename(t *testing.T) {
 	snap := migrationTestSchema()
-	checks, err := CheckMigration("ALTER TABLE users RENAME TO customers", snap, nil)
+	checks, err := CheckMigration("ALTER TABLE users RENAME TO customers", snap)
 	if err != nil {
 		t.Fatal(err)
 	}

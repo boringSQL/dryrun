@@ -72,6 +72,39 @@ type ProbeResult struct {
 	VersionString string           `json:"version_string"`
 	Flavor        Flavor           `json:"flavor"`
 	Capabilities  Capabilities     `json:"capabilities"`
+	// A separate axis from Capabilities, which describes flavor, not version.
+	BelowFloor bool `json:"below_floor,omitempty"`
+}
+
+// Advisory only: capture still runs below the floor; what breaks is
+// pg_snapshot_xmax() in planner stats. Major == 0 means the banner did not
+// parse — unknown stays unknown rather than becoming a false warning.
+func BelowSupportedFloor(v dryrun.PgVersion) bool {
+	return v.Major > 0 && v.Major < dryrun.MinSupportedMajor
+}
+
+// FloorWarningFor returns the warning to show for this connection, or "". The
+// flavor probe runs only in the rare below-floor case: forks report their own
+// low versions in a PostgreSQL banner (Redshift says 8.0.2), so stay silent there.
+func (d *DryRun) FloorWarningFor(ctx context.Context) string {
+	var versionStr string
+	if err := d.pool.QueryRow(ctx, "SELECT version()").Scan(&versionStr); err != nil {
+		return ""
+	}
+	v, err := dryrun.ParsePgVersion(versionStr)
+	if err != nil || !BelowSupportedFloor(v) {
+		return ""
+	}
+	if flavor, err := DetectFlavorLive(ctx, d.pool); err == nil && flavor != FlavorPostgres {
+		return ""
+	}
+	return FloorWarning(v)
+}
+
+func FloorWarning(v dryrun.PgVersion) string {
+	return fmt.Sprintf(
+		"PostgreSQL %d is past end-of-life upstream and below dryrun's supported floor (%d); capture will continue but is untested and some streams may be unavailable",
+		v.Major, dryrun.MinSupportedMajor)
 }
 
 type PrivilegeReport struct {
@@ -132,6 +165,7 @@ func (d *DryRun) Probe(ctx context.Context) (*ProbeResult, error) {
 		VersionString: versionStr,
 		Flavor:        flavor,
 		Capabilities:  flavor.Capabilities(),
+		BelowFloor:    BelowSupportedFloor(version) && flavor == FlavorPostgres,
 	}, nil
 }
 

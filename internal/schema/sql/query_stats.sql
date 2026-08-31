@@ -1,6 +1,12 @@
 -- name: fetch-pg-stat-statements-installed
+-- No server_version_num gate: the hazard is the EXTENSION version, not the
+-- server major (pg_upgrade leaves old pgss behind on new servers).
 SELECT to_regclass('pg_stat_statements') IS NOT NULL
-       AND current_setting('server_version_num')::int >= 130000,
+       -- total_exec_time is pgss 1.8+; without it the projection cannot
+       -- compile, so an older pgss counts as not installed.
+       AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                    WHERE attrelid = to_regclass('pg_stat_statements')
+                      AND attname = 'total_exec_time' AND attnum > 0 AND NOT attisdropped),
        to_regclass('pg_stat_statements_info') IS NOT NULL,
        EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
                 WHERE attrelid = to_regclass('pg_stat_statements')
@@ -31,11 +37,10 @@ SELECT s.queryid, s.calls, s.query,
  LIMIT $1
 
 -- name: fetch-query-stats-toplevel
--- pgss 1.9+ only; separate query because an older pgss (PG13, or one left
--- below 1.9 by pg_upgrade) has no toplevel column and this would not compile. pgss also counts nested statements' time inside
--- the caller's total, so the filter avoids double counting and keeps churning
--- nested rows out of the row cap. Consequence: function/trigger work is
--- invisible even under track = 'all', exactly as under track = 'top'.
+-- pgss 1.9+ only; an older pgss has no toplevel column and this would not
+-- compile. The filter avoids double counting (pgss counts nested time inside
+-- the caller's total). Consequence: function/trigger work is invisible even
+-- under track = 'all', exactly as under track = 'top'.
 SELECT s.queryid, s.calls, s.query,
        s.total_exec_time, s.stddev_exec_time, s.rows,
        -- temp blocks: the sorts and hashes that spilled out of work_mem. Present in
@@ -58,7 +63,7 @@ SELECT s.queryid, s.calls, s.query,
  LIMIT $1
 
 -- name: fetch-pgss-info
--- PG14+; the view doesn't exist on PG13, so failure means absent, not zero
+-- pgss 1.9+; a lower pgss has no such view, so failure means absent, not zero
 SELECT stats_reset, dealloc FROM pg_stat_statements_info
 
 -- name: fetch-pgss-max

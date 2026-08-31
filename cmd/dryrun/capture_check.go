@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/boringsql/dryrun/internal/config"
+	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
 )
@@ -161,6 +162,9 @@ func checkNode(ctx context.Context, store *history.Store, key history.SnapshotKe
 		return r
 	}
 	r.PgVersion, r.ServerAddr, r.Started = node.PgVersion, node.ServerAddr, node.PostmasterStartTime
+	if v, err := dryrun.ParsePgVersion(node.PgVersion); err == nil && schema.BelowSupportedFloor(v) {
+		r.Warnings = append(r.Warnings, schema.FloorWarning(v))
+	}
 	r.Role = history.NodeRolePrimary
 	if node.IsStandby {
 		r.Role = history.NodeRoleStandby

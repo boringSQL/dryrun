@@ -107,7 +107,7 @@ func TestReplicationSlotsQueries_ParseAgainstLiveDB(t *testing.T) {
 	pool := livePool(t)
 	ctx := context.Background()
 
-	for _, name := range []string{"fetch-replication-slots", "fetch-replication-slots-no-wal-status"} {
+	for _, name := range []string{"fetch-replication-slots"} {
 		rows, err := pool.Query(ctx, q(name))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)

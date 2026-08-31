@@ -42,21 +42,6 @@ func AddColumnVolatileDefault(table, col, colType, defaultExpr string) Entry {
 	}
 }
 
-func AddColumnPrePG11(table, col, colType, defaultExpr string) Entry {
-	return Entry{
-		Status: "DANGEROUS, full table rewrite",
-		Reason: "On PG <11, ANY column DEFAULT triggers a full table rewrite under ACCESS EXCLUSIVE lock.",
-		Fix: fmt.Sprintf(
-			"  1. ALTER TABLE %s ADD COLUMN %s %s;\n"+
-				"  2. ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s;\n"+
-				"  3. UPDATE %s SET %s = %s WHERE %s IS NULL AND id BETWEEN ... AND ...; -- backfill in batches",
-			table, col, colType,
-			table, col, defaultExpr,
-			table, col, defaultExpr, col),
-		Note: "Upgrade to PG 11+ where immutable defaults are metadata-only.",
-	}
-}
-
 func AlterColumnType(table, col, newType string) Entry {
 	return Entry{
 		Status: "DANGEROUS: full table rewrite under ACCESS EXCLUSIVE",
@@ -76,33 +61,20 @@ func AlterColumnType(table, col, newType string) Entry {
 	}
 }
 
-func SetNotNull(table, col string, pgMajor int) Entry {
-	if pgMajor >= 12 {
-		return Entry{
-			Status: "DANGEROUS; full table scan under ACCESS EXCLUSIVE",
-			Reason: "SET NOT NULL scans every row to verify no NULLs. All queries block until the scan completes.",
-			Fix: fmt.Sprintf(
-				"  Safe pattern (PG 12+):\n"+
-					"  1. ALTER TABLE %s ADD CONSTRAINT chk_%s_nn CHECK (%s IS NOT NULL) NOT VALID;\n"+
-					"  2. ALTER TABLE %s VALIDATE CONSTRAINT chk_%s_nn;  -- allows concurrent DML\n"+
-					"  3. ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;    -- instant, skips scan\n"+
-					"  4. ALTER TABLE %s DROP CONSTRAINT chk_%s_nn;       -- cleanup",
-				table, col, col,
-				table, col,
-				table, col,
-				table, col),
-		}
-	}
+func SetNotNull(table, col string) Entry {
 	return Entry{
 		Status: "DANGEROUS; full table scan under ACCESS EXCLUSIVE",
 		Reason: "SET NOT NULL scans every row to verify no NULLs. All queries block until the scan completes.",
 		Fix: fmt.Sprintf(
-			"  No safe shortcut on PG <12. Before running:\n"+
-				"  1. SELECT count(*) FROM %s WHERE %s IS NULL;  -- check for violations\n"+
-				"  2. SELECT pg_size_pretty(pg_total_relation_size('%s'));  -- check table size\n"+
-				"  3. Run during low-traffic window.",
-			table, col, table),
-		Note: "On PG 12+, you can avoid the scan using a CHECK constraint trick. Consider upgrading.",
+			"  Safe pattern:\n"+
+				"  1. ALTER TABLE %s ADD CONSTRAINT chk_%s_nn CHECK (%s IS NOT NULL) NOT VALID;\n"+
+				"  2. ALTER TABLE %s VALIDATE CONSTRAINT chk_%s_nn;  -- allows concurrent DML\n"+
+				"  3. ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;    -- instant, skips scan\n"+
+				"  4. ALTER TABLE %s DROP CONSTRAINT chk_%s_nn;       -- cleanup",
+			table, col, col,
+			table, col,
+			table, col,
+			table, col),
 	}
 }
 

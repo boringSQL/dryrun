@@ -114,7 +114,7 @@ func TestCrossNodeWindowCaveatNeedsTwoKnownWindows(t *testing.T) {
 func TestNodeWindowRejectsUnusableTimestamps(t *testing.T) {
 	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
 	cases := map[string]schema.QueryStatsSnapshot{
-		"no info view (PG13)": {Node: schema.NodeIdentity{Source: "n", Timestamp: now}},
+		"no info view (pgss < 1.9)": {Node: schema.NodeIdentity{Source: "n", Timestamp: now}},
 		"zero reset": {
 			Node:      schema.NodeIdentity{Source: "n", Timestamp: now},
 			InfoAfter: &schema.QueryStatsInfo{},
@@ -313,7 +313,7 @@ func TestYoungCountersWarnButOldOnesDoNot(t *testing.T) {
 func TestUnknownEpochIsReportedNotSilent(t *testing.T) {
 	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
 	cases := map[string]schema.QueryStatsSnapshot{
-		"no info view at all": {Node: schema.NodeIdentity{Source: "pg13", Timestamp: now}},
+		"no info view at all": {Node: schema.NodeIdentity{Source: "old-pgss", Timestamp: now}},
 		"second probe failed": {
 			Node:       schema.NodeIdentity{Source: "partial", Timestamp: now},
 			InfoBefore: &schema.QueryStatsInfo{StatsReset: now.Add(-time.Hour)},

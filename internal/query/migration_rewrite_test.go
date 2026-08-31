@@ -4,13 +4,11 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
-
-	"github.com/boringsql/dryrun/internal/dryrun"
 )
 
-func rewriteFor(t *testing.T, ddl string, major int) []string {
+func rewriteFor(t *testing.T, ddl string) []string {
 	t.Helper()
-	checks, err := CheckMigration(ddl, migrationTestSchema(), &dryrun.PgVersion{Major: major})
+	checks, err := CheckMigration(ddl, migrationTestSchema())
 	if err != nil {
 		t.Fatalf("%s: %v", ddl, err)
 	}
@@ -215,7 +213,7 @@ func TestSaferSQL(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := rewriteFor(t, tc.ddl, 17)
+			got := rewriteFor(t, tc.ddl)
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %d statements, want %d:\n got: %#v\nwant: %#v", len(got), len(tc.want), got, tc.want)
 			}
@@ -228,13 +226,14 @@ func TestSaferSQL(t *testing.T) {
 	}
 }
 
-// Below 12 there is no CHECK shortcut, so SET NOT NULL has no rewrite to give.
-func TestSetNotNullNeedsPG12(t *testing.T) {
-	if got := rewriteFor(t, "ALTER TABLE orders ALTER COLUMN status SET NOT NULL", 11); got != nil {
-		t.Fatalf("offered a pg 12+ rewrite on pg 11: %v", got)
-	}
-	if got := rewriteFor(t, "ALTER TABLE orders ALTER COLUMN status SET NOT NULL", 12); len(got) != 4 {
-		t.Fatalf("expected the four-step rewrite on pg 12, got %v", got)
+// SET NOT NULL's CHECK shortcut is available on every supported major, so the
+// rewrite is offered unconditionally -- CheckMigration no longer takes a
+// version at all. Kept as a regression guard: this rewrite used to be gated on
+// PG >= 12, and a snapshot with no parseable version silently lost it.
+func TestSetNotNullRewriteIsAlwaysOffered(t *testing.T) {
+	got := rewriteFor(t, "ALTER TABLE orders ALTER COLUMN status SET NOT NULL")
+	if len(got) != 4 {
+		t.Fatalf("expected the four-step rewrite, got %v", got)
 	}
 }
 
@@ -251,14 +250,14 @@ func TestSaferSQLIsActuallySafer(t *testing.T) {
 		`ALTER TABLE "My Orders" ALTER COLUMN "Status" SET NOT NULL`,
 	}
 	for _, ddl := range ddls {
-		steps := rewriteFor(t, ddl, 17)
+		steps := rewriteFor(t, ddl)
 		if len(steps) == 0 {
 			t.Fatalf("%s: expected a rewrite", ddl)
 		}
 		if len(steps) == 1 && steps[0] == ddl+";" {
 			t.Fatalf("%s: the rewrite is the input", ddl)
 		}
-		rechecked, err := CheckMigration(strings.Join(steps, "\n"), migrationTestSchema(), &dryrun.PgVersion{Major: 17})
+		rechecked, err := CheckMigration(strings.Join(steps, "\n"), migrationTestSchema())
 		if err != nil {
 			t.Fatalf("%s: the rewrite does not parse: %v", ddl, err)
 		}
@@ -283,7 +282,7 @@ func TestSaferSQLOnlyOnUnsafeChecks(t *testing.T) {
 		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
 	}
 	for _, ddl := range ddls {
-		checks, err := CheckMigration(ddl, migrationTestSchema(), &dryrun.PgVersion{Major: 17})
+		checks, err := CheckMigration(ddl, migrationTestSchema())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -299,7 +298,7 @@ func TestSaferSQLOnlyOnUnsafeChecks(t *testing.T) {
 // truncated the same way, the VALIDATE names a constraint that does not exist.
 func TestGeneratedConstraintNameFitsPostgres(t *testing.T) {
 	long := strings.Repeat("o", 60)
-	steps := rewriteFor(t, "ALTER TABLE "+long+" ALTER COLUMN status SET NOT NULL", 17)
+	steps := rewriteFor(t, "ALTER TABLE "+long+" ALTER COLUMN status SET NOT NULL")
 	if len(steps) != 4 {
 		t.Fatalf("expected a rewrite, got %v", steps)
 	}
@@ -321,7 +320,7 @@ func TestGeneratedConstraintNameFitsPostgres(t *testing.T) {
 func TestGeneratedConstraintNameClipsWholeRunes(t *testing.T) {
 	table := strings.Repeat("t", 41)
 	col := strings.Repeat("é", 20)
-	steps := rewriteFor(t, `ALTER TABLE `+table+` ALTER COLUMN "`+col+`" SET NOT NULL`, 17)
+	steps := rewriteFor(t, `ALTER TABLE `+table+` ALTER COLUMN "`+col+`" SET NOT NULL`)
 	if len(steps) != 4 {
 		t.Fatalf("expected a rewrite, got %v", steps)
 	}
@@ -345,7 +344,7 @@ func TestIndexBackedConstraintRecommendation(t *testing.T) {
 		{"ALTER TABLE orders ADD EXCLUDE USING gist (status WITH =)", "ADD EXCLUSION CONSTRAINT",
 			[]string{"CREATE INDEX CONCURRENTLY"}},
 	} {
-		checks, err := CheckMigration(tc.ddl, migrationTestSchema(), &dryrun.PgVersion{Major: 17})
+		checks, err := CheckMigration(tc.ddl, migrationTestSchema())
 		if err != nil {
 			t.Fatalf("%s: %v", tc.ddl, err)
 		}
@@ -376,7 +375,7 @@ func TestRecommendationDropsTheFixWhereThereIsARewrite(t *testing.T) {
 		"CREATE INDEX idx_o ON orders (user_id)",
 		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
 	} {
-		checks, err := CheckMigration(ddl, migrationTestSchema(), &dryrun.PgVersion{Major: 17})
+		checks, err := CheckMigration(ddl, migrationTestSchema())
 		if err != nil {
 			t.Fatalf("%s: %v", ddl, err)
 		}

@@ -13,7 +13,7 @@ dryrun snapshot capture --from "$URL" --label replica-1 --streams query
 
 `dryrun snapshot query-stats --from "$URL" --label replica-1` still works and writes the same row through the same code, without the lock or the interval check. It is superseded by `capture --from` and kept for existing scripts.
 
-Each row stores the raw `pg_stat_statements` rows, the grouped shapes with their rollups, and one `pg_stat_statements_info` read (`stats_reset`, `dealloc`). On PG13 the info part is absent rather than zero. A zero would look like a reset epoch that never happened.
+Each row stores the raw `pg_stat_statements` rows, the grouped shapes with their rollups, and one `pg_stat_statements_info` read (`stats_reset`, `dealloc`). Where `pg_stat_statements` is older than 1.9 the info part is absent rather than zero. A zero would look like a reset epoch that never happened.
 
 The fetch is capped at 500 rows by default; `--query-stats-limit` or `[query_stats].row_cap` changes it. A capped capture records `raw_rows` and `row_cap`. Without that, a diff couldn't tell a genuinely new shape from one that only made it under the cap this time.
 
