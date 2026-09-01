@@ -94,12 +94,23 @@ jobs:
   npm-publish:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC for npm trusted publishing; no stored credential
+      contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # v7 required: earlier versions export a dummy NODE_AUTH_TOKEN when
+      # registry-url is set without a real token, leaving npm holding a bogus
+      # credential (removed in actions/setup-node#1558).
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
+          # off on publishing jobs: a poisoned cache could leak the OIDC token
+          package-manager-cache: false
+      # Node 24 ships npm 11.x; this just pins the floor (^11 keeps npm 12 out).
+      - name: Ensure npm supports trusted publishing
+        run: npm install -g npm@^11.5.1
       - uses: actions/download-artifact@v4
         with:
           pattern: bin-*
@@ -115,17 +126,31 @@ jobs:
           cp bins/bin-win32-x64/dryrun.exe npm/packages/win32-x64/bin/dryrun.exe
       - name: Set versions
         run: node npm/scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
-      - name: Publish platform packages
+      # No NODE_AUTH_TOKEN: auth is the OIDC exchange. Each of the six packages
+      # needs a trusted publisher on npmjs.com naming repo dryrun, workflow
+      # release.yml, no environment; a mismatch fails as E404. Provenance is
+      # attested automatically, so --provenance is not needed.
+      #
+      # One step so the helper stays in scope. Launcher last: its platform
+      # optionalDependencies must exist first. Skipping published versions
+      # keeps the job re-runnable after a partial publish.
+      - name: Publish packages
         run: |
+          publish_if_new() {
+            local dir="$1" name version
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already published, skipping"
+              return 0
+            fi
+            npm publish --access public "$dir"
+          }
+
           for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
-            npm publish --access public ./npm/packages/$t
+            publish_if_new "npm/packages/$t"
           done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish launcher package
-        run: npm publish --access public ./npm/dryrun
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          publish_if_new npm/dryrun
 
   # Metadata only: the registry resolves @boringsql/dryrun on npm and checks its
   # mcpName against server.json's name, so npm-publish must land first.
