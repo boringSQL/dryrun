@@ -97,9 +97,21 @@ jobs:
   npm-publish:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # shell: bash gives -eo pipefail; the default bash -e lets a failing
+    # curl in a pipeline be masked by the next command's exit 0.
+    defaults:
+      run:
+        shell: bash
     permissions:
       id-token: write # OIDC for npm trusted publishing; no stored credential
       contents: read
+    # HARDENING, once publishing works: npm matches a trusted publisher on
+    # org + repo + workflow filename (+ optional environment) -- the git ref is
+    # NOT part of the match. With no environment set, anyone who can push a
+    # branch and dispatch a workflow can mint a real npm publish token from
+    # that branch. Bind the six packages to a GitHub Environment with required
+    # reviewers and add `environment:` here and on npm-oidc-check.
     steps:
       - uses: actions/checkout@v4
       # No registry-url on purpose: setup-node would still write an unresolved
@@ -162,6 +174,12 @@ jobs:
   mcp-registry:
     needs: npm-publish
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # shell: bash gives -eo pipefail; the default bash -e lets a failing
+    # curl in a pipeline be masked by the next command's exit 0.
+    defaults:
+      run:
+        shell: bash
     permissions:
       id-token: write # OIDC; no stored registry credential
       contents: read
@@ -196,6 +214,10 @@ jobs:
   npm-oidc-check:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
     permissions:
       id-token: write
       contents: read
@@ -205,16 +227,28 @@ jobs:
         run: |
           audience="npm:registry.npmjs.org"
 
+          # One token per package, deliberately NOT hoisted out of the loop:
+          # npm mints a fresh token per publish, and if the exchange treats the
+          # JWT as single-use a reused token would fail packages 2..6 and send
+          # you auditing npm settings that are fine. The extra call is cheap;
+          # a false FAIL from the tool meant to end false FAILs is not.
           # --get --data-urlencode matches npm's URLSearchParams (encodes ':').
-          token=$(curl -sS --get --data-urlencode "audience=$audience" \
-            -H "Accept: application/json" \
-            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r '.value // empty')
-
-          if [ -z "$token" ]; then
-            echo "::error::could not mint an OIDC token -- is id-token: write set?"
-            exit 1
-          fi
+          mint_token() {
+            local out code
+            out=$(mktemp)
+            code=$(curl -sS --max-time 30 -o "$out" -w '%{http_code}' \
+              --get --data-urlencode "audience=$audience" \
+              -H "Accept: application/json" \
+              -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL" || true)
+            if [ "$code" != "200" ]; then
+              echo "::error::minting the OIDC token failed (HTTP ${code:-000}) -- id-token: write missing, or a transport error" >&2
+              rm -f "$out"
+              return 1
+            fi
+            jq -r '.value // empty' "$out"
+            rm -f "$out"
+          }
 
           fail=0
           results=""
@@ -226,12 +260,18 @@ jobs:
             "@boringsql/dryrun-linux-arm64" \
             "@boringsql/dryrun-win32-x64"
           do
+            token=$(mint_token) || exit 1
+            if [ -z "$token" ]; then
+              echo "::error::OIDC token response had no value"
+              exit 1
+            fi
+
             # npm-package-arg's escapedName: a single lowercase %2f, no other escaping.
             escaped=$(printf '%s' "$pkg" | sed 's|/|%2f|')
             body=$(mktemp)
             # No Content-Type: npm posts no body. || true: transport errors
             # report as 000 instead of killing the loop under set -e.
-            code=$(curl -sS -o "$body" -w '%{http_code}' -X POST \
+            code=$(curl -sS --max-time 30 -o "$body" -w '%{http_code}' -X POST \
               -H "Authorization: Bearer $token" \
               "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${escaped}" \
               || true)
@@ -265,8 +305,9 @@ jobs:
               "under the package's Settings -> Trusted Publisher, check that:" \
               "  - owner is boringSQL and repository is dryrun (case-sensitive)" \
               "  - workflow is release.yml -- filename only, no path, no ref" \
-              "  - Environment is EMPTY: npm-publish enters none, and a configured" \
-              "    environment that the job never enters can never match" \
+              "  - Environment matches: npm-publish enters none today, so an" \
+              "    environment configured on npm can never match. See the note" \
+              "    on the npm-publish job about binding one once publishing works." \
               "  - publishing access is not set to require 2FA in a way that" \
               "    excludes trusted publishing" \
               "Note a reusable/called workflow changes job_workflow_ref and so" \

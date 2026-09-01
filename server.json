@@ -8,13 +8,13 @@
     "source": "github"
   },
   "websiteUrl": "https://boringsql.com/products/dryrun/",
-  "version": "0.16.1",
+  "version": "0.0.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@boringsql/dryrun",
-      "version": "0.16.0",
+      "version": "0.0.0",
       "transport": {
         "type": "stdio"
       },

@@ -34,6 +34,10 @@ patch(join(root, "dryrun", "package.json"), (pkg) => {
   }
 });
 
+// server.json's versions are committed as the 0.0.0 placeholder, same as the
+// package.json files: this script is their only writer, and the tag is the
+// single source of truth. Don't hand-bump them -- a committed real version
+// only ever drifts, and it names an npm version that may not exist.
 patch(join(root, "..", "server.json"), (srv) => {
   srv.version = version;
   for (const pkg of srv.packages ?? []) {
