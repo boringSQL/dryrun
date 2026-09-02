@@ -126,6 +126,10 @@ func ConnectWithGuards(ctx context.Context, url string, guards SessionGuards) (*
 	config.MaxConns = 5
 	config.MaxConnLifetime = 30 * time.Minute
 	config.AfterConnect = guards.apply
+	if !strings.Contains(url, "default_query_exec_mode") {
+		config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+	}
+	config.ConnConfig.RuntimeParams["extra_float_digits"] = "3"
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

@@ -231,3 +231,74 @@ func contains(ss []string, s string) bool {
 	}
 	return false
 }
+
+func TestInjectStats_InjectsColumnStats(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+	major := serverMajor(t, ctx, pool)
+
+	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS a0_colstats;
+		CREATE TABLE a0_colstats (id int PRIMARY KEY, v text);
+		INSERT INTO a0_colstats SELECT g, g::text FROM generate_series(1, 50) g;
+		ANALYZE a0_colstats;
+	`); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, "DROP TABLE IF EXISTS a0_colstats") })
+
+	nullFrac := 0.25
+	nDistinct := -0.5
+	correlation := 0.75
+	avgWidth := 4
+	a := &AnnotatedSchema{
+		Schema: &SchemaSnapshot{Tables: []Table{
+			{Schema: "public", Name: "a0_colstats", Columns: []Column{{Name: "id"}, {Name: "v"}}},
+		}},
+		Planner: &PlannerStatsSnapshot{
+			Tables: []TableSizingEntry{
+				{Table: qn("public", "a0_colstats"), Sizing: TableSizing{Reltuples: 1_000_000, Relpages: 8000}},
+			},
+			Columns: []ColumnStatsEntry{{
+				Table:  qn("public", "a0_colstats"),
+				Column: "id",
+				Stats: ColumnStats{
+					NullFrac:    &nullFrac,
+					NDistinct:   &nDistinct,
+					Correlation: &correlation,
+					AvgWidth:    &avgWidth,
+				},
+			}},
+		},
+	}
+
+	res, err := InjectStats(ctx, pool, a, major)
+	if err != nil {
+		t.Fatalf("InjectStats: %v", err)
+	}
+	if res.ColumnsUpdated != 1 {
+		t.Fatalf("ColumnsUpdated = %d, want 1 (method %s, warnings %v)", res.ColumnsUpdated, res.Method, res.Warnings)
+	}
+
+	var gotNullFrac, gotNDistinct, gotCorrelation float64
+	err = pool.QueryRow(ctx, `
+		SELECT null_frac, n_distinct, correlation
+		  FROM pg_catalog.pg_stats
+		 WHERE schemaname = 'public' AND tablename = 'a0_colstats' AND attname = 'id'`,
+	).Scan(&gotNullFrac, &gotNDistinct, &gotCorrelation)
+	if err != nil {
+		t.Fatalf("read back pg_stats (method %s): %v", res.Method, err)
+	}
+	for _, c := range []struct {
+		name      string
+		got, want float64
+	}{
+		{"null_frac", gotNullFrac, nullFrac},
+		{"n_distinct", gotNDistinct, nDistinct},
+		{"correlation", gotCorrelation, correlation},
+	} {
+		if diff := c.got - c.want; diff > 1e-6 || diff < -1e-6 {
+			t.Errorf("%s = %v, want %v (method %s)", c.name, c.got, c.want, res.Method)
+		}
+	}
+}

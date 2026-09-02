@@ -21,27 +21,24 @@ var (
 
 // Sizing + per-column pg_stats; schema_ref ties it back to a DDL snapshot
 func CapturePlannerStats(ctx context.Context, pool Querier, schemaRefHash string) (*PlannerStatsSnapshot, error) {
-	var database string
-	if err := pool.QueryRow(ctx, "SELECT current_database()").Scan(&database); err != nil {
-		return nil, fmt.Errorf("query current_database: %w", err)
-	}
-
 	// Reference counters for ageing relfrozenxid/relminmxid offline.
 	// xmax = next xid (pg_current_snapshot doesn't consume one, safe in our read tx).
 	// mxid_age('1')+1 = next_multixact, avoiding superuser-gated pg_control_checkpoint;
 	// cast before +1 since mxid_age is int4 and nears INT_MAX at wraparound.
-	var databaseXid, databaseMxid int64
+	var (
+		database                  string
+		databaseXid, databaseMxid int64
+		takenAt                   time.Time
+	)
 	if err := pool.QueryRow(ctx,
-		"SELECT pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot())::text::int8, "+
-			"(pg_catalog.mxid_age('1'::xid)::int8 + 1)",
-	).Scan(&databaseXid, &databaseMxid); err != nil {
-		return nil, fmt.Errorf("query reference counters: %w", err)
+		"SELECT current_database(), "+
+			"pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot())::text::int8, "+
+			"(pg_catalog.mxid_age('1'::xid)::int8 + 1), "+
+			"now()",
+	).Scan(&database, &databaseXid, &databaseMxid, &takenAt); err != nil {
+		return nil, fmt.Errorf("query snapshot reference counters: %w", err)
 	}
-
-	takenAt, err := serverNow(ctx, pool)
-	if err != nil {
-		return nil, err
-	}
+	takenAt = takenAt.UTC()
 
 	tables, err := fetchPlannerTableSizing(ctx, pool)
 	if err != nil {
@@ -122,19 +119,17 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	defer phase.log("query stats capture")
 	phase.note("rtt", measureRTT(ctx, pool))
 
-	var installed, hasInfoView, hasToplevel, renamedBlkTime bool
-	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).Scan(&installed, &hasInfoView, &hasToplevel, &renamedBlkTime); err != nil {
-		return nil, fmt.Errorf("check pg_stat_statements: %w", err)
-	}
-	if !installed {
-		return nil, ErrQueryStatsUnavailable
-	}
-
-	node, err := CaptureNodeIdentity(ctx, pool, source)
+	pre, err := fetchQueryStatsPreflight(ctx, pool)
 	if err != nil {
 		return nil, err
 	}
-	phase.mark("probe+identity")
+	if !pre.Installed {
+		return nil, ErrQueryStatsUnavailable
+	}
+	hasInfoView, hasToplevel, renamedBlkTime := pre.HasInfoView, pre.HasToplevel, pre.RenamedBlkTime
+	node := pre.Node.identity(source)
+	env := pre.Env
+	phase.mark("preflight")
 	// bracket the row-capped fetch: pgss isn't MVCC-consistent with its info view,
 	// so only differing before/after values prove a reset mid-capture. Gated on
 	// the probe above: capture runs in one tx, and reading a missing view aborts it.
@@ -142,8 +137,6 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	if hasInfoView {
 		infoBefore = fetchPgssInfo(ctx, pool)
 	}
-	env := fetchPgssEnvironment(ctx, pool)
-	phase.mark("environment")
 	ioTiming := env.TrackIOTiming
 	queries, err := fetchQueryStats(ctx, pool, hasToplevel, renamedBlkTime, ioTiming, rowCap)
 	phase.mark("fetch")
@@ -250,36 +243,45 @@ func totalRawBytes(queries []qshape.Query) int {
 // CaptureNodeIdentity reads the node's own view of itself. An empty source falls back to a
 // name derived from the server (cluster_name / address), never the machine running dryrun.
 func CaptureNodeIdentity(ctx context.Context, pool Querier, source string) (*NodeIdentity, error) {
-	var (
-		isStandby    bool
-		pgVersion    string
-		clusterName  string
-		serverAddr   string
-		postmasterUp time.Time
-	)
-	if err := pool.QueryRow(ctx, q("fetch-node-identity")).
-		Scan(&isStandby, &pgVersion, &clusterName, &serverAddr, &postmasterUp); err != nil {
+	var raw nodeIdentityRow
+	if err := pool.QueryRow(ctx, q("fetch-node-identity")).Scan(raw.dest()...); err != nil {
 		return nil, fmt.Errorf("fetch node identity: %w", err)
 	}
-	takenAt, err := serverNow(ctx, pool)
-	if err != nil {
-		return nil, err
+	return raw.identity(source), nil
+}
+
+type (
+	nodeIdentityRow struct {
+		IsStandby    bool
+		PgVersion    string
+		ClusterName  string
+		ServerAddr   string
+		PostmasterUp time.Time
+		TakenAt      time.Time
 	}
+)
+
+func (r *nodeIdentityRow) dest() []any {
+	return []any{&r.IsStandby, &r.PgVersion, &r.ClusterName, &r.ServerAddr, &r.PostmasterUp, &r.TakenAt}
+}
+
+func (r *nodeIdentityRow) identity(source string) *NodeIdentity {
 	if source == "" {
-		source = serverNodeName(clusterName, serverAddr)
+		source = serverNodeName(r.ClusterName, r.ServerAddr)
 		slog.Warn("no node label given; derived one from the server. pass --source (or --label) "+
 			"to name this node yourself — a derived name can change when the server's address does, "+
 			"and every counter is differenced per node label",
 			"derived", source)
 	}
+	postmasterUp := r.PostmasterUp
 	return &NodeIdentity{
 		Source:              source,
-		IsStandby:           isStandby,
-		PgVersion:           pgVersion,
-		Timestamp:           takenAt,
+		IsStandby:           r.IsStandby,
+		PgVersion:           r.PgVersion,
+		Timestamp:           r.TakenAt.UTC(),
 		PostmasterStartTime: &postmasterUp,
-		ServerAddr:          serverAddr,
-	}, nil
+		ServerAddr:          r.ServerAddr,
+	}
 }
 
 // serverNodeName picks the best server-side name available, or "unknown".
@@ -358,12 +360,16 @@ type (
 	}
 )
 
+func (e *pgssEnvironment) dest() []any {
+	return []any{
+		&e.PgssMax, &e.PgssTrack, &e.PgssTrackPlanning,
+		&e.TrackIOTiming, &e.TrackActivityQuerySize, &e.BlockSize,
+	}
+}
+
 func fetchPgssEnvironment(ctx context.Context, pool Querier) pgssEnvironment {
 	var env pgssEnvironment
-	if err := pool.QueryRow(ctx, q("fetch-pgss-environment")).Scan(
-		&env.PgssMax, &env.PgssTrack, &env.PgssTrackPlanning,
-		&env.TrackIOTiming, &env.TrackActivityQuerySize, &env.BlockSize,
-	); err != nil {
+	if err := pool.QueryRow(ctx, q("fetch-pgss-environment")).Scan(env.dest()...); err != nil {
 		slog.Debug("pg_stat_statements environment unavailable", "error", err)
 	}
 	return env

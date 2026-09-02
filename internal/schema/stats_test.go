@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/boringsql/qshape"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -20,12 +21,14 @@ func livePool(t *testing.T) *pgxpool.Pool {
 	if url == "" {
 		t.Skip("TEST_DATABASE_URL not set; skipping live capture test")
 	}
-	pool, err := pgxpool.New(context.Background(), url)
+	guards := DefaultSessionGuards()
+	guards.ReadOnly = false
+	conn, err := ConnectWithGuards(context.Background(), url, guards)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	t.Cleanup(pool.Close)
-	return pool
+	t.Cleanup(conn.Close)
+	return conn.Pool()
 }
 
 // Captures all three shapes against a live database and asserts each has
@@ -369,16 +372,16 @@ func TestFetchPgssEnvironment_AgainstLiveDB(t *testing.T) {
 		err := pool.QueryRow(ctx, "SELECT setting FROM pg_catalog.pg_settings WHERE name = $1", c.guc).Scan(&setting)
 		if err != nil {
 			if !isNilPointer(c.got) {
-				t.Errorf("%s is not readable but the batched read returned %v", c.guc, c.got)
+				t.Errorf("%s is not readable but the combined read returned %v", c.guc, c.got)
 			}
 			continue
 		}
 		if isNilPointer(c.got) {
-			t.Errorf("%s reads %q directly but the batched read returned nil", c.guc, setting)
+			t.Errorf("%s reads %q directly but the combined read returned nil", c.guc, setting)
 			continue
 		}
 		if got, want := derefString(c.got), derefString(c.want(setting)); got != want {
-			t.Errorf("%s: batched read got %s, pg_settings says %s", c.guc, got, want)
+			t.Errorf("%s: combined read got %s, pg_settings says %s", c.guc, got, want)
 		}
 	}
 
@@ -393,16 +396,16 @@ func TestFetchPgssEnvironment_AgainstLiveDB(t *testing.T) {
 		err := pool.QueryRow(ctx, "SELECT setting = 'on' FROM pg_catalog.pg_settings WHERE name = $1", b.guc).Scan(&on)
 		if err != nil {
 			if b.got != nil {
-				t.Errorf("%s is absent but the batched read returned %v", b.guc, *b.got)
+				t.Errorf("%s is absent but the combined read returned %v", b.guc, *b.got)
 			}
 			continue
 		}
 		if b.got == nil {
-			t.Errorf("%s reads %v directly but the batched read returned nil", b.guc, on)
+			t.Errorf("%s reads %v directly but the combined read returned nil", b.guc, on)
 			continue
 		}
 		if *b.got != on {
-			t.Errorf("%s: batched read got %v, pg_settings says %v", b.guc, *b.got, on)
+			t.Errorf("%s: combined read got %v, pg_settings says %v", b.guc, *b.got, on)
 		}
 	}
 }
@@ -441,4 +444,86 @@ func derefString(v any) string {
 		return *p
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+type noBatch struct{ Querier }
+
+func TestFetchQueryStatsPreflight_BatchedMatchesSequential(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	if _, ok := any(pool).(batcher); !ok {
+		t.Fatal("pgxpool.Pool no longer satisfies batcher; the preflight would silently take the slow path")
+	}
+
+	batched, err := fetchQueryStatsPreflight(ctx, pool)
+	if err != nil {
+		t.Fatalf("batched preflight: %v", err)
+	}
+	sequential, err := fetchQueryStatsPreflight(ctx, noBatch{pool})
+	if err != nil {
+		t.Fatalf("sequential preflight: %v", err)
+	}
+
+	if batched.Installed != sequential.Installed ||
+		batched.HasInfoView != sequential.HasInfoView ||
+		batched.HasToplevel != sequential.HasToplevel ||
+		batched.RenamedBlkTime != sequential.RenamedBlkTime {
+		t.Errorf("probe differs: batched=%+v sequential=%+v", batched, sequential)
+	}
+	if batched.Node.IsStandby != sequential.Node.IsStandby ||
+		batched.Node.PgVersion != sequential.Node.PgVersion ||
+		batched.Node.ClusterName != sequential.Node.ClusterName ||
+		batched.Node.ServerAddr != sequential.Node.ServerAddr ||
+		!batched.Node.PostmasterUp.Equal(sequential.Node.PostmasterUp) {
+		t.Errorf("node identity differs: batched=%+v sequential=%+v", batched.Node, sequential.Node)
+	}
+	if derefString(batched.Env.PgssMax) != derefString(sequential.Env.PgssMax) ||
+		derefString(batched.Env.PgssTrack) != derefString(sequential.Env.PgssTrack) ||
+		derefString(batched.Env.BlockSize) != derefString(sequential.Env.BlockSize) ||
+		derefString(batched.Env.TrackActivityQuerySize) != derefString(sequential.Env.TrackActivityQuerySize) ||
+		!sameOptionalBool(batched.Env.TrackIOTiming, sequential.Env.TrackIOTiming) ||
+		!sameOptionalBool(batched.Env.PgssTrackPlanning, sequential.Env.PgssTrackPlanning) {
+		t.Errorf("environment differs: batched=%+v sequential=%+v", batched.Env, sequential.Env)
+	}
+	if batched.Node.TakenAt.IsZero() || sequential.Node.TakenAt.IsZero() {
+		t.Error("node identity carries no server timestamp")
+	}
+}
+
+func sameOptionalBool(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func TestFetchQueryStatsPreflight_BatchErrorSurfaces(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	pipe, ok := any(pool).(batcher)
+	if !ok {
+		t.Skip("pool does not pipeline")
+	}
+	batch := &pgx.Batch{}
+	batch.Queue("SELECT 1 FROM no_such_relation_for_dryrun_test")
+	batch.Queue("SELECT 1")
+	results := pipe.SendBatch(ctx, batch)
+
+	var n int
+	first := results.QueryRow().Scan(&n)
+	if first == nil {
+		t.Fatal("a bad statement in a batch returned no error")
+	}
+	if second := results.QueryRow().Scan(&n); second == nil {
+		t.Error("the statement queued behind a failure reported success")
+	}
+	if err := results.Close(); err == nil {
+		t.Error("Close() hid the batch error")
+	}
+
+	if err := pool.QueryRow(ctx, "SELECT 1").Scan(&n); err != nil || n != 1 {
+		t.Errorf("connection unusable after a failed batch: n=%d err=%v", n, err)
+	}
 }
