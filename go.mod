@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/boringsql/fixturize v0.7.0
-	github.com/boringsql/qshape v0.4.0
+	github.com/boringsql/qshape v0.4.2
 	github.com/boringsql/queries v1.6.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/klauspost/compress v1.18.6
@@ -16,6 +16,7 @@ require (
 	github.com/pganalyze/pg_query_go/v6 v6.2.2
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/oauth2 v0.36.0
+	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.52.0
 	oras.land/oras-go/v2 v2.6.1
 )
@@ -38,11 +39,8 @@ require (
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.73.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/boringsql/qshape => ../qshape
