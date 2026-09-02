@@ -32,6 +32,7 @@ var (
 	flagLockTimeout     time.Duration
 	flagIdleTxTimeout   time.Duration
 	flagQueryStatsLimit int
+	flagDebug           bool
 )
 
 func main() {
@@ -51,6 +52,15 @@ func main() {
 	pf.DurationVar(&flagLockTimeout, "lock-timeout", guards.LockTimeout, "session lock_timeout (0 disables)")
 	pf.DurationVar(&flagIdleTxTimeout, "idle-tx-timeout", guards.IdleInTxTimeout, "session idle_in_transaction_session_timeout (0 disables)")
 	pf.IntVar(&flagQueryStatsLimit, "query-stats-limit", 0, "max pg_stat_statements rows to capture (default: 500, or [query_stats].row_cap in dryrun.toml)")
+	pf.BoolVar(&flagDebug, "debug", os.Getenv("DRYRUN_DEBUG") != "", "log debug detail, including per-phase capture timings [env: DRYRUN_DEBUG]")
+
+	root.PersistentPreRun = func(*cobra.Command, []string) {
+		level := slog.LevelInfo
+		if flagDebug {
+			level = slog.LevelDebug
+		}
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+	}
 
 	root.AddCommand(
 		probeCmd(), initCmd(), setupCmd(), importCmd(), dumpSchemaCmd(),

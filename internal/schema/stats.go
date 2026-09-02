@@ -118,6 +118,10 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	if rowCap <= 0 {
 		rowCap = QueryStatsRowCap
 	}
+	phase := newPhaseTimer()
+	defer phase.log("query stats capture")
+	phase.note("rtt", measureRTT(ctx, pool))
+
 	var installed, hasInfoView, hasToplevel, renamedBlkTime bool
 	if err := pool.QueryRow(ctx, q("fetch-pg-stat-statements-installed")).Scan(&installed, &hasInfoView, &hasToplevel, &renamedBlkTime); err != nil {
 		return nil, fmt.Errorf("check pg_stat_statements: %w", err)
@@ -130,6 +134,7 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	if err != nil {
 		return nil, err
 	}
+	phase.mark("probe+identity")
 	// bracket the row-capped fetch: pgss isn't MVCC-consistent with its info view,
 	// so only differing before/after values prove a reset mid-capture. Gated on
 	// the probe above: capture runs in one tx, and reading a missing view aborts it.
@@ -137,8 +142,11 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	if hasInfoView {
 		infoBefore = fetchPgssInfo(ctx, pool)
 	}
-	ioTiming := fetchTrackIOTiming(ctx, pool)
+	env := fetchPgssEnvironment(ctx, pool)
+	phase.mark("environment")
+	ioTiming := env.TrackIOTiming
 	queries, err := fetchQueryStats(ctx, pool, hasToplevel, renamedBlkTime, ioTiming, rowCap)
+	phase.mark("fetch")
 	if err != nil {
 		// role/session search_path can differ from the earlier to_regclass check.
 		// 42703: pgss left at 1.7 by pg_upgrade has no total_exec_time, so the
@@ -151,9 +159,11 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 	}
 	// The whitelist admits COPY; keep only its literal-free forms.
 	clusters, err := qshape.GroupWithPolicy(dropUnsafeCopy(queries), tags.DefaultPolicy())
+	phase.mark("group")
 	if err != nil {
 		return nil, fmt.Errorf("group query stats: %w", err)
 	}
+	phase.note("rows", len(queries), "shapes", len(clusters), "sql_bytes", totalRawBytes(queries))
 
 	entries := make([]QueryStatsEntry, len(clusters))
 	for i, c := range clusters {
@@ -212,12 +222,12 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		CaptureRuleVersion:     CaptureRuleVersion,
 		RawRows:                len(queries),
 		RowCap:                 rowCap,
-		PgssMax:                fetchPgssMax(ctx, pool),
-		PgssTrack:              fetchPgssTrack(ctx, pool),
-		PgssTrackPlanning:      fetchPgssTrackPlanning(ctx, pool),
+		PgssMax:                env.PgssMax,
+		PgssTrack:              env.PgssTrack,
+		PgssTrackPlanning:      env.PgssTrackPlanning,
 		TrackIOTiming:          ioTiming,
-		BlockSize:              fetchBlockSize(ctx, pool),
-		TrackActivityQuerySize: fetchTrackActivityQuerySize(ctx, pool),
+		BlockSize:              env.BlockSize,
+		TrackActivityQuerySize: env.TrackActivityQuerySize,
 		InfoBefore:             infoBefore,
 		InfoAfter:              infoAfter,
 		ToplevelOnly:           hasToplevel,
@@ -225,7 +235,16 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		Queries:                entries,
 	}
 	snap.ContentHash = ComputeQueryStatsContentHash(snap)
+	phase.mark("assemble+hash")
 	return snap, nil
+}
+
+func totalRawBytes(queries []qshape.Query) int {
+	total := 0
+	for _, q := range queries {
+		total += len(q.Raw)
+	}
+	return total
 }
 
 // CaptureNodeIdentity reads the node's own view of itself. An empty source falls back to a
@@ -328,6 +347,28 @@ func fetchPlannerColumnStats(ctx context.Context, pool Querier) ([]ColumnStatsEn
 	})
 }
 
+type (
+	pgssEnvironment struct {
+		PgssMax                *int
+		PgssTrack              *string
+		PgssTrackPlanning      *bool
+		TrackIOTiming          *bool
+		TrackActivityQuerySize *int
+		BlockSize              *int
+	}
+)
+
+func fetchPgssEnvironment(ctx context.Context, pool Querier) pgssEnvironment {
+	var env pgssEnvironment
+	if err := pool.QueryRow(ctx, q("fetch-pgss-environment")).Scan(
+		&env.PgssMax, &env.PgssTrack, &env.PgssTrackPlanning,
+		&env.TrackIOTiming, &env.TrackActivityQuerySize, &env.BlockSize,
+	); err != nil {
+		slog.Debug("pg_stat_statements environment unavailable", "error", err)
+	}
+	return env
+}
+
 // pg_stat_statements_info, pgss 1.9+. nil when absent/unreadable — absent is
 // not zero, or the row would claim a reset epoch it never had.
 func fetchPgssInfo(ctx context.Context, pool Querier) *QueryStatsInfo {
@@ -336,34 +377,6 @@ func fetchPgssInfo(ctx context.Context, pool Querier) *QueryStatsInfo {
 		return nil
 	}
 	return &info
-}
-
-// nil when the GUC has no row or the role can't read it
-func fetchPgssMax(ctx context.Context, pool Querier) *int {
-	var max int
-	if err := pool.QueryRow(ctx, q("fetch-pgss-max")).Scan(&max); err != nil {
-		return nil
-	}
-	return &max
-}
-
-// block_size is a preset GUC every role can read, so nil here means the query itself
-// failed — effectively never. A consumer treats nil as unknown and renders temp blocks as
-// blocks rather than assuming 8192 and being silently 2x out on a cluster built otherwise.
-func fetchBlockSize(ctx context.Context, pool Querier) *int {
-	var size int
-	if err := pool.QueryRow(ctx, q("fetch-block-size")).Scan(&size); err != nil {
-		return nil
-	}
-	return &size
-}
-
-func fetchPgssTrack(ctx context.Context, pool Querier) *string {
-	var track string
-	if err := pool.QueryRow(ctx, q("fetch-pgss-track")).Scan(&track); err != nil {
-		return nil
-	}
-	return &track
 }
 
 // The toplevel variant filters nested rows in SQL (pgss 1.9+); the plain one
@@ -399,30 +412,6 @@ func stripUntimed(e qshape.Query, timed bool) qshape.Query {
 		e.SharedBlkReadTimeMs, e.SharedBlkWriteTimeMs = nil, nil
 	}
 	return e
-}
-
-func fetchTrackIOTiming(ctx context.Context, pool Querier) *bool {
-	var on bool
-	if err := pool.QueryRow(ctx, q("fetch-track-io-timing")).Scan(&on); err != nil {
-		return nil
-	}
-	return &on
-}
-
-func fetchPgssTrackPlanning(ctx context.Context, pool Querier) *bool {
-	var on bool
-	if err := pool.QueryRow(ctx, q("fetch-pgss-track-planning")).Scan(&on); err != nil {
-		return nil
-	}
-	return &on
-}
-
-func fetchTrackActivityQuerySize(ctx context.Context, pool Querier) *int {
-	var size int
-	if err := pool.QueryRow(ctx, q("fetch-track-activity-query-size")).Scan(&size); err != nil {
-		return nil
-	}
-	return &size
 }
 
 func fetchActivityTables(ctx context.Context, pool Querier) ([]TableActivityEntry, error) {

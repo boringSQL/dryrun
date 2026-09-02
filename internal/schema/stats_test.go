@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
@@ -345,4 +346,99 @@ func TestStripUntimed(t *testing.T) {
 	if on.SharedBlkWriteTimeMs == nil || *on.SharedBlkWriteTimeMs != 4 {
 		t.Fatal("write timing lost")
 	}
+}
+
+func TestFetchPgssEnvironment_AgainstLiveDB(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	env := fetchPgssEnvironment(ctx, pool)
+
+	checks := []struct {
+		guc  string
+		got  any
+		want func(setting string) any
+	}{
+		{"pg_stat_statements.max", env.PgssMax, func(s string) any { return atoiOrNil(s) }},
+		{"pg_stat_statements.track", env.PgssTrack, func(s string) any { return &s }},
+		{"track_activity_query_size", env.TrackActivityQuerySize, func(s string) any { return atoiOrNil(s) }},
+		{"block_size", env.BlockSize, func(s string) any { return atoiOrNil(s) }},
+	}
+	for _, c := range checks {
+		var setting string
+		err := pool.QueryRow(ctx, "SELECT setting FROM pg_catalog.pg_settings WHERE name = $1", c.guc).Scan(&setting)
+		if err != nil {
+			if !isNilPointer(c.got) {
+				t.Errorf("%s is not readable but the batched read returned %v", c.guc, c.got)
+			}
+			continue
+		}
+		if isNilPointer(c.got) {
+			t.Errorf("%s reads %q directly but the batched read returned nil", c.guc, setting)
+			continue
+		}
+		if got, want := derefString(c.got), derefString(c.want(setting)); got != want {
+			t.Errorf("%s: batched read got %s, pg_settings says %s", c.guc, got, want)
+		}
+	}
+
+	for _, b := range []struct {
+		guc string
+		got *bool
+	}{
+		{"track_io_timing", env.TrackIOTiming},
+		{"pg_stat_statements.track_planning", env.PgssTrackPlanning},
+	} {
+		var on bool
+		err := pool.QueryRow(ctx, "SELECT setting = 'on' FROM pg_catalog.pg_settings WHERE name = $1", b.guc).Scan(&on)
+		if err != nil {
+			if b.got != nil {
+				t.Errorf("%s is absent but the batched read returned %v", b.guc, *b.got)
+			}
+			continue
+		}
+		if b.got == nil {
+			t.Errorf("%s reads %v directly but the batched read returned nil", b.guc, on)
+			continue
+		}
+		if *b.got != on {
+			t.Errorf("%s: batched read got %v, pg_settings says %v", b.guc, *b.got, on)
+		}
+	}
+}
+
+func atoiOrNil(s string) *int {
+	var n int
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return nil
+	}
+	return &n
+}
+
+func isNilPointer(v any) bool {
+	switch p := v.(type) {
+	case *int:
+		return p == nil
+	case *string:
+		return p == nil
+	case *bool:
+		return p == nil
+	}
+	return v == nil
+}
+
+func derefString(v any) string {
+	switch p := v.(type) {
+	case *int:
+		if p == nil {
+			return "<nil>"
+		}
+		return fmt.Sprintf("%d", *p)
+	case *string:
+		if p == nil {
+			return "<nil>"
+		}
+		return *p
+	}
+	return fmt.Sprintf("%v", v)
 }
