@@ -396,12 +396,41 @@ func maybeAutoPrune(ctx context.Context, store *history.Store, key history.Snaps
 		fmt.Fprintf(os.Stderr, "warning: [history] max_age %q is zero; skipping prune\n", cfg.History.MaxAge)
 		return
 	}
-	n, err := store.Prune(ctx, key, time.Now().UTC().Add(-maxAge))
+	res, err := store.Prune(ctx, key, history.PruneOptions{
+		Cutoff:      time.Now().UTC().Add(-maxAge),
+		KeepSchemas: keepOrDefault(cfg.History.KeepSchemas, history.DefaultKeepSchemas),
+		KeepPlanner: keepOrDefault(cfg.History.KeepPlanner, history.DefaultKeepPlanner),
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: auto-prune failed: %v\n", err)
 		return
 	}
-	if n > 0 {
-		fmt.Fprintf(os.Stderr, "Auto-pruned %d history rows older than %s\n", n, cfg.History.MaxAge)
+	if n := res.Total(); n > 0 {
+		fmt.Fprintf(os.Stderr, "Auto-pruned %d history rows older than %s (%s reclaimed)\n",
+			n, cfg.History.MaxAge, humanBytes(res.BytesFreed))
 	}
+	if res.SchemaPinned > 0 {
+		fmt.Fprintf(os.Stderr,
+			"  %d schema snapshot(s) kept past %s: stats rows still reference them\n",
+			res.SchemaPinned, cfg.History.MaxAge)
+	}
+}
+
+func keepOrDefault(v *int, def int) int {
+	if v == nil {
+		return def
+	}
+	return *v
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
 }

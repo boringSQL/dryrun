@@ -46,10 +46,12 @@ type (
 		RowCap *int `toml:"row_cap"`
 	}
 
-	// [history] block; retention for captured activity/query series
+	// [history] block; retention for captured series
 	HistoryConfig struct {
 		MaxAge    string `toml:"max_age"`
 		AutoPrune bool   `toml:"auto_prune"`
+		KeepSchemas *int `toml:"keep_schemas"`
+		KeepPlanner *int `toml:"keep_planner"`
 	}
 
 	// [[remote]] block; Ref is the registry base, e.g. ghcr.io/org/dryrun

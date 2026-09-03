@@ -25,7 +25,7 @@ func (s *Store) PutPlanner(ctx context.Context, key SnapshotKey, p *schema.Plann
 		   (project_id, database_id, schema_ref_hash, content_hash, timestamp, payload_json)
 		   VALUES (?, ?, ?, ?, ?, ?)`,
 		string(key.ProjectID), string(key.DatabaseID),
-		p.SchemaRefHash, p.ContentHash, p.Timestamp.Format(time.RFC3339), string(data),
+		p.SchemaRefHash, p.ContentHash, p.Timestamp.UTC().Format(time.RFC3339), string(data),
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save planner stats: %w", err)
