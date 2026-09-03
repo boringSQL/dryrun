@@ -350,6 +350,7 @@ See [`docs/dryrun-toml.md`](docs/dryrun-toml.md) for per-profile remotes and sha
 - **[Tutorial](TUTORIAL.md)** for offline, online, and multi-node workflows with full tool reference
 - **[Multi-node statistics](docs/multi-node-stats.md)** for cluster-wide stats collection, aggregation rules, and replica imbalance detection
 - **[Query stats](docs/query-stats.md)** for `pg_stat_statements` capture, shape grouping, and diffing
+- **[Anonymized snapshots](docs/anonymized-snapshots.md)** for producing a snapshot you can hand to someone else: the PII mapping, masked capture, and what to check before sending
 - **[Configuration reference](docs/dryrun-toml.md)** for `dryrun.toml` profiles, conventions, remotes, and lint rules
 - **[CLI stability](docs/cli-stability.md)** for which commands are stable versus experimental
 - **[Security overview](SECURITY.md)** for the CLI/MCP split and masking

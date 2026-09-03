@@ -46,7 +46,8 @@ databases:
       users.phone: { expr: "'+1-000-000-0000'",               tags: [pii] }
 ```
 
-The `dev` key must match your DryRun `database_id` (see below). The
+The `dev` key must match your DryRun `database_id` (see below), which
+defaults to `[project].id` unless the profile overrides it. The
 `version` field must be `1`. `expr` is only read by fixturize, but it
 is part of the shared schema, so leave it in even if you never run
 fixturize.
@@ -77,10 +78,10 @@ db_url     = "${DATABASE_URL}"
 masks_file = "data-masking-policy.yml"
 ```
 
-The profile's `database_id` defaults to the profile name (`dev`) and is
-what DryRun uses to select a block inside the YAML. The block name in
-the policy file must match it, so `databases.dev` rather than
-`databases.default`.
+The profile's `database_id` defaults to `[project].id` (not the profile
+name) and is what DryRun uses to select a block inside the YAML. Set it
+explicitly when the two differ. The block name in the policy file must
+match it, so `databases.dev` rather than `databases.default`.
 
 ### Capture and verify
 
@@ -101,13 +102,24 @@ Captured schema: 24 tables, 3 views, 8 functions
 Confirm it on the history store directly:
 
 ```sh
-sqlite3 .dryrun/history.db \
-  "SELECT column_name, most_common_vals FROM planner_column_stats
-   WHERE column_name IN ('email','phone');"
+sqlite3 -noheader .dryrun/history.db \
+  "SELECT payload_json FROM planner_stats ORDER BY id DESC LIMIT 1" \
+| jq -c '.masking,
+    (.columns[] | select(.column | IN("email","phone"))
+      | {c: "\(.table.name).\(.column)", mcv: .stats.most_common_vals})'
 ```
 
-Masked columns show NULL `most_common_vals`. Non-sensitive columns keep
+```
+{"applied":true,"columns_masked":2,"jsonb_mcv_stripped":true}
+{"c":"users.email","mcv":null}
+{"c":"users.phone","mcv":null}
+```
+
+Masked columns show no `most_common_vals`. Non-sensitive columns keep
 their statistics, so plans on those columns stay realistic.
+
+For a full pre-handover review, see
+[`docs/anonymized-snapshots.md`](docs/anonymized-snapshots.md).
 
 Regardless of policy, DryRun strips `jsonb` MCV values at capture as an
 always-on backstop. `histogram_bounds` is not auto-stripped, so list
