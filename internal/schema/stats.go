@@ -273,7 +273,9 @@ func (r *nodeIdentityRow) identity(source string) *NodeIdentity {
 			"and every counter is differenced per node label",
 			"derived", source)
 	}
-	postmasterUp := r.PostmasterUp
+	// normalize: text-format decoding (QueryExecModeExec) keeps the server's
+	// offset, binary lands in the client's zone — both would render differently
+	postmasterUp := r.PostmasterUp.UTC()
 	return &NodeIdentity{
 		Source:              source,
 		IsStandby:           r.IsStandby,
