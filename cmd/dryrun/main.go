@@ -321,9 +321,10 @@ func snapshotCmd() *cobra.Command {
 	}
 
 	var (
-		pushAfter  bool
-		pushRemote string
-		takeForce  bool
+		pushAfter           bool
+		pushRemote          string
+		takeForce           bool
+		takeAllowRoleChange bool
 	)
 	takeCmd := &cobra.Command{
 		Use:   "take",
@@ -361,7 +362,7 @@ func snapshotCmd() *cobra.Command {
 				slog.Warn("masking disabled by --no-masks; raw planner stats will be written to history.db")
 			}
 
-			snap, planner, activity, masked, err := runSnapshotTake(cmd.Context(), cap, store, key, policy, takeForce)
+			snap, planner, activity, masked, err := runSnapshotTake(cmd.Context(), cap, store, key, policy, takeForce, takeAllowRoleChange)
 			if err != nil {
 				return err
 			}
@@ -398,6 +399,7 @@ func snapshotCmd() *cobra.Command {
 	takeCmd.Flags().BoolVar(&pushAfter, "push", false, "push the snapshot to a remote after capture")
 	takeCmd.Flags().StringVar(&pushRemote, "remote", "", "configured [[remote]] name (with --push)")
 	takeCmd.Flags().BoolVar(&takeForce, "force", false, "record even if the cluster/database identity differs from this project's history")
+	takeCmd.Flags().BoolVar(&takeAllowRoleChange, "allow-role-change", false, "accept a label whose role flipped (promotion/failover)")
 
 	listCmd := snapshotListCmd(&historyDB)
 	addHistFlag(listCmd)

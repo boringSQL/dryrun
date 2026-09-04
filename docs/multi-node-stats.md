@@ -203,20 +203,25 @@ dryrun snapshot capture --all --check
 
 ```
 NODE       STATUS  ROLE      PG      DATABASE      SERVER           STREAMS
-analytics  ok      primary   17.10   analytics     10.0.0.1         activity
+analytics  FAIL    primary   17.10   analytics     10.0.0.1         activity
 primary    ok      primary   17.10   app           10.0.0.1         activity,query
 replica-1  FAIL    primary   17.10   app           10.0.0.1         activity,query
 replica-2  FAIL    -         -       -             -                -
 
 warning: analytics, primary and replica-1 are the same server (10.0.0.1), different databases.
 
+error: analytics: capture does not match this project's snapshot history: database name differs (history "app", capture "analytics").
+       The connection may point at the wrong database, or you may be in the wrong project directory.
+       Re-check --db / DATABASE_URL.
+       If the identity legitimately changed, re-baseline with `dryrun snapshot take --force`
+       on the primary; --force here bypasses this run only.
 error: primary and replica-1 point at 10.0.0.1 (database app): one server under 2 labels. --all captures it once per label, and the fleet view shows nodes that are the same server.
 error: replica-1: [[node]] replica-1 declares role standby, but this node is a primary;
   swap the roles in dryrun.toml, or set role = auto
 error: replica-2: url_env REPLICA2_URL is unset in this environment
 ```
 
-Each node is checked on its own, so one unreachable node still leaves a full report rather than aborting at the first failure, and `--check-timeout` (10s by default) bounds a node that neither answers nor refuses. Every check is one that capture itself makes: the privileged-role refusal, the declared vs. detected role, the role a label was last captured under, whether this label's last capture came from a different server, `pg_stat_statements` for the query stream, a schema snapshot for every stream (waived by `--allow-orphan`, except for planner, which annotates against the snapshot itself), the stream names, the row cap, and the masking policy `require_masks` demands. Two checks are only visible across the fleet — two labels resolving to one server (fatal; identified by the server's boot time, not by the URL text, so a hostname and its IP are still caught, and only a warning when one of the labels is a `pool = true` endpoint that lands on a member by design) and a fleet spread over several databases, whose stats all land under one `database_id`. Failures exit nonzero; warnings do not. No capture lock is taken, so the preflight is safe to run while a cron capture is in flight.
+Each node is checked on its own, so one unreachable node still leaves a full report rather than aborting at the first failure, and `--check-timeout` (10s by default) bounds a node that neither answers nor refuses. Every check is one that capture itself makes: the privileged-role refusal, the declared vs. detected role, the role a label was last captured under, the cluster and database identity against this project's schema baseline (waived by `--force`), whether this label's last capture came from a different server, `pg_stat_statements` for the query stream, a schema snapshot for every stream (waived by `--allow-orphan`, except for planner, which annotates against the snapshot itself), the stream names, the row cap, and the masking policy `require_masks` demands. Two checks are only visible across the fleet — two labels resolving to one server (fatal; identified by the server's boot time, not by the URL text, so a hostname and its IP are still caught, and only a warning when one of the labels is a `pool = true` endpoint that lands on a member by design) and a fleet spread over several databases, whose stats all land under one `database_id`. Failures exit nonzero; warnings do not. No capture lock is taken, so the preflight is safe to run while a cron capture is in flight.
 
 `--due` is what makes one cron line implement every cadence:
 

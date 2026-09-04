@@ -25,6 +25,7 @@ import (
 // init capture surface; kept narrow so tests can stub it.
 type initCapturer interface {
 	IsStandby(ctx context.Context) (bool, error)
+	Identity(ctx context.Context) (systemID, database string, err error)
 	Introspect(ctx context.Context) (*schema.SchemaSnapshot, error)
 	CapturePlanner(ctx context.Context, schemaRefHash string) (*schema.PlannerStatsSnapshot, error)
 	CaptureActivity(ctx context.Context, schemaRefHash, source string) (*schema.ActivityStatsSnapshot, error)
@@ -80,6 +81,14 @@ func (c pgxCapturer) IsStandby(ctx context.Context) (bool, error) {
 
 func (c pgxCapturer) CurrentDatabase(ctx context.Context) (string, error) {
 	return schema.FetchCurrentDatabase(ctx, c.tx)
+}
+
+func (c pgxCapturer) Identity(ctx context.Context) (string, string, error) {
+	db, err := schema.FetchCurrentDatabase(ctx, c.tx)
+	if err != nil {
+		return "", "", fmt.Errorf("query current database: %w", err)
+	}
+	return c.systemID, db, nil
 }
 
 func (c pgxCapturer) Introspect(ctx context.Context) (*schema.SchemaSnapshot, error) {
@@ -328,7 +337,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 // snapshot take wrapper: gate on standby (refuse, no replica fallback), then
 // delegate to runPrimaryCapture. Kept here so the masking + standby contract
 // lives next to init's; the snapshot take command only handles flag plumbing.
-func runSnapshotTake(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, policy *masking.Policy, force bool) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
+func runSnapshotTake(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, policy *masking.Policy, force, allowRoleChange bool) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
 	standby, err := cap.IsStandby(ctx)
 	if err != nil {
 		return nil, nil, nil, 0, fmt.Errorf("check standby status: %w", err)
@@ -337,6 +346,11 @@ func runSnapshotTake(ctx context.Context, cap initCapturer, store initWriter, ke
 		return nil, nil, nil, 0, dryrun.NewError(dryrun.ErrReplicaCapture,
 			"`dryrun snapshot take` must run against the primary; "+
 				"use `dryrun snapshot activity --from <url> --label <name>` to capture activity from a replica")
+	}
+	if err := guardNodeRole(ctx, store, key, captureOptions{
+		Label: "primary", AllowRoleChange: allowRoleChange,
+	}, history.NodeRolePrimary); err != nil {
+		return nil, nil, nil, 0, err
 	}
 	return runPrimaryCapture(ctx, cap, store, key, "primary", policy, force)
 }
@@ -347,7 +361,7 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 	if err != nil {
 		return nil, nil, nil, 0, err
 	}
-	if err := guardCaptureIdentity(ctx, store, key, snap, force); err != nil {
+	if err := guardCaptureIdentity(ctx, store, key, snap.SystemIdentifier, snap.Database, force); err != nil {
 		return snap, nil, nil, 0, err
 	}
 	if _, err := store.PutSchema(ctx, key, snap); err != nil {
@@ -383,7 +397,7 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 
 // refuse a capture whose cluster/database contradicts this key's history: a stray
 // DATABASE_URL recording a foreign db into the project.
-func guardCaptureIdentity(ctx context.Context, store initWriter, key history.SnapshotKey, snap *schema.SchemaSnapshot, force bool) error {
+func guardCaptureIdentity(ctx context.Context, store initWriter, key history.SnapshotKey, systemID, database string, force bool) error {
 	if force {
 		return nil
 	}
@@ -395,17 +409,23 @@ func guardCaptureIdentity(ctx context.Context, store initWriter, key history.Sna
 	if err != nil {
 		return dryrun.WrapError(dryrun.ErrHistory, "read prior snapshot for identity check", err)
 	}
-	if prior == nil {
+	return guardCaptureIdentityAgainst(prior, systemID, database, force)
+}
+
+func guardCaptureIdentityAgainst(prior *schema.SchemaSnapshot, systemID, database string, force bool) error {
+	if force || prior == nil {
 		return nil
 	}
-	reason, conflict := snapshot.IdentityConflict(prior, snap)
+	reason, conflict := snapshot.IdentityConflictWith(prior, systemID, database)
 	if !conflict {
 		return nil
 	}
 	return dryrun.NewError(dryrun.ErrIdentityMismatch,
 		fmt.Sprintf("capture does not match this project's snapshot history: %s.\n"+
 			"       The connection may point at the wrong database, or you may be in the wrong project directory.\n"+
-			"       Re-check --db / DATABASE_URL, or pass --force to record it anyway.", reason))
+			"       Re-check --db / DATABASE_URL.\n"+
+			"       If the identity legitimately changed, re-baseline with `dryrun snapshot take --force`\n"+
+			"       on the primary; --force here bypasses this run only.", reason))
 }
 
 // dbName, when set, is baked as the profile's database_id; empty leaves it commented

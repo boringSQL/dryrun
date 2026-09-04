@@ -107,20 +107,36 @@ func snapshotActivityCmd() *cobra.Command {
 // --due; they stay for the cron jobs already using them.
 const captureSupersedes = "Superseded by `dryrun snapshot capture`:\n"
 
-// Four call sites resolved this independently and worded the error four ways.
-func resolveSchemaRef(ctx context.Context, store initWriter, key history.SnapshotKey, allowOrphan bool) (string, error) {
+// nil, nil when the key has no schema yet
+func latestSchema(ctx context.Context, store initWriter, key history.SnapshotKey) (*schema.SchemaSnapshot, error) {
 	snap, err := store.GetSchema(ctx, key, history.NewRefLatest())
 	// only an absent snapshot falls through to --allow-orphan
 	if err != nil && !errors.Is(err, history.ErrSnapshotNotFound) {
-		return "", fmt.Errorf("read latest schema snapshot: %w", err)
+		return nil, fmt.Errorf("read latest schema snapshot: %w", err)
 	}
-	if err == nil && snap != nil {
-		return snap.ContentHash, nil
+	if err != nil {
+		return nil, nil
+	}
+	return snap, nil
+}
+
+func schemaRefFrom(prior *schema.SchemaSnapshot, allowOrphan bool) (string, error) {
+	if prior != nil {
+		return prior.ContentHash, nil
 	}
 	if allowOrphan {
 		return "", nil
 	}
 	return "", fmt.Errorf("no schema snapshot to bind to; run `dryrun snapshot take` on the primary first, or pass --allow-orphan")
+}
+
+// Four call sites resolved this independently and worded the error four ways.
+func resolveSchemaRef(ctx context.Context, store initWriter, key history.SnapshotKey, allowOrphan bool) (string, error) {
+	prior, err := latestSchema(ctx, store, key)
+	if err != nil {
+		return "", err
+	}
+	return schemaRefFrom(prior, allowOrphan)
 }
 
 // pg_stat_statements is a server configuration, so the remedy is the same

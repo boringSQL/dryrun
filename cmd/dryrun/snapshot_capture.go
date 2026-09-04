@@ -43,6 +43,7 @@ func snapshotCaptureCmd(historyDB *string) *cobra.Command {
 		allowOrphan           bool
 		allowRotation         bool
 		allowRoleChange       bool
+		force                 bool
 		pushAfter             bool
 		pushRemote            string
 		check                 bool
@@ -90,6 +91,7 @@ fail.`,
 				AllowOrphan:     allowOrphan,
 				AllowRotation:   allowRotation,
 				AllowRoleChange: allowRoleChange,
+				Force:           force,
 				Due:             due,
 			}
 
@@ -168,6 +170,7 @@ fail.`,
 	cmd.Flags().BoolVar(&allowOrphan, "allow-orphan", false, "permit capture without a bound schema snapshot")
 	cmd.Flags().BoolVar(&allowRotation, "allow-rotation", false, "this label names a pool; do not warn when it alternates between servers")
 	cmd.Flags().BoolVar(&allowRoleChange, "allow-role-change", false, "accept a label whose role flipped (promotion/failover)")
+	cmd.Flags().BoolVar(&force, "force", false, "record even if the cluster/database identity differs from this project's history")
 	cmd.Flags().BoolVar(&check, "check", false, "preflight only: connect, SELECT 1, report what capture would do; capture nothing")
 	cmd.Flags().DurationVar(&checkTimeout, "check-timeout", checkTimeoutDefault, "per-node time budget for --check")
 	cmd.Flags().BoolVar(&pushAfter, "push", false, "push to a remote after capturing")
@@ -186,6 +189,7 @@ var (
 type captureRunOptions struct {
 	MaskPolicy      *masking.Policy
 	AllowOrphan     bool
+	Force           bool
 	AllowRotation   bool
 	AllowRoleChange bool
 	Due             bool
@@ -321,7 +325,6 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 	}, role); err != nil {
 		return err
 	}
-
 	wanted := t.Streams
 	if len(wanted) == 0 {
 		wanted = config.DefaultStreamsFor(role)
@@ -334,9 +337,20 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 		fmt.Fprintf(os.Stderr, "%s: nothing due\n", t.Label)
 		return nil
 	}
+	prior, err := latestSchema(ctx, store, key)
+	if err != nil {
+		return err
+	}
+	systemID, database, err := cap.Identity(ctx)
+	if err != nil {
+		return err
+	}
+	if err := guardCaptureIdentityAgainst(prior, systemID, database, opts.Force); err != nil {
+		return err
+	}
 	// a run capturing schema writes the hash its stats bind to, so don't
 	// demand --allow-orphan for a gap it closes
-	schemaRef, err := resolveSchemaRef(ctx, store, key, opts.AllowOrphan || slices.Contains(wanted, "schema"))
+	schemaRef, err := schemaRefFrom(prior, opts.AllowOrphan || slices.Contains(wanted, "schema"))
 	if err != nil {
 		return err
 	}

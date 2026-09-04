@@ -34,11 +34,16 @@ type stubCapturer struct {
 	PlannerColumns []schema.ColumnStatsEntry
 	SystemID       string
 	Database       string
+	IdentityErr    error
 	LastRowCap     int
 }
 
 func (s *stubCapturer) IsStandby(_ context.Context) (bool, error) {
 	return s.Standby, s.StandbyErr
+}
+
+func (s *stubCapturer) Identity(_ context.Context) (string, string, error) {
+	return s.SystemID, s.Database, s.IdentityErr
 }
 
 func (s *stubCapturer) Introspect(_ context.Context) (*schema.SchemaSnapshot, error) {

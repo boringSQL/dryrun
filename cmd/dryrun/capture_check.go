@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -184,6 +185,16 @@ func checkNode(ctx context.Context, store *history.Store, key history.SnapshotKe
 		r.Fail = err
 		return r
 	}
+	systemID, err := schema.FetchSystemIdentifier(ctx, conn.Pool())
+	if err != nil {
+		// mirror newPgxCapturer: an unreadable id is no id, never a stale one
+		slog.Debug("system_identifier unavailable for preflight", "node", t.Label, "error", err)
+		systemID = ""
+	}
+	if err := guardCaptureIdentity(ctx, store, key, systemID, r.Database, opts.Force); err != nil {
+		r.Fail = err
+		return r
+	}
 
 	if len(r.Streams) == 0 {
 		r.Streams = config.DefaultStreamsFor(r.Role)
@@ -309,7 +320,9 @@ func fleetIssues(results []checkResult) (fatal, warn []string) {
 		}
 		warn = append(warn, fmt.Sprintf(
 			"the fleet spans %d databases: %s. Every node's stats land under one database_id, "+
-				"so they will be compared as if they were one database.", len(dbs), strings.Join(parts, "; ")))
+				"so they will be compared as if they were one database. A node contradicting "+
+				"this project's schema baseline fails on its own row above; this warning also "+
+				"covers a project that has no baseline yet.", len(dbs), strings.Join(parts, "; ")))
 	}
 	return fatal, warn
 }

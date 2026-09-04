@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
@@ -66,7 +68,7 @@ func TestRunSnapshotTake_IdentityGuard(t *testing.T) {
 			cap := &stubCapturer{SystemID: tc.capSystem, Database: tc.capDB}
 			w := &stubWriter{Stored: tc.stored}
 
-			_, _, _, _, err := runSnapshotTake(context.Background(), cap, w, key, nil, tc.force)
+			_, _, _, _, err := runSnapshotTake(context.Background(), cap, w, key, nil, tc.force, false)
 
 			if tc.wantRefuse {
 				var de *dryrun.Error
@@ -95,7 +97,7 @@ func TestRunSnapshotTake_IdentityGuard_FailsClosedOnReadError(t *testing.T) {
 	w := &stubWriter{GetErr: errors.New("history.db read failed")}
 
 	_, _, _, _, err := runSnapshotTake(context.Background(), cap, w,
-		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, nil, false)
+		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, nil, false, false)
 
 	var de *dryrun.Error
 	if !errors.As(err, &de) || de.Kind != dryrun.ErrHistory {
@@ -103,5 +105,116 @@ func TestRunSnapshotTake_IdentityGuard_FailsClosedOnReadError(t *testing.T) {
 	}
 	if w.SchemaN != 0 {
 		t.Fatalf("guard failed open: wrote %d schema rows on a read error", w.SchemaN)
+	}
+}
+
+// A node capture never introspects, so it proves identity from the pair alone.
+// Before this, node-scoped captures ran no identity guard at all and a stray
+// node URL could record a foreign cluster into the project.
+func TestGuardCaptureIdentity_OnTheIdentityPair(t *testing.T) {
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	prior := &schema.SchemaSnapshot{SystemIdentifier: "111", Database: "app"}
+
+	for _, tc := range []struct {
+		name       string
+		stored     *schema.SchemaSnapshot
+		systemID   string
+		database   string
+		force      bool
+		wantRefuse bool
+	}{
+		{"no baseline yet accepts anything", nil, "999", "billing", false, false},
+		{"matching pair is accepted", prior, "111", "app", false, false},
+		{"foreign cluster is refused", prior, "999", "app", false, true},
+		{"wrong database on the same cluster is refused", prior, "111", "billing", false, true},
+		{"--force records the mismatch anyway", prior, "999", "billing", true, false},
+		// a capture that could not read system_identifier (permissions) still
+		// proves the database axis; an absent axis must not false-positive
+		{"an empty axis does not conflict", prior, "", "app", false, false},
+		{"an empty cluster still catches the database", prior, "", "billing", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &stubWriter{Stored: tc.stored}
+			err := guardCaptureIdentity(context.Background(), w, key, tc.systemID, tc.database, tc.force)
+			if !tc.wantRefuse {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			var de *dryrun.Error
+			if !errors.As(err, &de) || de.Kind != dryrun.ErrIdentityMismatch {
+				t.Fatalf("want ErrIdentityMismatch, got %v", err)
+			}
+		})
+	}
+}
+
+// take checked the standby gate but never the recorded role, so it could
+// re-point a label that `capture` would have refused.
+func TestRunSnapshotTake_GuardsTheRecordedRole(t *testing.T) {
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+
+	for _, tc := range []struct {
+		name            string
+		prevRole        string
+		allowRoleChange bool
+		wantRefuse      bool
+	}{
+		{"a label last seen as a standby is refused", history.NodeRoleStandby, false, true},
+		{"--allow-role-change accepts the flip", history.NodeRoleStandby, true, false},
+		{"an unchanged role is accepted", history.NodeRolePrimary, false, false},
+		{"a label with no recorded role is accepted", history.NodeRoleUnknown, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cap := &stubCapturer{}
+			w := &stubWriter{PrevRole: tc.prevRole}
+
+			_, _, _, _, err := runSnapshotTake(context.Background(), cap, w, key, nil, false, tc.allowRoleChange)
+
+			if !tc.wantRefuse {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			var de *dryrun.Error
+			if !errors.As(err, &de) || de.Kind != dryrun.ErrNodeRoleChanged {
+				t.Fatalf("want ErrNodeRoleChanged, got %v", err)
+			}
+			if w.SchemaN != 0 {
+				t.Fatalf("refused capture still wrote %d schema rows", w.SchemaN)
+			}
+		})
+	}
+}
+
+// capture had no --force at all, so an identity mismatch was unrecoverable
+// there, and take never checked the recorded role that capture has always
+// checked. The guards are unit-tested above -- this pins that both commands
+// expose the same two escape hatches.
+func TestCaptureAndTake_ExposeTheSameGuardFlags(t *testing.T) {
+	db := "unused.db"
+	cmds := map[string]*cobra.Command{"capture": snapshotCaptureCmd(&db)}
+	for _, c := range snapshotCmd().Commands() {
+		if c.Name() == "take" {
+			cmds["take"] = c
+		}
+	}
+	if cmds["take"] == nil {
+		t.Fatal("could not find the take subcommand")
+	}
+
+	for _, name := range []string{"force", "allow-role-change"} {
+		for cmdName, c := range cmds {
+			f := c.Flags().Lookup(name)
+			if f == nil {
+				t.Errorf("snapshot %s is missing --%s, which its guard tells users to pass", cmdName, name)
+				continue
+			}
+			if f.DefValue != "false" {
+				t.Errorf("snapshot %s --%s defaults to %q, want the guard on by default", cmdName, name, f.DefValue)
+			}
+		}
 	}
 }
