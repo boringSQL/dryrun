@@ -54,6 +54,17 @@ type (
 	}
 )
 
+// Where a stream's rows live, and whether they are attributed to a node.
+var streamSources = map[string]struct {
+	table   string
+	perNode bool
+}{
+	"activity": {"activity_stats", true},
+	"query":    {"query_stats", true},
+	"planner":  {"planner_stats", false},
+	"schema":   {"snapshots", false},
+}
+
 var nodeTables = []struct {
 	table  string
 	stream string
@@ -184,19 +195,13 @@ func (s *Store) RecentNodeFingerprints(ctx context.Context, key SnapshotKey, nod
 // land in the same tables, so a pull can make a node look recently captured;
 // v0.17's captured_locally column is what fixes that.
 func (s *Store) LastCaptureAt(ctx context.Context, key SnapshotKey, nodeLabel, stream string) (time.Time, bool, error) {
-	table, ok := map[string]string{
-		"activity": "activity_stats",
-		"query":    "query_stats",
-		"planner":  "planner_stats",
-		"schema":   "snapshots",
-	}[stream]
+	src, ok := streamSources[stream]
 	if !ok {
 		return time.Time{}, false, fmt.Errorf("unknown stream %q", stream)
 	}
-	q := `SELECT timestamp FROM ` + table + ` WHERE project_id = ? AND database_id = ?`
+	q := `SELECT timestamp FROM ` + src.table + ` WHERE project_id = ? AND database_id = ?`
 	args := []any{string(key.ProjectID), string(key.DatabaseID)}
-	// only activity and query are per node; schema and planner are project-wide
-	if table == "activity_stats" || table == "query_stats" {
+	if src.perNode {
 		q += " AND node_source = ?"
 		args = append(args, nodeLabel)
 	}

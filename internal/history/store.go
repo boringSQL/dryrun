@@ -259,6 +259,15 @@ func (s *Store) migrate() error {
 			ON query_stats(project_id, database_id, timestamp DESC);
 		CREATE INDEX IF NOT EXISTS query_stats_by_schema_ref
 			ON query_stats(schema_ref_hash, node_source, timestamp DESC);
+
+		CREATE TABLE IF NOT EXISTS capture_attempts (
+			project_id   TEXT NOT NULL,
+			database_id  TEXT NOT NULL,
+			node_label   TEXT NOT NULL,
+			stream       TEXT NOT NULL,
+			attempted_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, database_id, node_label, stream)
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("migration failed: %w", err)

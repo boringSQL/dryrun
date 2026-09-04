@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/boringsql/dryrun/internal/history"
 )
 
 func parseNodes(t *testing.T, toml string) *ProjectConfig {
@@ -264,6 +266,18 @@ func TestDefaultStreamsFor(t *testing.T) {
 	for _, role := range []string{"primary", "standby", "auto"} {
 		if hasString(DefaultStreamsFor(role), "schema") {
 			t.Errorf("%s defaults include schema", role)
+		}
+	}
+}
+
+// A stream config accepts but history cannot resolve aborts the node on --due
+// (LastCaptureAt errors) while its attempt marker only logs a warning -- two
+// failure modes for one omission. Adding a stream here means adding it to
+// history.streamSources in the same change.
+func TestKnownStreamsResolveInHistory(t *testing.T) {
+	for _, s := range knownStreams {
+		if !history.StreamKnown(s) {
+			t.Errorf("stream %q is configurable but history has no source table for it", s)
 		}
 	}
 }

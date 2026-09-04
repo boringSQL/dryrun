@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -339,6 +340,24 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 		return err
 	}
 
+	done, err := captureStreams(ctx, cap, store, key, t, wanted, schemaRef, rowCap, opts)
+	// Report even on partial failure: captured streams already advanced their
+	// due clock, so silence would read as "nothing happened".
+	if err == nil || len(done) > 0 {
+		fmt.Fprintf(os.Stderr, "%s (%s): %s\n", t.Label, role, strings.Join(done, " "))
+	}
+	if err != nil {
+		return err
+	}
+	if len(skipped) > 0 {
+		fmt.Fprintf(os.Stderr, "  not due: %s\n", strings.Join(skipped, ", "))
+	}
+	return nil
+}
+
+// Runs each wanted stream in order and marks it attempted. A real error is
+// not recorded, so a broken node retries on the next tick.
+func captureStreams(ctx context.Context, cap initCapturer, store *history.Store, key history.SnapshotKey, t captureTarget, wanted []string, schemaRef string, rowCap int, opts captureRunOptions) ([]string, error) {
 	var done []string
 	for _, s := range wanted {
 		n, err := captureStream(ctx, cap, store, key, t, s, schemaRef, rowCap, opts)
@@ -350,16 +369,13 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 		case err != nil:
 			// the capture shares one transaction, so a failed read can leave
 			// it unusable for the streams after it
-			return fmt.Errorf("%s: %w", s, err)
+			return done, fmt.Errorf("%s: %w", s, err)
 		default:
 			done = append(done, fmt.Sprintf("%s=%d", s, n))
 		}
+		markCaptureAttempt(ctx, store, key, t.Label, s)
 	}
-	fmt.Fprintf(os.Stderr, "%s (%s): %s\n", t.Label, role, strings.Join(done, " "))
-	if len(skipped) > 0 {
-		fmt.Fprintf(os.Stderr, "  not due: %s\n", strings.Join(skipped, ", "))
-	}
-	return nil
+	return done, nil
 }
 
 func captureStream(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, t captureTarget, stream, schemaRef string, rowCap int, opts captureRunOptions) (int, error) {
@@ -441,25 +457,18 @@ func candidateStreams(t captureTarget) []string {
 	return []string{"planner", "activity", "query"}
 }
 
-// --due keys off the newest stored row. Pulled rows land in the same tables,
-// so a pull can make a node look freshly captured; worst case one stream skips
-// one interval and self-heals on the next tick.
+// --due keys off the newer of the newest stored row and this host's last
+// attempt. Pulled rows land in the same tables, so a pull can make a node look
+// freshly captured; it self-heals on the next tick.
 func dueStreams(ctx context.Context, store *history.Store, key history.SnapshotKey, t captureTarget, wanted []string, due bool) (run, skipped []string, err error) {
 	if !due || t.Interval <= 0 {
 		return wanted, nil, nil
 	}
 	now := time.Now().UTC()
 	for _, s := range wanted {
-		last, ok, err := store.LastCaptureAt(ctx, key, t.Label, s)
+		last, ok, err := lastDueMarker(ctx, store, key, t.Label, s, now)
 		if err != nil {
 			return nil, nil, err
-		}
-		// A row dated in the future came from a host with a skewed clock, most
-		// likely via pull. It is not evidence that we captured recently, so it
-		// is ignored rather than clamped to now -- clamping would still hold
-		// the stream back for a full interval on garbage input.
-		if ok && last.After(now) {
-			ok = false
 		}
 		if ok && now.Sub(last) < t.Interval {
 			skipped = append(skipped, fmt.Sprintf("%s (%s ago)", s, now.Sub(last).Round(time.Minute)))
@@ -468,6 +477,44 @@ func dueStreams(ctx context.Context, store *history.Store, key history.SnapshotK
 		run = append(run, s)
 	}
 	return run, skipped, nil
+}
+
+// The newer of "a row was stored" and "this host tried"; the attempt half
+// keeps a deduping stream from being due on every tick forever.
+func lastDueMarker(ctx context.Context, store *history.Store, key history.SnapshotKey, label, stream string, now time.Time) (time.Time, bool, error) {
+	row, rowOK, err := store.LastCaptureAt(ctx, key, label, stream)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	attempt, attemptOK, err := store.LastCaptureAttemptAt(ctx, key, label, stream)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+
+	var last time.Time
+	var ok bool
+	for _, c := range []struct {
+		at time.Time
+		ok bool
+	}{{row, rowOK}, {attempt, attemptOK}} {
+		// A future-dated timestamp came from a skewed clock, most likely via
+		// pull; ignore it rather than clamp to now.
+		if !c.ok || c.at.After(now) {
+			continue
+		}
+		if !ok || c.at.After(last) {
+			last, ok = c.at, true
+		}
+	}
+	return last, ok, nil
+}
+
+// Bookkeeping must not fail a capture that already succeeded, so a failed
+// upsert is logged and the stream simply stays due.
+func markCaptureAttempt(ctx context.Context, store *history.Store, key history.SnapshotKey, label, stream string) {
+	if err := store.MarkCaptureAttempt(ctx, key, label, stream, time.Now().UTC()); err != nil {
+		slog.Warn("record capture attempt", "node", label, "stream", stream, "err", err)
+	}
 }
 
 // Redaction lives with the code that builds connection errors, so every

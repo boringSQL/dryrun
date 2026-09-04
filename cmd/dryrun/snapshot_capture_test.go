@@ -164,7 +164,7 @@ func TestDueStreams(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(run) != 1 {
-			t.Errorf("run=%v, want a clamped future timestamp to read as due", run)
+			t.Errorf("run=%v, want a future timestamp to be ignored, leaving it due", run)
 		}
 	})
 
@@ -433,5 +433,217 @@ func TestCaptureStream_SchemaIsRefused(t *testing.T) {
 		captureTarget{Label: "primary"}, "schema", "sr-1", 0, captureRunOptions{})
 	if err == nil || !strings.Contains(err.Error(), "snapshot take") {
 		t.Errorf("got %v, want a pointer to snapshot take", err)
+	}
+}
+
+// A stream that dedups writes no row, so a due clock read from row timestamps
+// alone would introspect production on every tick forever.
+func TestDueStreams_AttemptSatisfiesTheClock(t *testing.T) {
+	ctx := context.Background()
+	store := testStoreAt(t, t.TempDir())
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	target := captureTarget{Label: "primary", Interval: time.Hour}
+
+	run, _, err := dueStreams(ctx, store, key, target, []string{"schema"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run) != 1 {
+		t.Fatalf("run=%v, want the first tick to be due", run)
+	}
+
+	if err := store.MarkCaptureAttempt(ctx, key, target.Label, "schema", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	run, skipped, err := dueStreams(ctx, store, key, target, []string{"schema"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run) != 0 || len(skipped) != 1 {
+		t.Errorf("run=%v skipped=%v, want the attempt to hold the second tick back", run, skipped)
+	}
+
+	// and it expires like a row does. A separate store, because the marker
+	// only moves forward: this attempt has to be the first one written.
+	aged := testStoreAt(t, t.TempDir())
+	if err := aged.MarkCaptureAttempt(ctx, key, target.Label, "schema", time.Now().UTC().Add(-90*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	run, _, err = dueStreams(ctx, aged, key, target, []string{"schema"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run) != 1 {
+		t.Errorf("run=%v, want it due again after the interval", run)
+	}
+}
+
+// The newer of the two markers wins, in both directions.
+func TestDueStreams_RowAndAttemptTakeTheMax(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	t.Run("a recent row outweighs a stale attempt", func(t *testing.T) {
+		store := testStoreAt(t, t.TempDir())
+		key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+		putQueryAt(t, store, key, "q-1", "primary", now.Add(-5*time.Minute))
+		if err := store.MarkCaptureAttempt(ctx, key, "primary", "query", now.Add(-10*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		run, _, err := dueStreams(ctx, store, key,
+			captureTarget{Label: "primary", Interval: time.Hour}, []string{"query"}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(run) != 0 {
+			t.Errorf("run=%v, want the recent row to hold it back", run)
+		}
+	})
+
+	t.Run("a recent attempt outweighs a stale row", func(t *testing.T) {
+		store := testStoreAt(t, t.TempDir())
+		key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+		putQueryAt(t, store, key, "q-1", "primary", now.Add(-10*time.Hour))
+		if err := store.MarkCaptureAttempt(ctx, key, "primary", "query", now.Add(-5*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		run, _, err := dueStreams(ctx, store, key,
+			captureTarget{Label: "primary", Interval: time.Hour}, []string{"query"}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(run) != 0 {
+			t.Errorf("run=%v, want the recent attempt to hold it back", run)
+		}
+	})
+
+	// a skewed clock, most likely arriving via pull, must not starve a stream
+	t.Run("a future attempt is ignored", func(t *testing.T) {
+		store := testStoreAt(t, t.TempDir())
+		key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+		if err := store.MarkCaptureAttempt(ctx, key, "primary", "query", now.Add(48*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		run, _, err := dueStreams(ctx, store, key,
+			captureTarget{Label: "primary", Interval: time.Hour}, []string{"query"}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(run) != 1 {
+			t.Errorf("run=%v, want a future-dated attempt to read as due", run)
+		}
+	})
+}
+
+// schema is project-scoped: one node's capture already satisfies another's
+// clock through the row, so the attempt must cross-satisfy too. Keying it per
+// node would leave the second node re-introspecting every tick.
+func TestDueStreams_ProjectScopedAttemptCrossesNodes(t *testing.T) {
+	ctx := context.Background()
+	store := testStoreAt(t, t.TempDir())
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+
+	if err := store.MarkCaptureAttempt(ctx, key, "node-a", "schema", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := dueStreams(ctx, store, key,
+		captureTarget{Label: "node-b", Interval: time.Hour}, []string{"schema"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run) != 0 {
+		t.Errorf("run=%v, want node-a's schema attempt to satisfy node-b", run)
+	}
+
+	// per-node streams keep the opposite property
+	if err := store.MarkCaptureAttempt(ctx, key, "node-a", "query", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	run, _, err = dueStreams(ctx, store, key,
+		captureTarget{Label: "node-b", Interval: time.Hour}, []string{"query"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run) != 1 {
+		t.Errorf("run=%v, want node-b's query stream still due", run)
+	}
+}
+
+// Recording a failed attempt would silence a broken node for a full interval
+// instead of retrying on the next tick.
+func TestCaptureStreams_AttemptRecording(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	target := captureTarget{Label: "primary"}
+
+	cases := []struct {
+		name    string
+		cap     *stubCapturer
+		wantErr bool
+		want    bool
+	}{
+		{"a captured row marks the attempt", &stubCapturer{}, false, true},
+		{"an unavailable stream marks the attempt",
+			&stubCapturer{QueryStatsErr: schema.ErrQueryStatsUnavailable}, false, true},
+		{"a real error does not", &stubCapturer{QueryStatsErr: errors.New("connection reset")}, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testStoreAt(t, t.TempDir())
+			_, err := captureStreams(ctx, tc.cap, store, key, target,
+				[]string{"query"}, "sr-1", 0, captureRunOptions{})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("captureStreams err=%v, wantErr=%t", err, tc.wantErr)
+			}
+			_, ok, err := store.LastCaptureAttemptAt(ctx, key, target.Label, "query")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok != tc.want {
+				t.Errorf("attempt recorded=%t, want %t", ok, tc.want)
+			}
+		})
+	}
+}
+
+// An unchanged stream dedups and writes no row; without the attempt marker it
+// would stay due forever.
+func TestCaptureStreams_DedupMarksTheAttempt(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	target := captureTarget{Label: "primary", Interval: time.Hour}
+	store := testStoreAt(t, t.TempDir())
+	cap := &stubCapturer{}
+
+	for i := range 2 {
+		done, err := captureStreams(ctx, cap, store, key, target,
+			[]string{"query"}, "sr-1", 0, captureRunOptions{})
+		if err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+		if i == 1 && strings.Join(done, ",") != "query=unchanged" {
+			t.Fatalf("second run reported %v, want the dedup", done)
+		}
+	}
+
+	run, _, err := dueStreams(ctx, store, key, target, []string{"query"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run) != 0 {
+		t.Errorf("run=%v, want a deduped stream to stop being permanently due", run)
+	}
+}
+
+// capture_attempts records what this host did, not what the project contains:
+// a pulled row must never mark a stream recently attempted here.
+func TestCaptureAttempts_NotWrittenByAStoreWrite(t *testing.T) {
+	ctx := context.Background()
+	store := testStoreAt(t, t.TempDir())
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+
+	putQueryAt(t, store, key, "pulled-1", "primary", time.Now().UTC())
+	if _, ok, err := store.LastCaptureAttemptAt(ctx, key, "primary", "query"); err != nil || ok {
+		t.Errorf("ok=%t err=%v, want a stored row to leave the attempt clock untouched", ok, err)
 	}
 }
