@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -256,9 +257,13 @@ func targetFromNode(n config.ResolvedNode, cliStreams []string) captureTarget {
 		Pool:     n.Pool,
 		Interval: n.Interval,
 	}
-	// an explicit --streams is the operator overriding config for this run
+	// an explicit --streams is the operator overriding config for this run;
+	// trim to match ValidateStreams, or exact matches downstream miss
 	if len(cliStreams) > 0 {
-		t.Streams = cliStreams
+		t.Streams = make([]string, 0, len(cliStreams))
+		for _, s := range cliStreams {
+			t.Streams = append(t.Streams, strings.TrimSpace(s))
+		}
 	}
 	return t
 }
@@ -329,8 +334,9 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 		fmt.Fprintf(os.Stderr, "%s: nothing due\n", t.Label)
 		return nil
 	}
-
-	schemaRef, err := resolveSchemaRef(ctx, store, key, opts.AllowOrphan)
+	// a run capturing schema writes the hash its stats bind to, so don't
+	// demand --allow-orphan for a gap it closes
+	schemaRef, err := resolveSchemaRef(ctx, store, key, opts.AllowOrphan || slices.Contains(wanted, "schema"))
 	if err != nil {
 		return err
 	}
@@ -355,12 +361,16 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 	return nil
 }
 
-// Runs each wanted stream in order and marks it attempted. A real error is
-// not recorded, so a broken node retries on the next tick.
+// test seam: the schema branch cannot be driven until it stops refusing
+var captureStreamFn = captureStream
+
+// Runs each wanted stream schema-first and marks it attempted. A real error
+// is not recorded, so a broken node retries on the next tick.
 func captureStreams(ctx context.Context, cap initCapturer, store *history.Store, key history.SnapshotKey, t captureTarget, wanted []string, schemaRef string, rowCap int, opts captureRunOptions) ([]string, error) {
 	var done []string
-	for _, s := range wanted {
-		n, err := captureStream(ctx, cap, store, key, t, s, schemaRef, rowCap, opts)
+	ordered := schemaFirst(wanted)
+	for i, s := range ordered {
+		n, hash, err := captureStreamFn(ctx, cap, store, key, t, s, schemaRef, rowCap, opts)
 		switch {
 		case errors.Is(err, errStreamUnavailable):
 			done = append(done, s+"=n/a")
@@ -373,27 +383,71 @@ func captureStreams(ctx context.Context, cap initCapturer, store *history.Store,
 		default:
 			done = append(done, fmt.Sprintf("%s=%d", s, n))
 		}
+		// rebind stats to the hash a schema capture just wrote. Carried out
+		// of the capture, not re-read: a pulled row with a fast clock could
+		// win a `latest` read. Ahead of the marker: a deduped schema writes
+		// no row, and the marker alone would silence the node for an interval.
+		if s == "schema" && (err == nil || errors.Is(err, errStreamUnchanged)) {
+			if hash == "" {
+				return done, fmt.Errorf("schema: capture returned no content hash to bind to")
+			}
+			schemaRef = hash
+		}
+		// a real error returned above, so this stream was attempted
 		markCaptureAttempt(ctx, store, key, t.Label, s)
+
+		// the run waived --allow-orphan on the promise of writing the hash;
+		// a standby skips, so fail rather than orphan what follows
+		if s == "schema" && schemaRef == "" && !opts.AllowOrphan && i < len(ordered)-1 {
+			return done, fmt.Errorf("schema was not captured on this node, so %s has no schema snapshot to bind to; capture schema on the primary first, or pass --allow-orphan",
+				strings.Join(ordered[i+1:], ", "))
+		}
 	}
 	return done, nil
 }
 
-func captureStream(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, t captureTarget, stream, schemaRef string, rowCap int, opts captureRunOptions) (int, error) {
+// schema writes the hash every other stream binds to, so it leads regardless
+// of listed order; the rest keep their order.
+func schemaFirst(streams []string) []string {
+	out := slices.Clone(streams)
+	slices.SortStableFunc(out, func(a, b string) int {
+		switch {
+		case a == b, a != "schema" && b != "schema":
+			return 0
+		case a == "schema":
+			return -1
+		default:
+			return 1
+		}
+	})
+	return out
+}
+
+// The second return is set only by the schema stream: the content hash it
+// stored (or already held on a dedup), which the rest of the run binds to.
+func captureStream(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, t captureTarget, stream, schemaRef string, rowCap int, opts captureRunOptions) (int, string, error) {
 	switch stream {
 	case "planner":
 		// planner rows carry pg_statistic MCVs and histogram bounds, so they
 		// go through the same masking `snapshot take` applies -- push ships
 		// whatever lands in history.db
-		snap, err := store.GetSchema(ctx, key, history.NewRefLatest())
+		// annotate against the ref the row binds to, not `latest`, or a
+		// rebound schemaRef could store it bound to one hash, annotated
+		// from another
+		ref := history.NewRefLatest()
+		if schemaRef != "" {
+			ref = history.NewRefHash(schemaRef)
+		}
+		snap, err := store.GetSchema(ctx, key, ref)
 		if err != nil && !errors.Is(err, history.ErrSnapshotNotFound) {
-			return 0, fmt.Errorf("read latest schema snapshot: %w", err)
+			return 0, "", fmt.Errorf("read schema snapshot to annotate against: %w", err)
 		}
 		if snap == nil {
-			return 0, fmt.Errorf("planner stats need a schema snapshot to annotate against; run `dryrun snapshot take` first")
+			return 0, "", fmt.Errorf("planner stats need a schema snapshot to annotate against; run `dryrun snapshot take` first")
 		}
 		p, err := cap.CapturePlanner(ctx, schemaRef)
 		if err != nil {
-			return 0, err
+			return 0, "", err
 		}
 		bloat.Annotate(p, snap)
 		masked := datamask.MaskPlanner(opts.MaskPolicy, p)
@@ -404,23 +458,23 @@ func captureStream(ctx context.Context, cap initCapturer, store initWriter, key 
 		}
 		out, err := store.PutPlanner(ctx, key, p)
 		if err != nil {
-			return 0, err
+			return 0, "", err
 		}
 		if out == history.PutDeduped {
-			return 0, errStreamUnchanged
+			return 0, "", errStreamUnchanged
 		}
-		return len(p.Tables), nil
+		return len(p.Tables), "", nil
 
 	case "activity":
 		a, err := cap.CaptureActivity(ctx, schemaRef, t.Label)
 		if err != nil {
-			return 0, err
+			return 0, "", err
 		}
 		warnNodeIdentityDrift(ctx, store, key, a.Node.Source, a.Node, opts.AllowRotation || t.Pool)
 		if _, err := store.PutActivity(ctx, key, a); err != nil {
-			return 0, err
+			return 0, "", err
 		}
-		return len(a.Tables), nil
+		return len(a.Tables), "", nil
 
 	case "query":
 		q, err := cap.CaptureQueryStats(ctx, schemaRef, t.Label, rowCap)
@@ -428,24 +482,24 @@ func captureStream(ctx context.Context, cap initCapturer, store initWriter, key 
 			// a replica without the extension must not fail a fleet run every
 			// tick; every other capture path treats this as best-effort
 			if errors.Is(err, schema.ErrQueryStatsUnavailable) {
-				return 0, errStreamUnavailable
+				return 0, "", errStreamUnavailable
 			}
-			return 0, err
+			return 0, "", err
 		}
 		warnNodeIdentityDrift(ctx, store, key, q.Node.Source, q.Node, opts.AllowRotation || t.Pool)
 		out, err := store.PutQueryStats(ctx, key, q)
 		if err != nil {
-			return 0, err
+			return 0, "", err
 		}
 		if out == history.PutDeduped {
-			return 0, errStreamUnchanged
+			return 0, "", errStreamUnchanged
 		}
-		return len(q.Queries), nil
+		return len(q.Queries), "", nil
 
 	case "schema":
-		return 0, fmt.Errorf("schema is captured by `dryrun snapshot take`, which guards that it runs on a primary")
+		return 0, "", fmt.Errorf("schema is captured by `dryrun snapshot take`, which guards that it runs on a primary")
 	}
-	return 0, fmt.Errorf("unknown stream %q", stream)
+	return 0, "", fmt.Errorf("unknown stream %q", stream)
 }
 
 // What the node could capture, without knowing its role yet: the union is
@@ -457,7 +511,7 @@ func candidateStreams(t captureTarget) []string {
 	if t.Role == "standby" {
 		return config.DefaultStreamsFor("standby")
 	}
-	return []string{"planner", "activity", "query"}
+	return config.DefaultStreamsFor("primary")
 }
 
 // --due keys off the newer of the newest stored row and this host's last

@@ -389,7 +389,7 @@ func TestCaptureStream_PlannerMasksLikeTake(t *testing.T) {
 			}}
 			w := &stubWriter{Stored: &schema.SchemaSnapshot{ContentHash: "sr-1"}}
 
-			if _, err := captureStream(ctx, cap, w, key, target, "planner", "sr-1", 0,
+			if _, _, err := captureStream(ctx, cap, w, key, target, "planner", "sr-1", 0,
 				captureRunOptions{MaskPolicy: tc.policy}); err != nil {
 				t.Fatalf("captureStream: %v", err)
 			}
@@ -419,7 +419,7 @@ func TestCaptureStream_QueryStatsUnavailableIsSkipped(t *testing.T) {
 	cap := &stubCapturer{QueryStatsErr: schema.ErrQueryStatsUnavailable}
 	w := &stubWriter{Stored: &schema.SchemaSnapshot{ContentHash: "sr-1"}}
 
-	_, err := captureStream(context.Background(), cap, w,
+	_, _, err := captureStream(context.Background(), cap, w,
 		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"},
 		captureTarget{Label: "replica"}, "query", "sr-1", 0, captureRunOptions{})
 	if !errors.Is(err, errStreamUnavailable) {
@@ -428,7 +428,7 @@ func TestCaptureStream_QueryStatsUnavailableIsSkipped(t *testing.T) {
 }
 
 func TestCaptureStream_SchemaIsRefused(t *testing.T) {
-	_, err := captureStream(context.Background(), &stubCapturer{}, &stubWriter{},
+	_, _, err := captureStream(context.Background(), &stubCapturer{}, &stubWriter{},
 		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"},
 		captureTarget{Label: "primary"}, "schema", "sr-1", 0, captureRunOptions{})
 	if err == nil || !strings.Contains(err.Error(), "snapshot take") {
@@ -645,5 +645,193 @@ func TestCaptureAttempts_NotWrittenByAStoreWrite(t *testing.T) {
 	putQueryAt(t, store, key, "pulled-1", "primary", time.Now().UTC())
 	if _, ok, err := store.LastCaptureAttemptAt(ctx, key, "primary", "query"); err != nil || ok {
 		t.Errorf("ok=%t err=%v, want a stored row to leave the attempt clock untouched", ok, err)
+	}
+}
+
+func TestSchemaFirst(t *testing.T) {
+	for _, tc := range []struct {
+		in   []string
+		want string
+	}{
+		{[]string{"query", "schema", "activity"}, "schema,query,activity"},
+		{[]string{"schema", "planner"}, "schema,planner"},
+		{[]string{"planner", "activity", "query"}, "planner,activity,query"},
+		{nil, ""},
+	} {
+		if got := strings.Join(schemaFirst(tc.in), ","); got != tc.want {
+			t.Errorf("schemaFirst(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	// the caller's slice must not be reordered under it: capture_check and the
+	// report both read the configured order
+	in := []string{"query", "schema"}
+	schemaFirst(in)
+	if in[0] != "query" {
+		t.Errorf("schemaFirst mutated its input: %v", in)
+	}
+}
+
+// Schema writes the hash the other streams bind to, so it leads even when the
+// config lists it last. Until the schema branch lands it refuses, which is what
+// makes the ordering observable here: query must not have run first.
+func TestCaptureStreams_SchemaRunsFirst(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	store := testStoreAt(t, t.TempDir())
+
+	done, err := captureStreams(ctx, &stubCapturer{}, store, key, captureTarget{Label: "primary"},
+		[]string{"query", "schema"}, "sr-1", 0, captureRunOptions{})
+	if err == nil || !strings.HasPrefix(err.Error(), "schema:") {
+		t.Fatalf("err=%v, want the schema stream to fail first", err)
+	}
+	if len(done) != 0 {
+		t.Errorf("done=%v, want nothing captured before schema", done)
+	}
+	if _, ok, err := store.LastCaptureAttemptAt(ctx, key, "primary", "query"); err != nil || ok {
+		t.Errorf("query attempted=%t err=%v, want query not to have run", ok, err)
+	}
+}
+
+// Swaps the stream function for one that records the schemaRef each stream was
+// called with, so the threading can be pinned before the schema branch stops
+// refusing.
+func stubStreams(t *testing.T, fn func(stream, schemaRef string) (int, string, error)) *[]string {
+	t.Helper()
+	var refs []string
+	prev := captureStreamFn
+	captureStreamFn = func(_ context.Context, _ initCapturer, _ initWriter, _ history.SnapshotKey,
+		_ captureTarget, stream, schemaRef string, _ int, _ captureRunOptions) (int, string, error) {
+		refs = append(refs, stream+"@"+schemaRef)
+		return fn(stream, schemaRef)
+	}
+	t.Cleanup(func() { captureStreamFn = prev })
+	return &refs
+}
+
+// §4.2: a stream captured after schema in the same run must bind to the hash
+// that run just wrote, not the one it started with.
+func TestCaptureStreams_ThreadsTheSchemaHash(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+
+	for _, tc := range []struct {
+		name    string
+		schema  func() (int, string, error)
+		want    string
+		wantErr string
+	}{
+		{"a written schema rebinds the streams after it",
+			func() (int, string, error) { return 139, "new-hash", nil },
+			"schema@old-hash,activity@new-hash", ""},
+		{"a deduped schema rebinds to the hash the store already held",
+			func() (int, string, error) { return 0, "old-hash", errStreamUnchanged },
+			"schema@old-hash,activity@old-hash", ""},
+		{"a schema that captured nothing to bind to is a real error",
+			func() (int, string, error) { return 139, "", nil },
+			"schema@old-hash", "no content hash"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testStoreAt(t, t.TempDir())
+			refs := stubStreams(t, func(stream, _ string) (int, string, error) {
+				if stream == "schema" {
+					return tc.schema()
+				}
+				return 1, "", nil
+			})
+			_, err := captureStreams(ctx, &stubCapturer{}, store, key,
+				captureTarget{Label: "primary"}, []string{"activity", "schema"},
+				"old-hash", 0, captureRunOptions{})
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("captureStreams: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err=%v, want it to mention %q", err, tc.wantErr)
+			}
+			if got := strings.Join(*refs, ","); got != tc.want {
+				t.Errorf("calls = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// An empty hash is a real error, and a deduped schema writes no row -- so the
+// attempt marker would be the only due clock and would silence the node for a
+// full interval. §4.1: never record on a real error.
+func TestCaptureStreams_NoAttemptWhenSchemaReturnsNoHash(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	store := testStoreAt(t, t.TempDir())
+	stubStreams(t, func(stream, _ string) (int, string, error) { return 0, "", nil })
+
+	if _, err := captureStreams(ctx, &stubCapturer{}, store, key,
+		captureTarget{Label: "primary"}, []string{"schema"}, "", 0,
+		captureRunOptions{}); err == nil {
+		t.Fatal("want an error when schema returns no content hash")
+	}
+	// schema is project-scoped, so its attempt is keyed with an empty label
+	if _, ok, err := store.LastCaptureAttemptAt(ctx, key, "", "schema"); err != nil || ok {
+		t.Errorf("attempt recorded=%t err=%v, want a real error to leave the clock untouched", ok, err)
+	}
+}
+
+// captureOneNode waives --allow-orphan because the run is going to write a
+// schema; if the schema stream skips, that waiver has to be paid back.
+func TestCaptureStreams_OrphanWaiverPayback(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+
+	for _, tc := range []struct {
+		name    string
+		streams []string
+		opts    captureRunOptions
+		wantErr bool
+	}{
+		{"a skipped schema orphans the streams after it", []string{"schema", "activity"}, captureRunOptions{}, true},
+		{"schema alone orphans nothing", []string{"schema"}, captureRunOptions{}, false},
+		{"--allow-orphan was the operator's call", []string{"schema", "activity"}, captureRunOptions{AllowOrphan: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testStoreAt(t, t.TempDir())
+			stubStreams(t, func(stream, _ string) (int, string, error) {
+				if stream == "schema" {
+					return 0, "", errStreamUnavailable // a standby skips
+				}
+				return 1, "", nil
+			})
+			// empty schemaRef: nothing stored for the run to fall back on
+			_, err := captureStreams(ctx, &stubCapturer{}, store, key,
+				captureTarget{Label: "primary"}, tc.streams, "", 0, tc.opts)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v, wantErr=%t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// A standby that skips schema but has a stored schema to bind to is not an
+// orphan: the payback must not fire.
+func TestCaptureStreams_SkippedSchemaWithAStoredRefIsFine(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	store := testStoreAt(t, t.TempDir())
+	refs := stubStreams(t, func(stream, _ string) (int, string, error) {
+		if stream == "schema" {
+			return 0, "", errStreamUnavailable
+		}
+		return 1, "", nil
+	})
+
+	done, err := captureStreams(ctx, &stubCapturer{}, store, key,
+		captureTarget{Label: "standby"}, []string{"schema", "activity"},
+		"stored-hash", 0, captureRunOptions{})
+	if err != nil {
+		t.Fatalf("captureStreams: %v", err)
+	}
+	if strings.Join(done, " ") != "schema=n/a activity=1" {
+		t.Errorf("done=%v, want the standby to skip schema and still capture activity", done)
+	}
+	if got := strings.Join(*refs, ","); got != "schema@stored-hash,activity@stored-hash" {
+		t.Errorf("calls = %q, want activity to keep the stored ref", got)
 	}
 }
