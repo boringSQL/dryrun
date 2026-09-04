@@ -109,7 +109,12 @@ const captureSupersedes = "Superseded by `dryrun snapshot capture`:\n"
 
 // Four call sites resolved this independently and worded the error four ways.
 func resolveSchemaRef(ctx context.Context, store initWriter, key history.SnapshotKey, allowOrphan bool) (string, error) {
-	if snap, err := store.GetSchema(ctx, key, history.NewRefLatest()); err == nil && snap != nil {
+	snap, err := store.GetSchema(ctx, key, history.NewRefLatest())
+	// only an absent snapshot falls through to --allow-orphan
+	if err != nil && !errors.Is(err, history.ErrSnapshotNotFound) {
+		return "", fmt.Errorf("read latest schema snapshot: %w", err)
+	}
+	if err == nil && snap != nil {
 		return snap.ContentHash, nil
 	}
 	if allowOrphan {

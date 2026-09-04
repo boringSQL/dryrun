@@ -45,9 +45,8 @@ const checkTimeoutDefault = 10 * time.Second
 // should show every broken node
 func runCaptureCheck(ctx context.Context, store *history.Store, key history.SnapshotKey, targets []captureTarget, opts captureRunOptions, timeout time.Duration, out io.Writer) error {
 	// same answer for every node, resolve once
-	_, schemaErr := resolveSchemaRef(ctx, store, key, opts.AllowOrphan)
-	snap, err := store.GetSchema(ctx, key, history.NewRefLatest())
-	hasSchema := err == nil && snap != nil
+	ref, schemaErr := resolveSchemaRef(ctx, store, key, opts.AllowOrphan)
+	hasSchema := schemaErr == nil && ref != ""
 
 	results := make([]checkResult, 0, len(targets))
 	for _, t := range targets {

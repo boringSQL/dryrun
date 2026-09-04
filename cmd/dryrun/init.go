@@ -32,6 +32,7 @@ type initCapturer interface {
 }
 
 type initWriter interface {
+	// absence must wrap history.ErrSnapshotNotFound (see resolveSchemaRef)
 	GetSchema(ctx context.Context, key history.SnapshotKey, at history.SnapshotRef) (*schema.SchemaSnapshot, error)
 	PutSchema(ctx context.Context, key history.SnapshotKey, snap *schema.SchemaSnapshot) (history.PutOutcome, error)
 	PutPlanner(ctx context.Context, key history.SnapshotKey, p *schema.PlannerStatsSnapshot) (history.PutOutcome, error)

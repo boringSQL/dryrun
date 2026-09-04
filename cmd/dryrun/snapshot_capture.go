@@ -385,7 +385,10 @@ func captureStream(ctx context.Context, cap initCapturer, store initWriter, key 
 		// go through the same masking `snapshot take` applies -- push ships
 		// whatever lands in history.db
 		snap, err := store.GetSchema(ctx, key, history.NewRefLatest())
-		if err != nil || snap == nil {
+		if err != nil && !errors.Is(err, history.ErrSnapshotNotFound) {
+			return 0, fmt.Errorf("read latest schema snapshot: %w", err)
+		}
+		if snap == nil {
 			return 0, fmt.Errorf("planner stats need a schema snapshot to annotate against; run `dryrun snapshot take` first")
 		}
 		p, err := cap.CapturePlanner(ctx, schemaRef)
