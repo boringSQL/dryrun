@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1144,5 +1145,269 @@ func TestNodeFingerprint_SurvivesJSONRoundTrip(t *testing.T) {
 	}
 	if legacy.PostmasterStartTime != nil {
 		t.Errorf("missing field decoded to %v, want nil", legacy.PostmasterStartTime)
+	}
+}
+
+// --- v3: partition children out of the digest -------------------------------
+
+// Capture-shaped: introspect.sql's fetch-tables takes relkind 'r' and 'p' with no
+// relispartition filter, so a real snapshot carries each partition twice — once in the
+// parent's PartitionInfo.Children and once as its own tables[] entry, columns and all.
+// A fixture that only sets PartitionInfo tests a schema no capture ever produces.
+func partitionedSnap(children ...PartitionChild) *SchemaSnapshot {
+	snap := baselineSnap()
+	snap.FormatVersion = 3
+	snap.Tables[0].PartitionInfo = &PartitionInfo{
+		Strategy: PartitionRange,
+		Key:      "created_at",
+		Children: children,
+	}
+	for _, c := range children {
+		snap.Tables = append(snap.Tables, Table{
+			Schema:  c.Schema,
+			Name:    c.Name,
+			Columns: snap.Tables[0].Columns,
+			Indexes: []Index{{
+				Name:       c.Name + "_pkey",
+				Columns:    []string{"id"},
+				IndexType:  "btree",
+				IsUnique:   true,
+				IsPrimary:  true,
+				Definition: "CREATE UNIQUE INDEX " + c.Name + "_pkey ON " + c.Schema + "." + c.Name + " USING btree (id)",
+				IsValid:    true,
+				IsReady:    true,
+			}},
+		})
+	}
+	return snap
+}
+
+func child(name, bound string) PartitionChild {
+	return PartitionChild{Schema: "public", Name: name, Bound: bound}
+}
+
+// The reason v3 exists: a pg_partman rotation is not DDL, and under v2 it minted a
+// full uncompressed schema row per rotation in a table nothing prunes cheaply.
+func TestContentHashV3_IgnoresPartitionChildren(t *testing.T) {
+	before := partitionedSnap(child("users_2026_01", "FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')"))
+	after := partitionedSnap(
+		child("users_2026_01", "FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')"),
+		child("users_2026_02", "FOR VALUES FROM ('2026-02-01') TO ('2026-03-01')"),
+	)
+
+	if ComputeContentHashV3(before) != ComputeContentHashV3(after) {
+		t.Errorf("adding a partition moved the v3 digest")
+	}
+	// Guard the fixture: v2 must still see the rotation, or the test proves nothing.
+	if ComputeContentHashV2(before) == ComputeContentHashV2(after) {
+		t.Fatal("fixture is not exercising the change; v2 digest did not move either")
+	}
+}
+
+// The child's own tables[] entry must leave the digest alone too; stripping only the
+// parent's Children list would still re-hash on every rotation.
+func TestContentHashV3_IgnoresPartitionChildTableEntries(t *testing.T) {
+	rotated := partitionedSnap(child("users_2026_01", "a"), child("users_2026_02", "b"))
+	// same doc, but with the parent's Children list already stripped: if the child
+	// tables[] entries still counted, this would differ from the one-child schema.
+	unpartitioned := baselineSnap()
+	unpartitioned.FormatVersion = 3
+
+	bare := partitionedSnap()
+	if ComputeContentHashV3(rotated) != ComputeContentHashV3(bare) {
+		t.Errorf("a partition's own tables[] entry moved the v3 digest")
+	}
+	// Guard: the child entries are really in the fixture and really move v2.
+	if len(rotated.Tables) != 3 {
+		t.Fatalf("fixture lost the child tables: %d tables", len(rotated.Tables))
+	}
+	if ComputeContentHashV2(rotated) == ComputeContentHashV2(bare) {
+		t.Fatal("fixture is not exercising the change; v2 digest did not move either")
+	}
+	// The parent still participates: this is not "partitioned tables are unhashed".
+	if ComputeContentHashV3(rotated) == ComputeContentHashV3(unpartitioned) {
+		t.Errorf("v3 dropped the partitioned parent itself, not just its children")
+	}
+}
+
+// A table that merely shares a name with nothing is untouched; only tables actually
+// listed as some parent's child are dropped, and the list is derived from the doc so a
+// stored snapshot always re-hashes identically.
+func TestContentHashV3_KeepsUnrelatedTables(t *testing.T) {
+	base := partitionedSnap(child("users_2026_01", "a"))
+	withOther := partitionedSnap(child("users_2026_01", "a"))
+	withOther.Tables = append(withOther.Tables, Table{Schema: "public", Name: "orders"})
+
+	if ComputeContentHashV3(base) == ComputeContentHashV3(withOther) {
+		t.Errorf("adding an ordinary table did not move the v3 digest")
+	}
+}
+
+// Detaching every child is still not DDL on the parent.
+func TestContentHashV3_IgnoresDroppedPartitions(t *testing.T) {
+	full := partitionedSnap(child("users_2026_01", "FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')"))
+	empty := partitionedSnap()
+
+	if ComputeContentHashV3(full) != ComputeContentHashV3(empty) {
+		t.Errorf("dropping a partition moved the v3 digest")
+	}
+}
+
+// Strategy and key are the partition DDL; changing either is a real schema change and
+// must still rotate the digest, or PARTITION BY changes would dedup away.
+func TestContentHashV3_SensitiveToStrategyAndKey(t *testing.T) {
+	base := ComputeContentHashV3(partitionedSnap())
+
+	rekeyed := partitionedSnap()
+	rekeyed.Tables[0].PartitionInfo.Key = "tenant_id"
+	if ComputeContentHashV3(rekeyed) == base {
+		t.Errorf("partition key change did not move the v3 digest")
+	}
+
+	restrategied := partitionedSnap()
+	restrategied.Tables[0].PartitionInfo.Strategy = PartitionHash
+	if ComputeContentHashV3(restrategied) == base {
+		t.Errorf("partition strategy change did not move the v3 digest")
+	}
+}
+
+// A partitioned table is the only thing v3 changes: every unpartitioned schema keeps
+// its v2 bytes, so the one-time re-hash is scoped to partitioned projects. Pinned to a
+// literal, not to ComputeContentHashV2 — a change to tableToStructural would move both
+// and a relative comparison would still pass while every stored digest re-derived.
+func TestContentHashV3_MatchesV2WithoutPartitions(t *testing.T) {
+	snap := baselineSnap()
+	snap.Tables[0].Reloptions = []string{"fillfactor=70"}
+
+	// Captured from the build before v3 existed.
+	const preV3 = "b6d505183d5cce0e1009143c9cdce0f0cdc16f91252bfbf0ed21a47f95304393"
+	if got := ComputeContentHashV2(snap); got != preV3 {
+		t.Fatalf("the v2 digest itself moved; every stored schema row re-derives:\n  got  %s\n  want %s", got, preV3)
+	}
+	if ComputeContentHashV3(snap) != preV3 {
+		t.Errorf("v3 re-hashed a schema with no partitioned table")
+	}
+}
+
+// v3 inherits v2's reloptions coverage; it strips children, it does not revert to v1.
+func TestContentHashV3_StillCoversReloptions(t *testing.T) {
+	base := partitionedSnap()
+	tuned := partitionedSnap()
+	tuned.Tables[0].Reloptions = []string{"autovacuum_enabled=off"}
+
+	if ComputeContentHashV3(base) == ComputeContentHashV3(tuned) {
+		t.Errorf("v3 lost the v2 reloptions coverage")
+	}
+}
+
+// The wire contract: a doc stamped v2 keeps hashing children in even on a build that
+// knows v3, or every stored digest would silently re-derive on read.
+func TestDigestFor_V2DocKeepsChildrenInDigest(t *testing.T) {
+	before := partitionedSnap(child("users_2026_01", "a"))
+	before.FormatVersion = 2
+	after := partitionedSnap(child("users_2026_01", "a"), child("users_2026_02", "b"))
+	after.FormatVersion = 2
+
+	if DigestFor(before) == DigestFor(after) {
+		t.Errorf("a v2 doc was hashed under the v3 rules")
+	}
+	if DigestFor(before) != ComputeContentHashV2(before) {
+		t.Errorf("format_version 2 did not hash with the v2 algorithm")
+	}
+}
+
+func TestDigestFor_V3DispatchesToV3(t *testing.T) {
+	snap := partitionedSnap(child("users_2026_01", "a"))
+	if DigestFor(snap) != ComputeContentHashV3(snap) {
+		t.Errorf("format_version 3 did not hash with the v3 algorithm")
+	}
+	// Forward compatibility: an unknown newer generation falls back to the newest
+	// algorithm this build has, matching how the v2 branch behaved before v3 landed.
+	snap.FormatVersion = 99
+	if DigestFor(snap) != ComputeContentHashV3(snap) {
+		t.Errorf("format_version 99 did not fall back to the newest known algorithm")
+	}
+}
+
+// What a fresh capture stamps must be what DigestFor hashes it with; a mismatch is
+// exactly the case predict answers 422 on (internal/history/http_store.go:107).
+func TestFormatVersionConstant_MatchesNewestDigest(t *testing.T) {
+	snap := partitionedSnap(child("users_2026_01", "a"))
+	snap.FormatVersion = FormatVersion
+	if DigestFor(snap) != ComputeContentHashV3(snap) {
+		t.Errorf("FormatVersion %d does not dispatch to the newest digest", FormatVersion)
+	}
+}
+
+// The mid-level of a sub-partitioned tree is both a child and a parent. pg_inherits
+// emits parent→mid and mid→leaf, so both land in the strip set and a rotation at any
+// level is invisible. Nothing else exercises the mid-level claim.
+func TestContentHashV3_IgnoresSubPartitionRotation(t *testing.T) {
+	tree := func(leaves ...string) *SchemaSnapshot {
+		snap := baselineSnap()
+		snap.FormatVersion = 3
+		snap.Tables[0].PartitionInfo = &PartitionInfo{
+			Strategy: PartitionRange,
+			Key:      "created_at",
+			Children: []PartitionChild{child("users_2026", "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')")},
+		}
+		mid := Table{
+			Schema:  "public",
+			Name:    "users_2026",
+			Columns: snap.Tables[0].Columns,
+			PartitionInfo: &PartitionInfo{
+				Strategy: PartitionHash,
+				Key:      "tenant_id",
+			},
+		}
+		for _, l := range leaves {
+			mid.PartitionInfo.Children = append(mid.PartitionInfo.Children, child(l, "FOR VALUES WITH (MODULUS 4, REMAINDER 0)"))
+		}
+		snap.Tables = append(snap.Tables, mid)
+		for _, l := range leaves {
+			snap.Tables = append(snap.Tables, Table{Schema: "public", Name: l, Columns: snap.Tables[0].Columns})
+		}
+		return snap
+	}
+
+	one, two := tree("users_2026_p0"), tree("users_2026_p0", "users_2026_p1")
+	if ComputeContentHashV3(one) != ComputeContentHashV3(two) {
+		t.Errorf("a leaf added under a mid-level partition moved the v3 digest")
+	}
+	if ComputeContentHashV2(one) == ComputeContentHashV2(two) {
+		t.Fatal("fixture is not exercising the change; v2 digest did not move either")
+	}
+}
+
+// The strip set is built from every table before any is filtered, so a document that
+// lists a child before its parent strips identically. A future single-pass rewrite of
+// partitionChildTables would break this silently.
+func TestContentHashV3_IndependentOfTableOrder(t *testing.T) {
+	forward := partitionedSnap(child("users_2026_01", "a"), child("users_2026_02", "b"))
+	reversed := partitionedSnap(child("users_2026_01", "a"), child("users_2026_02", "b"))
+	slices.Reverse(reversed.Tables)
+
+	if ComputeContentHashV3(forward) != ComputeContentHashV3(reversed) {
+		t.Errorf("v3 digest depends on the order tables appear in the document")
+	}
+}
+
+// DETACH PARTITION, which is what pg_partman retention does by default
+// (retention_keep_table = true). The child leaves pg_inherits and therefore leaves
+// PartitionInfo.Children, but stays in fetch-tables as a plain relkind='r' row — so it
+// re-enters the digest as an ordinary table. That is the right semantics (a detached
+// partition IS a standalone table) but it means retention still rotates the digest.
+// Pinned so nobody "fixes" it by name-matching partition children heuristically.
+func TestContentHashV3_DetachedPartitionCountsAsAnOrdinaryTable(t *testing.T) {
+	attached := partitionedSnap(child("users_2026_01", "a"))
+
+	detached := partitionedSnap()
+	detached.Tables = append(detached.Tables, attached.Tables[1]) // same Table, no longer listed as a child
+
+	if ComputeContentHashV3(attached) == ComputeContentHashV3(detached) {
+		t.Errorf("DETACH PARTITION did not move the v3 digest; the child is no longer a partition")
+	}
+	if ComputeContentHashV3(detached) == ComputeContentHashV3(partitionedSnap()) {
+		t.Errorf("a detached partition was stripped from the digest; it is an ordinary table now")
 	}
 }

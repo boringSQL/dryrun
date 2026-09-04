@@ -10,15 +10,34 @@ import (
 
 // The digest algorithm is a wire contract: derive it from the doc, not from this build.
 func DigestFor(snap *SchemaSnapshot) string {
-	if snap.FormatVersion >= 2 {
+	switch {
+	case snap.FormatVersion >= 3:
+		return ComputeContentHashV3(snap)
+	case snap.FormatVersion == 2:
 		return ComputeContentHashV2(snap)
 	}
 	return ComputeStructuralHash(snap)
 }
 
+type (
+	// Per-generation digest coverage; a doc hashes under its stamped generation.
+	digestOpts struct {
+		reloptions        bool // v2+
+		stripPartChildren bool // v3+
+	}
+
+	// PartitionInfo minus Children, which churn on every partition create/drop — the
+	// same reason indexStructural drops Index.Children. v3+ only: stripping it moves
+	// the digest of every partitioned table.
+	partitionStructural struct {
+		Strategy PartitionStrategy `json:"strategy"`
+		Key      string            `json:"key"`
+	}
+)
+
 // SHA-256 over DDL-relevant fields only, runtime stats are stripped
 func ComputeStructuralHash(snap *SchemaSnapshot) string {
-	return hashSchema(snap, false)
+	return hashSchema(snap, digestOpts{})
 }
 
 // Legacy (format_version <= 1) digest; new call sites want DigestFor.
@@ -29,13 +48,29 @@ func ComputeContentHash(snap *SchemaSnapshot) string {
 // Structural + reloptions. v1 hashed a settings-only ALTER identically, so the new body
 // deduped away and vacuum advice kept reading reloptions frozen at the last DDL change.
 func ComputeContentHashV2(snap *SchemaSnapshot) string {
-	return hashSchema(snap, true)
+	return hashSchema(snap, digestOpts{reloptions: true})
 }
 
-func hashSchema(snap *SchemaSnapshot, withReloptions bool) string {
-	tables := make([]any, len(snap.Tables))
+// v2 minus partition children, so a pg_partman rotation no longer re-hashes the
+// schema. Children are dropped both from the parent's PartitionInfo.Children and
+// from tables[] (introspect.sql takes relkind 'r' and 'p' without filtering
+// relispartition). Tradeoff, as with indexStructural: child-local DDL no longer
+// moves the digest.
+func ComputeContentHashV3(snap *SchemaSnapshot) string {
+	return hashSchema(snap, digestOpts{reloptions: true, stripPartChildren: true})
+}
+
+func hashSchema(snap *SchemaSnapshot, opts digestOpts) string {
+	var children map[QualifiedName]bool
+	if opts.stripPartChildren {
+		children = partitionChildTables(snap)
+	}
+	tables := make([]any, 0, len(snap.Tables))
 	for i := range snap.Tables {
-		tables[i] = tableToStructural(&snap.Tables[i], withReloptions)
+		if children[QualifiedName{Schema: snap.Tables[i].Schema, Name: snap.Tables[i].Name}] {
+			continue
+		}
+		tables = append(tables, tableToStructural(&snap.Tables[i], opts))
 	}
 
 	canonical := map[string]any{
@@ -54,7 +89,7 @@ func hashSchema(snap *SchemaSnapshot, withReloptions bool) string {
 	return fmt.Sprintf("%x", h)
 }
 
-func tableToStructural(t *Table, withReloptions bool) map[string]any {
+func tableToStructural(t *Table, opts digestOpts) map[string]any {
 	cols := make([]map[string]any, len(t.Columns))
 	for i := range t.Columns {
 		cols[i] = columnToStructural(&t.Columns[i])
@@ -71,19 +106,47 @@ func tableToStructural(t *Table, withReloptions bool) map[string]any {
 		"constraints":    t.Constraints,
 		"indexes":        indexes,
 		"comment":        t.Comment,
-		"partition_info": t.PartitionInfo,
+		"partition_info": partitionForDigest(t.PartitionInfo, opts.stripPartChildren),
 		"policies":       t.Policies,
 		"triggers":       t.Triggers,
 		"rls_enabled":    t.RLSEnabled,
 	}
 	// Omitted, not null, when empty: a table with no storage params keeps its v1 bytes.
 	// Sort a copy; pg_class.reloptions is in set-order, which is not identity.
-	if withReloptions && len(t.Reloptions) > 0 {
-		opts := slices.Clone(t.Reloptions)
-		slices.Sort(opts)
-		m["reloptions"] = opts
+	if opts.reloptions && len(t.Reloptions) > 0 {
+		ro := slices.Clone(t.Reloptions)
+		slices.Sort(ro)
+		m["reloptions"] = ro
 	}
 	return m
+}
+
+// Tables that are some other table's partition, derived from the doc alone so a
+// stored snapshot re-hashes to the same digest.
+func partitionChildTables(snap *SchemaSnapshot) map[QualifiedName]bool {
+	var out map[QualifiedName]bool
+	for i := range snap.Tables {
+		pi := snap.Tables[i].PartitionInfo
+		if pi == nil {
+			continue
+		}
+		for _, c := range pi.Children {
+			if out == nil {
+				out = make(map[QualifiedName]bool)
+			}
+			out[QualifiedName{Schema: c.Schema, Name: c.Name}] = true
+		}
+	}
+	return out
+}
+
+// Keeps the typed nil when absent, so an unpartitioned table still hashes
+// "partition_info":null under every generation.
+func partitionForDigest(pi *PartitionInfo, strip bool) any {
+	if pi == nil || !strip {
+		return pi
+	}
+	return partitionStructural{Strategy: pi.Strategy, Key: pi.Key}
 }
 
 func columnToStructural(c *Column) map[string]any {

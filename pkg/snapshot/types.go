@@ -8,7 +8,10 @@ import (
 )
 
 // 0 means legacy. not hashed. 2 = digest covers reloptions.
-const FormatVersion = 2
+// 3 = partition children left out of the digest, so a rotation is not DDL.
+// Bumping re-hashes every partitioned schema once; predict must know the new
+// generation first, or it 422s the blob.
+const FormatVersion = 3
 
 // CaptureRuleVersion: which pg_stat_statements rows a capture kept, per the
 // WHERE clause in internal/schema/sql/query_stats.sql plus dropUnsafeCopy.
