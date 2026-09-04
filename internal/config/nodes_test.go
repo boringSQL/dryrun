@@ -154,6 +154,29 @@ func TestResolveNodes_Errors(t *testing.T) {
 			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\ninterval = \"0s\"\n",
 			wantErr: "must be positive",
 		},
+		{
+			// a typo would silently lose the override, so it fails at load
+			name:    "per-stream interval for an unknown stream",
+			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\n[node.intervals]\nvacuum = \"1h\"\n",
+			wantErr: "intervals.vacuum: stream \"vacuum\"",
+		},
+		{
+			name:    "unparseable per-stream interval",
+			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\n[node.intervals]\nquery = \"nightly\"\n",
+			wantErr: "intervals.query",
+		},
+		{
+			// §5.1 will make this valid; until then the refusal must be
+			// explicit rather than an accidental pass
+			name:    "per-stream interval for schema, which is not yet a stream",
+			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\n[node.intervals]\nschema = \"24h\"\n",
+			wantErr: "snapshot take",
+		},
+		{
+			name:    "zero per-stream interval",
+			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\n[node.intervals]\nquery = \"0s\"\n",
+			wantErr: "must be positive",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -279,5 +302,52 @@ func TestKnownStreamsResolveInHistory(t *testing.T) {
 		if !history.StreamKnown(s) {
 			t.Errorf("stream %q is configurable but history has no source table for it", s)
 		}
+	}
+}
+
+// [node.intervals] gives one node two cadences: cheap stats often, expensive
+// schema rarely, from a single cron line.
+func TestResolveNodes_PerStreamIntervals(t *testing.T) {
+	cfg := parseNodes(t, `
+[[node]]
+name = "primary"
+url = "postgres://x"
+interval = "5m"
+[node.intervals]
+query = "1h"
+activity = "15m"
+`)
+	nodes, err := cfg.ResolveNodes()
+	if err != nil {
+		t.Fatalf("ResolveNodes: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("want 1 node, got %d", len(nodes))
+	}
+	n := nodes[0]
+	if n.Interval != 5*time.Minute {
+		t.Errorf("base interval = %s, want 5m", n.Interval)
+	}
+	want := map[string]time.Duration{"query": time.Hour, "activity": 15 * time.Minute}
+	if len(n.Intervals) != len(want) {
+		t.Fatalf("intervals = %v, want %v", n.Intervals, want)
+	}
+	for k, v := range want {
+		if n.Intervals[k] != v {
+			t.Errorf("intervals[%q] = %s, want %s", k, n.Intervals[k], v)
+		}
+	}
+}
+
+// A block naming none leaves the map nil, so the capture falls through to the
+// base interval (and, for schema, the built-in floor).
+func TestResolveNodes_NoPerStreamIntervals(t *testing.T) {
+	cfg := parseNodes(t, "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\ninterval = \"5m\"\n")
+	nodes, err := cfg.ResolveNodes()
+	if err != nil {
+		t.Fatalf("ResolveNodes: %v", err)
+	}
+	if nodes[0].Intervals != nil {
+		t.Errorf("intervals = %v, want nil", nodes[0].Intervals)
 	}
 }

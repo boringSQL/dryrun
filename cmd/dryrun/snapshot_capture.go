@@ -33,6 +33,24 @@ type captureTarget struct {
 	// this label names a read pool, so members rotate by design
 	Pool     bool
 	Interval time.Duration
+	// per-stream overrides of Interval, from [node.intervals]
+	Intervals map[string]time.Duration
+}
+
+// schema introspection is expensive and changes only on DDL, so absent a
+// [node.intervals] override it is due at most this often
+const schemaIntervalFloor = 24 * time.Hour
+
+// The cadence gating one stream on this node; an explicit override wins,
+// floor included.
+func (t captureTarget) intervalFor(stream string) time.Duration {
+	if d, ok := t.Intervals[stream]; ok {
+		return d
+	}
+	if stream == "schema" {
+		return max(t.Interval, schemaIntervalFloor)
+	}
+	return t.Interval
 }
 
 func snapshotCaptureCmd(historyDB *string) *cobra.Command {
@@ -254,12 +272,13 @@ func captureTargets(nodeName, from, label string, streams []string, all bool) ([
 
 func targetFromNode(n config.ResolvedNode, cliStreams []string) captureTarget {
 	t := captureTarget{
-		Label:    n.Name,
-		node:     &n,
-		Role:     n.Role,
-		Streams:  n.Streams,
-		Pool:     n.Pool,
-		Interval: n.Interval,
+		Label:     n.Name,
+		node:      &n,
+		Role:      n.Role,
+		Streams:   n.Streams,
+		Pool:      n.Pool,
+		Interval:  n.Interval,
+		Intervals: n.Intervals,
 	}
 	// an explicit --streams is the operator overriding config for this run;
 	// trim to match ValidateStreams, or exact matches downstream miss
@@ -283,7 +302,7 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 	// Decide cadence before connecting. On a fleet cron most ticks have
 	// nothing to do, and opening a production connection to find that out is
 	// the cost that makes a short interval expensive.
-	if opts.Due && t.Interval > 0 {
+	if opts.Due {
 		due, _, err := dueStreams(ctx, store, key, t, candidateStreams(t), true)
 		if err != nil {
 			return err
@@ -407,8 +426,11 @@ func captureStreams(ctx context.Context, cap initCapturer, store *history.Store,
 			}
 			schemaRef = hash
 		}
-		// a real error returned above, so this stream was attempted
-		markCaptureAttempt(ctx, store, key, t.Label, s)
+		// a real error returned above, so this stream was attempted -- but a
+		// skipped project-scoped stream must not satisfy the fleet's clock
+		if !(errors.Is(err, errStreamUnavailable) && history.StreamIsProjectScoped(s)) {
+			markCaptureAttempt(ctx, store, key, t.Label, s)
+		}
 
 		// the run waived --allow-orphan on the promise of writing the hash;
 		// a standby skips, so fail rather than orphan what follows
@@ -532,17 +554,22 @@ func candidateStreams(t captureTarget) []string {
 // attempt. Pulled rows land in the same tables, so a pull can make a node look
 // freshly captured; it self-heals on the next tick.
 func dueStreams(ctx context.Context, store *history.Store, key history.SnapshotKey, t captureTarget, wanted []string, due bool) (run, skipped []string, err error) {
-	if !due || t.Interval <= 0 {
+	if !due {
 		return wanted, nil, nil
 	}
 	now := time.Now().UTC()
 	for _, s := range wanted {
+		interval := t.intervalFor(s)
+		if interval <= 0 {
+			run = append(run, s)
+			continue
+		}
 		last, ok, err := lastDueMarker(ctx, store, key, t.Label, s, now)
 		if err != nil {
 			return nil, nil, err
 		}
-		if ok && now.Sub(last) < t.Interval {
-			skipped = append(skipped, fmt.Sprintf("%s (%s ago)", s, now.Sub(last).Round(time.Minute)))
+		if ok && now.Sub(last) < interval {
+			skipped = append(skipped, fmt.Sprintf("%s (%s ago, every %s)", s, now.Sub(last).Round(time.Minute), interval))
 			continue
 		}
 		run = append(run, s)

@@ -36,6 +36,8 @@ type (
 		URLEnv   string   `toml:"url_env"`
 		Streams  []string `toml:"streams"`
 		Interval string   `toml:"interval"`
+		// [node.intervals]: per-stream overrides of Interval
+		Intervals map[string]string `toml:"intervals"`
 		// this label is a read pool: members rotate by design, so identity
 		// drift is expected rather than a warning
 		Pool bool `toml:"pool"`
@@ -48,10 +50,10 @@ type (
 
 	// [history] block; retention for captured series
 	HistoryConfig struct {
-		MaxAge    string `toml:"max_age"`
-		AutoPrune bool   `toml:"auto_prune"`
-		KeepSchemas *int `toml:"keep_schemas"`
-		KeepPlanner *int `toml:"keep_planner"`
+		MaxAge      string `toml:"max_age"`
+		AutoPrune   bool   `toml:"auto_prune"`
+		KeepSchemas *int   `toml:"keep_schemas"`
+		KeepPlanner *int   `toml:"keep_planner"`
 	}
 
 	// [[remote]] block; Ref is the registry base, e.g. ghcr.io/org/dryrun

@@ -180,6 +180,23 @@ interval = "15m"
 pool     = true
 ```
 
+`interval` is the node's base cadence. A `[node.intervals]` block overrides it
+per stream, for streams that do not want the same one:
+
+```toml
+[[node]]
+name     = "primary"
+url      = "service=dryrun-primary"
+interval = "5m"
+[node.intervals]
+query = "1h"
+```
+
+Here activity is captured every five minutes while query stats are captured
+hourly, from the one `--due` cron line. Only the named streams change; the rest
+keep the base interval. Whether an override raises or lowers the cadence, it is
+taken as written.
+
 `url = "service=name"` is preferred: the entry lives in `~/.pg_service.conf` (or `$PGSERVICEFILE`) on the capture host and the password in `~/.pgpass`, so `dryrun.toml` never carries a password — or even a variable name — and stays committable. Where a service file is impractical, `url_env` names an environment variable and `url` may hold a `${VAR}` reference instead; either way nothing secret lands in the file. `role` is asserted against the node at capture time; `auto` (the default) accepts whatever it finds. Omit `streams` and the detected role decides: a standby has no schema of its own and its planner stats mirror the primary's, so it captures activity and query only.
 
 `pool = true` says the label names a read pool rather than one machine. Members rotate by design there, so the identity-drift warning is suppressed for that label — see the fingerprint paragraph above. Do not set it on a label that is supposed to be one node: the warning is the only thing that tells you two servers' counters are interleaving.

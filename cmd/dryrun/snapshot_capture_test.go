@@ -59,7 +59,9 @@ func TestCaptureTargets_Errors(t *testing.T) {
 
 // --streams is the operator overriding config for this run.
 func TestTargetFromNode_CLIStreamsWin(t *testing.T) {
-	n := config.ResolvedNode{Name: "primary", Streams: []string{"activity", "query"}, Interval: time.Hour, Pool: true}
+	n := config.ResolvedNode{Name: "primary", Streams: []string{"activity", "query"},
+		Interval: time.Hour, Pool: true,
+		Intervals: map[string]time.Duration{"query": 6 * time.Hour}}
 
 	if got := targetFromNode(n, nil); strings.Join(got.Streams, ",") != "activity,query" {
 		t.Errorf("streams %v, want the config's", got.Streams)
@@ -70,6 +72,10 @@ func TestTargetFromNode_CLIStreamsWin(t *testing.T) {
 	}
 	if !got.Pool || got.Interval != time.Hour {
 		t.Errorf("pool/interval lost: %+v", got)
+	}
+	// a dropped map is silent: every stream just falls back to the base
+	if got.Intervals["query"] != 6*time.Hour {
+		t.Errorf("per-stream intervals lost: %+v", got.Intervals)
 	}
 }
 
@@ -444,7 +450,7 @@ func TestDueStreams_AttemptSatisfiesTheClock(t *testing.T) {
 	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
 	target := captureTarget{Label: "primary", Interval: time.Hour}
 
-	run, _, err := dueStreams(ctx, store, key, target, []string{"schema"}, true)
+	run, _, err := dueStreams(ctx, store, key, target, []string{"planner"}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,10 +458,10 @@ func TestDueStreams_AttemptSatisfiesTheClock(t *testing.T) {
 		t.Fatalf("run=%v, want the first tick to be due", run)
 	}
 
-	if err := store.MarkCaptureAttempt(ctx, key, target.Label, "schema", time.Now().UTC()); err != nil {
+	if err := store.MarkCaptureAttempt(ctx, key, target.Label, "planner", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	run, skipped, err := dueStreams(ctx, store, key, target, []string{"schema"}, true)
+	run, skipped, err := dueStreams(ctx, store, key, target, []string{"planner"}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,10 +472,10 @@ func TestDueStreams_AttemptSatisfiesTheClock(t *testing.T) {
 	// and it expires like a row does. A separate store, because the marker
 	// only moves forward: this attempt has to be the first one written.
 	aged := testStoreAt(t, t.TempDir())
-	if err := aged.MarkCaptureAttempt(ctx, key, target.Label, "schema", time.Now().UTC().Add(-90*time.Minute)); err != nil {
+	if err := aged.MarkCaptureAttempt(ctx, key, target.Label, "planner", time.Now().UTC().Add(-90*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	run, _, err = dueStreams(ctx, aged, key, target, []string{"schema"}, true)
+	run, _, err = dueStreams(ctx, aged, key, target, []string{"planner"}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -833,5 +839,138 @@ func TestCaptureStreams_SkippedSchemaWithAStoredRefIsFine(t *testing.T) {
 	}
 	if got := strings.Join(*refs, ","); got != "schema@stored-hash,activity@stored-hash" {
 		t.Errorf("calls = %q, want activity to keep the stored ref", got)
+	}
+}
+
+// §2.4: introspection is expensive and DDL is rare, so schema does not run at
+// the stats streams' cadence unless the operator asks for it.
+func TestIntervalFor(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target captureTarget
+		stream string
+		want   time.Duration
+	}{
+		{"a stats stream takes the node's base interval",
+			captureTarget{Interval: 5 * time.Minute}, "activity", 5 * time.Minute},
+		{"schema is floored above a short base interval",
+			captureTarget{Interval: 5 * time.Minute}, "schema", 24 * time.Hour},
+		{"a base interval longer than the floor wins",
+			captureTarget{Interval: 48 * time.Hour}, "schema", 48 * time.Hour},
+		{"the floor applies even with no base interval",
+			captureTarget{}, "schema", 24 * time.Hour},
+		{"an explicit override beats the floor in both directions",
+			captureTarget{Interval: 5 * time.Minute,
+				Intervals: map[string]time.Duration{"schema": time.Hour}}, "schema", time.Hour},
+		{"an override on a stats stream is honoured",
+			captureTarget{Interval: 5 * time.Minute,
+				Intervals: map[string]time.Duration{"query": time.Hour}}, "query", time.Hour},
+		{"an override for another stream does not leak",
+			captureTarget{Interval: 5 * time.Minute,
+				Intervals: map[string]time.Duration{"query": time.Hour}}, "activity", 5 * time.Minute},
+		{"no interval anywhere leaves the stream ungated",
+			captureTarget{}, "activity", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.target.intervalFor(tc.stream); got != tc.want {
+				t.Errorf("intervalFor(%q) = %s, want %s", tc.stream, got, tc.want)
+			}
+		})
+	}
+}
+
+// One node, two cadences: the stats streams tick while schema stays held back.
+func TestDueStreams_PerStreamIntervals(t *testing.T) {
+	ctx := context.Background()
+	store := testStoreAt(t, t.TempDir())
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	target := captureTarget{Label: "primary", Interval: 5 * time.Minute}
+	now := time.Now().UTC()
+
+	// both captured an hour ago: past the 5m base, well inside the 24h floor
+	for _, s := range []string{"schema", "activity"} {
+		if err := store.MarkCaptureAttempt(ctx, key, target.Label, s, now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run, skipped, err := dueStreams(ctx, store, key, target, []string{"schema", "activity"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(run, ",") != "activity" {
+		t.Errorf("run=%v, want only activity due", run)
+	}
+	if len(skipped) != 1 || !strings.HasPrefix(skipped[0], "schema") {
+		t.Errorf("skipped=%v, want schema held back by the floor", skipped)
+	}
+
+	// an explicit override opts back in to the short cadence
+	target.Intervals = map[string]time.Duration{"schema": time.Minute}
+	run, _, err = dueStreams(ctx, store, key, target, []string{"schema", "activity"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(run, ",") != "schema,activity" {
+		t.Errorf("run=%v, want the override to make schema due", run)
+	}
+}
+
+// dueStreams stopped short-circuiting on a zero base interval so the schema
+// floor could still apply. For a node with neither an interval nor a floored
+// stream that has to stay a no-op: everything runs, nothing is reported
+// skipped, and the store is never read.
+func TestDueStreams_NoIntervalStaysUngated(t *testing.T) {
+	ctx := context.Background()
+	store := testStoreAt(t, t.TempDir())
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	target := captureTarget{Label: "primary"} // no Interval, no Intervals
+
+	// a marker recent enough to hold back any nonzero interval
+	if err := store.MarkCaptureAttempt(ctx, key, target.Label, "activity", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	run, skipped, err := dueStreams(ctx, store, key, target, []string{"activity", "query"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(run, ",") != "activity,query" {
+		t.Errorf("run=%v, want every stream ungated", run)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("skipped=%v, want nothing reported skipped", skipped)
+	}
+}
+
+// A project-scoped clock covers every node, so a node that captured nothing
+// must not satisfy it -- under the 24h schema floor that would buy the whole
+// fleet a day of no schema capture.
+func TestCaptureStreams_UnavailableDoesNotSatisfyAProjectClock(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	store := testStoreAt(t, t.TempDir())
+	stubStreams(t, func(stream, _ string) (int, string, error) {
+		return 0, "", errStreamUnavailable
+	})
+
+	done, err := captureStreams(ctx, &stubCapturer{}, store, key,
+		captureTarget{Label: "standby"}, []string{"schema", "query"}, "stored-hash", 0,
+		captureRunOptions{})
+	if err != nil {
+		t.Fatalf("captureStreams: %v", err)
+	}
+	if strings.Join(done, " ") != "schema=n/a query=n/a" {
+		t.Fatalf("done=%v, want both skipped", done)
+	}
+
+	// schema is project-scoped: this node proved nothing about the project
+	if _, ok, err := store.LastCaptureAttemptAt(ctx, key, "", "schema"); err != nil || ok {
+		t.Errorf("schema attempt recorded=%t err=%v, want an unavailable node to leave the project clock alone", ok, err)
+	}
+	// query is per-node: "this replica has no pg_stat_statements" is a fact
+	// about this node, and must still hold its own clock back
+	if _, ok, err := store.LastCaptureAttemptAt(ctx, key, "standby", "query"); err != nil || !ok {
+		t.Errorf("query attempt recorded=%t err=%v, want the per-node clock still marked", ok, err)
 	}
 }

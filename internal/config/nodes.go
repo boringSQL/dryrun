@@ -15,7 +15,9 @@ type ResolvedNode struct {
 	// nil when the block did not name any: the capture picks by detected role
 	Streams  []string
 	Interval time.Duration
-	Pool     bool
+	// per-stream overrides of Interval; nil when the block named none
+	Intervals map[string]time.Duration
+	Pool      bool
 
 	// resolved on demand: an unset variable is one node's problem, not the
 	// whole fleet's
@@ -143,16 +145,50 @@ func resolveNode(n NodeConfig) (ResolvedNode, error) {
 	}
 
 	if n.Interval != "" {
-		d, err := time.ParseDuration(n.Interval)
+		d, err := parseInterval("interval", n.Interval)
 		if err != nil {
-			return r, fmt.Errorf("interval %q: %w", n.Interval, err)
-		}
-		if d <= 0 {
-			return r, fmt.Errorf("interval %q must be positive", n.Interval)
+			return r, err
 		}
 		r.Interval = d
 	}
+
+	for _, k := range sortedKeys(n.Intervals) {
+		s := strings.TrimSpace(k)
+		// a typo silently loses the override, so refuse it at load
+		if err := validateStream(s); err != nil {
+			return r, fmt.Errorf("intervals.%s: %w", s, err)
+		}
+		d, err := parseInterval("intervals."+s, n.Intervals[k])
+		if err != nil {
+			return r, err
+		}
+		if r.Intervals == nil {
+			r.Intervals = map[string]time.Duration{}
+		}
+		r.Intervals[s] = d
+	}
 	return r, nil
+}
+
+func parseInterval(field, v string) (time.Duration, error) {
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s %q: %w", field, v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s %q must be positive", field, v)
+	}
+	return d, nil
+}
+
+// sorted so a config with two bad entries reports the same one every run
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // DefaultStreamsFor is what a node captures when its block names none.

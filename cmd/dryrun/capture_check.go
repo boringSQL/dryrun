@@ -221,7 +221,7 @@ func checkNode(ctx context.Context, store *history.Store, key history.SnapshotKe
 	}
 	// capture --due decides cadence before connecting; here we connected anyway
 	// (reachability is the point), so report what a due run would skip
-	if opts.Due && t.Interval > 0 {
+	if opts.Due {
 		run, skipped, err := dueStreams(ctx, store, key, t, r.Streams, true)
 		switch {
 		case err != nil:

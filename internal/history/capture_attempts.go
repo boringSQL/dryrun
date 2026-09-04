@@ -65,6 +65,13 @@ func StreamKnown(stream string) bool {
 	return ok
 }
 
+// A project-scoped stream's clock covers the whole project, so one node's
+// result satisfies it for every node.
+func StreamIsProjectScoped(stream string) bool {
+	src, ok := streamSources[stream]
+	return ok && !src.perNode
+}
+
 // A project-scoped stream is keyed with an empty label, matching its rows
 // being read with no node filter.
 func attemptLabel(nodeLabel, stream string) (string, error) {
