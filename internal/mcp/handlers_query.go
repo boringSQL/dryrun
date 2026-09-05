@@ -128,7 +128,9 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 		return errResult(fmt.Sprintf("DDL parse error: %v", err)), nil
 	}
 	if len(checks) == 0 {
-		return textResult("Could not identify a specific DDL operation to check."), nil
+		wrapper := map[string]any{"checks": []query.MigrationCheck{}}
+		s.injectMeta(wrapper, "Could not identify a specific DDL operation to check.", nil)
+		return jsonResult(wrapper), nil
 	}
 
 	var unsafe, rewritten, multiStep int

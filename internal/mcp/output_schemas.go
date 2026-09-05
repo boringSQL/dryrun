@@ -172,6 +172,16 @@ var (
 		"additionalProperties": true
 	}`)
 
+	checkMigrationOutputSchema = json.RawMessage(`{
+		"type": "object",
+		"description": "checks holds one entry per DDL operation identified in the input: operation, safety, lock_type/lock_duration, and recommendation always; safer_sql where a mechanical rewrite exists. table, version_behavior and rollback_ddl are omitted when not applicable to that operation. Empty when no operation this tool models was identified.",
+		"properties": {
+			"checks": {"type": "array"},
+			` + metaProperty + `
+		},
+		"additionalProperties": true
+	}`)
+
 	snapshotDiffOutputSchema = json.RawMessage(`{
 		"type": "object",
 		"description": "Diff between two snapshots: refs, headline summary, ranked per-object deltas for the requested kind, correlated planner/activity drift, and per-node query-shape drift (query_delta) whose means are over the window rather than since pg_stat_statements last reset; full view adds raw per-row deltas.",

@@ -124,11 +124,12 @@ func TestToolsRegistration_OutputSchemas(t *testing.T) {
 	}
 
 	wantOutputSchema := map[string]bool{
-		"find_objects":   true,
-		"describe_table": true,
-		"detect":         true,
-		"lint_schema":    true,
-		"snapshot_diff":  true,
+		"find_objects":    true,
+		"describe_table":  true,
+		"check_migration": true,
+		"detect":          true,
+		"lint_schema":     true,
+		"snapshot_diff":   true,
 	}
 
 	seen := map[string]bool{}
@@ -167,6 +168,7 @@ func TestToolsRegistration_StructuredContentPresent(t *testing.T) {
 		{"find_objects", "find_objects", nil},
 		{"find_objects_query", "find_objects", map[string]any{"query": "users"}},
 		{"describe_table", "describe_table", map[string]any{"table": "users"}},
+		{"check_migration", "check_migration", map[string]any{"ddl": "ALTER TABLE users ADD COLUMN phone TEXT"}},
 		{"detect", "detect", nil},
 		{"detect_vacuum_health", "detect", map[string]any{"kind": "vacuum_health"}},
 		{"lint_schema", "lint_schema", nil},
