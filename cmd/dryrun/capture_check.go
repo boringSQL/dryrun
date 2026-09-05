@@ -45,27 +45,16 @@ const checkTimeoutDefault = 10 * time.Second
 // order, nothing written. a node failing doesn't stop the rest: one report
 // should show every broken node
 func runCaptureCheck(ctx context.Context, store *history.Store, key history.SnapshotKey, targets []captureTarget, opts captureRunOptions, timeout time.Duration, out io.Writer) error {
-	// same answer for every node, resolve once
-	prior, storeErr := latestSchema(ctx, store, key)
+	sch := readSchemaState(ctx, store, key)
 
 	results := make([]checkResult, 0, len(targets))
 	for _, t := range targets {
 		results = append(results, checkNode(ctx, store, key, t, opts, timeout))
 	}
-	// a run that captures schema itself needs no prior snapshot
-	runWritesSchema := false
-	for _, r := range results {
-		if r.Fail == nil && slices.Contains(r.Streams, "schema") {
-			runWritesSchema = true
-			break
-		}
-	}
-	for i := range results {
-		results[i] = applySchemaBinding(results[i], storeErr, prior != nil, runWritesSchema, opts.AllowOrphan)
-	}
 
 	printCheckTable(out, results)
-	fleetFatal, warn := fleetIssues(results)
+	printSchemaLine(out, sch)
+	fleetFatal, warn := fleetIssues(results, sch, opts.AllowOrphan)
 	fatal := slices.Clone(fleetFatal)
 	failed := 0
 	for _, r := range results {
@@ -102,30 +91,70 @@ func runCaptureCheck(ctx context.Context, store *history.Store, key history.Snap
 	return nil
 }
 
-// every stream binds to a schema ref unless --allow-orphan or the run itself
-// writes one. planner also needs the snapshot itself to annotate against. a
-// node that already failed keeps its own error, it's the more useful one
-func applySchemaBinding(r checkResult, storeErr error, hasSchema, runWritesSchema, allowOrphan bool) checkResult {
-	if r.Fail != nil {
-		return r
+type schemaState struct {
+	prior      *schema.SchemaSnapshot
+	readErr    error
+	verified   time.Time
+	hasAttempt bool
+}
+
+func readSchemaState(ctx context.Context, store *history.Store, key history.SnapshotKey) schemaState {
+	st := schemaState{}
+	st.prior, st.readErr = latestSchema(ctx, store, key)
+	if st.readErr != nil {
+		return st
 	}
-	if storeErr != nil {
-		r.Fail = storeErr
-		return r
+	at, ok, err := store.LastCaptureAttemptAt(ctx, key, "", "schema")
+	if err != nil {
+		slog.Debug("schema attempt clock unreadable", "error", err)
+		return st
 	}
-	if hasSchema || runWritesSchema {
-		return r
+	st.verified, st.hasAttempt = at, ok
+	return st
+}
+
+func printSchemaLine(out io.Writer, sch schemaState) {
+	if sch.readErr != nil || sch.prior == nil {
+		return
 	}
-	if !allowOrphan {
-		r.Fail = fmt.Errorf("no schema snapshot to bind to, and no node in this run captures one; " +
-			"add schema to a primary's streams, or pass --allow-orphan")
-		return r
+	now := time.Now().UTC()
+	line := fmt.Sprintf("\nschema: %s, captured %s",
+		shortHash(sch.prior.ContentHash), ageAgo(now, sch.prior.Timestamp))
+	switch {
+	case !sch.hasAttempt:
+		line += " (no schema capture recorded on this host)"
+	case sch.prior.Timestamp.After(sch.verified):
+		line += fmt.Sprintf(", written elsewhere; this host last captured schema %s",
+			ageAgo(now, sch.verified))
+	default:
+		line += fmt.Sprintf(", last confirmed current %s", ageAgo(now, sch.verified))
 	}
-	if slices.Contains(r.Streams, "planner") {
-		r.Fail = fmt.Errorf("planner stats need a schema snapshot to annotate against; " +
-			"capture schema on the primary first")
+	fmt.Fprintln(out, line)
+}
+
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
 	}
-	return r
+	return h
+}
+
+func ageAgo(now, then time.Time) string {
+	if then.IsZero() || then.After(now) {
+		return "at an unknown time (clock skew)"
+	}
+	return roundAge(now.Sub(then)) + " ago"
+}
+
+func roundAge(d time.Duration) string {
+	switch {
+	case d >= 48*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours())/24)
+	case d >= time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
 }
 
 func checkNode(ctx context.Context, store *history.Store, key history.SnapshotKey, t captureTarget, opts captureRunOptions, timeout time.Duration) checkResult {
@@ -280,10 +309,64 @@ func connectForCheck(ctx context.Context, url string) (*schema.DryRun, error) {
 	return schema.ConnectWithGuards(ctx, url, guards)
 }
 
+func schemaFleetIssues(results []checkResult, sch schemaState, allowOrphan bool) (fatal, warn []string) {
+	if sch.readErr != nil {
+		return []string{redactSecrets(fmt.Sprintf("cannot read this project's schema history: %s", sch.readErr))}, nil
+	}
+
+	reached := false
+	for _, r := range results {
+		if r.Fail == nil && r.Reached {
+			reached = true
+			break
+		}
+	}
+	if !reached {
+		return nil, nil
+	}
+
+	writes, wantsPlanner := false, false
+	for _, r := range results {
+		if r.Fail != nil {
+			continue
+		}
+		if slices.Contains(r.Streams, "schema") && r.Role != history.NodeRoleStandby {
+			writes = true
+		}
+		if slices.Contains(r.Streams, "planner") {
+			wantsPlanner = true
+		}
+	}
+
+	if sch.prior != nil {
+		confirmed := sch.hasAttempt && time.Since(sch.verified) < 2*schemaIntervalFloor
+		if !writes && !confirmed {
+			warn = append(warn, "no node in this run captures schema and this host has not "+
+				"captured one recently, so every stream binds to the stored schema and it only "+
+				"gets older. Add schema to a primary's streams.")
+		}
+		return nil, warn
+	}
+	if writes {
+		return nil, nil
+	}
+	if !allowOrphan {
+		return []string{"this project has no schema snapshot and no node in this run captures one; " +
+			"add schema to a primary's streams, or pass --allow-orphan to store unbound stats"}, nil
+	}
+	if wantsPlanner {
+		return []string{"planner stats annotate against the schema snapshot itself, which " +
+			"--allow-orphan cannot waive; add schema to a primary's streams"}, nil
+	}
+	return nil, nil
+}
+
 // cross-node problems no single node can see: two labels aimed at one server,
 // a fleet split across databases. both usually a copy-pasted URL, both silent
 // at capture time
-func fleetIssues(results []checkResult) (fatal, warn []string) {
+func fleetIssues(results []checkResult, sch schemaState, allowOrphan bool) (fatal, warn []string) {
+	fatal, warn = schemaFleetIssues(results, sch, allowOrphan)
+
 	byServer := map[string][]checkResult{}
 	dbs := map[string][]string{}
 	for _, r := range results {
