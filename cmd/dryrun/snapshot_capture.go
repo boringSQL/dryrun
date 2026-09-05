@@ -219,6 +219,21 @@ type captureRunOptions struct {
 	AllowRotation   bool
 	AllowRoleChange bool
 	Due             bool
+	// collects documents for `snapshot take`'s per-stream stdout summary
+	docs *captureDocs
+}
+
+// what a run captured, filled before the dedup check
+type captureDocs struct {
+	Schema   *schema.SchemaSnapshot
+	Planner  *schema.PlannerStatsSnapshot
+	Activity *schema.ActivityStatsSnapshot
+}
+
+// initWriter plus the local-only attempt clock, shared by `snapshot take`
+type captureStore interface {
+	initWriter
+	MarkCaptureAttempt(ctx context.Context, key history.SnapshotKey, label, stream string, at time.Time) error
 }
 
 // --all reads the fleet from config; otherwise one node, named or ad hoc.
@@ -419,7 +434,7 @@ var captureStreamFn = captureStream
 
 // Runs each wanted stream schema-first and marks it attempted. A real error
 // is not recorded, so a broken node retries on the next tick.
-func captureStreams(ctx context.Context, cap initCapturer, store *history.Store, key history.SnapshotKey, t captureTarget, wanted []string, schemaRef string, rowCap int, opts captureRunOptions) ([]string, error) {
+func captureStreams(ctx context.Context, cap initCapturer, store captureStore, key history.SnapshotKey, t captureTarget, wanted []string, schemaRef string, rowCap int, opts captureRunOptions) ([]string, error) {
 	var done []string
 	ordered := schemaFirst(wanted)
 	for i, s := range ordered {
@@ -499,7 +514,7 @@ func captureStream(ctx context.Context, cap initCapturer, store initWriter, key 
 			return 0, "", fmt.Errorf("read schema snapshot to annotate against: %w", err)
 		}
 		if snap == nil {
-			return 0, "", fmt.Errorf("planner stats need a schema snapshot to annotate against; run `dryrun snapshot take` first")
+			return 0, "", fmt.Errorf("planner stats need a schema snapshot to annotate against; capture the schema stream on the primary first")
 		}
 		p, err := cap.CapturePlanner(ctx, schemaRef)
 		if err != nil {
@@ -516,6 +531,9 @@ func captureStream(ctx context.Context, cap initCapturer, store initWriter, key 
 		if err != nil {
 			return 0, "", err
 		}
+		if opts.docs != nil {
+			opts.docs.Planner = p
+		}
 		if out == history.PutDeduped {
 			return 0, "", errStreamUnchanged
 		}
@@ -529,6 +547,9 @@ func captureStream(ctx context.Context, cap initCapturer, store initWriter, key 
 		warnNodeIdentityDrift(ctx, store, key, a.Node.Source, a.Node, opts.AllowRotation || t.Pool)
 		if _, err := store.PutActivity(ctx, key, a); err != nil {
 			return 0, "", err
+		}
+		if opts.docs != nil {
+			opts.docs.Activity = a
 		}
 		return len(a.Tables), "", nil
 
@@ -569,6 +590,9 @@ func captureStream(ctx context.Context, cap initCapturer, store initWriter, key 
 		out, err := store.PutSchema(ctx, key, snap)
 		if err != nil {
 			return 0, "", err
+		}
+		if opts.docs != nil {
+			opts.docs.Schema = snap
 		}
 		// the rest of the run binds to this hash either way: PutDeduped means
 		// the store already holds this content
@@ -651,7 +675,7 @@ func lastDueMarker(ctx context.Context, store *history.Store, key history.Snapsh
 
 // Bookkeeping must not fail a capture that already succeeded, so a failed
 // upsert is logged and the stream simply stays due.
-func markCaptureAttempt(ctx context.Context, store *history.Store, key history.SnapshotKey, label, stream string) {
+func markCaptureAttempt(ctx context.Context, store captureStore, key history.SnapshotKey, label, stream string) {
 	if err := store.MarkCaptureAttempt(ctx, key, label, stream, time.Now().UTC()); err != nil {
 		slog.Warn("record capture attempt", "node", label, "stream", stream, "err", err)
 	}

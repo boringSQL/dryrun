@@ -329,7 +329,15 @@ func snapshotCmd() *cobra.Command {
 	takeCmd := &cobra.Command{
 		Use:   "take",
 		Short: "Take a new snapshot (schema + planner + activity; primary only)",
+		Long: `Take a new snapshot: schema, planner and activity stats, plus query stats
+when pg_stat_statements is available. Primary only.
+
+` + captureSupersedes + `  dryrun snapshot capture --streams schema,planner,activity,query
+
+take is now that command with the label "primary"; it will be removed after the
+next release.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Fprintln(os.Stderr, "note: `dryrun snapshot take` is deprecated; use `dryrun snapshot capture`")
 			rowCap, err := resolveQueryStatsRowCap()
 			if err != nil {
 				return err
@@ -375,7 +383,8 @@ func snapshotCmd() *cobra.Command {
 			}
 			fmt.Printf("Activity stats saved: %s (label=primary, %d tables, %d indexes)\n",
 				activity.ContentHash, len(activity.Tables), len(activity.Indexes))
-			if err := captureQueryStatsBestEffort(cmd.Context(), cap, store, key, snap.ContentHash, "primary", rowCap); err != nil {
+			// best-effort helper, so take doesn't stamp query's attempt clock
+			if err := captureQueryStatsBestEffort(cmd.Context(), cap, store, key, snap.ContentHash, takeLabel, rowCap); err != nil {
 				return err
 			}
 

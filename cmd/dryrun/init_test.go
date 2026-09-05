@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boringsql/fixturize/masking"
 
@@ -103,10 +104,20 @@ type stubWriter struct {
 	SchemaDedups                              bool
 	PrevSeen                                  []history.NodeFingerprint
 	PrevFpErr                                 error
+	Attempts                                  []string
+	MarkAttemptErr                            error
+	PutSchemaErr                              error
 }
 
 func (s *stubWriter) LatestNodeRole(_ context.Context, _ history.SnapshotKey, _ string) (string, error) {
 	return s.PrevRole, s.PrevRoleErr
+}
+
+// records the label verbatim; the real store normalizes a project-scoped
+// stream's label to ” (history.attemptLabel), which is what pins PLAN 4.1
+func (s *stubWriter) MarkCaptureAttempt(_ context.Context, _ history.SnapshotKey, label, stream string, at time.Time) error {
+	s.Attempts = append(s.Attempts, label+"/"+stream)
+	return s.MarkAttemptErr
 }
 
 func (s *stubWriter) RecentNodeFingerprints(_ context.Context, _ history.SnapshotKey, _ string) ([]history.NodeFingerprint, error) {
@@ -123,9 +134,15 @@ func (s *stubWriter) GetSchema(_ context.Context, _ history.SnapshotKey, _ histo
 	return s.Stored, nil
 }
 
+// take/capture read the schema back to annotate planner against, so the stub
+// has to serve what it was just given
 func (s *stubWriter) PutSchema(_ context.Context, _ history.SnapshotKey, snap *schema.SchemaSnapshot) (history.PutOutcome, error) {
+	if s.PutSchemaErr != nil {
+		return history.PutInserted, s.PutSchemaErr
+	}
 	s.SchemaN++
 	s.LastSchema = snap
+	s.Stored = snap
 	if s.SchemaDedups {
 		return history.PutDeduped, nil
 	}

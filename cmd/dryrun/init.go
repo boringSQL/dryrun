@@ -334,10 +334,15 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 	return captureQueryStatsBestEffort(ctx, cap, store, key, snap.ContentHash, source, opts.RowCap)
 }
 
-// snapshot take wrapper: gate on standby (refuse, no replica fallback), then
-// delegate to runPrimaryCapture. Kept here so the masking + standby contract
-// lives next to init's; the snapshot take command only handles flag plumbing.
-func runSnapshotTake(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, policy *masking.Policy, force, allowRoleChange bool) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
+// label stays "primary": renaming needs a `node` key on ProfileConfig (PLAN-nodes.md 1.2)
+const takeLabel = "primary"
+
+// query stays on captureQueryStatsBestEffort, which warns where the stream fails
+var takeStreams = []string{"schema", "planner", "activity"}
+
+// take is `capture --streams schema,planner,activity` on the label "primary",
+// plus the standby gate (refuse, no replica fallback).
+func runSnapshotTake(ctx context.Context, cap initCapturer, store captureStore, key history.SnapshotKey, policy *masking.Policy, force, allowRoleChange bool) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
 	standby, err := cap.IsStandby(ctx)
 	if err != nil {
 		return nil, nil, nil, 0, fmt.Errorf("check standby status: %w", err)
@@ -348,11 +353,40 @@ func runSnapshotTake(ctx context.Context, cap initCapturer, store initWriter, ke
 				"use `dryrun snapshot activity --from <url> --label <name>` to capture activity from a replica")
 	}
 	if err := guardNodeRole(ctx, store, key, captureOptions{
-		Label: "primary", AllowRoleChange: allowRoleChange,
+		Label: takeLabel, AllowRoleChange: allowRoleChange,
 	}, history.NodeRolePrimary); err != nil {
 		return nil, nil, nil, 0, err
 	}
-	return runPrimaryCapture(ctx, cap, store, key, "primary", policy, force)
+	// prove identity before introspecting so a refusal costs nothing
+	systemID, database, err := cap.Identity(ctx)
+	if err != nil {
+		return nil, nil, nil, 0, err
+	}
+	if err := guardCaptureIdentity(ctx, store, key, systemID, database, force); err != nil {
+		return nil, nil, nil, 0, err
+	}
+
+	docs := &captureDocs{}
+	t := captureTarget{Label: takeLabel, Role: history.NodeRolePrimary, DetectedRole: history.NodeRolePrimary}
+	// empty schemaRef: schema leads, and the stats bind to the hash it writes
+	if _, err := captureStreams(ctx, cap, store, key, t, takeStreams, "", 0,
+		captureRunOptions{MaskPolicy: policy, docs: docs}); err != nil {
+		return docs.Schema, docs.Planner, docs.Activity, 0, err
+	}
+	// caller prints all three unconditionally; a missing stream must error here
+	for name, got := range map[string]bool{
+		"schema": docs.Schema != nil, "planner": docs.Planner != nil, "activity": docs.Activity != nil,
+	} {
+		if !got {
+			return docs.Schema, docs.Planner, docs.Activity, 0,
+				fmt.Errorf("take captured no %s document", name)
+		}
+	}
+	masked := 0
+	if docs.Planner.Masking != nil {
+		masked = docs.Planner.Masking.ColumnsMasked
+	}
+	return docs.Schema, docs.Planner, docs.Activity, masked, nil
 }
 
 // schema + planner + activity in one shot; caller is responsible for the standby gate
@@ -424,7 +458,8 @@ func guardCaptureIdentityAgainst(prior *schema.SchemaSnapshot, systemID, databas
 		fmt.Sprintf("capture does not match this project's snapshot history: %s.\n"+
 			"       The connection may point at the wrong database, or you may be in the wrong project directory.\n"+
 			"       Re-check --db / DATABASE_URL.\n"+
-			"       If the identity legitimately changed, re-baseline with `dryrun snapshot take --force`\n"+
+			"       If the identity legitimately changed, re-baseline with\n"+
+			"       `dryrun snapshot capture --streams schema --force`\n"+
 			"       on the primary; --force here bypasses this run only.", reason))
 }
 

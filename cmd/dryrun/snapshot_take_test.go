@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/boringsql/fixturize/masking"
@@ -149,5 +150,90 @@ func TestRunSnapshotTake_Masking(t *testing.T) {
 					got, want)
 			}
 		})
+	}
+}
+
+// take routes through captureStreams now, so it must inherit what that path
+// provides and `take` never had: schema-first ordering (planner annotates
+// against the hash this run wrote, not a stale one) and the local attempt
+// clock, so a `capture --due` right after a take does not re-introspect.
+func TestRunSnapshotTake_IsACaptureAlias(t *testing.T) {
+	cap := &stubCapturer{}
+	w := &stubWriter{}
+
+	snap, planner, activity, _, err := runSnapshotTake(context.Background(), cap, w,
+		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, nil, false, false)
+	if err != nil {
+		t.Fatalf("runSnapshotTake: %v", err)
+	}
+	if snap == nil || planner == nil || activity == nil {
+		t.Fatalf("take must return all three documents for its stdout summary")
+	}
+	if w.LastActivityRef != snap.ContentHash {
+		t.Errorf("activity bound to %q, want the hash this run wrote (%q)",
+			w.LastActivityRef, snap.ContentHash)
+	}
+	want := []string{"primary/schema", "primary/planner", "primary/activity"}
+	if !slices.Equal(w.Attempts, want) {
+		t.Errorf("attempt markers = %v, want %v", w.Attempts, want)
+	}
+}
+
+// The point of guarding identity from cap.Identity() rather than from the
+// introspected document: a stray DATABASE_URL is refused before take pays for
+// a full introspection, which is the expensive half of the capture.
+func TestRunSnapshotTake_IdentityGuard_RefusesBeforeIntrospect(t *testing.T) {
+	cap := &stubCapturer{SystemID: "999", Database: "app"}
+	w := &stubWriter{Stored: &schema.SchemaSnapshot{SystemIdentifier: "111", Database: "app"}}
+
+	_, _, _, _, err := runSnapshotTake(context.Background(), cap, w,
+		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, nil, false, false)
+
+	var de *dryrun.Error
+	if !errors.As(err, &de) || de.Kind != dryrun.ErrIdentityMismatch {
+		t.Fatalf("want ErrIdentityMismatch, got %v", err)
+	}
+	if cap.IntrospectN != 0 {
+		t.Errorf("introspected %d times on a refused capture, want 0", cap.IntrospectN)
+	}
+}
+
+// An unchanged schema is the common case, and it is the one the alias could
+// have regressed: PutSchema dedups, captureStream turns that into
+// errStreamUnchanged, and take must still report the stored snapshot rather
+// than return a nil it would then dereference when printing.
+func TestRunSnapshotTake_DedupedSchemaStillReports(t *testing.T) {
+	cap := &stubCapturer{}
+	w := &stubWriter{SchemaDedups: true}
+
+	snap, planner, activity, _, err := runSnapshotTake(context.Background(), cap, w,
+		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, nil, false, false)
+	if err != nil {
+		t.Fatalf("runSnapshotTake: %v", err)
+	}
+	if snap == nil || snap.ContentHash == "" {
+		t.Fatal("a deduped schema must still be reported: the content is in the store")
+	}
+	if planner == nil || activity == nil {
+		t.Fatal("a deduped schema must not stop planner/activity")
+	}
+	if planner.SchemaRefHash != snap.ContentHash {
+		t.Errorf("planner bound to %q, want the deduped hash %q", planner.SchemaRefHash, snap.ContentHash)
+	}
+}
+
+// Writes used to warn and continue, so take printed "Snapshot saved" for a
+// snapshot it had not saved. Through captureStreams a failed put fails the run.
+func TestRunSnapshotTake_PutErrorFailsTheRun(t *testing.T) {
+	cap := &stubCapturer{}
+	w := &stubWriter{PutQueryStatsErr: nil, PutSchemaErr: errors.New("disk full")}
+
+	_, _, _, _, err := runSnapshotTake(context.Background(), cap, w,
+		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}, nil, false, false)
+	if err == nil {
+		t.Fatal("a failed PutSchema must fail take, not be warned about")
+	}
+	if cap.PlannerN != 0 {
+		t.Errorf("planner ran after the schema write failed (%d calls)", cap.PlannerN)
 	}
 }

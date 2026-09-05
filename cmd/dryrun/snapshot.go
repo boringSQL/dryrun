@@ -127,7 +127,7 @@ func schemaRefFrom(prior *schema.SchemaSnapshot, allowOrphan bool) (string, erro
 	if allowOrphan {
 		return "", nil
 	}
-	return "", fmt.Errorf("no schema snapshot to bind to; run `dryrun snapshot take` on the primary first, or pass --allow-orphan")
+	return "", fmt.Errorf("no schema snapshot to bind to; run `dryrun snapshot capture --streams schema` on the primary first, or pass --allow-orphan")
 }
 
 // Four call sites resolved this independently and worded the error four ways.
