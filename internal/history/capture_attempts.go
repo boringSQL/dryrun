@@ -27,7 +27,7 @@ func (s *Store) MarkCaptureAttempt(ctx context.Context, key SnapshotKey, nodeLab
 		 DO UPDATE SET attempted_at = excluded.attempted_at
 		 WHERE excluded.attempted_at > capture_attempts.attempted_at`,
 		string(key.ProjectID), string(key.DatabaseID), label, stream,
-		at.UTC().Format(time.RFC3339))
+		formatHistoryTS(at))
 	if err != nil {
 		return fmt.Errorf("record capture attempt: %w", err)
 	}

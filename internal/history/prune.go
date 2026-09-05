@@ -86,7 +86,7 @@ func (s *Store) pruneNodeSeries(ctx context.Context, key SnapshotKey, table stri
 		" AND node_source = keep.node_source" +
 		" ORDER BY timestamp DESC, id DESC LIMIT 1))"
 	args := []any{
-		string(key.ProjectID), string(key.DatabaseID), cutoff.Format(time.RFC3339),
+		string(key.ProjectID), string(key.DatabaseID), formatHistoryTS(cutoff),
 		string(key.ProjectID), string(key.DatabaseID),
 	}
 	return s.deleteMeasured(ctx, table, "payload_json", where, args)
@@ -98,7 +98,7 @@ func (s *Store) prunePlanner(ctx context.Context, key SnapshotKey, cutoff time.T
 		" WHERE project_id = ? AND database_id = ?" +
 		" ORDER BY timestamp DESC, id DESC LIMIT ?)"
 	args := []any{
-		string(key.ProjectID), string(key.DatabaseID), cutoff.Format(time.RFC3339),
+		string(key.ProjectID), string(key.DatabaseID), formatHistoryTS(cutoff),
 		string(key.ProjectID), string(key.DatabaseID), keep,
 	}
 	return s.deleteMeasured(ctx, "planner_stats", "payload_json", where, args)
@@ -131,7 +131,7 @@ func (s *Store) pruneSchemas(ctx context.Context, key SnapshotKey, cutoff time.T
 		    AND (timestamp >= ? OR id IN (SELECT id FROM snapshots
 		         WHERE project_id = ? AND database_id = ?
 		         ORDER BY timestamp DESC, id DESC LIMIT ?))`,
-		pid, did, cutoff.Format(time.RFC3339), pid, did, keep)
+		pid, did, formatHistoryTS(cutoff), pid, did, keep)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -162,7 +162,7 @@ func (s *Store) pruneSchemas(ctx context.Context, key SnapshotKey, cutoff time.T
 			         WHERE project_id = ? AND database_id = ?
 			         ORDER BY timestamp DESC, id DESC LIMIT ?)
 			  ORDER BY timestamp ASC, id ASC`,
-			pid, did, cutoff.Format(time.RFC3339), pid, did, keep)
+			pid, did, formatHistoryTS(cutoff), pid, did, keep)
 		if err != nil {
 			return nil, err
 		}

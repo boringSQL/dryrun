@@ -148,7 +148,7 @@ const (
 // corruption is not evidence the node moved.
 func (s *Store) RecentNodeFingerprints(ctx context.Context, key SnapshotKey, nodeLabel string) ([]NodeFingerprint, error) {
 	pid, did := string(key.ProjectID), string(key.DatabaseID)
-	since := time.Now().UTC().Add(-nodeFingerprintAge).Format(time.RFC3339)
+	since := formatHistoryTS(time.Now().Add(-nodeFingerprintAge))
 	// each arm orders and limits on its own so the index supplies the order;
 	// sorting the whole window to return 20 rows runs on every capture
 	arm := func(table string) string {

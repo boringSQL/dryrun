@@ -25,7 +25,7 @@ func (s *Store) PutPlanner(ctx context.Context, key SnapshotKey, p *schema.Plann
 		   (project_id, database_id, schema_ref_hash, content_hash, timestamp, payload_json)
 		   VALUES (?, ?, ?, ?, ?, ?)`,
 		string(key.ProjectID), string(key.DatabaseID),
-		p.SchemaRefHash, p.ContentHash, p.Timestamp.UTC().Format(time.RFC3339), string(data),
+		p.SchemaRefHash, p.ContentHash, formatHistoryTS(p.Timestamp), string(data),
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save planner stats: %w", err)
@@ -52,7 +52,7 @@ func (s *Store) PutActivity(ctx context.Context, key SnapshotKey, a *schema.Acti
 		   VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		string(key.ProjectID), string(key.DatabaseID),
 		a.SchemaRefHash, a.ContentHash, a.Node.Source,
-		a.Node.Timestamp.UTC().Format(time.RFC3339), string(data),
+		formatHistoryTS(a.Node.Timestamp), string(data),
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save activity stats: %w", err)
@@ -99,7 +99,7 @@ func (s *Store) PutQueryStats(ctx context.Context, key SnapshotKey, q *schema.Qu
 		   VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		string(key.ProjectID), string(key.DatabaseID),
 		q.SchemaRefHash, q.ContentHash, q.Node.Source,
-		q.Node.Timestamp.UTC().Format(time.RFC3339), string(data),
+		formatHistoryTS(q.Node.Timestamp), string(data),
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save query stats: %w", err)
@@ -402,7 +402,7 @@ func (s *Store) getPlannerRef(ctx context.Context, key SnapshotKey, at SnapshotR
 			`SELECT payload_json FROM planner_stats
 			  WHERE project_id = ? AND database_id = ? AND timestamp <= ?
 			  ORDER BY timestamp DESC, id DESC LIMIT 1`,
-			pid, did, at.At.Format(time.RFC3339),
+			pid, did, formatHistoryTS(at.At),
 		).Scan(&jsonStr)
 	case RefHash:
 		detail = "planner hash " + at.Hash
@@ -454,7 +454,7 @@ func (s *Store) getActivityRef(ctx context.Context, key SnapshotKey, nodeLabel s
 		err = s.db.QueryRowContext(ctx, base+" ORDER BY timestamp DESC, id DESC LIMIT 1", args...).Scan(&jsonStr)
 	case RefAt:
 		detail = fmt.Sprintf("activity at-or-before %s", at.At.Format(time.RFC3339))
-		args = append(args, at.At.Format(time.RFC3339))
+		args = append(args, formatHistoryTS(at.At))
 		err = s.db.QueryRowContext(ctx,
 			base+" AND timestamp <= ? ORDER BY timestamp DESC, id DESC LIMIT 1",
 			args...).Scan(&jsonStr)
@@ -490,11 +490,11 @@ func (s *Store) listPlanner(ctx context.Context, key SnapshotKey, rng TimeRange)
 	args = append(args, string(key.ProjectID), string(key.DatabaseID))
 	if rng.From != nil {
 		sb.WriteString(" AND timestamp >= ?")
-		args = append(args, rng.From.Format(time.RFC3339))
+		args = append(args, formatHistoryTS(*rng.From))
 	}
 	if rng.To != nil {
 		sb.WriteString(" AND timestamp < ?")
-		args = append(args, rng.To.Format(time.RFC3339))
+		args = append(args, formatHistoryTS(*rng.To))
 	}
 	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
 
@@ -544,11 +544,11 @@ func (s *Store) listActivity(ctx context.Context, key SnapshotKey, nodeLabel str
 	}
 	if rng.From != nil {
 		sb.WriteString(" AND timestamp >= ?")
-		args = append(args, rng.From.Format(time.RFC3339))
+		args = append(args, formatHistoryTS(*rng.From))
 	}
 	if rng.To != nil {
 		sb.WriteString(" AND timestamp < ?")
-		args = append(args, rng.To.Format(time.RFC3339))
+		args = append(args, formatHistoryTS(*rng.To))
 	}
 	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
 
@@ -612,7 +612,7 @@ func (s *Store) getQueryStatsRef(ctx context.Context, key SnapshotKey, nodeLabel
 		err = s.db.QueryRowContext(ctx, base+" ORDER BY timestamp DESC, id DESC LIMIT 1", args...).Scan(&jsonStr)
 	case RefAt:
 		detail = fmt.Sprintf("query stats at-or-before %s", at.At.Format(time.RFC3339))
-		args = append(args, at.At.Format(time.RFC3339))
+		args = append(args, formatHistoryTS(at.At))
 		err = s.db.QueryRowContext(ctx,
 			base+" AND timestamp <= ? ORDER BY timestamp DESC, id DESC LIMIT 1",
 			args...).Scan(&jsonStr)
@@ -651,11 +651,11 @@ func (s *Store) listQueryStats(ctx context.Context, key SnapshotKey, nodeLabel s
 	}
 	if rng.From != nil {
 		sb.WriteString(" AND timestamp >= ?")
-		args = append(args, rng.From.Format(time.RFC3339))
+		args = append(args, formatHistoryTS(*rng.From))
 	}
 	if rng.To != nil {
 		sb.WriteString(" AND timestamp < ?")
-		args = append(args, rng.To.Format(time.RFC3339))
+		args = append(args, formatHistoryTS(*rng.To))
 	}
 	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
 

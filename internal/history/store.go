@@ -361,7 +361,7 @@ func (s *Store) PutSchema(ctx context.Context, key SnapshotKey, snap *schema.Sch
 		`INSERT INTO snapshots (db_url_hash, timestamp, content_hash, database_name,
 		                        snapshot_json, project_id, database_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		syntheticDBURLHash(key), snap.Timestamp.UTC().Format(time.RFC3339),
+		syntheticDBURLHash(key), formatHistoryTS(snap.Timestamp),
 		snap.ContentHash, snap.Database, string(data), pid, did,
 	)
 	if err != nil {
@@ -398,7 +398,7 @@ func (s *Store) GetSchema(ctx context.Context, key SnapshotKey, at SnapshotRef) 
 			`SELECT snapshot_json FROM snapshots
 			  WHERE project_id = ? AND database_id = ? AND timestamp <= ?
 			  ORDER BY timestamp DESC, id DESC LIMIT 1`,
-			pid, did, at.At.Format(time.RFC3339),
+			pid, did, formatHistoryTS(at.At),
 		).Scan(&jsonStr)
 	case RefHash:
 		detail = "hash " + at.Hash
@@ -486,11 +486,11 @@ func (s *Store) ListSchema(ctx context.Context, key SnapshotKey, rng TimeRange) 
 	args = append(args, string(key.ProjectID), string(key.DatabaseID))
 	if rng.From != nil {
 		sb.WriteString(" AND timestamp >= ?")
-		args = append(args, rng.From.Format(time.RFC3339))
+		args = append(args, formatHistoryTS(*rng.From))
 	}
 	if rng.To != nil {
 		sb.WriteString(" AND timestamp < ?")
-		args = append(args, rng.To.Format(time.RFC3339))
+		args = append(args, formatHistoryTS(*rng.To))
 	}
 	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
 
@@ -806,7 +806,7 @@ func (s *Store) DeleteSchemaBefore(ctx context.Context, key SnapshotKey, cutoff 
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM snapshots
 		  WHERE project_id = ? AND database_id = ? AND timestamp < ?`,
-		string(key.ProjectID), string(key.DatabaseID), cutoff.Format(time.RFC3339),
+		string(key.ProjectID), string(key.DatabaseID), formatHistoryTS(cutoff),
 	)
 	if err != nil {
 		return 0, err
@@ -912,7 +912,7 @@ func (s *Store) DeleteBefore(ctx context.Context, key SnapshotKey, kind Snapshot
 		res, err := s.db.ExecContext(ctx,
 			`DELETE FROM planner_stats
 			  WHERE project_id = ? AND database_id = ? AND timestamp < ?`,
-			string(key.ProjectID), string(key.DatabaseID), cutoff.Format(time.RFC3339),
+			string(key.ProjectID), string(key.DatabaseID), formatHistoryTS(cutoff),
 		)
 		if err != nil {
 			return 0, err
@@ -929,7 +929,7 @@ func (s *Store) DeleteBefore(ctx context.Context, key SnapshotKey, kind Snapshot
 // table is a caller-side literal, never user input.
 func (s *Store) deleteNodeStatsBefore(ctx context.Context, key SnapshotKey, nodeLabel, table string, cutoff time.Time) (int64, error) {
 	query := "DELETE FROM " + table + " WHERE project_id = ? AND database_id = ? AND timestamp < ?"
-	args := []any{string(key.ProjectID), string(key.DatabaseID), cutoff.Format(time.RFC3339)}
+	args := []any{string(key.ProjectID), string(key.DatabaseID), formatHistoryTS(cutoff)}
 	if nodeLabel != "" {
 		query += " AND node_source = ?"
 		args = append(args, nodeLabel)
