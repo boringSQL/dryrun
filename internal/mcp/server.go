@@ -128,16 +128,11 @@ func (s *Server) historyNote() *string {
 	if hist == nil {
 		return nil
 	}
-	var note string
-	switch hist.Compat() {
-	case history.CompatLegacy:
-		note = "the history database is from an older dryrun and cannot be read; re-run `dryrun init` to recapture its snapshots"
-	case history.CompatNewer:
-		note = "the history database was written by a newer dryrun; upgrade dryrun"
-	default:
-		return nil
+	if hist.Compat() == history.CompatNewer {
+		note := "the history database was written by a newer dryrun; upgrade dryrun"
+		return &note
 	}
-	return &note
+	return nil
 }
 
 func (s *Server) getAnnotated() (*schema.AnnotatedSchema, error) {

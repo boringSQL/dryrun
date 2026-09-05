@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -60,13 +61,14 @@ func TestOpenFreshStoreIsCompatOK(t *testing.T) {
 	}
 }
 
-// TestOpenForeignStoreIsLegacy is the core of the Rust-to-Go detection. We
+// TestOpenForeignStoreRefused is the core of the Rust-to-Go boundary. We
 // hand-build a SQLite file whose snapshots table looks like the pre-Go (Rust)
 // schema — it carries a `kind` column and, crucially, lacks `db_url_hash`.
-// Open must flag it CompatLegacy AND leave it completely untouched: no
-// migrate, so no empty planner_stats table gets created inside someone's old
-// database. Mutating a foreign store would be the rude, data-risking move.
-func TestOpenForeignStoreIsLegacy(t *testing.T) {
+// Open must refuse it with an actionable error AND leave it completely
+// untouched: no migrate, so no empty planner_stats table gets created inside
+// someone's old database. Mutating a foreign store would be the rude,
+// data-risking move.
+func TestOpenForeignStoreRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rust.db")
 
 	raw, err := sql.Open("sqlite", path)
@@ -88,13 +90,12 @@ func TestOpenForeignStoreIsLegacy(t *testing.T) {
 	raw.Close()
 
 	s, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open foreign store should not error: %v", err)
+	if err == nil {
+		s.Close()
+		t.Fatal("Open must refuse a foreign store")
 	}
-	defer s.Close()
-
-	if s.Compat() != CompatLegacy {
-		t.Errorf("foreign store: got Compat %v, want legacy", s.Compat())
+	if !strings.Contains(err.Error(), "created by an older dryrun") {
+		t.Errorf("error should name the cause, got: %v", err)
 	}
 	// Open must not have run migrate against the foreign file.
 	if tableExists(t, path, "planner_stats") {
@@ -133,7 +134,7 @@ func TestOpenNewerStoreIsCompatNewer(t *testing.T) {
 // TestOpenAdoptsPreMarkerGoStore: a Go-shaped store from before the
 // user_version marker existed has the right tables but user_version 0. Open
 // must recognise it as its own (db_url_hash present), adopt it by stamping the
-// current version, and report CompatOK — never CompatLegacy.
+// current version, and report CompatOK — not refuse it as a foreign store.
 func TestOpenAdoptsPreMarkerGoStore(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "premarker.db")
 

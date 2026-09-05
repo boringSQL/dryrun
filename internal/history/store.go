@@ -46,25 +46,20 @@ type (
 )
 
 const (
-	CompatOK     Compat = iota // this build's format
-	CompatLegacy               // old rust history.db
-	CompatNewer                // written by a newer dryrun
+	CompatOK    Compat = iota // this build's format
+	CompatNewer               // written by a newer dryrun
 )
 
 func (c Compat) String() string {
-	switch c {
-	case CompatLegacy:
-		return "legacy"
-	case CompatNewer:
+	if c == CompatNewer {
 		return "newer"
-	default:
-		return "ok"
 	}
+	return "ok"
 }
 
 func (s *Store) Compat() Compat { return s.compat }
 
-// Opens (or creates) sqlite history db at path
+// Opens (or creates) sqlite history db at path; refuses a foreign (rust-era) file
 func Open(path string) (*Store, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -80,16 +75,16 @@ func Open(path string) (*Store, error) {
 
 	s := &Store{db: db}
 
-	// old rust db, don't migrate it
+	// old rust db: refuse before migrate() can bolt columns onto a schema we don't own
 	foreign, err := isForeignStore(db)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
 	if foreign {
-		s.compat = CompatLegacy
-		slog.Debug("history store: incompatible format", "path", path)
-		return s, nil
+		db.Close()
+		return nil, fmt.Errorf("history db %s was created by an older dryrun and cannot be read; "+
+			"move it aside and re-run 'dryrun init' or 'dryrun snapshot pull'", path)
 	}
 
 	if err := s.migrate(); err != nil {

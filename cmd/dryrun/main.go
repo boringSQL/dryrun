@@ -706,12 +706,7 @@ func loadSavedSchema() (*schema.SchemaSnapshot, error) {
 	hist, err := openExistingHistoryStore()
 	if err == nil {
 		defer hist.Close()
-		// a legacy db never ran migrate(), so GetSchema would fail on a missing column
-		switch hist.Compat() {
-		case history.CompatLegacy:
-			return nil, fmt.Errorf(".dryrun/history.db was created by an older dryrun and cannot be read; " +
-				"re-run 'dryrun init' or 'dryrun snapshot pull' to recapture its snapshots")
-		case history.CompatNewer:
+		if hist.Compat() == history.CompatNewer {
 			return nil, fmt.Errorf(".dryrun/history.db was written by a newer dryrun; upgrade dryrun")
 		}
 		snap, gerr := hist.GetSchema(context.Background(), key, history.NewRefLatest())
@@ -761,13 +756,9 @@ func openExistingHistoryStore() (*history.Store, error) {
 	return openHistoryStore(path)
 }
 
-// warn if history.db was written by a different dryrun
+// warn if history.db was written by a newer dryrun
 func warnIfIncompatible(s *history.Store) {
-	switch s.Compat() {
-	case history.CompatLegacy:
-		fmt.Fprintln(os.Stderr, "warning: the history database was created by an older dryrun and cannot be read.")
-		fmt.Fprintln(os.Stderr, "         Re-run 'dryrun init', or 'dryrun snapshot pull' to re-import its snapshots.")
-	case history.CompatNewer:
+	if s.Compat() == history.CompatNewer {
 		fmt.Fprintln(os.Stderr, "warning: the history database was written by a newer dryrun; some data may be unreadable. Please, upgrade dryrun.")
 	}
 }
@@ -831,6 +822,8 @@ func mcpServeCmd() *cobra.Command {
 				var hist *history.Store
 				if h, err := openHistoryStore(""); err == nil {
 					hist = h
+				} else {
+					fmt.Fprintf(os.Stderr, "dryrun: history database unavailable (%v) — running without history\n", err)
 				}
 
 				server = drmcp.NewServer(conn.Pool(), flagDB, snap, hist, lintCfg, pgMustardAPIKey)
@@ -841,7 +834,11 @@ func mcpServeCmd() *cobra.Command {
 
 				hist, err := openExistingHistoryStore()
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "dryrun: no history database (%v) — starting in uninitialized mode\n", err)
+					if errors.Is(err, os.ErrNotExist) {
+						fmt.Fprintln(os.Stderr, "dryrun: no history database — starting in uninitialized mode")
+					} else {
+						fmt.Fprintf(os.Stderr, "dryrun: history database unusable (%v) — starting in uninitialized mode\n", err)
+					}
 					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot take'; the snapshot is picked up on the next tool call")
 					server.SetUninitialized()
 					break

@@ -30,12 +30,7 @@ func snapshotNodesCmd(historyDB *string) *cobra.Command {
 			}
 			defer store.Close()
 
-			// a legacy db never ran migrate(), so the node tables may not exist
-			switch store.Compat() {
-			case history.CompatLegacy:
-				return fmt.Errorf(".dryrun/history.db was created by an older dryrun and cannot be read; " +
-					"re-run 'dryrun init' or 'dryrun snapshot pull' to recapture its snapshots")
-			case history.CompatNewer:
+			if store.Compat() == history.CompatNewer {
 				return fmt.Errorf(".dryrun/history.db was written by a newer dryrun; upgrade dryrun")
 			}
 

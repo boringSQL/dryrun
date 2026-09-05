@@ -661,13 +661,9 @@ func markCaptureAttempt(ctx context.Context, store *history.Store, key history.S
 // command benefits; --all is only the loudest consumer.
 func redactSecrets(msg string) string { return schema.RedactSecrets(msg) }
 
-// A legacy database never ran migrate(), so the node tables may not exist.
+// the write path is stricter than reads: a newer db is refused, not warned about
 func historyUsable(store *history.Store) error {
-	switch store.Compat() {
-	case history.CompatLegacy:
-		return fmt.Errorf(".dryrun/history.db was created by an older dryrun and cannot be read; " +
-			"re-run 'dryrun init' or 'dryrun snapshot pull' to recapture its snapshots")
-	case history.CompatNewer:
+	if store.Compat() == history.CompatNewer {
 		return fmt.Errorf(".dryrun/history.db was written by a newer dryrun; upgrade dryrun")
 	}
 	return nil
