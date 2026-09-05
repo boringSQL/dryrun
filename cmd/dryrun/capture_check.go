@@ -46,12 +46,22 @@ const checkTimeoutDefault = 10 * time.Second
 // should show every broken node
 func runCaptureCheck(ctx context.Context, store *history.Store, key history.SnapshotKey, targets []captureTarget, opts captureRunOptions, timeout time.Duration, out io.Writer) error {
 	// same answer for every node, resolve once
-	ref, schemaErr := resolveSchemaRef(ctx, store, key, opts.AllowOrphan)
-	hasSchema := schemaErr == nil && ref != ""
+	prior, storeErr := latestSchema(ctx, store, key)
 
 	results := make([]checkResult, 0, len(targets))
 	for _, t := range targets {
-		results = append(results, applySchemaBinding(checkNode(ctx, store, key, t, opts, timeout), schemaErr, hasSchema))
+		results = append(results, checkNode(ctx, store, key, t, opts, timeout))
+	}
+	// a run that captures schema itself needs no prior snapshot
+	runWritesSchema := false
+	for _, r := range results {
+		if r.Fail == nil && slices.Contains(r.Streams, "schema") {
+			runWritesSchema = true
+			break
+		}
+	}
+	for i := range results {
+		results[i] = applySchemaBinding(results[i], storeErr, prior != nil, runWritesSchema, opts.AllowOrphan)
 	}
 
 	printCheckTable(out, results)
@@ -92,19 +102,28 @@ func runCaptureCheck(ctx context.Context, store *history.Store, key history.Snap
 	return nil
 }
 
-// every stream binds to a schema ref (--allow-orphan waives that). planner
-// also needs the snapshot itself to annotate against, orphan or not. a node
-// that already failed keeps its own error, it's the more useful one
-func applySchemaBinding(r checkResult, schemaErr error, hasSchema bool) checkResult {
+// every stream binds to a schema ref unless --allow-orphan or the run itself
+// writes one. planner also needs the snapshot itself to annotate against. a
+// node that already failed keeps its own error, it's the more useful one
+func applySchemaBinding(r checkResult, storeErr error, hasSchema, runWritesSchema, allowOrphan bool) checkResult {
 	if r.Fail != nil {
 		return r
 	}
-	if schemaErr != nil {
-		r.Fail = schemaErr
+	if storeErr != nil {
+		r.Fail = storeErr
 		return r
 	}
-	if !hasSchema && slices.Contains(r.Streams, "planner") {
-		r.Fail = fmt.Errorf("planner stats need a schema snapshot to annotate against; run `dryrun snapshot take` first")
+	if hasSchema || runWritesSchema {
+		return r
+	}
+	if !allowOrphan {
+		r.Fail = fmt.Errorf("no schema snapshot to bind to, and no node in this run captures one; " +
+			"add schema to a primary's streams, or pass --allow-orphan")
+		return r
+	}
+	if slices.Contains(r.Streams, "planner") {
+		r.Fail = fmt.Errorf("planner stats need a schema snapshot to annotate against; " +
+			"capture schema on the primary first")
 	}
 	return r
 }

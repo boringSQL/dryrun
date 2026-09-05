@@ -8,7 +8,7 @@ dryrun merges statistics from every node in your cluster into one snapshot, then
 
 A snapshot is split into three rows in `~/.dryrun/history.db`:
 
-- **`schema`**: DDL (tables, columns, constraints, indexes, partitions, functions, enums, extensions, GUCs).
+- **`schema`**: DDL (tables, columns, constraints, indexes, partitions, functions, enums, extensions, GUCs). **Not masked** — `data-masking-policy.yml` and `require_masks` cover planner stats only, so column names, `DEFAULT` expressions, `CHECK` literals and view/function bodies are stored and pushed as introspected. This is unchanged from `snapshot take`, but worth knowing now that schema rides the same cron line as masked planner stats.
 - **`planner_stats`**: what the planner uses (`reltuples`, `relpages`, `pg_statistic`). Masked per `data-masking-policy.yml` at capture time; see [SECURITY.md](../SECURITY.md).
 - **`activity_stats`**: runtime counters (`seq_scan`, `idx_scan`, `n_dead_tup`, `last_vacuum`).
 
@@ -162,7 +162,7 @@ Wiring every node's URL into cron by hand does not scale past a couple of replic
 name     = "primary"
 role     = "primary"
 url      = "service=dryrun-primary"
-streams  = ["planner", "activity", "query"]
+streams  = ["schema", "planner", "activity", "query"]
 interval = "1h"
 
 [[node]]
@@ -193,11 +193,20 @@ query = "1h"
 ```
 
 Here activity is captured every five minutes while query stats are captured
-hourly, from the one `--due` cron line. Only the named streams change; the rest
-keep the base interval. Whether an override raises or lowers the cadence, it is
-taken as written.
+hourly, from the one `--due` cron line. Whether an override raises or lowers the
+cadence, it is taken as written.
 
-`url = "service=name"` is preferred: the entry lives in `~/.pg_service.conf` (or `$PGSERVICEFILE`) on the capture host and the password in `~/.pgpass`, so `dryrun.toml` never carries a password — or even a variable name — and stays committable. Where a service file is impractical, `url_env` names an environment variable and `url` may hold a `${VAR}` reference instead; either way nothing secret lands in the file. `role` is asserted against the node at capture time; `auto` (the default) accepts whatever it finds. Omit `streams` and the detected role decides: a standby has no schema of its own and its planner stats mirror the primary's, so it captures activity and query only.
+`schema` is the exception to "the rest keep the base interval". Introspection is
+far more expensive than the stats streams and a schema changes on DDL, not on a
+cron, so under `--due` it is capped at once per 24h however short the node's
+interval is. Name it in `[node.intervals]` to choose a different cadence in
+either direction, or drop `--due` to capture it unconditionally:
+
+```sh
+dryrun snapshot capture --node primary --streams schema
+```
+
+`url = "service=name"` is preferred: the entry lives in `~/.pg_service.conf` (or `$PGSERVICEFILE`) on the capture host and the password in `~/.pgpass`, so `dryrun.toml` never carries a password — or even a variable name — and stays committable. Where a service file is impractical, `url_env` names an environment variable and `url` may hold a `${VAR}` reference instead; either way nothing secret lands in the file. `role` is asserted against the node at capture time; `auto` (the default) accepts whatever it finds. Omit `streams` and the detected role decides: a primary captures schema, planner, activity and query; a standby has no schema of its own and its planner stats mirror the primary's, so it captures activity and query only. Naming `schema` on a block that declares `role = "standby"` fails at config load rather than at capture. A node that turns out to be a standby at run time (`role = "auto"` on a replica, or a failover between the config edit and the run) reports `schema=n/a` and carries on, like a node without `pg_stat_statements`.
 
 `pool = true` says the label names a read pool rather than one machine. Members rotate by design there, so the identity-drift warning is suppressed for that label — see the fingerprint paragraph above. Do not set it on a label that is supposed to be one node: the warning is the only thing that tells you two servers' counters are interleaving.
 
@@ -238,7 +247,7 @@ error: replica-1: [[node]] replica-1 declares role standby, but this node is a p
 error: replica-2: url_env REPLICA2_URL is unset in this environment
 ```
 
-Each node is checked on its own, so one unreachable node still leaves a full report rather than aborting at the first failure, and `--check-timeout` (10s by default) bounds a node that neither answers nor refuses. Every check is one that capture itself makes: the privileged-role refusal, the declared vs. detected role, the role a label was last captured under, the cluster and database identity against this project's schema baseline (waived by `--force`), whether this label's last capture came from a different server, `pg_stat_statements` for the query stream, a schema snapshot for every stream (waived by `--allow-orphan`, except for planner, which annotates against the snapshot itself), the stream names, the row cap, and the masking policy `require_masks` demands. Two checks are only visible across the fleet — two labels resolving to one server (fatal; identified by the server's boot time, not by the URL text, so a hostname and its IP are still caught, and only a warning when one of the labels is a `pool = true` endpoint that lands on a member by design) and a fleet spread over several databases, whose stats all land under one `database_id`. Failures exit nonzero; warnings do not. No capture lock is taken, so the preflight is safe to run while a cron capture is in flight.
+Each node is checked on its own, so one unreachable node still leaves a full report rather than aborting at the first failure, and `--check-timeout` (10s by default) bounds a node that neither answers nor refuses. Every check is one that capture itself makes: the privileged-role refusal, the declared vs. detected role, the role a label was last captured under, the cluster and database identity against this project's schema baseline (waived by `--force`), whether this label's last capture came from a different server, `pg_stat_statements` for the query stream, a schema snapshot for every stream — waived by `--allow-orphan`, and waived outright when some node in the run captures `schema` itself, so a fresh project's first `--check` passes rather than reporting a failure for a run that would succeed, the stream names, the row cap, and the masking policy `require_masks` demands. Two checks are only visible across the fleet — two labels resolving to one server (fatal; identified by the server's boot time, not by the URL text, so a hostname and its IP are still caught, and only a warning when one of the labels is a `pool = true` endpoint that lands on a member by design) and a fleet spread over several databases, whose stats all land under one `database_id`. Failures exit nonzero; warnings do not. No capture lock is taken, so the preflight is safe to run while a cron capture is in flight.
 
 `--due` is what makes one cron line implement every cadence:
 
@@ -280,15 +289,16 @@ Statuses: `grew`, `shrank`, `flat`, `new`, `gone` (absent from an uncapped newer
 
 ## Automating collection
 
-Activity captures are lightweight and safe for cron. Take the primary snapshot first so replica activity rows have a `schema_ref_hash` to attach to:
+Activity captures are lightweight and safe for cron. With `[[node]]` blocks one line covers the whole fleet, schema included:
 
 ```sh
 # /etc/cron.d/dryrun-stats
-0  2 * * * app dryrun snapshot take            # schema + planner, on the primary
 */5 * * * * app dryrun snapshot capture --all --due
 ```
 
-With [[node]] blocks the second line covers every node at its own interval. Without them, each node needs its own line:
+Schema is captured by the primary on its own 24h cadence, and nodes that declare it run first so every stat row in a tick binds to the same schema hash. No separate `snapshot take` line is needed.
+
+Without `[[node]]` blocks, each node needs its own line:
 
 ```sh
 15 2 * * * app dryrun --profile replica1 snapshot activity --from "$REPLICA1_DB" --label replica1

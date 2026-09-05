@@ -946,7 +946,6 @@ func (s *Store) deleteNodeStatsBefore(ctx context.Context, key SnapshotKey, node
 	return res.RowsAffected()
 }
 
-// Prune drops activity/query rows older than cutoff, keeping the newest row per (node, kind).
 func (s *Store) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error) {
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)

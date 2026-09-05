@@ -55,6 +55,8 @@ func (s *stubCapturer) Introspect(_ context.Context) (*schema.SchemaSnapshot, er
 		ContentHash:      "schema-hash-1",
 		SystemIdentifier: s.SystemID,
 		Database:         s.Database,
+		Tables:           make([]schema.Table, 3),
+		Views:            make([]schema.View, 1),
 	}, nil
 }
 
@@ -97,6 +99,8 @@ type stubWriter struct {
 	PutQueryStatsErr                          error
 	PrevRole                                  string
 	PrevRoleErr                               error
+	LastSchema                                *schema.SchemaSnapshot
+	SchemaDedups                              bool
 	PrevSeen                                  []history.NodeFingerprint
 	PrevFpErr                                 error
 }
@@ -119,8 +123,12 @@ func (s *stubWriter) GetSchema(_ context.Context, _ history.SnapshotKey, _ histo
 	return s.Stored, nil
 }
 
-func (s *stubWriter) PutSchema(_ context.Context, _ history.SnapshotKey, _ *schema.SchemaSnapshot) (history.PutOutcome, error) {
+func (s *stubWriter) PutSchema(_ context.Context, _ history.SnapshotKey, snap *schema.SchemaSnapshot) (history.PutOutcome, error) {
 	s.SchemaN++
+	s.LastSchema = snap
+	if s.SchemaDedups {
+		return history.PutDeduped, nil
+	}
 	return history.PutInserted, nil
 }
 

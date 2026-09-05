@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,8 +29,10 @@ type captureTarget struct {
 	// environment variable costs one node, not the fleet
 	node    *config.ResolvedNode
 	URL     string
-	Role    string // primary | standby | auto
+	Role    string // declared: primary | standby | auto
 	Streams []string
+	// set after connecting; role "auto" resolves here
+	DetectedRole string
 	// this label names a read pool, so members rotate by design
 	Pool     bool
 	Interval time.Duration
@@ -71,7 +74,12 @@ func snapshotCaptureCmd(historyDB *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "capture",
 		Short: "Capture stats from one node or the whole fleet",
-		Long: `Capture planner, activity and query stats from a node.
+		Long: `Capture schema, planner, activity and query stats from a node.
+
+A primary captures all four by default; a standby captures activity and query.
+schema is capped at once per 24h under --due, however short the node's interval
+is -- name it in [node.intervals] for a different cadence, or drop --due to
+capture it unconditionally.
 
 Nodes come from [[node]] blocks in dryrun.toml, or from --from/--label for a
 one-off. With --all every configured node is captured in turn; --due skips the
@@ -182,7 +190,7 @@ fail.`,
 	cmd.Flags().StringVar(&nodeName, "node", "", "capture the named [[node]] from dryrun.toml")
 	cmd.Flags().StringVar(&from, "from", "", "connection URL for a one-off capture (with --label)")
 	cmd.Flags().StringVar(&label, "label", "", "node label for a one-off capture")
-	cmd.Flags().StringSliceVar(&streams, "streams", nil, "planner,activity,query (default: by detected role)")
+	cmd.Flags().StringSliceVar(&streams, "streams", nil, "schema,planner,activity,query (default: by detected role)")
 	cmd.Flags().BoolVar(&all, "all", false, "capture every [[node]] in dryrun.toml")
 	cmd.Flags().BoolVar(&due, "due", false, "skip streams whose interval has not elapsed")
 	cmd.Flags().BoolVar(&allowOrphan, "allow-orphan", false, "permit capture without a bound schema snapshot")
@@ -249,7 +257,7 @@ func captureTargets(nodeName, from, label string, streams []string, all bool) ([
 			for _, n := range nodes {
 				out = append(out, targetFromNode(n, streams))
 			}
-			return out, nil
+			return schemaNodesFirst(out), nil
 		}
 		n, err := cfg.ResolveNode(nodeName)
 		if err != nil {
@@ -268,6 +276,17 @@ func captureTargets(nodeName, from, label string, streams []string, all bool) ([
 		return nil, fmt.Errorf("--label is required with --from; it names the series every counter is differenced against")
 	}
 	return []captureTarget{{Label: label, URL: from, Role: "auto", Streams: streams}}, nil
+}
+
+// resolveSchemaRef runs per node, so the schema-bearing node goes first or
+// nodes before it bind to the previous hash. Stable, so alphabetical order
+// holds within each group.
+func schemaNodesFirst(targets []captureTarget) []captureTarget {
+	sort.SliceStable(targets, func(i, j int) bool {
+		return slices.Contains(candidateStreams(targets[i]), "schema") &&
+			!slices.Contains(candidateStreams(targets[j]), "schema")
+	})
+	return targets
 }
 
 func targetFromNode(n config.ResolvedNode, cliStreams []string) captureTarget {
@@ -379,6 +398,7 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 		return err
 	}
 
+	t.DetectedRole = role
 	done, err := captureStreams(ctx, cap, store, key, t, wanted, schemaRef, rowCap, opts)
 	// Report even on partial failure: captured streams already advanced their
 	// due clock, so silence would read as "nothing happened".
@@ -533,7 +553,29 @@ func captureStream(ctx context.Context, cap initCapturer, store initWriter, key 
 		return len(q.Queries), "", nil
 
 	case "schema":
-		return 0, "", fmt.Errorf("schema is captured by `dryrun snapshot take`, which guards that it runs on a primary")
+		// a standby here is role = "auto" on a replica or a failover since the
+		// config edit; skip like an absent pg_stat_statements
+		switch t.DetectedRole {
+		case history.NodeRoleStandby:
+			return 0, "", errStreamUnavailable
+		case history.NodeRolePrimary:
+		default:
+			return 0, "", fmt.Errorf("node role was not detected before capture")
+		}
+		snap, err := cap.Introspect(ctx)
+		if err != nil {
+			return 0, "", err
+		}
+		out, err := store.PutSchema(ctx, key, snap)
+		if err != nil {
+			return 0, "", err
+		}
+		// the rest of the run binds to this hash either way: PutDeduped means
+		// the store already holds this content
+		if out == history.PutDeduped {
+			return 0, snap.ContentHash, errStreamUnchanged
+		}
+		return len(snap.Tables), snap.ContentHash, nil
 	}
 	return 0, "", fmt.Errorf("unknown stream %q", stream)
 }

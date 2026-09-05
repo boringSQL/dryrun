@@ -83,10 +83,13 @@ func TestCandidateStreams(t *testing.T) {
 	// with no configured streams the role decides later, so every stream is a
 	// candidate for the cadence pre-check
 	got := candidateStreams(captureTarget{})
-	for _, want := range []string{"planner", "activity", "query"} {
+	for _, want := range []string{"schema", "planner", "activity", "query"} {
 		if !strings.Contains(strings.Join(got, ","), want) {
 			t.Errorf("candidates %v omit %q", got, want)
 		}
+	}
+	if got := candidateStreams(captureTarget{Role: "standby"}); strings.Contains(strings.Join(got, ","), "schema") {
+		t.Errorf("candidates %v: a declared standby has no schema to originate", got)
 	}
 	if got := candidateStreams(captureTarget{Streams: []string{"query"}}); len(got) != 1 {
 		t.Errorf("candidates %v, want only the configured stream", got)
@@ -433,13 +436,58 @@ func TestCaptureStream_QueryStatsUnavailableIsSkipped(t *testing.T) {
 	}
 }
 
-func TestCaptureStream_SchemaIsRefused(t *testing.T) {
-	_, _, err := captureStream(context.Background(), &stubCapturer{}, &stubWriter{},
-		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"},
-		captureTarget{Label: "primary"}, "schema", "sr-1", 0, captureRunOptions{})
-	if err == nil || !strings.Contains(err.Error(), "snapshot take") {
-		t.Errorf("got %v, want a pointer to snapshot take", err)
-	}
+func TestCaptureStream_Schema(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+
+	t.Run("a primary introspects and stores", func(t *testing.T) {
+		cap := &stubCapturer{}
+		w := &stubWriter{}
+		n, hash, err := captureStream(ctx, cap, w, key,
+			captureTarget{Label: "primary", DetectedRole: history.NodeRolePrimary},
+			"schema", "", 0, captureRunOptions{})
+		if err != nil {
+			t.Fatalf("captureStream: %v", err)
+		}
+		if cap.IntrospectN != 1 || w.SchemaN != 1 {
+			t.Errorf("introspects=%d puts=%d, want 1 each", cap.IntrospectN, w.SchemaN)
+		}
+		if hash != "schema-hash-1" {
+			t.Errorf("hash=%q, want the captured snapshot's", hash)
+		}
+		if n != 3 {
+			t.Errorf("n=%d, want the stub's 3 tables", n)
+		}
+	})
+
+	t.Run("an unchanged schema dedups and still reports its hash", func(t *testing.T) {
+		cap := &stubCapturer{}
+		w := &stubWriter{SchemaDedups: true}
+		_, hash, err := captureStream(ctx, cap, w, key,
+			captureTarget{Label: "primary", DetectedRole: history.NodeRolePrimary},
+			"schema", "", 0, captureRunOptions{})
+		if !errors.Is(err, errStreamUnchanged) {
+			t.Fatalf("err=%v, want errStreamUnchanged", err)
+		}
+		if hash != "schema-hash-1" {
+			t.Errorf("hash=%q, want the deduped content's hash", hash)
+		}
+	})
+
+	// role = "auto" on a replica, or a failover since the config edit
+	t.Run("a standby skips instead of failing", func(t *testing.T) {
+		cap := &stubCapturer{}
+		w := &stubWriter{}
+		_, _, err := captureStream(ctx, cap, w, key,
+			captureTarget{Label: "replica", DetectedRole: history.NodeRoleStandby},
+			"schema", "", 0, captureRunOptions{})
+		if !errors.Is(err, errStreamUnavailable) {
+			t.Fatalf("err=%v, want errStreamUnavailable", err)
+		}
+		if cap.IntrospectN != 0 || w.SchemaN != 0 {
+			t.Errorf("standby introspected=%d stored=%d, want neither", cap.IntrospectN, w.SchemaN)
+		}
+	})
 }
 
 // A stream that dedups writes no row, so a due clock read from row timestamps
@@ -679,23 +727,31 @@ func TestSchemaFirst(t *testing.T) {
 }
 
 // Schema writes the hash the other streams bind to, so it leads even when the
-// config lists it last. Until the schema branch lands it refuses, which is what
-// makes the ordering observable here: query must not have run first.
+// config lists it last.
 func TestCaptureStreams_SchemaRunsFirst(t *testing.T) {
 	ctx := context.Background()
 	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
 	store := testStoreAt(t, t.TempDir())
+	cap := &stubCapturer{}
 
-	done, err := captureStreams(ctx, &stubCapturer{}, store, key, captureTarget{Label: "primary"},
-		[]string{"query", "schema"}, "sr-1", 0, captureRunOptions{})
-	if err == nil || !strings.HasPrefix(err.Error(), "schema:") {
-		t.Fatalf("err=%v, want the schema stream to fail first", err)
+	done, err := captureStreams(ctx, cap, store, key,
+		captureTarget{Label: "primary", DetectedRole: history.NodeRolePrimary},
+		[]string{"query", "schema"}, "", 0, captureRunOptions{})
+	if err != nil {
+		t.Fatalf("captureStreams: %v", err)
 	}
-	if len(done) != 0 {
-		t.Errorf("done=%v, want nothing captured before schema", done)
+	// reported in run order, not the order the caller asked for
+	if strings.HasPrefix(strings.Join(done, " "), "query") {
+		t.Errorf("done=%v, want schema reported first", done)
 	}
-	if _, ok, err := store.LastCaptureAttemptAt(ctx, key, "primary", "query"); err != nil || ok {
-		t.Errorf("query attempted=%t err=%v, want query not to have run", ok, err)
+	if cap.IntrospectN != 1 {
+		t.Fatalf("introspects=%d, want the schema stream to have run", cap.IntrospectN)
+	}
+	if cap.QueryStatsN != 1 {
+		t.Errorf("query stream ran %d times, want 1", cap.QueryStatsN)
+	}
+	if strings.Join(done, " ") != "schema=3 query=0" {
+		t.Errorf("done=%v, want both streams captured", done)
 	}
 }
 
@@ -972,5 +1028,49 @@ func TestCaptureStreams_UnavailableDoesNotSatisfyAProjectClock(t *testing.T) {
 	// about this node, and must still hold its own clock back
 	if _, ok, err := store.LastCaptureAttemptAt(ctx, key, "standby", "query"); err != nil || !ok {
 		t.Errorf("query attempt recorded=%t err=%v, want the per-node clock still marked", ok, err)
+	}
+}
+
+// §4.4: the schema-bearing node goes first so the nodes after it bind to the
+// hash this run writes.
+func TestSchemaNodesFirst(t *testing.T) {
+	targets := []captureTarget{
+		{Label: "analytics", Streams: []string{"activity"}},
+		{Label: "primary", Streams: []string{"schema", "planner"}},
+		{Label: "replica", Streams: []string{"query"}},
+	}
+	var got []string
+	for _, tgt := range schemaNodesFirst(targets) {
+		got = append(got, tgt.Label)
+	}
+	if strings.Join(got, ",") != "primary,analytics,replica" {
+		t.Errorf("order = %v, want the schema-bearing node first", got)
+	}
+
+	// a node with no explicit streams gets the primary defaults, schema included
+	auto := []captureTarget{
+		{Label: "b-replica", Role: "standby"},
+		{Label: "a-primary"},
+	}
+	got = nil
+	for _, tgt := range schemaNodesFirst(auto) {
+		got = append(got, tgt.Label)
+	}
+	if strings.Join(got, ",") != "a-primary,b-replica" {
+		t.Errorf("order = %v, want the role-defaulted primary first", got)
+	}
+
+	// stable: two schema-bearing nodes keep their alphabetical order
+	two := []captureTarget{
+		{Label: "a", Streams: []string{"schema"}},
+		{Label: "b", Streams: []string{"schema"}},
+		{Label: "c", Streams: []string{"query"}},
+	}
+	got = nil
+	for _, tgt := range schemaNodesFirst(two) {
+		got = append(got, tgt.Label)
+	}
+	if strings.Join(got, ",") != "a,b,c" {
+		t.Errorf("order = %v, want a stable sort", got)
 	}
 }

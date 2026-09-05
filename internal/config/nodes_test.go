@@ -125,9 +125,9 @@ func TestResolveNodes_Errors(t *testing.T) {
 			wantErr: "url or url_env is required",
 		},
 		{
-			name:    "schema is not a capture stream",
-			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\nstreams = [\"schema\"]\n",
-			wantErr: "snapshot take",
+			name:    "a standby declaring schema",
+			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\nrole = \"standby\"\nstreams = [\"schema\"]\n",
+			wantErr: "a standby cannot originate a schema",
 		},
 		{
 			name:    "both url and url_env",
@@ -164,13 +164,6 @@ func TestResolveNodes_Errors(t *testing.T) {
 			name:    "unparseable per-stream interval",
 			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\n[node.intervals]\nquery = \"nightly\"\n",
 			wantErr: "intervals.query",
-		},
-		{
-			// §5.1 will make this valid; until then the refusal must be
-			// explicit rather than an accidental pass
-			name:    "per-stream interval for schema, which is not yet a stream",
-			toml:    "[[node]]\nname = \"a\"\nurl = \"postgres://x\"\n[node.intervals]\nschema = \"24h\"\n",
-			wantErr: "snapshot take",
 		},
 		{
 			name:    "zero per-stream interval",
@@ -282,14 +275,15 @@ func TestDefaultStreamsFor(t *testing.T) {
 	if got := DefaultStreamsFor("standby"); hasString(got, "planner") || hasString(got, "schema") {
 		t.Errorf("standby defaults %v include primary-only streams", got)
 	}
-	if got := DefaultStreamsFor("primary"); !hasString(got, "planner") {
-		t.Errorf("primary defaults %v omit planner", got)
-	}
-	// schema is never a default: it is what `snapshot take` is for
-	for _, role := range []string{"primary", "standby", "auto"} {
-		if hasString(DefaultStreamsFor(role), "schema") {
-			t.Errorf("%s defaults include schema", role)
+	// a primary captures all four, schema included
+	for _, want := range []string{"schema", "planner", "activity", "query"} {
+		if !hasString(DefaultStreamsFor("primary"), want) {
+			t.Errorf("primary defaults %v omit %s", DefaultStreamsFor("primary"), want)
 		}
+	}
+	// schema writes the hash the others bind to, so it leads
+	if got := DefaultStreamsFor("primary"); got[0] != "schema" {
+		t.Errorf("primary defaults %v do not lead with schema", got)
 	}
 }
 

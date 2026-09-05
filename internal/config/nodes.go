@@ -41,9 +41,9 @@ func (n ResolvedNode) URL() (string, error) {
 	return v, nil
 }
 
-// Streams a node can feed. schema and planner are primary-only in practice but
-// the check belongs at capture, where the role is known.
-var knownStreams = []string{"planner", "activity", "query"}
+// Streams a node can feed. planner is primary-only in practice but the check
+// belongs at capture, where the role is known.
+var knownStreams = []string{"schema", "planner", "activity", "query"}
 
 // Config declares intent; nothing here connects. A bad block should fail the
 // command that reads it, not the capture that is already halfway through a
@@ -102,9 +102,6 @@ func ValidateStreams(streams []string) error {
 }
 
 func validateStream(s string) error {
-	if s == "schema" {
-		return fmt.Errorf("stream \"schema\": captured by `dryrun snapshot take`, which guards that it runs on a primary")
-	}
 	if !hasString(knownStreams, s) {
 		return fmt.Errorf("stream %q: want one of %s", s, strings.Join(knownStreams, ", "))
 	}
@@ -138,6 +135,9 @@ func resolveNode(n NodeConfig) (ResolvedNode, error) {
 		s = strings.TrimSpace(s)
 		if err := validateStream(s); err != nil {
 			return r, err
+		}
+		if s == "schema" && r.Role == "standby" {
+			return r, fmt.Errorf("stream \"schema\": a standby cannot originate a schema; capture it on the primary")
 		}
 		if !hasString(r.Streams, s) {
 			r.Streams = append(r.Streams, s)
@@ -193,11 +193,12 @@ func sortedKeys(m map[string]string) []string {
 
 // DefaultStreamsFor is what a node captures when its block names none.
 // A standby has no schema to write and its planner stats mirror the primary's.
+// schema leads: it writes the hash the other streams bind to.
 func DefaultStreamsFor(role string) []string {
 	if role == "standby" {
 		return []string{"activity", "query"}
 	}
-	return []string{"planner", "activity", "query"}
+	return []string{"schema", "planner", "activity", "query"}
 }
 
 func hasString(haystack []string, needle string) bool {

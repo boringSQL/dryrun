@@ -131,27 +131,50 @@ func TestRunCaptureCheck_UnreachableNodeFailsButReports(t *testing.T) {
 
 // planner needs a stored schema snapshot; fail here, not mid-capture
 func TestApplySchemaBinding(t *testing.T) {
-	missing := errors.New("no schema snapshot to bind to")
+	storeBroken := errors.New("history.db read failed")
 
-	// no snapshot and no --allow-orphan: every stream needs the ref
-	got := applySchemaBinding(checkResult{Label: "n", Reached: true, Streams: []string{"activity"}}, missing, false)
+	// no snapshot, nothing in this run writes one, no --allow-orphan
+	got := applySchemaBinding(checkResult{Label: "n", Reached: true, Streams: []string{"activity"}},
+		nil, false, false, false)
 	if got.Fail == nil {
-		t.Error("without --allow-orphan a node with no schema snapshot must fail")
+		t.Error("without a schema or --allow-orphan a node must fail")
 	}
-	// --allow-orphan waives the ref, but planner annotates against the snapshot itself
-	got = applySchemaBinding(checkResult{Label: "n", Reached: true, Streams: []string{"planner", "activity"}}, nil, false)
+	// a run that captures schema itself needs no prior snapshot
+	got = applySchemaBinding(checkResult{Label: "n", Reached: true, Streams: []string{"activity"}},
+		nil, false, true, false)
+	if got.Fail != nil {
+		t.Errorf("fail %v, want none when this run captures a schema", got.Fail)
+	}
+	// that waiver covers planner too
+	got = applySchemaBinding(checkResult{Label: "n", Reached: true, Streams: []string{"planner"}},
+		nil, false, true, false)
+	if got.Fail != nil {
+		t.Errorf("fail %v, want the run's own schema to satisfy planner", got.Fail)
+	}
+	// --allow-orphan waives the ref, but planner annotates against the snapshot
+	got = applySchemaBinding(checkResult{Label: "n", Reached: true, Streams: []string{"planner", "activity"}},
+		nil, false, false, true)
 	if got.Fail == nil || !strings.Contains(got.Fail.Error(), "planner") {
 		t.Errorf("fail %v, want the planner-needs-a-snapshot refusal", got.Fail)
 	}
-	if got := applySchemaBinding(checkResult{Streams: []string{"activity", "query"}}, nil, false); got.Fail != nil {
+	if got := applySchemaBinding(checkResult{Streams: []string{"activity", "query"}},
+		nil, false, false, true); got.Fail != nil {
 		t.Errorf("fail %v: with --allow-orphan these streams capture fine", got.Fail)
 	}
-	if got := applySchemaBinding(checkResult{Streams: []string{"planner"}}, nil, true); got.Fail != nil {
+	if got := applySchemaBinding(checkResult{Streams: []string{"planner"}},
+		nil, true, false, false); got.Fail != nil {
 		t.Errorf("fail %v, want none when a schema snapshot exists", got.Fail)
+	}
+	// an unreadable history is never waived
+	got = applySchemaBinding(checkResult{Streams: []string{"activity"}},
+		storeBroken, false, true, true)
+	if !errors.Is(got.Fail, storeBroken) {
+		t.Errorf("fail %v, want the store error surfaced", got.Fail)
 	}
 	// the node's own error is the more useful one
 	conn := errors.New("connection failed")
-	got = applySchemaBinding(checkResult{Label: "n", Fail: conn, Streams: []string{"planner"}}, missing, false)
+	got = applySchemaBinding(checkResult{Label: "n", Fail: conn, Streams: []string{"planner"}},
+		nil, false, false, false)
 	if !errors.Is(got.Fail, conn) {
 		t.Errorf("fail %v, want the node's own error kept", got.Fail)
 	}
@@ -187,13 +210,13 @@ func TestFleetIssues_DisagreeingAddresses(t *testing.T) {
 
 // unknown --streams must fail before connecting, on both paths
 func TestCaptureTargets_RejectsUnknownStreams(t *testing.T) {
-	for _, bad := range []string{"schema", "plnner"} {
+	for _, bad := range []string{"vacuum", "plnner"} {
 		_, err := captureTargets("", "postgres://u@h/db", "n", []string{bad}, false)
 		if err == nil || !strings.Contains(err.Error(), bad) {
 			t.Errorf("--streams %s: error %v, want a refusal naming it", bad, err)
 		}
 	}
-	if _, err := captureTargets("", "postgres://u@h/db", "n", []string{"query", "activity"}, false); err != nil {
+	if _, err := captureTargets("", "postgres://u@h/db", "n", []string{"schema", "query", "activity"}, false); err != nil {
 		t.Errorf("valid streams refused: %v", err)
 	}
 }
