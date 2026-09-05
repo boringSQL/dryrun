@@ -268,6 +268,241 @@ func TestAdoptPicksUpStatsUnderAnUnchangedSchema(t *testing.T) {
 	}
 }
 
+func putPlannerAt(t *testing.T, hist *history.Store, refHash string, at time.Time) {
+	t.Helper()
+	if _, err := hist.PutPlanner(context.Background(), testKey, &schema.PlannerStatsSnapshot{
+		SchemaRefHash: refHash,
+		ContentHash:   "planner-" + at.Format(time.RFC3339),
+		Database:      "appdb",
+		Timestamp:     at,
+	}); err != nil {
+		t.Fatalf("PutPlanner: %v", err)
+	}
+}
+
+func putActivityAt(t *testing.T, hist *history.Store, refHash, source string, at time.Time) {
+	t.Helper()
+	if _, err := hist.PutActivity(context.Background(), testKey, &schema.ActivityStatsSnapshot{
+		SchemaRefHash: refHash,
+		ContentHash:   "activity-" + source + "-" + at.Format(time.RFC3339),
+		Node:          schema.NodeIdentity{Source: source, Timestamp: at},
+	}); err != nil {
+		t.Fatalf("PutActivity: %v", err)
+	}
+}
+
+func expireFreshness(srv *Server) {
+	srv.freshness.mu.Lock()
+	srv.freshness.checkedAt = time.Now().Add(-2 * freshnessTTL)
+	srv.freshness.mu.Unlock()
+}
+
+// §5.5: a new schema hash lands and every stat row is still bound to the prior
+// one. _meta used to drop planner_captured_at/activity_captured_at entirely,
+// which an agent cannot tell apart from a project that never captured stats.
+func TestMetaMarksAReschemaWindow(t *testing.T) {
+	t0 := time.Now().Add(-3 * time.Hour).UTC().Truncate(time.Second)
+	statsAt := t0.Add(time.Hour)
+	reschemaAt := t0.Add(2 * time.Hour)
+	recapturedAt := t0.Add(3 * time.Hour)
+
+	hist := historyStore(t)
+	oldSnap := datedSnap(t, t0, "old")
+	put(t, hist, oldSnap)
+	putPlannerAt(t, hist, oldSnap.ContentHash, statsAt)
+	putActivityAt(t, hist, oldSnap.ContentHash, "primary", statsAt)
+
+	srv := serverWithHistory(t, oldSnap, hist)
+	meta := srv.newMeta("", nil)
+	if meta.PlannerCapturedAt != statsAt.Format(time.RFC3339) || meta.StatsPendingReschema {
+		t.Fatalf("baseline: planner %q, pending %v", meta.PlannerCapturedAt, meta.StatsPendingReschema)
+	}
+
+	// the migration: a new hash with no stats under it yet
+	newSnap := datedSnap(t, reschemaAt, "new")
+	put(t, hist, newSnap)
+	expireFreshness(srv)
+
+	meta = srv.newMeta("", nil)
+	if meta.SchemaCapturedAt != reschemaAt.Format(time.RFC3339) {
+		t.Errorf("serving the new schema: %q", meta.SchemaCapturedAt)
+	}
+	if meta.PlannerCapturedAt != statsAt.Format(time.RFC3339) {
+		t.Errorf("planner stamp dropped instead of dated to the prior hash: %q", meta.PlannerCapturedAt)
+	}
+	if meta.ActivityCapturedAt != statsAt.Format(time.RFC3339) {
+		t.Errorf("activity stamp dropped instead of dated to the prior hash: %q", meta.ActivityCapturedAt)
+	}
+	if meta.ActivityOldestNode != "primary" {
+		t.Errorf("laggard node lost: %q", meta.ActivityOldestNode)
+	}
+	if !meta.StatsPendingReschema {
+		t.Error("the re-schema window is not flagged")
+	}
+
+	// the map-based _meta path (dynamic-payload tools) carries the same marker
+	wrapper := map[string]any{}
+	srv.injectMeta(wrapper, "", nil)
+	if got, _ := wrapper["_meta"].(map[string]any); got["stats_pending_reschema"] != true {
+		t.Errorf("map _meta missing the marker: %v", got)
+	}
+	// and thin clients, which cannot see _meta at all, read the text header
+	if suffix := srv.captureTimes().suffix(); !strings.Contains(suffix, "stats pending reschema") {
+		t.Errorf("header hides the window: %q", suffix)
+	}
+
+	// planner re-captures first: its stamp advances, activity is still pending
+	putPlannerAt(t, hist, newSnap.ContentHash, recapturedAt)
+	expireFreshness(srv)
+	meta = srv.newMeta("", nil)
+	if !meta.StatsPendingReschema {
+		t.Error("activity is still prior-hash; the window is not over")
+	}
+	if meta.PlannerCapturedAt != recapturedAt.Format(time.RFC3339) {
+		t.Errorf("planner stamp did not advance: %q", meta.PlannerCapturedAt)
+	}
+	if meta.ActivityCapturedAt != statsAt.Format(time.RFC3339) {
+		t.Errorf("activity stamp should still be the prior hash's: %q", meta.ActivityCapturedAt)
+	}
+
+	// activity lands under the new hash and the window closes
+	putActivityAt(t, hist, newSnap.ContentHash, "primary", recapturedAt)
+	expireFreshness(srv)
+	meta = srv.newMeta("", nil)
+	if meta.StatsPendingReschema {
+		t.Error("window closed but still flagged")
+	}
+	if meta.PlannerCapturedAt != recapturedAt.Format(time.RFC3339) || meta.ActivityCapturedAt != recapturedAt.Format(time.RFC3339) {
+		t.Errorf("stamps did not advance: planner %q activity %q", meta.PlannerCapturedAt, meta.ActivityCapturedAt)
+	}
+}
+
+// A server restarted mid-window (migration landed, next capture not yet) must
+// flag it through the bootstrap path, not only through adoption.
+func TestMetaMarksAReschemaWindowAfterRestart(t *testing.T) {
+	t0 := time.Now().Add(-3 * time.Hour).UTC().Truncate(time.Second)
+	statsAt := t0.Add(time.Hour)
+	reschemaAt := t0.Add(2 * time.Hour)
+
+	hist := historyStore(t)
+	oldSnap := datedSnap(t, t0, "old")
+	put(t, hist, oldSnap)
+	putPlannerAt(t, hist, oldSnap.ContentHash, statsAt)
+	putActivityAt(t, hist, oldSnap.ContentHash, "primary", statsAt)
+	put(t, hist, datedSnap(t, reschemaAt, "new"))
+
+	srv := NewOfflineServerAnnotated(nil, lint.DefaultConfig())
+	srv.SetHistory(hist)
+	srv.SetSnapshotKey(testKey)
+	if !srv.BootstrapFromHistory(context.Background()) {
+		t.Fatal("bootstrap failed")
+	}
+
+	meta := srv.newMeta("", nil)
+	if meta.SchemaCapturedAt != reschemaAt.Format(time.RFC3339) {
+		t.Errorf("latest schema not served: %q", meta.SchemaCapturedAt)
+	}
+	if !meta.StatsPendingReschema {
+		t.Error("restart inside the window lost the marker")
+	}
+	if meta.PlannerCapturedAt != statsAt.Format(time.RFC3339) {
+		t.Errorf("prior planner stamp lost: %q", meta.PlannerCapturedAt)
+	}
+}
+
+// The marker exists to tell "not yet re-captured under this schema" from
+// "never captured"; it must not fire for the latter.
+func TestMetaNoReschemaMarkerWhenStatsNeverCaptured(t *testing.T) {
+	hist := historyStore(t)
+	put(t, hist, datedSnap(t, time.Now().Add(-time.Hour).UTC(), "solo"))
+
+	srv := NewOfflineServerAnnotated(nil, lint.DefaultConfig())
+	srv.SetHistory(hist)
+	srv.SetSnapshotKey(testKey)
+	if !srv.BootstrapFromHistory(context.Background()) {
+		t.Fatal("bootstrap failed")
+	}
+
+	meta := srv.newMeta("", nil)
+	if meta.StatsPendingReschema {
+		t.Error("no stats ever captured, but the meta claims a pending window")
+	}
+	if meta.PlannerCapturedAt != "" || meta.ActivityCapturedAt != "" {
+		t.Errorf("stamps invented from nothing: planner %q activity %q", meta.PlannerCapturedAt, meta.ActivityCapturedAt)
+	}
+}
+
+// pendingStamps are computed at adoption and used to be final: a lookup that
+// failed under a contended read left the window unflagged until the first
+// re-capture, because a stats-free bundle never advances again. The expired
+// freshness tick refreshes them instead.
+func TestMetaReschemaWindowRefreshesPendingStamps(t *testing.T) {
+	t0 := time.Now().Add(-3 * time.Hour).UTC().Truncate(time.Second)
+	statsAt := t0.Add(time.Hour)
+	reschemaAt := t0.Add(2 * time.Hour)
+
+	hist := historyStore(t)
+	oldSnap := datedSnap(t, t0, "old")
+	put(t, hist, oldSnap)
+	putPlannerAt(t, hist, oldSnap.ContentHash, statsAt)
+	putActivityAt(t, hist, oldSnap.ContentHash, "primary", statsAt)
+	newSnap := datedSnap(t, reschemaAt, "new")
+	put(t, hist, newSnap)
+
+	srv := serverWithHistory(t, newSnap, hist)
+	if meta := srv.newMeta("", nil); !meta.StatsPendingReschema {
+		t.Fatal("window not flagged on the first tick; fixture broken")
+	}
+
+	// simulate the transient failure: the stamps computed for the window are lost
+	srv.mu.Lock()
+	srv.pendingStamps = captureStamps{}
+	srv.mu.Unlock()
+	if meta := srv.newMeta("", nil); meta.StatsPendingReschema {
+		t.Fatal("pendingStamps cleared but the flag survived the throttle window")
+	}
+
+	// the bundle does not advance; the next expired tick must restore the stamps
+	expireFreshness(srv)
+	meta := srv.newMeta("", nil)
+	if !meta.StatsPendingReschema {
+		t.Error("flag missing until the next re-capture")
+	}
+	if meta.PlannerCapturedAt != statsAt.Format(time.RFC3339) {
+		t.Errorf("planner stamp = %q, want the prior capture %q", meta.PlannerCapturedAt, statsAt.Format(time.RFC3339))
+	}
+	if meta.ActivityCapturedAt != statsAt.Format(time.RFC3339) {
+		t.Errorf("activity stamp = %q, want the prior capture %q", meta.ActivityCapturedAt, statsAt.Format(time.RFC3339))
+	}
+}
+
+// ... but only when history's latest IS the served bundle: a schema history
+// does not hold (a --db introspection ahead of the last capture) must not
+// borrow stamps bound to another hash.
+func TestMetaReschemaRefreshRequiresTheServedHash(t *testing.T) {
+	t0 := time.Now().Add(-3 * time.Hour).UTC().Truncate(time.Second)
+	statsAt := t0.Add(time.Hour)
+
+	hist := historyStore(t)
+	oldSnap := datedSnap(t, t0, "old")
+	put(t, hist, oldSnap)
+	putPlannerAt(t, hist, oldSnap.ContentHash, statsAt)
+
+	// served schema is newer than anything in history and never captured there
+	local := datedSnap(t, t0.Add(2*time.Hour), "local")
+	srv := serverWithHistory(t, local, hist)
+	meta := srv.newMeta("", nil)
+	if meta.SchemaCapturedAt != local.Timestamp.Format(time.RFC3339) {
+		t.Errorf("not serving the local schema: %q", meta.SchemaCapturedAt)
+	}
+	if meta.StatsPendingReschema {
+		t.Error("borrowed prior-hash stamps for a schema history does not hold")
+	}
+	if meta.PlannerCapturedAt != "" || meta.ActivityCapturedAt != "" {
+		t.Errorf("invented stamps: planner %q activity %q", meta.PlannerCapturedAt, meta.ActivityCapturedAt)
+	}
+}
+
 // "newest" is decided on the instant, not the string: stored timestamps need not be UTC.
 func TestAdoptToleratesOddTimestamps(t *testing.T) {
 	zone := time.FixedZone("CEST", 2*60*60)

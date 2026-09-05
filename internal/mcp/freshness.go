@@ -101,6 +101,13 @@ func (s *Server) adoptNewerSnapshot(ctx context.Context) {
 	}
 	if served != nil {
 		if !bundleAdvanced(a, served) {
+			// retry a failed pendingStamps computation: a stats-free bundle
+			// never advances again. Gate: served bundle must be history's latest.
+			if a.Schema.ContentHash == served.Schema.ContentHash {
+				s.mu.Lock()
+				s.pendingStamps = pendingReschemaStamps(ctx, hist, key, served)
+				s.mu.Unlock()
+			}
 			return
 		}
 		// key and --db url resolve independently; history can hold another database entirely
@@ -109,13 +116,46 @@ func (s *Server) adoptNewerSnapshot(ctx context.Context) {
 		}
 	}
 
+	// outside s.mu: freshness.mu serializes adopts; the reads must not stall tool calls
+	pending := pendingReschemaStamps(ctx, hist, key, a)
+
 	s.mu.Lock()
 	s.annotated = a
+	s.pendingStamps = pending
 	s.uninitialized = false
 	s.mu.Unlock()
 	s.freshness.servedAt = a.Schema.Timestamp
 	slog.Info("picked up a newer snapshot from history",
 		"captured_at", a.Schema.Timestamp.UTC().Format(time.RFC3339), "content_hash", a.Schema.ContentHash)
+}
+
+// the prior-hash captures _meta shows beside stats_pending_reschema; a failed
+// lookup is no stats, never a failed adoption — the freshness tick retries
+func pendingReschemaStamps(ctx context.Context, hist *history.Store, key history.SnapshotKey, a *schema.AnnotatedSchema) captureStamps {
+	var c captureStamps
+	if a == nil || (a.Planner != nil && a.Merged != nil) {
+		return c
+	}
+	if a.Planner == nil {
+		if p, err := hist.LatestPlanner(ctx, key); err == nil && p != nil {
+			c.planner = stamp(p.Timestamp)
+			c.pendingReschema = true
+		}
+	}
+	if a.Merged == nil {
+		acts, err := hist.LatestActivity(ctx, key)
+		if err == nil && len(acts) > 0 {
+			nodes := make([]schema.NodeActivity, len(acts))
+			for i := range acts {
+				nodes[i] = schema.NodeActivity{Node: acts[i].Node}
+			}
+			if oldest, source := oldestActivityStamp(nodes); !oldest.IsZero() {
+				c.activity, c.activityNode = stamp(oldest), source
+				c.pendingReschema = true
+			}
+		}
+	}
+	return c
 }
 
 // a content twin (A -> B -> A) is not newer; fresh stats under an unchanged schema are

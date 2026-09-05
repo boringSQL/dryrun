@@ -21,9 +21,11 @@ import (
 
 type (
 	Server struct {
-		pool            *pgxpool.Pool
-		dbURL           string
-		annotated       *schema.AnnotatedSchema
+		pool      *pgxpool.Pool
+		dbURL     string
+		annotated *schema.AnnotatedSchema
+		// stats bound to a schema hash older than the served one
+		pendingStamps   captureStamps
 		mu              sync.RWMutex
 		history         *history.Store
 		snapshotKey     history.SnapshotKey
@@ -84,12 +86,13 @@ func (s *Server) SetHistory(hist *history.Store) {
 }
 
 func (s *Server) BootstrapFromHistory(ctx context.Context) bool {
-	a, ok := s.loadAnnotatedFromHistory(ctx)
+	a, pending, ok := s.loadAnnotatedFromHistory(ctx)
 	if !ok || a == nil || a.Schema == nil {
 		return false
 	}
 	s.mu.Lock()
 	s.annotated = a
+	s.pendingStamps = pending
 	s.uninitialized = false
 	s.mu.Unlock()
 	return true
@@ -104,20 +107,20 @@ func (s *Server) SchemaCounts() (tables, views, functions int) {
 	return len(snap.Tables), len(snap.Views), len(snap.Functions)
 }
 
-func (s *Server) loadAnnotatedFromHistory(ctx context.Context) (*schema.AnnotatedSchema, bool) {
+func (s *Server) loadAnnotatedFromHistory(ctx context.Context) (*schema.AnnotatedSchema, captureStamps, bool) {
 	s.mu.RLock()
 	hist := s.history
 	key := s.snapshotKey
 	s.mu.RUnlock()
 	if hist == nil || key.ProjectID == "" {
-		return nil, false
+		return nil, captureStamps{}, false
 	}
 	a, err := hist.GetAnnotated(ctx, key, history.NewRefLatest())
 	if err != nil {
 		slog.Debug("history.GetAnnotated miss", "error", err)
-		return nil, false
+		return nil, captureStamps{}, false
 	}
-	return a, true
+	return a, pendingReschemaStamps(ctx, hist, key, a), true
 }
 
 // describes a history.db compat problem for the user, or nil if fine
@@ -200,6 +203,8 @@ type (
 		// which node is the laggard: "three weeks stale" is not actionable
 		// without knowing whose capture is old
 		activityNode string
+		// planner/activity above are a prior hash's captures, not the served bundle's
+		pendingReschema bool
 	}
 )
 
@@ -220,20 +225,40 @@ func (s *Server) captureTimes() captureStamps {
 		c.planner = stamp(a.Planner.Timestamp)
 	}
 	if a.Merged != nil {
-		// the oldest node, not the newest: a fresh primary beside a three-week
-		// replica is three weeks stale for anything read across nodes
-		var oldest time.Time
-		for _, n := range a.Merged.Nodes {
-			if n.Node.Timestamp.IsZero() {
-				continue
-			}
-			if oldest.IsZero() || n.Node.Timestamp.Before(oldest) {
-				oldest, c.activityNode = n.Node.Timestamp, n.Node.Source
-			}
-		}
+		oldest, source := oldestActivityStamp(a.Merged.Nodes)
 		c.activity = stamp(oldest)
+		c.activityNode = source
+	}
+
+	// history still holds the prior hash's stats: report them rather than
+	// dropping the fields, which would read as "never captured"
+	s.mu.RLock()
+	pending := s.pendingStamps
+	s.mu.RUnlock()
+	if c.planner == "" && pending.planner != "" {
+		c.planner = pending.planner
+		c.pendingReschema = true
+	}
+	if c.activity == "" && pending.activity != "" {
+		c.activity = pending.activity
+		c.activityNode = pending.activityNode
+		c.pendingReschema = true
 	}
 	return c
+}
+
+// the oldest node, not the newest: a fresh primary beside a three-week replica
+// is three weeks stale; an undated node is missing info, not a dawn-of-time capture
+func oldestActivityStamp(nodes []schema.NodeActivity) (at time.Time, source string) {
+	for _, n := range nodes {
+		if n.Node.Timestamp.IsZero() {
+			continue
+		}
+		if at.IsZero() || n.Node.Timestamp.Before(at) {
+			at, source = n.Node.Timestamp, n.Node.Source
+		}
+	}
+	return at, source
 }
 
 func stamp(t time.Time) string {
@@ -255,6 +280,9 @@ func (c captureStamps) fields() map[string]any {
 			out[k] = v
 		}
 	}
+	if c.pendingReschema {
+		out["stats_pending_reschema"] = true
+	}
 	return out
 }
 
@@ -273,6 +301,10 @@ func (c captureStamps) suffix() string {
 		}
 		parts = append(parts, part)
 	}
+	if c.pendingReschema {
+		// the header must not pass prior-hash timestamps as the served bundle's
+		parts = append(parts, "stats pending reschema")
+	}
 	if len(parts) == 0 {
 		return ""
 	}
@@ -287,7 +319,7 @@ func (s *Server) requirePool() (*pgxpool.Pool, error) {
 }
 
 func (s *Server) Instructions() string {
-	metaNote := "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint. _meta.schema_captured_at, _meta.planner_captured_at and _meta.activity_captured_at say when each part of the snapshot was taken -- DDL, planner stats and per-node counters are captured by separate commands, so they age at different rates. They describe the snapshot, not a live read. Activity is the oldest node, named in _meta.activity_oldest_node. A snapshot taken while this server runs (`dryrun snapshot take`, `snapshot pull`) is picked up on the next tool call; nothing needs reloading."
+	metaNote := "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint. _meta.schema_captured_at, _meta.planner_captured_at and _meta.activity_captured_at say when each part of the snapshot was taken -- DDL, planner stats and per-node counters are captured by separate commands, so they age at different rates. They describe the snapshot, not a live read. Activity is the oldest node, named in _meta.activity_oldest_node. _meta.stats_pending_reschema: true marks a re-schema window: the newest schema hash has no stats capture yet, so the planner/activity timestamps shown are the prior schema's. A snapshot taken while this server runs (`dryrun snapshot take`, `snapshot pull`) is picked up on the next tool call; nothing needs reloading."
 
 	// surface a history.db compat problem here so MCP-only users see it
 	if note := s.historyNote(); note != nil {

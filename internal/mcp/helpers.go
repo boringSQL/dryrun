@@ -58,27 +58,30 @@ type (
 		Mode      string `json:"mode"`
 		// DDL, planner stats and activity are captured by separate commands on
 		// separate schedules; one timestamp would misstate the other two
-		SchemaCapturedAt   string     `json:"schema_captured_at,omitempty"`
-		PlannerCapturedAt  string     `json:"planner_captured_at,omitempty"`
-		ActivityCapturedAt string     `json:"activity_captured_at,omitempty"`
-		ActivityOldestNode string     `json:"activity_oldest_node,omitempty"`
-		Hint               string     `json:"hint,omitempty"`
-		Next               []NextCall `json:"next,omitempty"`
+		SchemaCapturedAt   string `json:"schema_captured_at,omitempty"`
+		PlannerCapturedAt  string `json:"planner_captured_at,omitempty"`
+		ActivityCapturedAt string `json:"activity_captured_at,omitempty"`
+		ActivityOldestNode string `json:"activity_oldest_node,omitempty"`
+		// served hash has no stats yet: the timestamps above are a prior hash's
+		StatsPendingReschema bool       `json:"stats_pending_reschema,omitempty"`
+		Hint                 string     `json:"hint,omitempty"`
+		Next                 []NextCall `json:"next,omitempty"`
 	}
 )
 
 func (s *Server) newMeta(hint string, next []NextCall) *toolMeta {
 	c := s.captureTimes()
 	return &toolMeta{
-		PgVersion:          s.pgDisplay(),
-		Database:           s.databaseName(),
-		Mode:               s.modeStr(),
-		SchemaCapturedAt:   c.schema,
-		PlannerCapturedAt:  c.planner,
-		ActivityCapturedAt: c.activity,
-		ActivityOldestNode: c.activityNode,
-		Hint:               hint,
-		Next:               next,
+		PgVersion:            s.pgDisplay(),
+		Database:             s.databaseName(),
+		Mode:                 s.modeStr(),
+		SchemaCapturedAt:     c.schema,
+		PlannerCapturedAt:    c.planner,
+		ActivityCapturedAt:   c.activity,
+		ActivityOldestNode:   c.activityNode,
+		StatsPendingReschema: c.pendingReschema,
+		Hint:                 hint,
+		Next:                 next,
 	}
 }
 
