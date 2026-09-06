@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/boringsql/dryrun/pkg/jit"
 )
 
 func rewriteFor(t *testing.T, ddl string) []string {
@@ -389,5 +391,159 @@ func TestRecommendationDropsTheFixWhereThereIsARewrite(t *testing.T) {
 		if !strings.Contains(c.Recommendation, "REASON:") {
 			t.Errorf("%s: recommendation lost the reason:\n%s", ddl, c.Recommendation)
 		}
+	}
+}
+
+// Every construction site must fill Rationale -- an agent reading rationale
+// instead of parsing Recommendation prose should never get an empty reason.
+func TestRationalePresentAcrossConstructionSites(t *testing.T) {
+	ddls := []string{
+		"ALTER TABLE orders DROP COLUMN legacy",                                                     // DROP COLUMN
+		"ALTER TABLE orders ALTER COLUMN total TYPE bigint",                                         // ALTER COLUMN TYPE
+		"ALTER TABLE orders VALIDATE CONSTRAINT fk",                                                 // VALIDATE CONSTRAINT
+		"ALTER TABLE users ADD COLUMN age integer",                                                  // ADD COLUMN, no default
+		"ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT now()",                           // ADD COLUMN, volatile default
+		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL",                                       // SET NOT NULL, rewrite offered
+		"ALTER TABLE ONLY orders ALTER COLUMN status SET NOT NULL",                                  // SET NOT NULL, no rewrite
+		"ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users(id) NOT VALID", // ADD CONSTRAINT, already NOT VALID
+		"ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id)",                         // ADD CONSTRAINT, rewrite offered
+		"ALTER TABLE orders ADD PRIMARY KEY (id)",                                                   // ADD CONSTRAINT, no NOT VALID form at all
+		"CREATE INDEX CONCURRENTLY idx_o ON orders (user_id)",                                       // CREATE INDEX, already concurrent
+		"CREATE INDEX idx_o ON orders (user_id)",                                                    // CREATE INDEX, rewrite offered
+		"ALTER TABLE orders RENAME COLUMN total TO amount",                                          // RENAME
+		"DROP TABLE orders", // fallback keyword check
+	}
+	for _, ddl := range ddls {
+		checks, err := CheckMigration(ddl, migrationTestSchema())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		if len(checks) == 0 {
+			t.Fatalf("%s: expected a check", ddl)
+		}
+		for _, c := range checks {
+			if c.Rationale == nil {
+				t.Errorf("%s: %s has no rationale", ddl, c.Operation)
+				continue
+			}
+			if c.Rationale.Reason == "" {
+				t.Errorf("%s: %s rationale has an empty reason", ddl, c.Operation)
+			}
+		}
+	}
+}
+
+// Where a jit.Entry backs the check, rationale must be the Entry's own
+// Reason/Note verbatim -- not prose re-extracted from Recommendation.
+func TestRationaleMatchesJitEntry(t *testing.T) {
+	tests := []struct {
+		ddl   string
+		entry jit.Entry
+	}{
+		{"ALTER TABLE orders ALTER COLUMN total TYPE bigint", jit.AlterColumnType("orders", "total", "<new_type>")},
+		{"ALTER TABLE orders ALTER COLUMN status SET NOT NULL", jit.SetNotNull("orders", "status")},
+		{"ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id)", jit.AddForeignKeyUnsafe("orders", "<col>", "<ref_table>", "<ref_col>")},
+		{"ALTER TABLE orders ADD CHECK (total >= 0)", jit.AddCheckConstraintUnsafe("orders", "<expr>")},
+		{"ALTER TABLE orders ADD PRIMARY KEY (id)", jit.AddIndexBackedConstraint("orders", "PRIMARY KEY", "id")},
+		{"CREATE INDEX idx_o ON orders (user_id)", jit.CreateIndexBlocking("orders", "idx_o", "btree", "user_id")},
+		{"ALTER TABLE orders RENAME COLUMN total TO amount", jit.Rename("<old_name>", "<new_name>")},
+	}
+	for _, tc := range tests {
+		checks, err := CheckMigration(tc.ddl, migrationTestSchema())
+		if err != nil {
+			t.Fatalf("%s: %v", tc.ddl, err)
+		}
+		c := checks[0]
+		if c.Rationale == nil {
+			t.Fatalf("%s: no rationale", tc.ddl)
+		}
+		if c.Rationale.Reason != tc.entry.Reason {
+			t.Errorf("%s: rationale.reason = %q, want %q", tc.ddl, c.Rationale.Reason, tc.entry.Reason)
+		}
+		if !strings.Contains(c.Rationale.Note, tc.entry.Note) {
+			t.Errorf("%s: rationale.note = %q, want it to contain %q", tc.ddl, c.Rationale.Note, tc.entry.Note)
+		}
+	}
+}
+
+// SET NOT NULL downgrades Recommendation from String() to Warning() once a
+// rewrite exists (migration.go's analyzeSetNotNull); rationale must not move
+// with it -- it comes from the Entry either way. ADD CONSTRAINT has the same
+// downgrade (analyzeAddConstraint), but FK/CHECK always get a mechanical
+// rewrite through CheckMigration, so there is no reachable no-rewrite
+// counterpart to compare against; SET NOT NULL is the one site where both
+// sides of the downgrade are actually observable.
+func TestRationaleSurvivesStringToWarningDowngrade(t *testing.T) {
+	withRewrite, err := CheckMigration("ALTER TABLE orders ALTER COLUMN status SET NOT NULL", migrationTestSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutRewrite, err := CheckMigration("ALTER TABLE ONLY orders ALTER COLUMN status SET NOT NULL", migrationTestSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withRewrite[0].SaferSQL) == 0 {
+		t.Fatal("expected a rewrite on the non-ONLY statement")
+	}
+	if len(withoutRewrite[0].SaferSQL) != 0 {
+		t.Fatal("expected no rewrite on the ONLY statement")
+	}
+	if withRewrite[0].Rationale == nil || withoutRewrite[0].Rationale == nil {
+		t.Fatal("expected rationale in both cases")
+	}
+	if withRewrite[0].Rationale.Reason != withoutRewrite[0].Rationale.Reason {
+		t.Errorf("rationale.reason differs across the downgrade: %q vs %q",
+			withRewrite[0].Rationale.Reason, withoutRewrite[0].Rationale.Reason)
+	}
+}
+
+// ADD COLUMN with a DEFAULT cannot tell from the parse tree whether the
+// default is volatile, so Recommendation hedges ("safe for immutable
+// defaults... If the default IS volatile"). jit.AddColumnVolatileDefault's
+// Reason asserts an unconditional rewrite, which is only true in the volatile
+// case -- it must land in Note as detail, not as Rationale.Reason, or an
+// agent reading only rationale gets an answer stronger than the evidence.
+func TestRationaleHedgesAddColumnDefault(t *testing.T) {
+	checks, err := CheckMigration("ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT now()", migrationTestSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rationale := checks[0].Rationale
+	if rationale == nil {
+		t.Fatal("expected rationale")
+	}
+	if strings.Contains(rationale.Reason, "rewrites every row") {
+		t.Errorf("rationale.reason asserts an unconditional rewrite the code cannot prove: %q", rationale.Reason)
+	}
+	if !strings.Contains(rationale.Reason, "immutable defaults") {
+		t.Errorf("rationale.reason lost the hedge: %q", rationale.Reason)
+	}
+	if !strings.Contains(rationale.Note, "rewrites every row") {
+		t.Errorf("rationale.note dropped the volatile-case detail: %q", rationale.Note)
+	}
+}
+
+// The one branch where two notes merge: a non-concurrent CREATE INDEX on a
+// partitioned table carries both CreateIndexBlocking's own note (cannot run
+// in a transaction) and the partition-specific one appended to Recommendation
+// at the same site. Both must survive in rationale.Note; neither may clobber
+// the other.
+func TestRationaleJoinsPartitionNote(t *testing.T) {
+	checks, err := CheckMigration("CREATE INDEX ON events (created_at)", migrationTestSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks[0].SaferSQL) != 0 {
+		t.Fatal("expected no rewrite on a partitioned table")
+	}
+	rationale := checks[0].Rationale
+	if rationale == nil {
+		t.Fatal("expected rationale")
+	}
+	if !strings.Contains(rationale.Note, "Cannot run inside a transaction") {
+		t.Errorf("rationale.note lost the jit entry's own note: %q", rationale.Note)
+	}
+	if !strings.Contains(rationale.Note, "CONCURRENTLY is rejected on a partitioned table") {
+		t.Errorf("rationale.note lost the partition-specific note: %q", rationale.Note)
 	}
 }

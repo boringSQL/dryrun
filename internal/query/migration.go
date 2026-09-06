@@ -20,11 +20,18 @@ type (
 		TableSize       *string      `json:"table_size,omitempty"`
 		RowEstimate     *float64     `json:"row_estimate,omitempty"`
 		Recommendation  string       `json:"recommendation"`
+		Rationale       *Rationale   `json:"rationale,omitempty"`
 		VersionBehavior *string      `json:"version_behavior,omitempty"`
 		RollbackDDL     *string      `json:"rollback_ddl,omitempty"`
 
 		// SaferSQL is the mechanical rewrite as runnable statements, in order.
 		SaferSQL []string `json:"safer_sql,omitempty"`
+	}
+
+	// Rationale: Recommendation's reason as fields, so agents skip parsing prose.
+	Rationale struct {
+		Reason string `json:"reason"`
+		Note   string `json:"note,omitempty"`
 	}
 
 	SafetyRating string
@@ -92,11 +99,13 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 	case pg_query.AlterTableType_AT_AddColumn:
 		return analyzeAddColumn(cmd, tableName, tableSize, rowEstimate)
 	case pg_query.AlterTableType_AT_DropColumn:
+		const rec = "Metadata-only operation. Column space reclaimed by VACUUM."
 		return &MigrationCheck{
 			Operation: "DROP COLUMN", Table: strp(tableName), Safety: SafetySafe,
 			LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
 			TableSize: tableSize, RowEstimate: rowEstimate,
-			Recommendation: "Metadata-only operation. Column space reclaimed by VACUUM.",
+			Recommendation: rec,
+			Rationale:      &Rationale{Reason: rec},
 		}
 	case pg_query.AlterTableType_AT_SetNotNull:
 		return analyzeSetNotNull(cmd.Name, tableName, tableSize, rowEstimate, snap, stmt, names)
@@ -108,16 +117,19 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			LockType: "ACCESS EXCLUSIVE", LockDuration: "proportional to table size (full rewrite)",
 			TableSize: tableSize, RowEstimate: rowEstimate,
 			Recommendation: e.String(),
+			Rationale:      &Rationale{Reason: e.Reason, Note: e.Note},
 		}
 	case pg_query.AlterTableType_AT_AddConstraint:
 		return analyzeAddConstraint(cmd, stmt, tableName, tableSize, rowEstimate, names)
 	case pg_query.AlterTableType_AT_ValidateConstraint:
+		const rec = "Safe - validates existing rows with a weaker lock that allows concurrent reads and writes."
 		return &MigrationCheck{
 			Operation: "VALIDATE CONSTRAINT", Table: strp(tableName), Safety: SafetySafe,
 			LockType:     "SHARE UPDATE EXCLUSIVE",
 			LockDuration: "proportional to table size (but allows concurrent DML)",
 			TableSize:    tableSize, RowEstimate: rowEstimate,
-			Recommendation: "Safe - validates existing rows with a weaker lock that allows concurrent reads and writes.",
+			Recommendation: rec,
+			Rationale:      &Rationale{Reason: rec},
 		}
 	}
 	return nil
@@ -150,17 +162,21 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, tableName string, tableSize *
 
 	var safety SafetyRating
 	var recommendation, lockDuration string
+	var rationale *Rationale
 
 	if !hasDefault {
 		safety = SafetySafe
 		recommendation = "Nullable column without DEFAULT - metadata-only change."
+		rationale = &Rationale{Reason: recommendation}
 		lockDuration = "brief (milliseconds)"
 	} else {
 		safety = SafetyCaution
 		e := jit.AddColumnVolatileDefault(tableName, colName, colType, "<default>")
-		recommendation = "Column with DEFAULT is safe for immutable defaults (metadata-only). " +
-			"Volatile defaults (now(), random()) still trigger a full table rewrite.\n\n" +
-			"If the default IS volatile:\n" + e.Fix
+		const hedgedReason = "Column with DEFAULT is safe for immutable defaults (metadata-only). " +
+			"Volatile defaults (now(), random()) still trigger a full table rewrite."
+		recommendation = hedgedReason + "\n\n" + "If the default IS volatile:\n" + e.Fix
+		// e.Reason asserts an unconditional rewrite; unprovable here, so it goes to Note
+		rationale = &Rationale{Reason: hedgedReason, Note: joinNotes(e.Reason, e.Note)}
 		lockDuration = "brief for immutable default, long for volatile"
 	}
 
@@ -174,6 +190,7 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, tableName string, tableSize *
 		LockType: "ACCESS EXCLUSIVE", LockDuration: lockDuration,
 		TableSize: tableSize, RowEstimate: rowEstimate,
 		Recommendation: recommendation,
+		Rationale:      rationale,
 		RollbackDDL:    rollback,
 	}
 }
@@ -221,6 +238,7 @@ func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate
 		LockDuration: "scan duration (skipped when a valid CHECK proves no NULLs)",
 		TableSize:    tableSize, RowEstimate: rowEstimate,
 		Recommendation:  rec,
+		Rationale:       &Rationale{Reason: e.Reason, Note: e.Note},
 		VersionBehavior: strp("Scan is skipped if a valid CHECK (col IS NOT NULL) exists."),
 		RollbackDDL:     strp("ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL;"),
 		SaferSQL:        safer,
@@ -252,9 +270,11 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 
 	var safety SafetyRating
 	var recommendation, lockDuration, lockType string
+	var rationale *Rationale
 	if isNotValid {
 		safety = SafetySafe
 		recommendation = fmt.Sprintf("%s NOT VALID - metadata-only. Follow up with VALIDATE CONSTRAINT.", operation)
+		rationale = &Rationale{Reason: recommendation}
 		lockDuration = "brief (metadata-only)"
 		lockType = "ACCESS EXCLUSIVE (brief)"
 	}
@@ -274,6 +294,7 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 				strings.Join(constraintColumns(con), ", "))
 		}
 		recommendation = e.String()
+		rationale = &Rationale{Reason: e.Reason, Note: e.Note}
 		if len(safer) > 0 {
 			// two differently-named migrations in one response is worse than one
 			recommendation = e.Warning()
@@ -287,6 +308,7 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 		LockType: lockType, LockDuration: lockDuration,
 		TableSize: tableSize, RowEstimate: rowEstimate,
 		Recommendation: recommendation,
+		Rationale:      rationale,
 		RollbackDDL:    strp(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT <name>;", tableName)),
 		SaferSQL:       safer,
 	}
@@ -340,10 +362,12 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, na
 
 	var safety SafetyRating
 	var recommendation, lockType string
+	var rationale *Rationale
 	if idx.Concurrent {
 		safety = SafetySafe
 		recommendation = "CREATE INDEX CONCURRENTLY - does not block reads or writes. Takes ~2-3x longer. " +
 			"Cannot run inside a transaction. If it fails, drop the INVALID index."
+		rationale = &Rationale{Reason: recommendation}
 		lockType = "SHARE UPDATE EXCLUSIVE"
 	} else {
 		safety = SafetyDangerous
@@ -361,10 +385,13 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, na
 	if !idx.Concurrent {
 		e := jit.CreateIndexBlocking(tableName, idxName, idxMethod, colStr)
 		recommendation = e.String()
+		rationale = &Rationale{Reason: e.Reason, Note: e.Note}
 		if len(safer) > 0 {
 			recommendation = e.Warning()
 		} else if t := lookupTable(snap, idx.GetRelation()); t != nil && t.PartitionInfo != nil {
-			recommendation += "\nNOTE: CONCURRENTLY is rejected on a partitioned table. Build the index on each partition concurrently, then CREATE INDEX on the parent and ATTACH them."
+			partitionNote := "CONCURRENTLY is rejected on a partitioned table. Build the index on each partition concurrently, then CREATE INDEX on the parent and ATTACH them."
+			recommendation += "\nNOTE: " + partitionNote
+			rationale.Note = joinNotes(rationale.Note, partitionNote)
 		}
 	}
 
@@ -384,9 +411,18 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, na
 		LockType: lockType, LockDuration: lockDuration,
 		TableSize: tableSize, RowEstimate: rowEstimate,
 		Recommendation: recommendation,
+		Rationale:      rationale,
 		RollbackDDL:    strp(fmt.Sprintf("DROP INDEX CONCURRENTLY %s;", idxName)),
 		SaferSQL:       safer,
 	}
+}
+
+// joinNotes joins notes with a newline, skipping the empty half.
+func joinNotes(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + "\n" + b
 }
 
 func analyzeRename(snap *schema.SchemaSnapshot) MigrationCheck {
@@ -395,6 +431,7 @@ func analyzeRename(snap *schema.SchemaSnapshot) MigrationCheck {
 		Operation: "RENAME", Safety: SafetyDangerous,
 		LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
 		Recommendation: e.String(),
+		Rationale:      &Rationale{Reason: e.Reason, Note: e.Note},
 		RollbackDDL:    strp("ALTER TABLE/COLUMN ... RENAME TO <old_name>;"),
 	}
 }
@@ -402,10 +439,12 @@ func analyzeRename(snap *schema.SchemaSnapshot) MigrationCheck {
 func fallbackKeywordCheck(ddl string) *MigrationCheck {
 	upper := strings.ToUpper(ddl)
 	if strings.Contains(upper, "DROP TABLE") {
+		const rec = "Irreversible. Ensure no dependent objects or application code references this table."
 		return &MigrationCheck{
 			Operation: "DROP TABLE", Safety: SafetyDangerous,
 			LockType: "ACCESS EXCLUSIVE", LockDuration: "brief",
-			Recommendation: "Irreversible. Ensure no dependent objects or application code references this table.",
+			Recommendation: rec,
+			Rationale:      &Rationale{Reason: rec},
 		}
 	}
 	return nil
