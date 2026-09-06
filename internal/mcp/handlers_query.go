@@ -152,8 +152,12 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 		}
 	}
 
+	migrationSQL := query.ComposeMigrationSQL(checks)
+
 	hint := ""
 	switch {
+	case migrationSQL != "":
+		hint = "safer_sql holds the rewrite; migration_sql is those statements, with the safe ones passed through unchanged, as one runnable file in order."
 	case rewritten > 0 && rewritten == unsafe:
 		hint = "safer_sql holds the rewrite: run those statements, in that order, instead of the input."
 	case rewritten > 0:
@@ -171,6 +175,9 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 	}
 
 	wrapper := map[string]any{"checks": checks}
+	if migrationSQL != "" {
+		wrapper["migration_sql"] = migrationSQL
+	}
 	s.injectMeta(wrapper, hint, nil)
 	return jsonResult(wrapper), nil
 }

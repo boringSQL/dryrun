@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 // Smoke tests for query-family tools: validate_query, check_migration,
@@ -256,6 +258,64 @@ func TestCheckMigration_Hints(t *testing.T) {
 				if strings.Contains(hint, w) {
 					t.Errorf("hint should not mention %q: %q", w, hint)
 				}
+			}
+		})
+	}
+}
+
+// migration_sql is present in the wrapper, parses, and holds both the rewrite
+// and the safe passthrough -- when every unsafe statement has a rewrite.
+func TestCheckMigration_MigrationSQLPresentWhenAllRewritable(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "check_migration", map[string]any{
+		"ddl": "ALTER TABLE tasks VALIDATE CONSTRAINT tasks_priority_check, ADD CHECK (priority > 0)",
+	})
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("expected JSON output: %v\n%s", err, out)
+	}
+	migrationSQL, ok := decoded["migration_sql"].(string)
+	if !ok || migrationSQL == "" {
+		t.Fatalf("expected migration_sql in the wrapper, got: %s", out)
+	}
+	if !strings.Contains(migrationSQL, "VALIDATE CONSTRAINT tasks_priority_check") {
+		t.Errorf("migration_sql lost the safe passthrough:\n%s", migrationSQL)
+	}
+	if !strings.Contains(migrationSQL, "NOT VALID") {
+		t.Errorf("migration_sql lost the unsafe statement's rewrite:\n%s", migrationSQL)
+	}
+	if _, err := pg_query.Parse(migrationSQL); err != nil {
+		t.Fatalf("migration_sql does not parse: %v\n%s", err, migrationSQL)
+	}
+
+	meta, _ := decoded["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if !strings.Contains(hint, "migration_sql") {
+		t.Errorf("hint should point at migration_sql, got %q", hint)
+	}
+}
+
+// The gate: an unsafe statement with no mechanical rewrite suppresses
+// migration_sql for the whole input, not just that statement.
+func TestCheckMigration_MigrationSQLAbsentWhenAnyUnsafeHasNoRewrite(t *testing.T) {
+	c := setupOfflineTest(t)
+	for _, tc := range []struct {
+		name string
+		ddl  string
+	}{
+		{"mixed with an unrewritable statement", "ALTER TABLE tasks ADD CHECK (priority > 0); ALTER TABLE tasks ALTER COLUMN title TYPE varchar(200)"},
+		{"nothing rewritable", "ALTER TABLE tasks ALTER COLUMN title TYPE varchar(200)"},
+		{"nothing unsafe", "ALTER TABLE tasks ADD COLUMN note text"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := callTool(t, c, "check_migration", map[string]any{"ddl": tc.ddl})
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if v, ok := decoded["migration_sql"]; ok {
+				t.Errorf("expected no migration_sql, got %v", v)
 			}
 		})
 	}

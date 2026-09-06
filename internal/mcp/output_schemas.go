@@ -174,9 +174,10 @@ var (
 
 	checkMigrationOutputSchema = json.RawMessage(`{
 		"type": "object",
-		"description": "checks holds one entry per DDL operation identified in the input: operation, safety, lock_type/lock_duration, and recommendation always; rationale (reason, plus note where one applies) is the same finding as structured fields rather than prose; safer_sql where a mechanical rewrite exists. table, version_behavior and rollback_ddl are omitted when not applicable to that operation. Empty when no operation this tool models was identified.",
+		"description": "checks holds one entry per DDL operation identified in the input: operation, safety, lock_type/lock_duration, and recommendation always; rationale (reason, plus note where one applies) is the same finding as structured fields rather than prose; safer_sql where a mechanical rewrite exists. table, version_behavior and rollback_ddl are omitted when not applicable to that operation. Empty only when the input contains no DDL statements at all. migration_sql bundles the whole input as one runnable file -- unsafe statements replaced by safer_sql, safe ones (e.g. SET, DROP INDEX, DROP CONSTRAINT) passed through unchanged -- present only when at least one check is unsafe and every unsafe check has a rewrite; a statement type check_migration cannot analyze, or a BEGIN/COMMIT/ROLLBACK (which the file cannot safely wrap a rewrite in), suppresses migration_sql for the whole input rather than silently mishandling it.",
 		"properties": {
 			"checks": {"type": "array"},
+			"migration_sql": {"type": "string"},
 			` + metaProperty + `
 		},
 		"additionalProperties": true

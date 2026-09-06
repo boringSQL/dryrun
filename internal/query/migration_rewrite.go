@@ -169,6 +169,38 @@ func rewriteSetNotNull(stmt *pg_query.AlterTableStmt, col string, names *nameAll
 	})
 }
 
+// alterCmdStatement deparses this one command as its own ALTER TABLE (via
+// singleCmdStmt, so ONLY/IF EXISTS/quoting survive) -- the passthrough half
+// of ComposeMigrationSQL.
+func alterCmdStatement(stmt *pg_query.AlterTableStmt, cmd *pg_query.AlterTableCmd) string {
+	one, _ := singleCmdStmt(stmt, cmd)
+	s, err := deparseStmt(&pg_query.Node{Node: &pg_query.Node_AlterTableStmt{AlterTableStmt: one}})
+	if err != nil {
+		return ""
+	}
+	return s + ";"
+}
+
+// indexStmtStatement deparses a CREATE INDEX as-parsed, same passthrough
+// purpose as alterCmdStatement.
+func indexStmtStatement(idx *pg_query.IndexStmt) string {
+	s, err := deparseStmt(&pg_query.Node{Node: &pg_query.Node_IndexStmt{IndexStmt: idx}})
+	if err != nil {
+		return ""
+	}
+	return s + ";"
+}
+
+// topLevelStatement deparses a whole top-level statement as-parsed -- DROP
+// INDEX, SET, or a statement CheckMigration cannot analyze at all.
+func topLevelStatement(node *pg_query.Node) string {
+	s, err := deparseStmt(node)
+	if err != nil {
+		return ""
+	}
+	return s + ";"
+}
+
 // singleCmdStmt isolates the one command being reported from the rest of the
 // ALTER TABLE.
 func singleCmdStmt(stmt *pg_query.AlterTableStmt, cmd *pg_query.AlterTableCmd) (*pg_query.AlterTableStmt, *pg_query.AlterTableCmd) {
