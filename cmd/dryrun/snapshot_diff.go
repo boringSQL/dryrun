@@ -36,7 +36,11 @@ func newDiffCmd(historyDB *string) *cobra.Command {
   dryrun snapshot diff <from> --live    diff a stored snapshot against the database now (schema only)
 
 latest / latest~N name a snapshot of the kind given by --kind (default schema);
-hash-prefix operands carry their own kind. Mixing kinds is rejected.`,
+hash-prefix operands carry their own kind. Mixing kinds is rejected.
+
+latest~N counts captures, not changes: a node captured while nothing changed
+stores an identical snapshot, so latest~1 can hold the same content as latest
+and the diff is legitimately empty.`,
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := openHistoryStore(*historyDB)

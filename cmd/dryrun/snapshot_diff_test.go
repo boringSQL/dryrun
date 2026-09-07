@@ -243,13 +243,21 @@ func TestResolveDiffToken(t *testing.T) {
 	})
 
 	t.Run("latest~1 walks back one generation in the series", func(t *testing.T) {
-		_, ref, err := store.ResolveToken(ctx, key, "latest~1", "planner", "")
+		kind, ref, err := store.ResolveToken(ctx, key, "latest~1", "planner", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// the previous planner capture is the older of the two we seeded
-		if ref.Kind != history.RefHash || ref.Hash != "planner-older" {
-			t.Fatalf("latest~1 should point at the previous capture, got kind=%v hash=%q", ref.Kind, ref.Hash)
+		// positional, not a hash: content twins would make a hash ambiguous
+		if ref.Kind != history.RefIndex || ref.Index != 1 {
+			t.Fatalf("latest~1 should be a RefIndex(1), got kind=%v index=%d", ref.Kind, ref.Index)
+		}
+		// and it must land on the older of the two we seeded
+		got, err := store.Get(ctx, key, kind, ref)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.ContentHash() != "planner-older" {
+			t.Fatalf("latest~1 resolved to %q, want planner-older", got.ContentHash())
 		}
 	})
 

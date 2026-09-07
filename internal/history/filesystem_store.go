@@ -204,7 +204,13 @@ func (f *FilesystemStore) List(ctx context.Context, key SnapshotKey, kind Snapsh
 		}
 		out = append(out, ss...)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.After(out[j].Timestamp) })
+	// hash tiebreak: equal timestamps would otherwise make latest~N nondeterministic
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].Timestamp.Equal(out[j].Timestamp) {
+			return out[i].Timestamp.After(out[j].Timestamp)
+		}
+		return out[i].ContentHash < out[j].ContentHash
+	})
 	return out, nil
 }
 
@@ -477,8 +483,14 @@ func readBundleEntries(dir string) ([]bundleEntry, error) {
 		}
 		out = append(out, bundleEntry{name: f.Name(), timestamp: ts, contentHash: hash})
 	}
-	// newest first; sync loops and Latest expect descending order.
-	sort.Slice(out, func(i, j int) bool { return out[i].timestamp.After(out[j].timestamp) })
+	// newest first; sync loops and Latest expect descending order. The hash
+	// tiebreak keeps latest~N stable when two bundles share a timestamp.
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].timestamp.Equal(out[j].timestamp) {
+			return out[i].timestamp.After(out[j].timestamp)
+		}
+		return out[i].contentHash < out[j].contentHash
+	})
 	return out, nil
 }
 
@@ -540,6 +552,11 @@ func pickSchemaBundle(bundles []*Bundle, at SnapshotRef) (*Bundle, error) {
 			}
 		}
 		return nil, fmt.Errorf("%w (hash %s)", ErrSnapshotNotFound, at.Hash)
+	case RefIndex:
+		if at.Index >= 0 && at.Index < len(bundles) {
+			return bundles[at.Index], nil
+		}
+		return nil, fmt.Errorf("%w (latest~%d)", ErrSnapshotNotFound, at.Index)
 	}
 	return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 }
@@ -567,6 +584,18 @@ func pickPlannerBundle(bundles []*Bundle, at SnapshotRef) (*Bundle, error) {
 			}
 		}
 		return nil, fmt.Errorf("%w (planner hash %s)", ErrSnapshotNotFound, at.Hash)
+	case RefIndex:
+		skip := at.Index
+		for _, b := range bundles {
+			if b.Planner == nil {
+				continue
+			}
+			if skip == 0 {
+				return b, nil
+			}
+			skip--
+		}
+		return nil, fmt.Errorf("%w (planner latest~%d)", ErrSnapshotNotFound, at.Index)
 	}
 	return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 }
@@ -600,6 +629,19 @@ func pickActivity(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schema.
 			}
 		}
 		return nil, fmt.Errorf("%w (activity hash %s)", ErrSnapshotNotFound, at.Hash)
+	case RefIndex:
+		skip := at.Index
+		for _, b := range bundles {
+			a := selectActivity(b, nodeLabel)
+			if a == nil {
+				continue
+			}
+			if skip == 0 {
+				return a, nil
+			}
+			skip--
+		}
+		return nil, fmt.Errorf("%w (activity latest~%d)", ErrSnapshotNotFound, at.Index)
 	}
 	return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 }
@@ -644,6 +686,19 @@ func pickQueryStats(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schem
 			}
 		}
 		return nil, fmt.Errorf("%w (query stats hash %s)", ErrSnapshotNotFound, at.Hash)
+	case RefIndex:
+		skip := at.Index
+		for _, b := range bundles {
+			q := selectQueryStats(b, nodeLabel)
+			if q == nil {
+				continue
+			}
+			if skip == 0 {
+				return q, nil
+			}
+			skip--
+		}
+		return nil, fmt.Errorf("%w (query stats latest~%d)", ErrSnapshotNotFound, at.Index)
 	}
 	return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 }

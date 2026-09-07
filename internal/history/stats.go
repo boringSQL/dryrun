@@ -344,36 +344,39 @@ func (s *Store) GetAnnotated(ctx context.Context, key SnapshotKey, at SnapshotRe
 	return out, nil
 }
 
-// scanHashPrefix runs a git like LIMIT 2 prefix query, returning the single
-// match's payload or sql.ErrNoRows; an ambiguous prefix is rejected
-func scanHashPrefix(ctx context.Context, db *sql.DB, query string, args ...any) (string, error) {
+// resolveHashPrefix maps a git-style hash prefix to exactly one content hash.
+// Only a prefix spanning two *different* hashes is ambiguous: content twins —
+// an idle node captured twice writes byte-identical rows — collapse to one
+// hash, and the caller then reads the newest row carrying it.
+// The probe selects hashes only: activity_stats/query_stats have no
+// content_hash index, so a short prefix already scans, and selecting payloads
+// here would stream every matching blob just to discard it.
+func resolveHashPrefix(ctx context.Context, db *sql.DB, prefix, query string, args ...any) (string, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
 	var (
-		jsonStr string
-		matches int
+		hashes  []string
+		scanned string
 	)
 	for rows.Next() {
-		matches++
-		if matches == 1 {
-			if err := rows.Scan(&jsonStr); err != nil {
-				return "", err
-			}
+		if err := rows.Scan(&scanned); err != nil {
+			return "", err
 		}
+		hashes = append(hashes, scanned)
 	}
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
-	switch matches {
+	switch len(hashes) {
 	case 0:
 		return "", sql.ErrNoRows
 	case 1:
-		return jsonStr, nil
+		return hashes[0], nil
 	default:
-		return "", fmt.Errorf("ambiguous snapshot hash prefix (matches multiple)")
+		return "", fmt.Errorf("ambiguous snapshot hash prefix %q (matches multiple snapshots; use a longer prefix or --latest)", prefix)
 	}
 }
 
@@ -406,12 +409,26 @@ func (s *Store) getPlannerRef(ctx context.Context, key SnapshotKey, at SnapshotR
 		).Scan(&jsonStr)
 	case RefHash:
 		detail = "planner hash " + at.Hash
-		// git-style prefix match; ambiguous prefixes are rejected
-		jsonStr, err = scanHashPrefix(ctx, s.db,
+		// git-style prefix match; content twins resolve newest-wins
+		var hash string
+		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
+			`SELECT DISTINCT content_hash FROM planner_stats
+			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? LIMIT 2`,
+			pid, did, at.Hash+"%"); err == nil {
+			err = s.db.QueryRowContext(ctx,
+				`SELECT payload_json FROM planner_stats
+				  WHERE project_id = ? AND database_id = ? AND content_hash = ?
+				  ORDER BY timestamp DESC, id DESC LIMIT 1`,
+				pid, did, hash).Scan(&jsonStr)
+		}
+	case RefIndex:
+		detail = fmt.Sprintf("planner latest~%d", at.Index)
+		err = s.db.QueryRowContext(ctx,
 			`SELECT payload_json FROM planner_stats
-			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
-			  LIMIT 2`,
-			pid, did, at.Hash+"%")
+			  WHERE project_id = ? AND database_id = ?
+			  ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?`,
+			pid, did, at.Index,
+		).Scan(&jsonStr)
 	default:
 		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 	}
@@ -435,13 +452,14 @@ func (s *Store) getActivityRef(ctx context.Context, key SnapshotKey, nodeLabel s
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
 
-	base := `SELECT payload_json FROM activity_stats
-	          WHERE project_id = ? AND database_id = ?`
+	where := ` FROM activity_stats
+	           WHERE project_id = ? AND database_id = ?`
 	args := []any{pid, did}
 	if nodeLabel != "" {
-		base += " AND node_source = ?"
+		where += " AND node_source = ?"
 		args = append(args, nodeLabel)
 	}
+	base := "SELECT payload_json" + where
 
 	var (
 		jsonStr string
@@ -460,9 +478,20 @@ func (s *Store) getActivityRef(ctx context.Context, key SnapshotKey, nodeLabel s
 			args...).Scan(&jsonStr)
 	case RefHash:
 		detail = "activity hash " + at.Hash
-		// git-style prefix match; ambiguous prefixes are rejected
-		args = append(args, at.Hash+"%")
-		jsonStr, err = scanHashPrefix(ctx, s.db, base+" AND content_hash LIKE ? LIMIT 2", args...)
+		// git-style prefix match; content twins resolve newest-wins
+		var hash string
+		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
+			"SELECT DISTINCT content_hash"+where+" AND content_hash LIKE ? LIMIT 2",
+			append(append([]any{}, args...), at.Hash+"%")...); err == nil {
+			err = s.db.QueryRowContext(ctx,
+				base+" AND content_hash = ? ORDER BY timestamp DESC, id DESC LIMIT 1",
+				append(args, hash)...).Scan(&jsonStr)
+		}
+	case RefIndex:
+		detail = fmt.Sprintf("activity latest~%d", at.Index)
+		args = append(args, at.Index)
+		err = s.db.QueryRowContext(ctx,
+			base+" ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?", args...).Scan(&jsonStr)
 	default:
 		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 	}
@@ -592,13 +621,14 @@ func (s *Store) getQueryStatsRef(ctx context.Context, key SnapshotKey, nodeLabel
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
 
-	base := `SELECT payload_json FROM query_stats
-	          WHERE project_id = ? AND database_id = ?`
+	where := ` FROM query_stats
+	           WHERE project_id = ? AND database_id = ?`
 	args := []any{pid, did}
 	if nodeLabel != "" {
-		base += " AND node_source = ?"
+		where += " AND node_source = ?"
 		args = append(args, nodeLabel)
 	}
+	base := "SELECT payload_json" + where
 
 	var (
 		jsonStr string
@@ -618,8 +648,20 @@ func (s *Store) getQueryStatsRef(ctx context.Context, key SnapshotKey, nodeLabel
 			args...).Scan(&jsonStr)
 	case RefHash:
 		detail = "query stats hash " + at.Hash
-		args = append(args, at.Hash+"%")
-		jsonStr, err = scanHashPrefix(ctx, s.db, base+" AND content_hash LIKE ? LIMIT 2", args...)
+		// git-style prefix match; content twins resolve newest-wins
+		var hash string
+		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
+			"SELECT DISTINCT content_hash"+where+" AND content_hash LIKE ? LIMIT 2",
+			append(append([]any{}, args...), at.Hash+"%")...); err == nil {
+			err = s.db.QueryRowContext(ctx,
+				base+" AND content_hash = ? ORDER BY timestamp DESC, id DESC LIMIT 1",
+				append(args, hash)...).Scan(&jsonStr)
+		}
+	case RefIndex:
+		detail = fmt.Sprintf("query stats latest~%d", at.Index)
+		args = append(args, at.Index)
+		err = s.db.QueryRowContext(ctx,
+			base+" ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?", args...).Scan(&jsonStr)
 	default:
 		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 	}

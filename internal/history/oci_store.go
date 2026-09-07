@@ -338,8 +338,11 @@ func (o *OCIStore) load(ctx context.Context, key SnapshotKey) (*remote.Repositor
 		}
 		return nil, nil, err
 	}
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].bundle.Schema.Timestamp.After(items[j].bundle.Schema.Timestamp)
+	sort.SliceStable(items, func(i, j int) bool {
+		if !items[i].bundle.Schema.Timestamp.Equal(items[j].bundle.Schema.Timestamp) {
+			return items[i].bundle.Schema.Timestamp.After(items[j].bundle.Schema.Timestamp)
+		}
+		return items[i].bundle.Schema.ContentHash < items[j].bundle.Schema.ContentHash
 	})
 	return repo, items, nil
 }
@@ -412,7 +415,12 @@ func (o *OCIStore) List(ctx context.Context, key SnapshotKey, kind SnapshotKind,
 		}
 		out = append(out, ss...)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.After(out[j].Timestamp) })
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].Timestamp.Equal(out[j].Timestamp) {
+			return out[i].Timestamp.After(out[j].Timestamp)
+		}
+		return out[i].ContentHash < out[j].ContentHash
+	})
 	return out, nil
 }
 

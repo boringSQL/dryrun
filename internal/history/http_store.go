@@ -327,6 +327,11 @@ func (h *HTTPStore) resolveRef(ctx context.Context, key SnapshotKey, kind Snapsh
 			}
 		}
 		return "", fmt.Errorf("%w (at-or-before %s)", ErrSnapshotNotFound, at.At.Format(time.RFC3339))
+	case RefIndex:
+		if at.Index >= 0 && at.Index < len(list) {
+			return list[at.Index].ContentHash, nil
+		}
+		return "", fmt.Errorf("%w (latest~%d)", ErrSnapshotNotFound, at.Index)
 	}
 	return "", fmt.Errorf("http store: unknown SnapshotRef kind: %d", at.Kind)
 }
@@ -344,7 +349,12 @@ func (h *HTTPStore) List(ctx context.Context, key SnapshotKey, kind SnapshotKind
 		out = append(out, summariesFromManifest(m, kind, rng)...)
 	}
 	out = dedupSummaries(out)
-	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.After(out[j].Timestamp) })
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].Timestamp.Equal(out[j].Timestamp) {
+			return out[i].Timestamp.After(out[j].Timestamp)
+		}
+		return out[i].ContentHash < out[j].ContentHash
+	})
 	return out, nil
 }
 

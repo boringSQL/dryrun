@@ -81,7 +81,13 @@ func (s *Store) ResolveToken(ctx context.Context, key SnapshotKey, token, kindFl
 		if m[1] == "" {
 			return kind, NewRefLatest(), nil
 		}
-		n, _ := strconv.Atoi(m[1])
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			// an overflowing count would silently become latest~0
+			return SnapshotKind{}, SnapshotRef{}, fmt.Errorf("latest~%s: %w", m[1], err)
+		}
+		// bounds-check here so the message names the kind; the ref stays
+		// positional (a hash round-trip is ambiguous across content twins)
 		list, err := s.List(ctx, key, kind, TimeRange{})
 		if err != nil {
 			return SnapshotKind{}, SnapshotRef{}, err
@@ -90,7 +96,7 @@ func (s *Store) ResolveToken(ctx context.Context, key SnapshotKey, token, kindFl
 			return SnapshotKind{}, SnapshotRef{},
 				fmt.Errorf("latest~%d: only %d %s snapshot(s) in history", n, len(list), kind)
 		}
-		return kind, NewRefHash(list[n].ContentHash), nil
+		return kind, NewRefIndex(n), nil
 	}
 	kind, err := s.ResolveKind(ctx, key, token)
 	if err != nil {

@@ -211,7 +211,7 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 	srv.AddTool(
 		mcp.NewTool("snapshot_diff",
 			mcp.WithDescription("When something changed and you need to know what: the schema DDL delta between two snapshots, plus planner sizing, activity, and query-shape drift correlated to the same capture window. Query deltas are per shape over that window, so their mean is comparable across captures -- unlike pg_stat_statements' own since-reset mean. Needs no database connection, but does need two snapshots in the local history. Snapshot-to-snapshot only, never against the live database (check_drift); it reports what moved, not why."),
-			mcp.WithString("from", mcp.Description("Base snapshot: 'latest~N' or a content-hash prefix. Default 'latest~1'.")),
+			mcp.WithString("from", mcp.Description("Base snapshot: 'latest~N' or a content-hash prefix. Default 'latest~1'. latest~N counts captures, not changes: a node captured while unchanged stores an identical snapshot, so an empty delta can mean nothing moved between two real captures.")),
 			mcp.WithString("to", mcp.Description("Target snapshot: 'latest' or a content-hash prefix. Default 'latest'.")),
 			mcp.WithString("kind",
 				mcp.Enum("schema", "planner", "activity", "query"),

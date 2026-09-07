@@ -25,17 +25,35 @@ const (
 	RefLatest RefKind = iota
 	RefAt
 	RefHash
+	RefIndex
 )
 
-// discriminated union: Kind selects which of At/Hash is meaningful
+// discriminated union: Kind selects which of At/Hash/Index is meaningful
 type SnapshotRef struct {
-	Kind RefKind
-	At   time.Time
-	Hash string
+	Kind  RefKind
+	At    time.Time
+	Hash  string
+	Index int
 }
 
 func NewRefLatest() SnapshotRef       { return SnapshotRef{Kind: RefLatest} }
 func NewRefHash(h string) SnapshotRef { return SnapshotRef{Kind: RefHash, Hash: h} }
+
+// nth-newest (0 == latest). Positional, so content twins stay addressable where
+// a hash prefix would be ambiguous. "nth" is over the backend's own List
+// ordering and is NOT portable across backends: history.db counts rows (twins
+// take a slot each), while the bundle stores and the HTTP store count
+// distinct captures. Only *Store mints these today.
+func NewRefIndex(n int) SnapshotRef { return SnapshotRef{Kind: RefIndex, Index: n} }
+
+// Index is an offset into a newest-first list, so a negative one addresses
+// nothing; reject it centrally rather than let each backend index its slice.
+func (r SnapshotRef) validate() error {
+	if r.Kind == RefIndex && r.Index < 0 {
+		return fmt.Errorf("%w (negative index %d)", ErrSnapshotNotFound, r.Index)
+	}
+	return nil
+}
 
 type TimeRange struct {
 	From *time.Time

@@ -375,6 +375,9 @@ func (s *Store) PutSchema(ctx context.Context, key SnapshotKey, snap *schema.Sch
 var ErrSnapshotNotFound = errors.New("snapshot not found")
 
 func (s *Store) GetSchema(ctx context.Context, key SnapshotKey, at SnapshotRef) (*schema.SchemaSnapshot, error) {
+	if err := at.validate(); err != nil {
+		return nil, err
+	}
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
 
@@ -402,31 +405,26 @@ func (s *Store) GetSchema(ctx context.Context, key SnapshotKey, at SnapshotRef) 
 		).Scan(&jsonStr)
 	case RefHash:
 		detail = "hash " + at.Hash
-		// git-style prefix match; ambiguous prefixes are rejected
-		rows, qerr := s.db.QueryContext(ctx,
+		// git-style prefix match; content twins resolve newest-wins
+		var hash string
+		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
+			`SELECT DISTINCT content_hash FROM snapshots
+			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? LIMIT 2`,
+			pid, did, at.Hash+"%"); err == nil {
+			err = s.db.QueryRowContext(ctx,
+				`SELECT snapshot_json FROM snapshots
+				  WHERE project_id = ? AND database_id = ? AND content_hash = ?
+				  ORDER BY timestamp DESC, id DESC LIMIT 1`,
+				pid, did, hash).Scan(&jsonStr)
+		}
+	case RefIndex:
+		detail = fmt.Sprintf("latest~%d", at.Index)
+		err = s.db.QueryRowContext(ctx,
 			`SELECT snapshot_json FROM snapshots
-			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
-			  LIMIT 2`,
-			pid, did, at.Hash+"%",
-		)
-		if qerr != nil {
-			return nil, qerr
-		}
-		defer rows.Close()
-		matches := 0
-		for rows.Next() {
-			matches++
-			if matches == 1 {
-				if scanErr := rows.Scan(&jsonStr); scanErr != nil {
-					return nil, scanErr
-				}
-			}
-		}
-		if matches == 0 {
-			err = sql.ErrNoRows
-		} else if matches > 1 {
-			return nil, fmt.Errorf("ambiguous snapshot hash prefix %q (matches multiple)", at.Hash)
-		}
+			  WHERE project_id = ? AND database_id = ?
+			  ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?`,
+			pid, did, at.Index,
+		).Scan(&jsonStr)
 	default:
 		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
 	}
@@ -538,21 +536,37 @@ func (s *Store) LatestSchema(ctx context.Context, key SnapshotKey) (*SnapshotSum
 
 // ResolveSchemaSnapshot maps a content-hash prefix to one schema row.
 // More than one match (prefix collision or content twin) is rejected.
+// Content twins — byte-identical payloads captured twice, which an idle node
+// on a cron produces routinely — are one addressable snapshot: keep the newest
+// row of each (kind tag, node label, content_hash) so only genuinely distinct
+// matches make a prefix ambiguous. Input must be newest-first.
+func dedupeContentTwins(matches []SnapshotSummary) []SnapshotSummary {
+	seen := make(map[string]struct{}, len(matches))
+	out := make([]SnapshotSummary, 0, len(matches))
+	for _, m := range matches {
+		k := fmt.Sprintf("%d\x00%s\x00%s", m.Kind.Tag, m.Kind.NodeLabel, m.ContentHash)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, m)
+	}
+	return out
+}
+
 func (s *Store) ResolveSchemaSnapshot(ctx context.Context, key SnapshotKey, hashPrefix string) (SnapshotSummary, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, db_url_hash, timestamp, content_hash, database_name, project_id, database_id
 		   FROM snapshots
 		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
-		  ORDER BY timestamp DESC, id DESC LIMIT 2`,
+		  ORDER BY timestamp DESC, id DESC`,
 		string(key.ProjectID), string(key.DatabaseID), hashPrefix+"%")
 	if err != nil {
 		return SnapshotSummary{}, err
 	}
 	defer rows.Close()
 
-	var (
-		matches []SnapshotSummary
-	)
+	var matches []SnapshotSummary
 	for rows.Next() {
 		ss, serr := scanSchemaSummary(rows)
 		if serr != nil {
@@ -563,6 +577,7 @@ func (s *Store) ResolveSchemaSnapshot(ctx context.Context, key SnapshotKey, hash
 	if err := rows.Err(); err != nil {
 		return SnapshotSummary{}, err
 	}
+	matches = dedupeContentTwins(matches)
 	switch len(matches) {
 	case 0:
 		return SnapshotSummary{}, fmt.Errorf("%w (hash %s)", ErrSnapshotNotFound, hashPrefix)
@@ -577,7 +592,7 @@ func (s *Store) ResolveSchemaSnapshot(ctx context.Context, key SnapshotKey, hash
 func (s *Store) nodeStatsHashMatches(ctx context.Context, pid, did, like, table string, mk func(string) SnapshotKind) ([]SnapshotSummary, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT id, schema_ref_hash, content_hash, node_source, timestamp FROM "+table+
-			" WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ORDER BY timestamp DESC, id DESC LIMIT 2",
+			" WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ORDER BY timestamp DESC, id DESC",
 		pid, did, like)
 	if err != nil {
 		return nil, err
@@ -617,7 +632,7 @@ func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix
 		`SELECT id, db_url_hash, timestamp, content_hash, database_name, project_id, database_id
 		   FROM snapshots
 		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
-		  ORDER BY timestamp DESC, id DESC LIMIT 2`,
+		  ORDER BY timestamp DESC, id DESC`,
 		pid, did, like)
 	if err != nil {
 		return SnapshotSummary{}, err
@@ -640,7 +655,7 @@ func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix
 		`SELECT id, schema_ref_hash, content_hash, timestamp
 		   FROM planner_stats
 		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
-		  ORDER BY timestamp DESC, id DESC LIMIT 2`,
+		  ORDER BY timestamp DESC, id DESC`,
 		pid, did, like)
 	if err != nil {
 		return SnapshotSummary{}, err
@@ -676,6 +691,7 @@ func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix
 	}
 	matches = append(matches, qmatches...)
 
+	matches = dedupeContentTwins(matches)
 	switch len(matches) {
 	case 0:
 		return SnapshotSummary{}, fmt.Errorf("%w (hash %s)", ErrSnapshotNotFound, hashPrefix)
@@ -684,6 +700,40 @@ func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix
 	default:
 		return SnapshotSummary{}, fmt.Errorf("ambiguous snapshot hash prefix %q (matches multiple snapshots; use a longer prefix or --latest)", hashPrefix)
 	}
+}
+
+// CountContentTwins reports how many rows of this snapshot's kind carry its
+// content hash. Deletes address one row by id, so a caller about to remove one
+// of several byte-identical rows (what an idle node on a cron produces) needs
+// to say so rather than report the snapshot as gone.
+func (s *Store) CountContentTwins(ctx context.Context, key SnapshotKey, snap SnapshotSummary) (int, error) {
+	var (
+		table  string
+		clause string
+		args   = []any{string(key.ProjectID), string(key.DatabaseID), snap.ContentHash}
+	)
+	switch snap.Kind.Tag {
+	case KindSchema:
+		table = "snapshots"
+	case KindPlanner:
+		table = "planner_stats"
+	case KindActivity, KindQuery:
+		table = "activity_stats"
+		if snap.Kind.Tag == KindQuery {
+			table = "query_stats"
+		}
+		clause = " AND node_source = ?"
+		args = append(args, snap.Kind.NodeLabel)
+	default:
+		return 0, fmt.Errorf("unknown SnapshotKind tag: %d", snap.Kind.Tag)
+	}
+	var n int
+	// table/clause are caller-side literals, never user input.
+	err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+table+
+			" WHERE project_id = ? AND database_id = ? AND content_hash = ?"+clause,
+		args...).Scan(&n)
+	return n, err
 }
 
 type DeletedSnapshot struct {
@@ -852,6 +902,9 @@ func (s *Store) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (
 }
 
 func (s *Store) Get(ctx context.Context, key SnapshotKey, kind SnapshotKind, at SnapshotRef) (StoredSnapshot, error) {
+	if err := at.validate(); err != nil {
+		return StoredSnapshot{}, err
+	}
 	switch kind.Tag {
 	case KindSchema:
 		snap, err := s.GetSchema(ctx, key, at)

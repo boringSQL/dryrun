@@ -69,6 +69,15 @@ Targets the local store only, never a remote.
 			if target.Kind.Tag == history.KindSchema {
 				fmt.Println("Planner/activity/query stats captured with it will be removed too, unless kept by an identical snapshot.")
 			}
+			// twins are one addressable snapshot for resolution but separate rows
+			// on disk; deleting the newest and calling it gone would be a lie
+			twins, err := store.CountContentTwins(cmd.Context(), key, target)
+			if err != nil {
+				return err
+			}
+			if twins > 1 {
+				fmt.Printf("%d rows carry this content hash (a node captured while unchanged); this deletes the newest one only.\n", twins)
+			}
 
 			if !yes && !confirm("Delete this snapshot?") {
 				fmt.Println("Aborted.")
@@ -80,6 +89,9 @@ Targets the local store only, never a remote.
 				return err
 			}
 			fmt.Printf("Deleted %s snapshot %s", target.Kind.String(), hash)
+			if twins > 1 {
+				fmt.Printf(" (1 of %d identical rows)", twins)
+			}
 			if res.Cascaded {
 				fmt.Printf(" (+%d planner, +%d activity, +%d query)", res.PlannerRemoved, res.ActivityRemoved, res.QueryStatsRemoved)
 			}
