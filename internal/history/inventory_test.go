@@ -361,3 +361,44 @@ func TestInventoryCountsABoundGoCannotParse(t *testing.T) {
 		t.Errorf("the readable end still stands: want %s, got %v", base, span.Oldest)
 	}
 }
+
+// The database-identity guard must survive the corruption Inventory was built
+// to survive: routing it through LatestSchema, which parses the row's
+// timestamp, would let one unreadable value silence the whole inventory.
+func TestLatestDatabaseNameSurvivesAnUnreadableTimestamp(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	k := key("acme", "primary")
+
+	if _, err := store.PutSchema(ctx, k, testSnapshot("h1", "acme")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE snapshots SET timestamp = 'not-a-timestamp'
+		  WHERE project_id = ? AND database_id = ?`,
+		string(k.ProjectID), string(k.DatabaseID)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.LatestSchema(ctx, k); err == nil {
+		t.Fatal("fixture must break LatestSchema for this test to mean anything")
+	}
+	got, err := store.LatestDatabaseName(ctx, k)
+	if err != nil {
+		t.Fatalf("the identity read must not parse the timestamp: %v", err)
+	}
+	if got != "acme" {
+		t.Errorf("want acme, got %q", got)
+	}
+}
+
+func TestLatestDatabaseNameIsEmptyWithNoSchemaRow(t *testing.T) {
+	store := testStore(t)
+	got, err := store.LatestDatabaseName(context.Background(), key("acme", "primary"))
+	if err != nil {
+		t.Fatalf("an empty store is not an error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("want no name, got %q", got)
+	}
+}

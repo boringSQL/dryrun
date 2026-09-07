@@ -33,6 +33,7 @@ type (
 		pgmustardClient *pgmustard.Client
 		uninitialized   bool
 		freshness       freshness
+		inventory       historyInventory
 	}
 )
 

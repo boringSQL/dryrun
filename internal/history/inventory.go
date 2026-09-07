@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -180,4 +181,28 @@ func spanBound(v sql.NullString, unreadable map[string]bool) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+// LatestDatabaseName is the database the newest stored schema names, for a
+// caller checking that this store is about the database it is serving. Empty
+// when the key holds no schema row.
+//
+// Deliberately not LatestSchema, which parses the row's timestamp and fails on
+// one it cannot read: that is the corruption Inventory is built to survive, and
+// routing the guard through it would make one unreadable timestamp silence the
+// whole inventory.
+func (s *Store) LatestDatabaseName(ctx context.Context, key SnapshotKey) (string, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT database_name FROM snapshots
+		  WHERE project_id = ? AND database_id = ?
+		  ORDER BY timestamp DESC, id DESC LIMIT 1`,
+		string(key.ProjectID), string(key.DatabaseID)).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return name, nil
 }

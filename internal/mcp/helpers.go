@@ -63,15 +63,47 @@ type (
 		ActivityCapturedAt string `json:"activity_captured_at,omitempty"`
 		ActivityOldestNode string `json:"activity_oldest_node,omitempty"`
 		// served hash has no stats yet: the timestamps above are a prior hash's
-		StatsPendingReschema bool       `json:"stats_pending_reschema,omitempty"`
-		Hint                 string     `json:"hint,omitempty"`
-		Next                 []NextCall `json:"next,omitempty"`
+		StatsPendingReschema bool `json:"stats_pending_reschema,omitempty"`
+		// how much local history stands behind the answer, per stream: absent
+		// when there is no store to read, which is not the same as empty
+		History []historySpan `json:"history,omitempty"`
+		// the store is there and could not be read -- absence already means
+		// "no local history", so a failed read needs its own word
+		HistoryUnavailable bool       `json:"history_unavailable,omitempty"`
+		Hint               string     `json:"hint,omitempty"`
+		Next               []NextCall `json:"next,omitempty"`
+	}
+
+	// One stream's holdings in local history: a count and a span, never a rate.
+	// The tools serve one snapshot and do not difference these rows.
+	historySpan struct {
+		Stream string `json:"stream"`
+		// stored rows, not capture attempts: schema, planner and query stats
+		// dedup on content, so a quiet database stores one row however often
+		// it is captured
+		Rows   int    `json:"rows"`
+		Oldest string `json:"oldest,omitempty"`
+		// when the content last changed, which on a deduping stream is not
+		// when it was last captured -- that is last_attempt
+		Newest string `json:"newest,omitempty"`
+		// when this host last tried, row or no row. Absent on a store built by
+		// `snapshot pull`, which records no attempts.
+		LastAttempt string `json:"last_attempt,omitempty"`
+		// distinct node labels ever seen on the stream. nil where the rows are
+		// not node-scoped (schema, planner); 0 is a node-scoped stream with no
+		// rows left, which is not the same statement.
+		Nodes *int `json:"nodes,omitempty"`
+		// rows excluded from the span because their timestamp will not parse
+		CorruptRows int `json:"corrupt_rows,omitempty"`
 	}
 )
 
 func (s *Server) newMeta(hint string, next []NextCall) *toolMeta {
 	c := s.captureTimes()
-	return &toolMeta{
+	spans, ok := s.historySpans()
+	m := &toolMeta{
+		History:              spans,
+		HistoryUnavailable:   !ok,
 		PgVersion:            s.pgDisplay(),
 		Database:             s.databaseName(),
 		Mode:                 s.modeStr(),
@@ -83,6 +115,7 @@ func (s *Server) newMeta(hint string, next []NextCall) *toolMeta {
 		Hint:                 hint,
 		Next:                 next,
 	}
+	return m
 }
 
 func (s *Server) injectMeta(val map[string]any, hint string, next []NextCall) {
@@ -93,6 +126,11 @@ func (s *Server) injectMeta(val map[string]any, hint string, next []NextCall) {
 	}
 	for k, v := range s.captureTimes().fields() {
 		meta[k] = v
+	}
+	if spans, ok := s.historySpans(); len(spans) > 0 {
+		meta["history"] = spans
+	} else if !ok {
+		meta["history_unavailable"] = true
 	}
 	if hint != "" {
 		meta["hint"] = hint

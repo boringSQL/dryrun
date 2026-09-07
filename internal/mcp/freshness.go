@@ -125,6 +125,10 @@ func (s *Server) adoptNewerSnapshot(ctx context.Context) {
 	s.uninitialized = false
 	s.mu.Unlock()
 	s.freshness.servedAt = a.Schema.Timestamp
+	// the capture that moved the schema moved the counts too: without this the
+	// response can carry a schema_captured_at newer than the newest capture
+	// _meta.history reports, which reads as "what you are served is not stored"
+	s.inventory.invalidate()
 	slog.Info("picked up a newer snapshot from history",
 		"captured_at", a.Schema.Timestamp.UTC().Format(time.RFC3339), "content_hash", a.Schema.ContentHash)
 }
