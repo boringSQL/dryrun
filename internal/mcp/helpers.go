@@ -64,8 +64,10 @@ type (
 		ActivityOldestNode string `json:"activity_oldest_node,omitempty"`
 		// served hash has no stats yet: the timestamps above are a prior hash's
 		StatsPendingReschema bool `json:"stats_pending_reschema,omitempty"`
-		// how much local history stands behind the answer, per stream: absent
-		// when there is no store to read, which is not the same as empty
+		// how much local history stands behind the answer, per stream. Absent
+		// when there is no readable store, when it holds another database, and
+		// when it holds nothing for this one -- those are one answer, and a
+		// store that would not ANSWER is the separate one below.
 		History []historySpan `json:"history,omitempty"`
 		// the store is there and could not be read -- absence already means
 		// "no local history", so a failed read needs its own word
@@ -86,8 +88,9 @@ type (
 		// when the content last changed, which on a deduping stream is not
 		// when it was last captured -- that is last_attempt
 		Newest string `json:"newest,omitempty"`
-		// when this host last tried, row or no row. Absent on a store built by
-		// `snapshot pull`, which records no attempts.
+		// when this host last captured the stream SUCCESSFULLY -- a failed
+		// capture records nothing. Absent on a store built by `snapshot pull`,
+		// which records no attempts at all.
 		LastAttempt string `json:"last_attempt,omitempty"`
 		// distinct node labels ever seen on the stream. nil where the rows are
 		// not node-scoped (schema, planner); 0 is a node-scoped stream with no

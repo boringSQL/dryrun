@@ -402,3 +402,54 @@ func TestLatestDatabaseNameIsEmptyWithNoSchemaRow(t *testing.T) {
 		t.Errorf("want no name, got %q", got)
 	}
 }
+
+// The wire text tells an agent that schema, planner and query rows dedup on
+// content while activity rows do not, and draws a conclusion from it about what
+// Newest means on each. That is a claim about four writers, so pin it here:
+// silently deduping activity, or dropping the dedup on any of the other three,
+// makes the instructions wrong rather than merely stale.
+func TestWhichStreamsDedupOnContent(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	k := key("acme", "primary")
+
+	at := time.Now().UTC().Truncate(time.Second)
+	for i := range 2 {
+		s := testSnapshot("same-schema", "acme")
+		s.Timestamp = at.Add(time.Duration(i) * time.Hour)
+		if _, err := store.PutSchema(ctx, k, s); err != nil {
+			t.Fatal(err)
+		}
+		p := plannerFixture("same-schema", "same-planner", "acme")
+		p.Timestamp = at.Add(time.Duration(i) * time.Hour)
+		if _, err := store.PutPlanner(ctx, k, p); err != nil {
+			t.Fatal(err)
+		}
+		putNodeActivityAt(t, store, k, "same-activity", "primary", false, at.Add(time.Duration(i)*time.Hour))
+		putNodeQueryStatsAt(t, store, k, "same-query", "primary", at.Add(time.Duration(i)*time.Hour))
+	}
+
+	got := inventoryOf(t, store, k)
+	for _, tc := range []struct {
+		stream string
+		rows   int
+	}{
+		{"schema", 1},
+		{"planner", 1},
+		{"query", 1},
+		// plain INSERT: every row counts, a re-imported one included
+		{"activity", 2},
+	} {
+		if got[tc.stream].Rows != tc.rows {
+			t.Errorf("%s: two identical captures should store %d row(s), got %d",
+				tc.stream, tc.rows, got[tc.stream].Rows)
+		}
+	}
+	// and the conclusion the copy draws from it
+	if !got["schema"].Newest.Equal(at) {
+		t.Errorf("a deduping stream's newest is the first capture of that content: want %s, got %s", at, *got["schema"].Newest)
+	}
+	if !got["activity"].Newest.Equal(at.Add(time.Hour)) {
+		t.Errorf("activity's newest is the last capture: want %s, got %s", at.Add(time.Hour), *got["activity"].Newest)
+	}
+}
