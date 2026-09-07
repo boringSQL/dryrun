@@ -550,12 +550,8 @@ func (s *Store) LatestSchema(ctx context.Context, key SnapshotKey) (*SnapshotSum
 	return &out, nil
 }
 
-// ResolveSchemaSnapshot maps a content-hash prefix to one schema row.
-// More than one match (prefix collision or content twin) is rejected.
-// Content twins — byte-identical payloads captured twice, which an idle node
-// on a cron produces routinely — are one addressable snapshot: keep the newest
-// row of each (kind tag, node label, content_hash) so only genuinely distinct
-// matches make a prefix ambiguous. Input must be newest-first.
+// dedupeContentTwins keeps the newest row per (kind, node, content_hash):
+// byte-identical re-captures are one addressable snapshot. Input must be newest-first.
 func dedupeContentTwins(matches []SnapshotSummary) []SnapshotSummary {
 	seen := make(map[string]struct{}, len(matches))
 	out := make([]SnapshotSummary, 0, len(matches))
@@ -570,6 +566,8 @@ func dedupeContentTwins(matches []SnapshotSummary) []SnapshotSummary {
 	return out
 }
 
+// ResolveSchemaSnapshot maps a content-hash prefix to one schema row.
+// More than one distinct match is rejected.
 func (s *Store) ResolveSchemaSnapshot(ctx context.Context, key SnapshotKey, hashPrefix string) (SnapshotSummary, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, db_url_hash, timestamp, content_hash, database_name, project_id, database_id
@@ -718,10 +716,58 @@ func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix
 	}
 }
 
-// CountContentTwins reports how many rows of this snapshot's kind carry its
-// content hash. Deletes address one row by id, so a caller about to remove one
-// of several byte-identical rows (what an idle node on a cron produces) needs
-// to say so rather than report the snapshot as gone.
+type (
+	CascadeCounts struct {
+		Planner    int
+		Activity   int
+		QueryStats int
+		Blocked    bool // a surviving content twin keeps these rows; nothing cascades
+	}
+)
+
+func (c CascadeCounts) Total() int { return c.Planner + c.Activity + c.QueryStats }
+
+// CountCascade counts the stats rows bound to this snapshot, so the delete
+// prompt can say how many go with it. Non-schema kinds never cascade, so they
+// count zero. Blocked means a content twin survives the delete and keeps the
+// rows: the counts then describe what stays, not what goes.
+//
+// Advisory only, and read outside the delete transaction: `snap` is assumed to
+// have been resolved from this store, and a capture landing between the count
+// and the delete can add a twin, turning a promised cascade into a blocked one.
+// The delete recounts inside its transaction and reports the actuals.
+func (s *Store) CountCascade(ctx context.Context, key SnapshotKey, snap SnapshotSummary) (CascadeCounts, error) {
+	if snap.Kind.Tag != KindSchema {
+		return CascadeCounts{}, nil
+	}
+	twins, err := s.CountContentTwins(ctx, key, snap)
+	if err != nil {
+		return CascadeCounts{}, err
+	}
+
+	out := CascadeCounts{Blocked: twins > 1}
+	for _, t := range []struct {
+		table string
+		into  *int
+	}{
+		{"planner_stats", &out.Planner},
+		{"activity_stats", &out.Activity},
+		{"query_stats", &out.QueryStats},
+	} {
+		// table is a caller-side literal, never user input.
+		if err := s.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM "+t.table+
+				" WHERE project_id = ? AND database_id = ? AND schema_ref_hash = ?",
+			string(key.ProjectID), string(key.DatabaseID), snap.ContentHash,
+		).Scan(t.into); err != nil {
+			return CascadeCounts{}, err
+		}
+	}
+	return out, nil
+}
+
+// CountContentTwins counts rows of this kind carrying the content hash,
+// so delete can report removing 1 of N identical rows.
 func (s *Store) CountContentTwins(ctx context.Context, key SnapshotKey, snap SnapshotSummary) (int, error) {
 	var (
 		table  string

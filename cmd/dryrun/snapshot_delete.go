@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -66,17 +67,21 @@ Targets the local store only, never a remote.
 			fmt.Printf("%s  %s  %s  %s\n",
 				target.Timestamp.Format("2006-01-02 15:04:05"),
 				target.Kind.String(), hash, target.Database)
-			if target.Kind.Tag == history.KindSchema {
-				fmt.Println("Planner/activity/query stats captured with it will be removed too, unless kept by an identical snapshot.")
-			}
-			// twins are one addressable snapshot for resolution but separate rows
-			// on disk; deleting the newest and calling it gone would be a lie
+			// twins are one snapshot to resolve but N rows on disk; delete removes one row only
 			twins, err := store.CountContentTwins(cmd.Context(), key, target)
 			if err != nil {
 				return err
 			}
 			if twins > 1 {
 				fmt.Printf("%d rows carry this content hash (a node captured while unchanged); this deletes the newest one only.\n", twins)
+			}
+			if target.Kind.Tag == history.KindSchema {
+				// advisory: a count we cannot read must not block a delete that would work
+				if cascade, err := store.CountCascade(cmd.Context(), key, target); err != nil {
+					slog.Debug("cannot count bound stats", "err", err)
+				} else {
+					fmt.Println(describeCascade(cascade))
+				}
 			}
 
 			if !yes && !confirm("Delete this snapshot?") {
@@ -102,6 +107,36 @@ Targets the local store only, never a remote.
 	c.Flags().BoolVar(&latest, "latest", false, "delete the most recent schema snapshot")
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "skip confirmation prompt")
 	return c
+}
+
+// what the cascade does to the stats bound to a schema snapshot, in one line
+func describeCascade(c history.CascadeCounts) string {
+	total := c.Total()
+	if total == 0 {
+		return "No planner/activity/query stats are bound to it."
+	}
+	var parts []string
+	for _, p := range []struct {
+		n    int
+		name string
+	}{
+		{c.Planner, "planner"},
+		{c.Activity, "activity"},
+		{c.QueryStats, "query"},
+	} {
+		if p.n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", p.n, p.name))
+		}
+	}
+	rows, stays, goes := "rows", "stay", "go"
+	if total == 1 {
+		rows, stays, goes = "row", "stays", "goes"
+	}
+	if c.Blocked {
+		return fmt.Sprintf("%d bound stats %s %s, kept by the identical snapshot: %s.",
+			total, rows, stays, strings.Join(parts, ", "))
+	}
+	return fmt.Sprintf("%d bound stats %s %s with it: %s.", total, rows, goes, strings.Join(parts, ", "))
 }
 
 func confirm(prompt string) bool {

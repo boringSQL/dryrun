@@ -324,3 +324,180 @@ func TestDeleteSnapshotStatsMissing(t *testing.T) {
 		t.Errorf("got %v, want ErrSnapshotNotFound", err)
 	}
 }
+
+// CountCascade previews exactly what the delete cascade removes: the stats rows
+// bound to the target hash, none of a sibling snapshot's, and nothing at all
+// when a content twin still binds them.
+func TestCountCascade(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	k := key("acme", "primary")
+
+	base := time.Now().UTC().Truncate(time.Second)
+	seedSchema(t, store, k, "keep-me", base)
+	seedSchema(t, store, k, "drop-me", base.Add(time.Minute))
+
+	for i, node := range []string{"n-1", "n-2", "n-3"} {
+		if _, err := store.PutActivity(ctx, k, activityFixture("drop-me", "a-"+node, node, false)); err != nil {
+			t.Fatal(err)
+		}
+		if i < 2 {
+			if _, err := store.PutQueryStats(ctx, k, queryStatsFixture("drop-me", "q-"+node, node)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := store.PutPlanner(ctx, k, plannerFixture("drop-me", "p-1", "appdb")); err != nil {
+		t.Fatal(err)
+	}
+	// bound to the survivor, must not be counted
+	if _, err := store.PutPlanner(ctx, k, plannerFixture("keep-me", "p-2", "appdb")); err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := store.ResolveSchemaSnapshot(ctx, k, "drop-me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.CountCascade(ctx, k, target)
+	if err != nil {
+		t.Fatalf("count cascade: %v", err)
+	}
+	if got.Blocked {
+		t.Error("no content twin present, cascade should not be blocked")
+	}
+	if got.Planner != 1 || got.Activity != 3 || got.QueryStats != 2 {
+		t.Errorf("counted planner=%d activity=%d query=%d, want 1/3/2",
+			got.Planner, got.Activity, got.QueryStats)
+	}
+	if got.Total() != 6 {
+		t.Errorf("Total() = %d, want 6", got.Total())
+	}
+
+	// the preview must match what the delete actually removes
+	res, err := store.DeleteSchemaSnapshot(ctx, k, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int(res.PlannerRemoved) != got.Planner ||
+		int(res.ActivityRemoved) != got.Activity ||
+		int(res.QueryStatsRemoved) != got.QueryStats {
+		t.Errorf("delete removed planner=%d activity=%d query=%d, preview said %d/%d/%d",
+			res.PlannerRemoved, res.ActivityRemoved, res.QueryStatsRemoved,
+			got.Planner, got.Activity, got.QueryStats)
+	}
+}
+
+// A content twin keeps the bound stats alive, so the preview reports a blocked
+// cascade with zero counts rather than promising rows that survive.
+func TestCountCascadeBlockedByContentTwin(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	k := key("acme", "primary")
+
+	base := time.Now().UTC().Truncate(time.Second)
+	// PutSchema dedupes against the latest row, so a differing hash sits between
+	seedSchema(t, store, k, "same-hash", base)
+	seedSchema(t, store, k, "other-hash", base.Add(time.Minute))
+	seedSchema(t, store, k, "same-hash", base.Add(2*time.Minute))
+	if _, err := store.PutPlanner(ctx, k, plannerFixture("same-hash", "p-1", "appdb")); err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := store.ResolveSchemaSnapshot(ctx, k, "same-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.CountCascade(ctx, k, target)
+	if err != nil {
+		t.Fatalf("count cascade: %v", err)
+	}
+	if !got.Blocked {
+		t.Error("a surviving content twin must block the cascade")
+	}
+	// blocked counts describe the rows that stay
+	if got.Planner != 1 || got.Total() != 1 {
+		t.Errorf("got %+v, want the one bound planner row reported as staying", got)
+	}
+
+	res, err := store.DeleteSchemaSnapshot(ctx, k, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Cascaded {
+		t.Error("delete cascaded despite a surviving twin; preview said it would not")
+	}
+}
+
+// Stats kinds delete alone, so their preview is empty rather than an error.
+func TestCountCascadeNonSchemaKinds(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	k := key("acme", "primary")
+
+	seedSchema(t, store, k, "sch-1", time.Now().UTC().Truncate(time.Second))
+	if _, err := store.PutPlanner(ctx, k, plannerFixture("sch-1", "p-1", "appdb")); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := store.ResolveSnapshot(ctx, k, "p-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.CountCascade(ctx, k, plan)
+	if err != nil {
+		t.Fatalf("count cascade: %v", err)
+	}
+	if got.Blocked || got.Total() != 0 {
+		t.Errorf("got %+v, want zero counts for a planner row", got)
+	}
+}
+
+// A schema snapshot with nothing bound to it counts zero rather than erroring,
+// so the prompt can say there is nothing to cascade.
+func TestCountCascadeNoBoundStats(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	k := key("acme", "primary")
+
+	seedSchema(t, store, k, "lonely", time.Now().UTC().Truncate(time.Second))
+	// bound to a different schema, must not be counted
+	if _, err := store.PutPlanner(ctx, k, plannerFixture("elsewhere", "p-1", "appdb")); err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.ResolveSchemaSnapshot(ctx, k, "lonely")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.CountCascade(ctx, k, target)
+	if err != nil {
+		t.Fatalf("count cascade: %v", err)
+	}
+	if got.Blocked || got.Total() != 0 {
+		t.Errorf("got %+v, want zero counts and no block", got)
+	}
+}
+
+// Blocked with nothing bound: the counts must stay zero so the caller does not
+// claim stats are being kept when there are none.
+func TestCountCascadeBlockedWithNoBoundStats(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	k := key("acme", "primary")
+
+	base := time.Now().UTC().Truncate(time.Second)
+	seedSchema(t, store, k, "twin", base)
+	seedSchema(t, store, k, "other-hash", base.Add(time.Minute))
+	seedSchema(t, store, k, "twin", base.Add(2*time.Minute))
+
+	target, err := store.ResolveSchemaSnapshot(ctx, k, "twin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.CountCascade(ctx, k, target)
+	if err != nil {
+		t.Fatalf("count cascade: %v", err)
+	}
+	if !got.Blocked || got.Total() != 0 {
+		t.Errorf("got %+v, want blocked with zero counts", got)
+	}
+}
