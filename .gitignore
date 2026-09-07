@@ -1,6 +1,9 @@
 /bin/
 .env
 *.db
+# WAL sidecars: transient, but a crashed run or a live mcp-serve leaves them
+*.db-wal
+*.db-shm
 # the README's 30-second demo runs from this fixture; lint reads history.db
 !examples/demo/.dryrun/history.db
 vendor/

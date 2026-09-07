@@ -237,6 +237,8 @@ All commands work offline from `.dryrun/history.db`. Each project has its own `d
 
 Snapshots live in `.dryrun/history.db`, keyed by `(project_id, database_id)`. It is the only schema source: the MCP server, `lint` and `drift` all read from it. A `.dryrun/schema.json` left over from an older dryrun is ignored.
 
+The database runs in SQLite's WAL mode so a scheduled `snapshot capture` and a long-lived `mcp-serve` can share it: the capture commits while the server is mid-query, instead of one waiting the other out. WAL adds `history.db-wal` and `history.db-shm` sidecars next to it, removed when the last process exits cleanly and left behind by a crash, so ignore them alongside `.dryrun/`. Two consequences worth knowing: a WAL `history.db` needs write access to `.dryrun/` even for read-only commands like `lint`, and WAL needs shared memory, which network filesystems do not provide — a `.dryrun/` on NFS or SMB keeps the rollback journal automatically (correct, just slower under contention).
+
 ### Multi-node: capture activity from replicas
 
 `snapshot take` runs against the primary and writes schema + planner stats. Activity counters (`idx_scan`, `n_dead_tup`, last vacuum) live on each replica, so capture them separately:

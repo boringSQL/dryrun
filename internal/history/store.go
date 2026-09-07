@@ -87,14 +87,30 @@ func Open(path string) (*Store, error) {
 			"move it aside and re-run 'dryrun init' or 'dryrun snapshot pull'", path)
 	}
 
+	// journal_mode rewrites the file — must run after the legacy-db check above
+	journal := enableWAL(db)
+
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	s.compat = stampVersion(db)
 
-	slog.Debug("history store opened", "path", path, "compat", s.compat)
+	slog.Debug("history store opened", "path", path, "compat", s.compat, "journal", journal)
 	return s, nil
+}
+
+// WAL keeps mcp-serve reads off SQLITE_BUSY during captures; a fs that refuses
+// the switch stays on the rollback journal.
+func enableWAL(db *sql.DB) string {
+	var journal string
+	if err := db.QueryRow("PRAGMA journal_mode = WAL").Scan(&journal); err != nil {
+		slog.Debug("history db stays on the rollback journal", "err", err)
+		if err := db.QueryRow("PRAGMA journal_mode").Scan(&journal); err != nil {
+			return "unknown"
+		}
+	}
+	return journal
 }
 
 // true if this looks like an old rust history.db, not ours

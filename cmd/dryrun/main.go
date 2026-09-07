@@ -830,6 +830,7 @@ func mcpServeCmd() *cobra.Command {
 				var hist *history.Store
 				if h, err := openHistoryStore(""); err == nil {
 					hist = h
+					defer hist.Close()
 				} else {
 					fmt.Fprintf(os.Stderr, "dryrun: history database unavailable (%v) — running without history\n", err)
 				}
@@ -851,6 +852,7 @@ func mcpServeCmd() *cobra.Command {
 					server.SetUninitialized()
 					break
 				}
+				defer hist.Close()
 				server.SetHistory(hist)
 
 				if server.BootstrapFromHistory(context.Background()) {
