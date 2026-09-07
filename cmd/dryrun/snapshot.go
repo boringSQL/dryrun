@@ -30,10 +30,8 @@ func snapshotActivityCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "activity",
 		Short: "Capture activity stats from a node into history",
-		Long: `Capture activity stats from a node into history.
-
-` + captureSupersedes + `  dryrun snapshot capture --from <url> --label <name> --streams activity`,
-		Args: cobra.NoArgs,
+		Long:  `Capture activity stats from a node into history.`,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if label == "" {
 				return fmt.Errorf("--label is required")
@@ -100,12 +98,11 @@ func snapshotActivityCmd() *cobra.Command {
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
 	cmd.Flags().BoolVar(&pushAfter, "push", false, "push the snapshot to a remote after capture")
 	cmd.Flags().StringVar(&pushRemote, "remote", "", "configured [[remote]] name (with --push)")
+	// activity captures query stats best-effort too, so the migration keeps both
+	// streams; dropping "query" would silently stop feeding list_top_queries
+	markCaptureSuperseded(cmd, "dryrun snapshot capture --from <url> --label <name> --streams activity,query")
 	return cmd
 }
-
-// `capture` covers both of these and adds config-driven nodes, --all and
-// --due; they stay for the cron jobs already using them.
-const captureSupersedes = "Superseded by `dryrun snapshot capture`:\n"
 
 // nil, nil when the key has no schema yet
 func latestSchema(ctx context.Context, store initWriter, key history.SnapshotKey) (*schema.SchemaSnapshot, error) {
@@ -253,10 +250,8 @@ func snapshotQueryStatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query-stats",
 		Short: "Capture pg_stat_statements into history (primary or replica)",
-		Long: `Capture pg_stat_statements into history (primary or replica).
-
-` + captureSupersedes + `  dryrun snapshot capture --from <url> --label <name> --streams query`,
-		Args: cobra.NoArgs,
+		Long:  `Capture pg_stat_statements into history (primary or replica).`,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if label == "" {
 				return fmt.Errorf("--label is required")
@@ -321,6 +316,7 @@ func snapshotQueryStatsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
 	cmd.Flags().BoolVar(&pushAfter, "push", false, "push the snapshot to a remote after capture")
 	cmd.Flags().StringVar(&pushRemote, "remote", "", "configured [[remote]] name (with --push)")
+	markCaptureSuperseded(cmd, "dryrun snapshot capture --from <url> --label <name> --streams query")
 	return cmd
 }
 

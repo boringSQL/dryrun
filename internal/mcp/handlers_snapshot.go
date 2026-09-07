@@ -31,7 +31,7 @@ func (s *Server) runSnapshotDiff(ctx context.Context, opt snapdiff.Options, view
 	hist, key := s.history, s.snapshotKey
 	s.mu.RUnlock()
 	if hist == nil || key.ProjectID == "" {
-		return errResult("no snapshot history available; capture with `dryrun snapshot take` first"), nil
+		return errResult("no snapshot history available; capture with `dryrun init` or `dryrun snapshot capture` first"), nil
 	}
 	if note := s.historyNote(); note != nil {
 		return errResult(*note), nil
@@ -125,7 +125,7 @@ func (s *Server) driftAgainst(ctx context.Context, liveSnap *schema.SchemaSnapsh
 	hint := ""
 	if baseline == baselineLoaded {
 		// "no drift" here only means nothing changed since startup
-		hint = "No stored snapshot for this project and database, so the comparison is against the schema this server read at startup -- it cannot show a migration that ran before it. Run `dryrun snapshot take`."
+		hint = "No stored snapshot for this project and database, so the comparison is against the schema this server read at startup -- it cannot show a migration that ran before it. Run `dryrun snapshot capture`."
 	}
 
 	report := diff.ClassifyDrift(savedSnap, liveSnap)

@@ -332,12 +332,8 @@ func snapshotCmd() *cobra.Command {
 		Long: `Take a new snapshot: schema, planner and activity stats, plus query stats
 when pg_stat_statements is available. Primary only.
 
-` + captureSupersedes + `  dryrun snapshot capture --streams schema,planner,activity,query
-
-take is now that command with the label "primary"; it will be removed after the
-next release.`,
+take is that command with the label "primary".`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintln(os.Stderr, "note: `dryrun snapshot take` is deprecated; use `dryrun snapshot capture`")
 			rowCap, err := resolveQueryStatsRowCap()
 			if err != nil {
 				return err
@@ -401,6 +397,9 @@ next release.`,
 			return nil
 		},
 	}
+	// take writes under the hardcoded "primary" label; capture requires --label,
+	// and any other value starts a second series for the same physical node
+	markCaptureSuperseded(takeCmd, "dryrun snapshot capture --label "+takeLabel+" --streams schema,planner,activity,query")
 	addHistFlag(takeCmd)
 	takeCmd.Flags().StringVar(&flagMasksFile, "masks-file", "", "path to data-masking-policy.yml")
 	takeCmd.Flags().StringSliceVar(&flagMaskPolicy, "mask-policy", nil, "masking policy name (repeatable, comma-separated)")
@@ -848,7 +847,7 @@ func mcpServeCmd() *cobra.Command {
 					} else {
 						fmt.Fprintf(os.Stderr, "dryrun: history database unusable (%v) — starting in uninitialized mode\n", err)
 					}
-					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot take'; the snapshot is picked up on the next tool call")
+					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot capture'; the snapshot is picked up on the next tool call")
 					server.SetUninitialized()
 					break
 				}
@@ -860,7 +859,7 @@ func mcpServeCmd() *cobra.Command {
 				} else {
 					fmt.Fprintf(os.Stderr, "dryrun: no schema snapshot in history.db for project=%s database=%s — starting in uninitialized mode\n",
 						key.ProjectID, key.DatabaseID)
-					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot take'; the snapshot is picked up on the next tool call")
+					fmt.Fprintln(os.Stderr, "dryrun: run 'dryrun init' or 'dryrun snapshot capture'; the snapshot is picked up on the next tool call")
 					server.SetUninitialized()
 				}
 			}

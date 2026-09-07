@@ -235,7 +235,7 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("list_top_queries",
-			mcp.WithDescription("When asked what this database spends its time on: captured pg_stat_statements query shapes ranked by exec time, calls, or mean. Needs no database connection; reads the local history (dryrun snapshot query-stats, or init/take's best-effort capture) and is empty when no capture carries query stats. Each entry is tagged with its reporting node and never averaged across nodes: a primary and a replica are different workloads. SQL is qshape-normalized and parameterized, never the literal text or parameter values a user ran. Counters are cumulative since the last reset, not a recent-activity rate. Before comparing or differencing any two numbers, read _meta.hint -- it carries the caveats that decide whether they are comparable at all."),
+			mcp.WithDescription("When asked what this database spends its time on: captured pg_stat_statements query shapes ranked by exec time, calls, or mean. Needs no database connection; reads the local history (dryrun snapshot capture --streams query, or init's best-effort capture) and is empty when no capture carries query stats. Each entry is tagged with its reporting node and never averaged across nodes: a primary and a replica are different workloads. SQL is qshape-normalized and parameterized, never the literal text or parameter values a user ran. Counters are cumulative since the last reset, not a recent-activity rate. Before comparing or differencing any two numbers, read _meta.hint -- it carries the caveats that decide whether they are comparable at all."),
 			mcp.WithString("node", mcp.Description("Filter to one node label. Omit to see all nodes' queries together (each entry still tagged with its own node).")),
 			mcp.WithString("sort",
 				mcp.Enum("total_time", "calls", "mean_time"),
@@ -269,7 +269,7 @@ func (s *Server) registerLiveTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("check_drift",
-			mcp.WithDescription("When a migration may have run since the snapshot, or before acting on an offline answer that is expensive to get wrong: compares the live database against the newest snapshot in the local history and reports ahead, behind, or diverged with the objects that differ, naming the baseline it used. Requires a connection, so it is absent in offline mode. Read-only: it refreshes nothing (`dryrun snapshot take` does) and changes nothing."),
+			mcp.WithDescription("When a migration may have run since the snapshot, or before acting on an offline answer that is expensive to get wrong: compares the live database against the newest snapshot in the local history and reports ahead, behind, or diverged with the objects that differ, naming the baseline it used. Requires a connection, so it is absent in offline mode. Read-only: it refreshes nothing (`dryrun snapshot capture` does) and changes nothing."),
 			annLiveRead,
 		),
 		s.handleCheckDrift,

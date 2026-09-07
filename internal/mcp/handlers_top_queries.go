@@ -32,7 +32,7 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 	hist, key := s.history, s.snapshotKey
 	s.mu.RUnlock()
 	if hist == nil || key.ProjectID == "" {
-		return errResult("no snapshot history available; capture with `dryrun snapshot query-stats` first"), nil
+		return errResult("no snapshot history available; capture with `dryrun snapshot capture --streams query` first"), nil
 	}
 	if note := s.historyNote(); note != nil {
 		return errResult(*note), nil
@@ -45,7 +45,7 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 	if len(snaps) == 0 {
 		return structuredTextResult(
 			listTopQueriesResult{Queries: []queryStatsEntry{}, Meta: s.newMeta("", nil)},
-			s.wrapText("No query stats captured yet.", "capture with `dryrun snapshot query-stats` (or `dryrun init`/`snapshot take`, which capture it best-effort)")), nil
+			s.wrapText("No query stats captured yet.", "capture with `dryrun snapshot capture --streams query` (or `dryrun init`, which captures it best-effort)")), nil
 	}
 
 	nodeFilter := getArg(req, "node")

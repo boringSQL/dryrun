@@ -151,7 +151,7 @@ func (s *Server) getAnnotated() (*schema.AnnotatedSchema, error) {
 
 // Takes no lock of its own: reads snapshotKey under the caller's s.mu.
 func (s *Server) noSchemaMsg() string {
-	msg := "no schema loaded — initialize first: run `dryrun init --db <DATABASE_URL>` (or `dryrun snapshot take`) in a terminal, then retry. The snapshot is picked up without restarting the server"
+	msg := "no schema loaded — initialize first: run `dryrun init --db <DATABASE_URL>` (or `dryrun snapshot capture`) in a terminal, then retry. The snapshot is picked up without restarting the server"
 	if s.snapshotKey.ProjectID != "" {
 		// an empty history and a project/database mismatch fail identically
 		msg += fmt.Sprintf(" (looked under project=%s database=%s)", s.snapshotKey.ProjectID, s.snapshotKey.DatabaseID)
@@ -319,7 +319,7 @@ func (s *Server) requirePool() (*pgxpool.Pool, error) {
 }
 
 func (s *Server) Instructions() string {
-	metaNote := "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint. _meta.schema_captured_at, _meta.planner_captured_at and _meta.activity_captured_at say when each part of the snapshot was taken -- DDL, planner stats and per-node counters are captured by separate commands, so they age at different rates. They describe the snapshot, not a live read. Activity is the oldest node, named in _meta.activity_oldest_node. _meta.stats_pending_reschema: true marks a re-schema window: the newest schema hash has no stats capture yet, so the planner/activity timestamps shown are the prior schema's. A snapshot taken while this server runs (`dryrun snapshot take`, `snapshot pull`) is picked up on the next tool call; nothing needs reloading."
+	metaNote := "Each tool response includes _meta.hint (prose) and may include _meta.next: an array of {tool, args} entries that are pre-validated follow-up calls — copy the args verbatim instead of inferring them from the hint. _meta.schema_captured_at, _meta.planner_captured_at and _meta.activity_captured_at say when each part of the snapshot was taken -- DDL, planner stats and per-node counters are captured by separate commands, so they age at different rates. They describe the snapshot, not a live read. Activity is the oldest node, named in _meta.activity_oldest_node. _meta.stats_pending_reschema: true marks a re-schema window: the newest schema hash has no stats capture yet, so the planner/activity timestamps shown are the prior schema's. A snapshot taken while this server runs (`dryrun snapshot capture`, `snapshot pull`) is picked up on the next tool call; nothing needs reloading."
 
 	// surface a history.db compat problem here so MCP-only users see it
 	if note := s.historyNote(); note != nil {

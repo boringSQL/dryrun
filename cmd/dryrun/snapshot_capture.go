@@ -236,6 +236,42 @@ type captureStore interface {
 	MarkCaptureAttempt(ctx context.Context, key history.SnapshotKey, label, stream string, at time.Time) error
 }
 
+// `capture` covers every per-stream command and adds config-driven nodes,
+// --all and --due; they stay one release for the cron jobs already using them.
+// The grace period only starts once the notice ships, so it goes out with the
+// release that introduces `capture` publicly.
+//
+// cobra's own Deprecated field is not used: it makes IsAvailableCommand false,
+// which would hide these from `dryrun snapshot --help` for the whole grace
+// period -- the opposite of announcing them.
+//
+// replacement must be a runnable invocation with the same stream set, since
+// operators paste it straight into cron.
+func markCaptureSuperseded(cmd *cobra.Command, replacement string) {
+	if strings.HasSuffix(cmd.Short, deprecatedSuffix) {
+		return
+	}
+	cmd.Short += deprecatedSuffix
+	cmd.Long += "\n\nSuperseded by `dryrun snapshot capture`:\n  " + replacement +
+		"\n\nDeprecated: this command will be removed in v0.18."
+
+	prevE, prev := cmd.PreRunE, cmd.PreRun
+	cmd.PreRunE = func(c *cobra.Command, args []string) error {
+		fmt.Fprintf(c.ErrOrStderr(), "notice: `%s` is deprecated; use `%s`\n", c.CommandPath(), replacement)
+		// cobra runs PreRunE *or* PreRun, so chaining only the former would
+		// silently drop a non-E hook
+		if prevE != nil {
+			return prevE(c, args)
+		}
+		if prev != nil {
+			prev(c, args)
+		}
+		return nil
+	}
+}
+
+const deprecatedSuffix = " (deprecated)"
+
 // --all reads the fleet from config; otherwise one node, named or ad hoc.
 func captureTargets(nodeName, from, label string, streams []string, all bool) ([]captureTarget, error) {
 	if all && (nodeName != "" || from != "") {

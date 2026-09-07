@@ -46,7 +46,7 @@ func snapshotNodesCmd(historyDB *string) *cobra.Command {
 			}
 			if len(nodes) == 0 {
 				fmt.Printf("No nodes in history for %s/%s.\n", key.ProjectID, key.DatabaseID)
-				fmt.Println("Capture one with `dryrun snapshot activity --from <url> --label <name>`.")
+				fmt.Println("Capture one with `dryrun snapshot capture --from <url> --label <name> --streams activity`.")
 				return nil
 			}
 			printNodeTable(nodes)

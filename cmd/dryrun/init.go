@@ -350,7 +350,7 @@ func runSnapshotTake(ctx context.Context, cap initCapturer, store captureStore, 
 	if standby {
 		return nil, nil, nil, 0, dryrun.NewError(dryrun.ErrReplicaCapture,
 			"`dryrun snapshot take` must run against the primary; "+
-				"use `dryrun snapshot activity --from <url> --label <name>` to capture activity from a replica")
+				"use `dryrun snapshot capture --from <url> --label <name> --streams activity` to capture activity from a replica")
 	}
 	if err := guardNodeRole(ctx, store, key, captureOptions{
 		Label: takeLabel, AllowRoleChange: allowRoleChange,
