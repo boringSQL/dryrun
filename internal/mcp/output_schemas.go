@@ -115,6 +115,8 @@ type (
 		Queries []queryStatsEntry `json:"queries"`
 		Count   int               `json:"count"`
 		Offset  int               `json:"offset,omitempty"`
+		Unknown bool              `json:"unknown,omitempty"`
+		Reason  string            `json:"reason,omitempty"`
 		Meta    *toolMeta         `json:"_meta,omitempty"`
 	}
 )

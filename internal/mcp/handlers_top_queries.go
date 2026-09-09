@@ -43,8 +43,14 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 		return errResult(fmt.Sprintf("load query stats: %v", err)), nil
 	}
 	if len(snaps) == 0 {
+		const why = "no capture carries query stats, so nothing has been observed about what this database runs"
 		return structuredTextResult(
-			listTopQueriesResult{Queries: []queryStatsEntry{}, Meta: s.newMeta("", nil)},
+			listTopQueriesResult{
+				Queries: []queryStatsEntry{},
+				Unknown: true,
+				Reason:  why,
+				Meta:    s.newMeta("", nil),
+			},
 			s.wrapText("No query stats captured yet.", "capture with `dryrun snapshot capture --streams query` (or `dryrun init`, which captures it best-effort)")), nil
 	}
 
@@ -75,8 +81,10 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 	minCalls := int64(getFloatArg(req, "min_calls", 2))
 
 	var entries []queryStatsEntry
+	observed := 0
 	nodeExecTime := map[string]float64{}
 	for _, snap := range snaps {
+		observed += len(snap.Queries)
 		capturedAt := snap.Node.Timestamp.Format(time.RFC3339)
 		for _, q := range snap.Queries {
 			if q.Calls < minCalls {
@@ -143,9 +151,13 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 
 	total := len(entries)
 	if total == 0 {
+		body := fmt.Sprintf("No queries with >= %d calls.", minCalls)
+		if observed == 0 {
+			body = "The newest capture per node holds no statements."
+		}
 		return structuredTextResult(
 			listTopQueriesResult{Queries: []queryStatsEntry{}, Meta: s.newMeta(hint, nil)},
-			s.wrapText(fmt.Sprintf("No queries with >= %d calls.", minCalls), hint)), nil
+			s.wrapText(body, hint)), nil
 	}
 	offset := int(getFloatArg(req, "offset", 0))
 	limit := limitArg(req)
