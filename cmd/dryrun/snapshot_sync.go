@@ -199,7 +199,7 @@ func buildHTTPStore(name, ref, tokenEnv string) (history.SnapshotStore, error) {
 		return nil, fmt.Errorf("remote %q: http remote requires a url in ref", name)
 	}
 	if tokenEnv == "" {
-		tokenEnv = "DRYRUN_TOKEN"
+		tokenEnv = defaultTokenEnv
 	}
 	token := os.Getenv(tokenEnv)
 	if token == "" {

@@ -14,7 +14,7 @@ func TestMergeMCPJSON_NewFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".mcp.json")
 
-	changed, err := mergeMCPJSON(path, "mcpServers")
+	changed, err := mergeMCPJSON(path, "mcpServers", map[string]any{mcpServerName: mcpServerEntry()}, false)
 	if err != nil || !changed {
 		t.Fatalf("mergeMCPJSON: changed=%v err=%v", changed, err)
 	}
@@ -58,7 +58,7 @@ func TestMergeMCPJSON_PreservesExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := mergeMCPJSON(path, "mcpServers"); err != nil {
+	if _, err := mergeMCPJSON(path, "mcpServers", map[string]any{mcpServerName: mcpServerEntry()}, false); err != nil {
 		t.Fatalf("mergeMCPJSON: %v", err)
 	}
 
@@ -87,7 +87,7 @@ func TestMergeMCPJSON_RefusesInvalidJSON(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{ not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mergeMCPJSON(path, "mcpServers"); err == nil {
+	if _, err := mergeMCPJSON(path, "mcpServers", map[string]any{mcpServerName: mcpServerEntry()}, false); err == nil {
 		t.Fatalf("expected error on invalid JSON, got nil")
 	}
 }
@@ -98,12 +98,12 @@ func TestMergeMCPJSON_NoOpOnUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".mcp.json")
 
-	if _, err := mergeMCPJSON(path, "mcpServers"); err != nil {
+	if _, err := mergeMCPJSON(path, "mcpServers", map[string]any{mcpServerName: mcpServerEntry()}, false); err != nil {
 		t.Fatal(err)
 	}
 	first, _ := os.ReadFile(path)
 
-	changed, err := mergeMCPJSON(path, "mcpServers")
+	changed, err := mergeMCPJSON(path, "mcpServers", map[string]any{mcpServerName: mcpServerEntry()}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestConfigureAgents_ExplicitOptOut(t *testing.T) {
 	dir := t.TempDir()
 	mustMkdir(t, filepath.Join(dir, ".cursor"))
 
-	if err := configureAgents(dir, true, ""); err != nil {
+	if err := configureAgents(dir, true, "", nil); err != nil {
 		t.Fatalf("configureAgents: %v", err)
 	}
 	if pathExists(filepath.Join(dir, ".cursor", "mcp.json")) {
@@ -235,7 +235,7 @@ func TestConfigureAgents_ExplicitOptOut(t *testing.T) {
 func TestConfigureAgents_ExplicitListWrites(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := configureAgents(dir, true, "cursor"); err != nil {
+	if err := configureAgents(dir, true, "cursor", nil); err != nil {
 		t.Fatalf("configureAgents: %v", err)
 	}
 	if !pathExists(filepath.Join(dir, ".cursor", "mcp.json")) {

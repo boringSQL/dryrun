@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +38,37 @@ func mcpServerEntry() map[string]any {
 	}
 }
 
+// Per-client token syntax: a ${VAR} in a config that does not expand it
+// authenticates nothing, so the form is encoded here, not left to the caller.
+type tokenRef int
+
+const (
+	tokenBraceVar    tokenRef = iota // Claude Code: ${VAR}
+	tokenEnvVar                      // Cursor: ${env:VAR}
+	tokenBearerEnv                   // Codex: bearer_token_env_var, no header
+	tokenNoExpansion                 // Zed: expands nothing; the value is pasted
+)
+
+// A reference wherever the client resolves one; never the token itself.
+func hindsightServerEntry(url, tokenEnv string, ref tokenRef) map[string]any {
+	entry := map[string]any{"type": "http", "url": url}
+	if h := authHeaderValue(tokenEnv, ref); h != "" {
+		entry["headers"] = map[string]any{"Authorization": h}
+	}
+	return entry
+}
+
+// Empty when the client cannot resolve a reference (Codex, Zed).
+func authHeaderValue(tokenEnv string, ref tokenRef) string {
+	switch ref {
+	case tokenBraceVar:
+		return "Bearer ${" + tokenEnv + "}"
+	case tokenEnvVar:
+		return "Bearer ${env:" + tokenEnv + "}"
+	}
+	return ""
+}
+
 type agentKind int
 
 const (
@@ -49,6 +82,7 @@ type agentDef struct {
 	configPath string
 	jsonKey    string
 	kind       agentKind
+	tokenRef   tokenRef
 	detect     func(cwd, home string) bool
 }
 
@@ -61,7 +95,7 @@ func agentRegistry() []agentDef {
 	return []agentDef{
 		{
 			name: "claude", label: "Claude Code", configPath: ".mcp.json",
-			jsonKey: "mcpServers", kind: agentJSON,
+			jsonKey: "mcpServers", kind: agentJSON, tokenRef: tokenBraceVar,
 			detect: func(cwd, home string) bool {
 				return pathExists(filepath.Join(cwd, ".claude")) ||
 					pathExists(filepath.Join(cwd, ".mcp.json"))
@@ -69,19 +103,19 @@ func agentRegistry() []agentDef {
 		},
 		{
 			name: "cursor", label: "Cursor", configPath: ".cursor/mcp.json",
-			jsonKey: "mcpServers", kind: agentJSON,
+			jsonKey: "mcpServers", kind: agentJSON, tokenRef: tokenEnvVar,
 			detect: func(cwd, home string) bool { return pathExists(filepath.Join(cwd, ".cursor")) },
 		},
 		{
 			name: "codex", label: "Codex", configPath: "~/.codex/config.toml",
-			kind: agentSnippet,
+			kind: agentSnippet, tokenRef: tokenBearerEnv,
 			detect: func(cwd, home string) bool {
 				return home != "" && pathExists(filepath.Join(home, ".codex"))
 			},
 		},
 		{
 			name: "zed", label: "Zed", configPath: ".zed/settings.json",
-			jsonKey: "context_servers", kind: agentSnippet,
+			jsonKey: "context_servers", kind: agentSnippet, tokenRef: tokenNoExpansion,
 			detect: func(cwd, home string) bool { return pathExists(filepath.Join(cwd, ".zed")) },
 		},
 	}
@@ -157,7 +191,7 @@ func promptSelect(detected []agentDef) []agentDef {
 
 func isTTY() bool { return isatty.IsTerminal(os.Stdin.Fd()) }
 
-func writeAgentConfigs(cwd string, selected []agentDef) error {
+func writeAgentConfigs(cwd string, selected []agentDef, hosted *hindsightTarget) error {
 	var (
 		wrote    []string
 		snippets []agentDef
@@ -167,8 +201,13 @@ func writeAgentConfigs(cwd string, selected []agentDef) error {
 			snippets = append(snippets, a)
 			continue
 		}
+		// per agent: the auth syntax is the client's, not ours
+		entries := map[string]any{mcpServerName: mcpServerEntry()}
+		if hosted != nil {
+			entries[hindsightServerName] = hosted.entryFor(a)
+		}
 		abs := filepath.Join(cwd, filepath.FromSlash(a.configPath))
-		changed, err := mergeMCPJSON(abs, a.jsonKey)
+		changed, err := mergeMCPJSON(abs, a.jsonKey, entries, hosted != nil)
 		if err != nil {
 			return err
 		}
@@ -189,13 +228,13 @@ func writeAgentConfigs(cwd string, selected []agentDef) error {
 		fmt.Fprintf(os.Stderr, "Updated agent directive: %s\n", strings.Join(directives, ", "))
 	}
 	for _, a := range snippets {
-		printSnippet(a)
+		printSnippet(os.Stderr, a, hosted)
 	}
-	printCommitGuidance(wrote, directives)
+	printCommitGuidance(wrote, directives, hosted != nil)
 	return nil
 }
 
-func mergeMCPJSON(absPath, key string) (bool, error) {
+func mergeMCPJSON(absPath, key string, entries map[string]any, hosted bool) (bool, error) {
 	existing, err := os.ReadFile(absPath)
 	if err != nil && !os.IsNotExist(err) {
 		return false, err
@@ -212,7 +251,9 @@ func mergeMCPJSON(absPath, key string) (bool, error) {
 	if servers == nil {
 		servers = map[string]any{}
 	}
-	servers[mcpServerName] = mcpServerEntry()
+	for name, entry := range entries {
+		servers[name] = entry
+	}
 	root[key] = servers
 
 	out, err := json.MarshalIndent(root, "", "  ")
@@ -227,7 +268,21 @@ func mergeMCPJSON(absPath, key string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
 		return false, err
 	}
-	return true, os.WriteFile(absPath, out, 0o644)
+	perm := os.FileMode(0o644)
+	if hosted {
+		perm = 0o600
+	}
+	if err := os.WriteFile(absPath, out, perm); err != nil {
+		return false, err
+	}
+	// WriteFile's perm applies only on create; chmod so an existing config
+	// does not hold the auth header world-readable.
+	if hosted {
+		if err := os.Chmod(absPath, perm); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func writeDirective(cwd string) ([]string, error) {
@@ -286,23 +341,43 @@ func upsertDirective(path string) (bool, error) {
 	return true, os.WriteFile(path, []byte(next), 0o644)
 }
 
-func printSnippet(a agentDef) {
-	fmt.Fprintf(os.Stderr, "\n%s uses %s — add this entry yourself:\n", a.label, a.configPath)
+func printSnippet(w io.Writer, a agentDef, hosted *hindsightTarget) {
+	fmt.Fprintf(w, "\n%s uses %s — add this entry yourself:\n", a.label, a.configPath)
 	switch a.name {
 	case "codex":
-		fmt.Fprintln(os.Stderr, "  [mcp_servers.dryrun]")
-		fmt.Fprintln(os.Stderr, "  command = \"npx\"")
-		fmt.Fprintf(os.Stderr, "  args = [\"-y\", %q, \"mcp-serve\"]\n", npmPackage)
+		fmt.Fprintln(w, "  [mcp_servers.dryrun]")
+		fmt.Fprintln(w, "  command = \"npx\"")
+		fmt.Fprintf(w, "  args = [\"-y\", %q, \"mcp-serve\"]\n", npmPackage)
+		if hosted != nil {
+			// Codex sources the token itself, so no header is formatted here
+			fmt.Fprintf(w, "\n  [mcp_servers.%s]\n", hindsightServerName)
+			fmt.Fprintf(w, "  url = %q\n", hosted.URL)
+			fmt.Fprintf(w, "  bearer_token_env_var = %q\n", hosted.TokenEnv)
+		}
 	default:
-		fmt.Fprintln(os.Stderr, "  {")
-		fmt.Fprintf(os.Stderr, "    %q: {\n", a.jsonKey)
-		fmt.Fprintf(os.Stderr, "      \"dryrun\": { \"command\": \"npx\", \"args\": [\"-y\", %q, \"mcp-serve\"] }\n", npmPackage)
-		fmt.Fprintln(os.Stderr, "    }")
-		fmt.Fprintln(os.Stderr, "  }")
+		fmt.Fprintln(w, "  {")
+		fmt.Fprintf(w, "    %q: {\n", a.jsonKey)
+		fmt.Fprintf(w, "      \"dryrun\": { \"command\": \"npx\", \"args\": [\"-y\", %q, \"mcp-serve\"] }", npmPackage)
+		if hosted != nil {
+			// no HTML escaping: Marshal would mangle the placeholder's < >
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(false)
+			if err := enc.Encode(hosted.entryFor(a)); err == nil {
+				fmt.Fprintf(w, ",\n      %q: %s", hindsightServerName, strings.TrimSpace(buf.String()))
+			}
+		}
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "    }")
+		fmt.Fprintln(w, "  }")
+	}
+	if hosted != nil && a.tokenRef == tokenNoExpansion {
+		fmt.Fprintf(w, "  %s expands no variables, so paste the value of %s in place of the placeholder — and keep that file out of version control.\n",
+			a.label, hosted.TokenEnv)
 	}
 }
 
-func printCommitGuidance(wrote, directives []string) {
+func printCommitGuidance(wrote, directives []string, hosted bool) {
 	if len(wrote) == 0 && len(directives) == 0 {
 		return
 	}
@@ -310,5 +385,9 @@ func printCommitGuidance(wrote, directives []string) {
 	files = append(files, directives...)
 	fmt.Fprintf(os.Stderr, "\nCommit so teammates' agents pick this up automatically:\n  git add %s\n",
 		strings.Join(files, " "))
+	// safe only while the header is a ${VAR} reference, not an inlined token
+	if hosted {
+		fmt.Fprintln(os.Stderr, "  (safe as written: the auth header is an environment-variable reference. If you inlined the token instead, do not commit that file — and note the next run replaces it with the reference.)")
+	}
 	fmt.Fprintln(os.Stderr, "Share the schema (.dryrun/) per your team's workflow: commit it, or use `dryrun snapshot push`/`pull`.")
 }
