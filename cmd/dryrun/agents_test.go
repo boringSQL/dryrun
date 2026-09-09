@@ -121,7 +121,7 @@ func TestUpsertDirective_CreatesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "AGENTS.md")
 
-	changed, err := upsertDirective(path)
+	changed, err := upsertDirective(path, false)
 	if err != nil || !changed {
 		t.Fatalf("upsertDirective: changed=%v err=%v", changed, err)
 	}
@@ -141,7 +141,7 @@ func TestUpsertDirective_AppendsToExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, err := upsertDirective(path)
+	changed, err := upsertDirective(path, false)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}
@@ -161,10 +161,10 @@ func TestUpsertDirective_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "AGENTS.md")
 
-	if _, err := upsertDirective(path); err != nil {
+	if _, err := upsertDirective(path, false); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := upsertDirective(path)
+	changed, err := upsertDirective(path, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestUpsertDirective_ReplacesStaleBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := upsertDirective(path); err != nil {
+	if _, err := upsertDirective(path, false); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(path)

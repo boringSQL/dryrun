@@ -21,15 +21,25 @@ const (
 	directiveEnd   = "<!-- dryrun:end -->"
 )
 
-var directiveBody = strings.Join([]string{
-	directiveStart,
-	"## Database schema",
-	"",
-	"This repo uses Postgres; the schema is captured in `.dryrun/`. Do not guess",
-	"columns, indexes, or types — call the `dryrun` MCP server to inspect the",
-	"schema, validate queries, and check migrations before writing SQL.",
-	directiveEnd,
-}, "\n")
+func directiveBody(hosted bool) string {
+	lines := []string{
+		directiveStart,
+		"## Database schema",
+		"",
+		"This repo uses Postgres; the schema is captured in `.dryrun/`. Do not guess",
+		"columns, indexes, or types — call the `dryrun` MCP server to inspect the",
+		"schema, validate queries, and check migrations before writing SQL.",
+	}
+	// naming only the first server steers agents away from the one just added
+	if hosted {
+		lines = append(lines,
+			"",
+			"The `hindsight` server answers the same questions from the history of every",
+			"node's pushes, and answers ones this repo's snapshot cannot: start with",
+			"`worklist` for what to fix first.")
+	}
+	return strings.Join(append(lines, directiveEnd), "\n")
+}
 
 func mcpServerEntry() map[string]any {
 	return map[string]any{
@@ -216,7 +226,16 @@ func writeAgentConfigs(cwd string, selected []agentDef, hosted *hindsightTarget)
 		}
 	}
 
-	directives, err := writeDirective(cwd)
+	// repo state, not this invocation: a plain `dryrun setup` in a repo that
+	// already registered the endpoint must not rewrite the directive back to
+	// one server while the agent config still holds both
+	peer := hosted != nil
+	if !peer {
+		if _, cfg, err := loadProjectConfig(); err == nil {
+			peer = hasHTTPRemote(cfg)
+		}
+	}
+	directives, err := writeDirective(cwd, peer)
 	if err != nil {
 		return err
 	}
@@ -285,11 +304,11 @@ func mergeMCPJSON(absPath, key string, entries map[string]any, hosted bool) (boo
 	return true, nil
 }
 
-func writeDirective(cwd string) ([]string, error) {
+func writeDirective(cwd string, hosted bool) ([]string, error) {
 	var written []string
 
 	agents := filepath.Join(cwd, "AGENTS.md")
-	changed, err := upsertDirective(agents)
+	changed, err := upsertDirective(agents, hosted)
 	if err != nil {
 		return written, err
 	}
@@ -299,7 +318,7 @@ func writeDirective(cwd string) ([]string, error) {
 
 	claude := filepath.Join(cwd, "CLAUDE.md")
 	if pathExists(claude) {
-		changed, err := upsertDirective(claude)
+		changed, err := upsertDirective(claude, hosted)
 		if err != nil {
 			return written, err
 		}
@@ -310,7 +329,7 @@ func writeDirective(cwd string) ([]string, error) {
 	return written, nil
 }
 
-func upsertDirective(path string) (bool, error) {
+func upsertDirective(path string, hosted bool) (bool, error) {
 	existing := ""
 	if b, err := os.ReadFile(path); err == nil {
 		existing = string(b)
@@ -322,9 +341,9 @@ func upsertDirective(path string) (bool, error) {
 	start := strings.Index(existing, directiveStart)
 	end := strings.Index(existing, directiveEnd)
 	if start >= 0 && end > start {
-		next = existing[:start] + directiveBody + existing[end+len(directiveEnd):]
+		next = existing[:start] + directiveBody(hosted) + existing[end+len(directiveEnd):]
 	} else if existing == "" {
-		next = directiveBody + "\n"
+		next = directiveBody(hosted) + "\n"
 	} else {
 		sep := "\n\n"
 		if strings.HasSuffix(existing, "\n\n") {
@@ -332,7 +351,7 @@ func upsertDirective(path string) (bool, error) {
 		} else if strings.HasSuffix(existing, "\n") {
 			sep = "\n"
 		}
-		next = existing + sep + directiveBody + "\n"
+		next = existing + sep + directiveBody(hosted) + "\n"
 	}
 
 	if next == existing {

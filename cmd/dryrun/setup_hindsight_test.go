@@ -396,3 +396,59 @@ func TestTheReportClaimsOnlyWhatHoldsForEveryAgent(t *testing.T) {
 		t.Errorf("want the literal scope, not a description of it:\n%s", got)
 	}
 }
+
+// setup registers a second server, and the repo directive is the only place
+// that says so: with the MCP-side note cut, this text is what tells an agent
+// `worklist` exists at all.
+func TestTheRepoDirectiveNamesBothServersAfterHindsight(t *testing.T) {
+	if strings.Contains(directiveBody(false), "hindsight") {
+		t.Error("plain setup must not name an endpoint this repo may not have")
+	}
+	hosted := directiveBody(true)
+	for _, want := range []string{"hindsight", "worklist"} {
+		if !strings.Contains(hosted, want) {
+			t.Errorf("the directive does not name %q:\n%s", want, hosted)
+		}
+	}
+
+	target, err := resolveHindsight(httpRemoteConfig(""), testKey, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := writeAgentConfigs(dir, []agentDef{claudeAgent}, &target); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(blob), "worklist") {
+		t.Errorf("the written directive does not mention the server just registered:\n%s", blob)
+	}
+}
+
+// The regression this gate exists for: `setup --hindsight` writes the
+// two-server directive, then a later plain `dryrun setup` (adding an agent,
+// re-running after a rename) rewrote it to name one server while .mcp.json
+// still held both — mergeMCPJSON is additive, upsertDirective replaces.
+func TestAPlainSetupKeepsTheDirectiveInARepoThatPushes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "dryrun.toml"), []byte(
+		"[project]\nid = \"acme\"\n\n[[remote]]\nname = \"hindsight\"\ntype = \"http\"\nref = \"https://h.example.com\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	// no --hindsight on this run, but the repo is configured to push
+	if err := writeAgentConfigs(dir, []agentDef{claudeAgent}, nil); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(blob), "worklist") {
+		t.Errorf("a plain setup stripped the two-server directive:\n%s", blob)
+	}
+}
