@@ -64,10 +64,7 @@ type (
 		ActivityOldestNode string `json:"activity_oldest_node,omitempty"`
 		// served hash has no stats yet: the timestamps above are a prior hash's
 		StatsPendingReschema bool `json:"stats_pending_reschema,omitempty"`
-		// how much local history stands behind the answer, per stream. Absent
-		// when there is no readable store, when it holds another database, and
-		// when it holds nothing for this one -- those are one answer, and a
-		// store that would not ANSWER is the separate one below.
+		// semantics live in historyFieldDoc, which is what the wire carries -- do not restate them here
 		History []historySpan `json:"history,omitempty"`
 		// the store is there and could not be read -- absence already means
 		// "no local history", so a failed read needs its own word
@@ -130,6 +127,7 @@ func (s *Server) injectMeta(val map[string]any, hint string, next []NextCall) {
 	for k, v := range s.captureTimes().fields() {
 		meta[k] = v
 	}
+	// same precedence as newMeta, so the two paths cannot disagree
 	if spans, ok := s.historySpans(); len(spans) > 0 {
 		meta["history"] = spans
 	} else if !ok {

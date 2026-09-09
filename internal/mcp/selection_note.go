@@ -28,5 +28,9 @@ func historyMetaNote(hasHistory bool) string {
 	if !hasHistory {
 		return ""
 	}
-	return " _meta.history reports, per stream, the rows the local store holds, their span, and last_attempt: when this host last captured that stream successfully. Schema, planner and query rows dedup on content — activity rows do not — so on those three newest is when the content last CHANGED rather than when it was last captured, and an absent last_attempt is unknown rather than never. The field is absent when there is no readable store, when it holds another database, or when it holds nothing for this one; _meta.history_unavailable: true is the separate case of a store that is there and would not answer."
+	return " " + historyFieldDoc
 }
+
+// Shared by the instructions and output schemas so they cannot diverge.
+// JSON-embeddable: no quotes, no newlines.
+const historyFieldDoc = "_meta.history, when present, is what the local store holds per stream: rows stored (schema, planner and query dedup on content and activity does not, so on those three newest dates the newest DISTINCT content rather than the last capture), their oldest and newest, last_attempt for when this host last captured that stream SUCCESSFULLY, nodes where rows are node-scoped, and corrupt_rows for rows whose timestamp will not parse and are excluded from the span. It is absent when there is nothing to report for this database, INCLUDING when the store holds a different one, and when this build cannot open the store at all; history_unavailable: true marks the narrower case of a store this build opened and could not read."

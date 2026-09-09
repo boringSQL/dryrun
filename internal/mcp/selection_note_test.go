@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -69,6 +70,48 @@ func TestInstructionsCarryTheSelectionNoteWithHistory(t *testing.T) {
 	for _, want := range []string{"snapshot_diff", "list_top_queries", "_meta.history", "last_attempt"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("instructions do not name %s:\n%s", want, got)
+		}
+	}
+}
+
+// The instructions and the tool output schemas describe one field, and they
+// diverged inside a single change set: the schema said rows dedup on content
+// with no exception while the note carried it. One const, used by both, is what
+// keeps a reader who meets only one of them from a different answer.
+func TestBothTextsStateTheFieldOnce(t *testing.T) {
+	if !strings.Contains(metaProperty, historyFieldDoc) {
+		t.Error("the output schema does not carry the shared statement of _meta.history")
+	}
+	if !strings.Contains(historyMetaNote(true), historyFieldDoc) {
+		t.Error("the instructions do not carry the shared statement of _meta.history")
+	}
+	// the clauses a reader gets wrong without them. Self-referential by
+	// construction: it catches a dropped clause and a re-inlined copy, not the
+	// const drifting from inventory.go, which is what the store's own tests pin.
+	for _, want := range []string{"activity does not", "SUCCESSFULLY", "corrupt_rows", "history_unavailable"} {
+		if !strings.Contains(historyFieldDoc, want) {
+			t.Errorf("the shared statement drops %q", want)
+		}
+	}
+}
+
+// The const is embedded in five raw-JSON schemas by string concatenation, so a
+// quote, newline or control character in it breaks them — and the character
+// check alone would not notice metaProperty falling out of a schema.
+func TestEverySchemaEmbeddingTheFieldDocStillParses(t *testing.T) {
+	schemas := map[string]json.RawMessage{
+		"describe_table":  describeTableOutputSchema,
+		"detect":          detectOutputSchema,
+		"lint_schema":     lintSchemaOutputSchema,
+		"check_migration": checkMigrationOutputSchema,
+		"snapshot_diff":   snapshotDiffOutputSchema,
+	}
+	for name, raw := range schemas {
+		if !json.Valid(raw) {
+			t.Errorf("%s: schema is not valid JSON after embedding", name)
+		}
+		if !strings.Contains(string(raw), historyFieldDoc) {
+			t.Errorf("%s: no longer carries the shared statement", name)
 		}
 	}
 }

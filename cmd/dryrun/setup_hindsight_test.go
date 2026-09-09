@@ -372,3 +372,27 @@ func TestPlaintextToAnotherHostIsFlagged(t *testing.T) {
 		}
 	}
 }
+
+// The report runs before an agent is chosen and Zed gets a literal placeholder,
+// so it must not claim a reference was written. It said so once.
+func TestTheReportClaimsOnlyWhatHoldsForEveryAgent(t *testing.T) {
+	target, err := resolveHindsight(httpRemoteConfig(""), testKey, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	target.report(&buf)
+	got := buf.String()
+	if strings.Contains(got, "is written as a reference") {
+		t.Errorf("the Zed path writes a placeholder, not a reference:\n%s", got)
+	}
+	if !strings.Contains(got, "No token value is written") {
+		t.Errorf("want the claim that holds on every path:\n%s", got)
+	}
+	// Pins the WORDING only: mcp:read is the cloud's literal (token.ScopeMCPRead,
+	// checked by token.Grants) and nothing in this repo can see it, so a rename
+	// there is caught by a human reading both, not by this.
+	if !strings.Contains(got, "mcp:read") {
+		t.Errorf("want the literal scope, not a description of it:\n%s", got)
+	}
+}

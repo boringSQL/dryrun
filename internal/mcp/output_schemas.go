@@ -128,7 +128,7 @@ type (
 var (
 	metaProperty = `"_meta": {
 		"type": "object",
-		"description": "pg_version/database/mode envelope, plus schema_captured_at, planner_captured_at and activity_captured_at (oldest node, named in activity_oldest_node) where the answer comes from a snapshot; stats_pending_reschema: true marks a re-schema window (the timestamps above are the prior hash's, pending re-capture); history lists what local history holds per stream (rows stored, the oldest/newest of them, last_attempt for when this host last captured, and node labels where the stream is node-scoped); rows are deduped on content, so newest is when the content last changed rather than when it was last captured, and the whole field is absent when there is no local store to read -- history_unavailable: true is the other absence, a store that is there and could not be read; may carry hint (prose) and next (pre-validated follow-up calls)."
+		"description": "pg_version/database/mode envelope, plus schema_captured_at, planner_captured_at and activity_captured_at (oldest node, named in activity_oldest_node) where the answer comes from a snapshot; stats_pending_reschema: true marks a re-schema window (the timestamps above are the prior hash's, pending re-capture); ` + historyFieldDoc + ` May carry hint (prose) and next (pre-validated follow-up calls)."
 	}`
 
 	describeTableOutputSchema = json.RawMessage(`{

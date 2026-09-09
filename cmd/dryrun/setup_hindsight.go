@@ -121,11 +121,12 @@ func (t hindsightTarget) report(w io.Writer) {
 	if t.Profile != "" {
 		fmt.Fprintf(w, "  from profile %q — check this is the database you meant.\n", t.Profile)
 	}
-	fmt.Fprintf(w, "Authorization is written as a reference to %s, not the token itself.\n", t.TokenEnv)
+	// holds on every agent path: Zed gets a placeholder, not a reference
+	fmt.Fprintf(w, "No token value is written: each agent gets a reference to %s that its client expands, or a placeholder to fill in where the client expands none.\n", t.TokenEnv)
 	if t.TokenUnset {
-		fmt.Fprintf(w, "  %s is not set in this shell; export it before the agent connects.\n", t.TokenEnv)
+		fmt.Fprintf(w, "  %s is not set in this shell; agents that read it need it exported.\n", t.TokenEnv)
 	}
-	fmt.Fprintln(w, "  The token must reach the MCP endpoint: a workspace-wide CLI token does, a push-scoped one does not.")
+	fmt.Fprintln(w, "  The token must carry mcp:read, or be a workspace token with no scopes at all — a token scoped to pushing alone would not reach this endpoint.")
 	if t.Insecure {
 		fmt.Fprintln(w, "  WARNING: this remote is plain http, so the token crosses the network in the clear.")
 	}

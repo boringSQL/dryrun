@@ -45,9 +45,12 @@ func (h *historyInventory) invalidate() {
 // append to it.
 func (s *Server) historySpans() ([]historySpan, bool) {
 	hist, key := s.historyKey()
-	// a history.db this build cannot read is not a source to count from
-	if hist == nil || s.historyNote() != nil {
+	if hist == nil {
 		return nil, true
+	}
+	// history_unavailable, not absence: the store is there, this build just cannot read it
+	if s.historyNote() != nil {
+		return nil, false
 	}
 
 	// Read OUTSIDE the lock. getSchema runs the freshness check, which takes

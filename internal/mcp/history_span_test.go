@@ -2,12 +2,16 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
@@ -318,5 +322,102 @@ func TestTheInventoryCacheTakesNoLockWhileHoldingItsOwn(t *testing.T) {
 	case <-done:
 	case <-time.After(20 * time.Second):
 		t.Fatal("deadlocked: the inventory cache is taking another lock while holding its own")
+	}
+}
+
+// A store this build cannot read is present and refusing, which is what
+// history_unavailable exists to say. Plain absence would report the stronger
+// claim — that the deployment has no local history — on the one server that
+// does have it, and the selection note is telling the agent to look there.
+func TestACompatNewerStoreReportsUnavailableRatherThanAbsent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history.db")
+	hist, err := history.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	put(t, hist, datedSnap(t, at, "one"))
+	srv := serverWithHistory(t, datedSnap(t, at, "one"), hist)
+	if _, ok := srv.historySpans(); !ok {
+		t.Fatal("the fixture store is readable; this test would prove nothing")
+	}
+	hist.Close()
+
+	// what a newer dryrun leaves behind
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 9999"); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	newer, err := history.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { newer.Close() })
+	if newer.Compat() != history.CompatNewer {
+		t.Fatalf("want CompatNewer, got %v", newer.Compat())
+	}
+	srv.SetHistory(newer)
+	srv.inventory.invalidate()
+
+	spans, ok := srv.historySpans()
+	if len(spans) != 0 {
+		t.Errorf("an unreadable store must report no counts, got %+v", spans)
+	}
+	if ok {
+		t.Error("want history_unavailable; plain absence says there is no local history at all")
+	}
+}
+
+// _meta is built two ways -- by hand for the map payloads, from toolMeta for
+// the typed ones -- so the unreadable-store answer is checked on both wires
+// rather than only through historySpans.
+func TestUnavailableReachesTheWire(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history.db")
+	hist, err := history.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	put(t, hist, datedSnap(t, at, "one"))
+	srv := serverWithHistory(t, datedSnap(t, at, "one"), hist)
+	c := serveOffline(t, srv)
+	hist.Close()
+
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 9999"); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	newer, err := history.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { newer.Close() })
+	srv.SetHistory(newer)
+	srv.inventory.invalidate()
+
+	for name, meta := range map[string]map[string]any{
+		// injectMeta
+		"describe_table": metaOf(t, callTool(t, c, "describe_table", map[string]any{"table": "public.one"})),
+		// newMeta, through the generated output schema
+		"find_objects": structuredMetaOf(t, c, "find_objects", nil),
+	} {
+		if meta["history_unavailable"] != true {
+			t.Errorf("%s: want history_unavailable on the wire, got %v", name, meta)
+		}
+		if _, ok := meta["history"]; ok {
+			t.Errorf("%s: an unreadable store must report no counts, got %v", name, meta["history"])
+		}
 	}
 }

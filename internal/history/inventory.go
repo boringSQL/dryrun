@@ -19,9 +19,9 @@ type (
 	// dedup and counts every row, a re-imported one included.
 	//
 	// Newest is therefore when the content last CHANGED, and LastAttempt is
-	// when this host last tried, whether or not a row came of it. The gap
-	// between them is a quiet stream, not a stale one — the distinction
-	// capture_attempts exists for.
+	// when this host last captured it successfully. The gap is a quiet stream,
+	// not a stale one — pulled rows carry no attempt, so Newest can also lead
+	// LastAttempt.
 	StreamSpan struct {
 		Stream string `json:"stream"`
 		Rows   int    `json:"rows"`
