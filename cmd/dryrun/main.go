@@ -345,10 +345,7 @@ take is that command with the label "primary".`,
 			}
 			defer conn.Close()
 
-			cap, err := newPgxCapturer(cmd.Context(), conn.Pool())
-			if err != nil {
-				return err
-			}
+			cap := newPgxCapturer(cmd.Context(), conn.Pool())
 			defer cap.Close(cmd.Context())
 
 			store, err := openHistoryStore(historyDB)
@@ -397,8 +394,7 @@ take is that command with the label "primary".`,
 			return nil
 		},
 	}
-	// take writes under the hardcoded "primary" label; capture requires --label,
-	// and any other value starts a second series for the same physical node
+	// keep the "primary" label so take's replacement continues the same series
 	markCaptureSuperseded(takeCmd, "dryrun snapshot capture --label "+takeLabel+" --streams schema,planner,activity,query")
 	addHistFlag(takeCmd)
 	takeCmd.Flags().StringVar(&flagMasksFile, "masks-file", "", "path to data-masking-policy.yml")

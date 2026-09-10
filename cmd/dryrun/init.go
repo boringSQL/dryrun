@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,56 +44,91 @@ type initWriter interface {
 	RecentNodeFingerprints(ctx context.Context, key history.SnapshotKey, nodeLabel string) ([]history.NodeFingerprint, error)
 }
 
-// one REPEATABLE READ, READ ONLY tx (as pg_dump uses) for the whole capture:
-// consistent snapshot, no writes, one connection
+// REPEATABLE READ, READ ONLY tx for capture reads; released before store I/O to avoid idle timeouts
 type pgxCapturer struct {
+	pool     *pgxpool.Pool
 	tx       pgx.Tx
 	systemID string
+	lastRead time.Time
 }
 
-func newPgxCapturer(ctx context.Context, pool *pgxpool.Pool) (pgxCapturer, error) {
+func newPgxCapturer(ctx context.Context, pool *pgxpool.Pool) *pgxCapturer {
 	// probe on the pool before the tx: a permission error here must not poison capture
 	systemID, err := schema.FetchSystemIdentifier(ctx, pool)
 	if err != nil {
 		slog.Debug("system_identifier unavailable; capturing without cluster id", "error", err)
 		systemID = ""
 	}
+	return &pgxCapturer{pool: pool, systemID: systemID}
+}
 
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{
+// opens capture snapshot on first use or after release
+func (c *pgxCapturer) snapshotTx(ctx context.Context) (pgx.Tx, error) {
+	if c.tx != nil {
+		c.warnIfIdled()
+		return c.tx, nil
+	}
+	slog.Debug("opening capture snapshot")
+	tx, err := c.pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
 		AccessMode: pgx.ReadOnly,
 	})
 	if err != nil {
-		return pgxCapturer{}, fmt.Errorf("begin read-only transaction: %w", err)
+		return nil, fmt.Errorf("begin read-only transaction: %w", err)
 	}
-	return pgxCapturer{tx: tx, systemID: systemID}, nil
+	c.tx = tx
+	return tx, nil
 }
 
-// read-only, so there is nothing to commit; rollback releases the snapshot
-func (c pgxCapturer) Close(ctx context.Context) {
-	if err := c.tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+// warn if idle time between reads approaches idle_in_transaction_session_timeout
+func (c *pgxCapturer) warnIfIdled() {
+	if c.lastRead.IsZero() || flagIdleTxTimeout <= 0 {
+		return
+	}
+	if idle := time.Since(c.lastRead); idle > flagIdleTxTimeout/2 {
+		slog.Warn("capture transaction idle between reads",
+			"idle", idle, "idle_tx_timeout", flagIdleTxTimeout)
+	}
+}
+
+// releases capture transaction; idempotent
+func (c *pgxCapturer) ReleaseTx(ctx context.Context) {
+	tx := c.tx
+	c.tx, c.lastRead = nil, time.Time{}
+	if tx == nil {
+		return
+	}
+	if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
 		slog.Warn("rollback capture transaction", "error", err)
 	}
 }
 
-func (c pgxCapturer) IsStandby(ctx context.Context) (bool, error) {
-	return schema.FetchIsStandby(ctx, c.tx)
+func (c *pgxCapturer) Close(ctx context.Context) { c.ReleaseTx(ctx) }
+
+// probes run on pool to avoid holding an idle tx across gating
+func (c *pgxCapturer) IsStandby(ctx context.Context) (bool, error) {
+	return schema.FetchIsStandby(ctx, c.pool)
 }
 
-func (c pgxCapturer) CurrentDatabase(ctx context.Context) (string, error) {
-	return schema.FetchCurrentDatabase(ctx, c.tx)
+func (c *pgxCapturer) CurrentDatabase(ctx context.Context) (string, error) {
+	return schema.FetchCurrentDatabase(ctx, c.pool)
 }
 
-func (c pgxCapturer) Identity(ctx context.Context) (string, string, error) {
-	db, err := schema.FetchCurrentDatabase(ctx, c.tx)
+func (c *pgxCapturer) Identity(ctx context.Context) (string, string, error) {
+	db, err := schema.FetchCurrentDatabase(ctx, c.pool)
 	if err != nil {
 		return "", "", fmt.Errorf("query current database: %w", err)
 	}
 	return c.systemID, db, nil
 }
 
-func (c pgxCapturer) Introspect(ctx context.Context) (*schema.SchemaSnapshot, error) {
-	snap, err := schema.IntrospectSchema(ctx, c.tx)
+func (c *pgxCapturer) Introspect(ctx context.Context) (*schema.SchemaSnapshot, error) {
+	tx, err := c.snapshotTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { c.lastRead = time.Now() }()
+	snap, err := schema.IntrospectSchema(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
@@ -100,22 +136,49 @@ func (c pgxCapturer) Introspect(ctx context.Context) (*schema.SchemaSnapshot, er
 	return snap, nil
 }
 
-func (c pgxCapturer) CapturePlanner(ctx context.Context, schemaRefHash string) (*schema.PlannerStatsSnapshot, error) {
-	return schema.CapturePlannerStats(ctx, c.tx, schemaRefHash)
+func (c *pgxCapturer) CapturePlanner(ctx context.Context, schemaRefHash string) (*schema.PlannerStatsSnapshot, error) {
+	tx, err := c.snapshotTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { c.lastRead = time.Now() }()
+	return schema.CapturePlannerStats(ctx, tx, schemaRefHash)
 }
 
-func (c pgxCapturer) CaptureActivity(ctx context.Context, schemaRefHash, source string) (*schema.ActivityStatsSnapshot, error) {
-	return schema.CaptureActivityStats(ctx, c.tx, schemaRefHash, source)
+func (c *pgxCapturer) CaptureActivity(ctx context.Context, schemaRefHash, source string) (*schema.ActivityStatsSnapshot, error) {
+	tx, err := c.snapshotTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { c.lastRead = time.Now() }()
+	return schema.CaptureActivityStats(ctx, tx, schemaRefHash, source)
 }
 
-func (c pgxCapturer) CaptureQueryStats(ctx context.Context, schemaRefHash, source string, rowCap int) (*schema.QueryStatsSnapshot, error) {
-	return schema.CaptureQueryStats(ctx, c.tx, schemaRefHash, source, rowCap)
+func (c *pgxCapturer) CaptureQueryStats(ctx context.Context, schemaRefHash, source string, rowCap int) (*schema.QueryStatsSnapshot, error) {
+	tx, err := c.snapshotTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { c.lastRead = time.Now() }()
+	return schema.CaptureQueryStats(ctx, tx, schemaRefHash, source, rowCap)
+}
+
+// optional interface for capturers holding an open transaction
+type txReleaser interface {
+	ReleaseTx(ctx context.Context)
+}
+
+func releaseCaptureTx(ctx context.Context, cap initCapturer) {
+	if r, ok := cap.(txReleaser); ok {
+		r.ReleaseTx(ctx)
+	}
 }
 
 // best-effort, call last: a real capture error aborts the shared REPEATABLE READ tx,
 // so nothing after this call can use cap. Only ctx cancellation/deadline propagates.
 func captureQueryStatsBestEffort(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, schemaRefHash, source string, rowCap int) error {
 	qs, err := cap.CaptureQueryStats(ctx, schemaRefHash, source, rowCap)
+	releaseCaptureTx(ctx, cap)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
@@ -186,10 +249,7 @@ func initCmd() *cobra.Command {
 			}
 			defer conn.Close()
 
-			cap, err := newPgxCapturer(ctx, conn.Pool())
-			if err != nil {
-				return err
-			}
+			cap := newPgxCapturer(ctx, conn.Pool())
 			defer cap.Close(ctx)
 
 			// bake the real db name so the first capture's key matches later ones
@@ -305,6 +365,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 			schemaRef = snap.ContentHash
 		}
 		activity, err := cap.CaptureActivity(ctx, schemaRef, source)
+		releaseCaptureTx(ctx, cap)
 		if err != nil {
 			return fmt.Errorf("capture activity stats: %w", err)
 		}
@@ -389,22 +450,34 @@ func runSnapshotTake(ctx context.Context, cap initCapturer, store captureStore, 
 	return docs.Schema, docs.Planner, docs.Activity, masked, nil
 }
 
-// schema + planner + activity in one shot; caller is responsible for the standby gate
+// schema + planner + activity in one shot; reads all snapshots before store writes to avoid idle tx timeout
 func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string, policy *masking.Policy, force bool) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
+	// prove identity before introspecting so a refusal costs nothing
+	systemID, database, err := cap.Identity(ctx)
+	if err != nil {
+		return nil, nil, nil, 0, err
+	}
+	if err := guardCaptureIdentity(ctx, store, key, systemID, database, force); err != nil {
+		return nil, nil, nil, 0, err
+	}
+
 	snap, err := cap.Introspect(ctx)
 	if err != nil {
 		return nil, nil, nil, 0, err
 	}
-	if err := guardCaptureIdentity(ctx, store, key, snap.SystemIdentifier, snap.Database, force); err != nil {
-		return snap, nil, nil, 0, err
-	}
-	if _, err := store.PutSchema(ctx, key, snap); err != nil {
-		slog.Warn("could not save snapshot", "error", err)
-	}
-
 	planner, err := cap.CapturePlanner(ctx, snap.ContentHash)
 	if err != nil {
+		releaseCaptureTx(ctx, cap)
 		return snap, nil, nil, 0, fmt.Errorf("capture planner stats: %w", err)
+	}
+	activity, err := cap.CaptureActivity(ctx, snap.ContentHash, source)
+	releaseCaptureTx(ctx, cap)
+	if err != nil {
+		return snap, planner, nil, 0, fmt.Errorf("capture activity stats: %w", err)
+	}
+
+	if _, err := store.PutSchema(ctx, key, snap); err != nil {
+		slog.Warn("could not save snapshot", "error", err)
 	}
 	bloat.Annotate(planner, snap)
 	masked := datamask.MaskPlanner(policy, planner)
@@ -415,11 +488,6 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 	}
 	if _, err := store.PutPlanner(ctx, key, planner); err != nil {
 		slog.Warn("could not save planner stats", "error", err)
-	}
-
-	activity, err := cap.CaptureActivity(ctx, snap.ContentHash, source)
-	if err != nil {
-		return snap, planner, nil, masked, fmt.Errorf("capture activity stats: %w", err)
 	}
 	warnNodeIdentityDrift(ctx, store, key, activity.Node.Source, activity.Node, false)
 	if _, err := store.PutActivity(ctx, key, activity); err != nil {

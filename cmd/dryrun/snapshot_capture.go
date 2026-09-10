@@ -219,6 +219,8 @@ type captureRunOptions struct {
 	AllowRotation   bool
 	AllowRoleChange bool
 	Due             bool
+	// base schema for planner annotation, pre-read before opening capture tx
+	AnnotateBase *schema.SchemaSnapshot
 	// collects documents for `snapshot take`'s per-stream stdout summary
 	docs *captureDocs
 }
@@ -236,17 +238,7 @@ type captureStore interface {
 	MarkCaptureAttempt(ctx context.Context, key history.SnapshotKey, label, stream string, at time.Time) error
 }
 
-// `capture` covers every per-stream command and adds config-driven nodes,
-// --all and --due; they stay one release for the cron jobs already using them.
-// The grace period only starts once the notice ships, so it goes out with the
-// release that introduces `capture` publicly.
-//
-// cobra's own Deprecated field is not used: it makes IsAvailableCommand false,
-// which would hide these from `dryrun snapshot --help` for the whole grace
-// period -- the opposite of announcing them.
-//
-// replacement must be a runnable invocation with the same stream set, since
-// operators paste it straight into cron.
+// not cobra's Deprecated field: that hides the command from --help for the whole grace period
 func markCaptureSuperseded(cmd *cobra.Command, replacement string) {
 	if strings.HasSuffix(cmd.Short, deprecatedSuffix) {
 		return
@@ -258,8 +250,7 @@ func markCaptureSuperseded(cmd *cobra.Command, replacement string) {
 	prevE, prev := cmd.PreRunE, cmd.PreRun
 	cmd.PreRunE = func(c *cobra.Command, args []string) error {
 		fmt.Fprintf(c.ErrOrStderr(), "notice: `%s` is deprecated; use `%s`\n", c.CommandPath(), replacement)
-		// cobra runs PreRunE *or* PreRun, so chaining only the former would
-		// silently drop a non-E hook
+		// cobra runs PreRunE *or* PreRun; chain both
 		if prevE != nil {
 			return prevE(c, args)
 		}
@@ -389,10 +380,7 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 	}
 	defer conn.Close()
 
-	cap, err := newPgxCapturer(ctx, conn.Pool())
-	if err != nil {
-		return err
-	}
+	cap := newPgxCapturer(ctx, conn.Pool())
 	defer cap.Close(ctx)
 
 	standby, err := cap.IsStandby(ctx)
@@ -450,6 +438,8 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 	}
 
 	t.DetectedRole = role
+	// pass prior schema to avoid store reads while capture tx is open
+	opts.AnnotateBase = prior
 	done, err := captureStreams(ctx, cap, store, key, t, wanted, schemaRef, rowCap, opts)
 	// Report even on partial failure: captured streams already advanced their
 	// due clock, so silence would read as "nothing happened".
@@ -466,51 +456,228 @@ func captureOneNode(ctx context.Context, store *history.Store, key history.Snaps
 }
 
 // test seam: the schema branch cannot be driven until it stops refusing
-var captureStreamFn = captureStream
+var readStreamFn = readStream
 
-// Runs each wanted stream schema-first and marks it attempted. A real error
-// is not recorded, so a broken node retries on the next tick.
+type streamRead struct {
+	stream      string
+	unavailable bool
+	schema      *schema.SchemaSnapshot
+	planner     *schema.PlannerStatsSnapshot
+	activity    *schema.ActivityStatsSnapshot
+	query       *schema.QueryStatsSnapshot
+}
+
+func (r streamRead) hasDocument() bool {
+	return r.schema != nil || r.planner != nil || r.activity != nil || r.query != nil
+}
+
+// Runs each wanted stream schema-first. Reads all streams before persisting to avoid idle tx timeouts.
 func captureStreams(ctx context.Context, cap initCapturer, store captureStore, key history.SnapshotKey, t captureTarget, wanted []string, schemaRef string, rowCap int, opts captureRunOptions) ([]string, error) {
-	var done []string
 	ordered := schemaFirst(wanted)
+	reads, base, readErr := readStreams(ctx, cap, store, key, t, ordered, schemaRef, rowCap, opts)
+	releaseCaptureTx(ctx, cap)
+	// persist successful reads even on partial failure
+	done, err := persistStreams(ctx, store, key, t, reads, base, opts)
+	if err != nil {
+		return done, err
+	}
+	return done, readErr
+}
+
+func readStreams(ctx context.Context, cap initCapturer, store captureStore, key history.SnapshotKey, t captureTarget, ordered []string, schemaRef string, rowCap int, opts captureRunOptions) ([]streamRead, *schema.SchemaSnapshot, error) {
+	base, err := resolveAnnotateBase(ctx, store, key, ordered, schemaRef, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var reads []streamRead
 	for i, s := range ordered {
-		n, hash, err := captureStreamFn(ctx, cap, store, key, t, s, schemaRef, rowCap, opts)
+		// planner rows require a base schema to annotate against
+		if s == "planner" && base == nil {
+			return reads, base, fmt.Errorf("%s: planner stats need a schema snapshot to annotate against; capture the schema stream on the primary first", s)
+		}
+		r, err := readStreamFn(ctx, cap, t, s, schemaRef, rowCap, opts)
+		r.stream = s
 		switch {
 		case errors.Is(err, errStreamUnavailable):
-			done = append(done, s+"=n/a")
-		case errors.Is(err, errStreamUnchanged):
-			done = append(done, s+"=unchanged")
+			r.unavailable = true
 		case err != nil:
 			// the capture shares one transaction, so a failed read can leave
 			// it unusable for the streams after it
-			return done, fmt.Errorf("%s: %w", s, err)
-		default:
-			done = append(done, fmt.Sprintf("%s=%d", s, n))
+			return reads, base, fmt.Errorf("%s: %w", s, err)
 		}
-		// rebind stats to the hash a schema capture just wrote. Carried out
-		// of the capture, not re-read: a pulled row with a fast clock could
-		// win a `latest` read. Ahead of the marker: a deduped schema writes
-		// no row, and the marker alone would silence the node for an interval.
-		if s == "schema" && (err == nil || errors.Is(err, errStreamUnchanged)) {
-			if hash == "" {
-				return done, fmt.Errorf("schema: capture returned no content hash to bind to")
-			}
-			schemaRef = hash
+		if s == "schema" && r.schema != nil && r.schema.ContentHash == "" {
+			return reads, base, fmt.Errorf("schema: capture returned no content hash to bind to")
 		}
-		// a real error returned above, so this stream was attempted -- but a
-		// skipped project-scoped stream must not satisfy the fleet's clock
-		if !(errors.Is(err, errStreamUnavailable) && history.StreamIsProjectScoped(s)) {
-			markCaptureAttempt(ctx, store, key, t.Label, s)
-		}
+		reads = append(reads, r)
 
+		// rebind stats to the hash this run just captured
+		if s == "schema" && r.schema != nil {
+			schemaRef, base = r.schema.ContentHash, r.schema
+		}
 		// the run waived --allow-orphan on the promise of writing the hash;
 		// a standby skips, so fail rather than orphan what follows
 		if s == "schema" && schemaRef == "" && !opts.AllowOrphan && i < len(ordered)-1 {
-			return done, fmt.Errorf("schema was not captured on this node, so %s has no schema snapshot to bind to; capture schema on the primary first, or pass --allow-orphan",
+			return reads, base, fmt.Errorf("schema was not captured on this node, so %s has no schema snapshot to bind to; capture schema on the primary first, or pass --allow-orphan",
 				strings.Join(ordered[i+1:], ", "))
 		}
 	}
+	return reads, base, nil
+}
+
+// resolves the schema to annotate planner stats against before opening the capture tx
+func resolveAnnotateBase(ctx context.Context, store captureStore, key history.SnapshotKey, ordered []string, schemaRef string, opts captureRunOptions) (*schema.SchemaSnapshot, error) {
+	if !slices.Contains(ordered, "planner") {
+		return nil, nil
+	}
+	base := opts.AnnotateBase
+	if base != nil && schemaRef != "" && base.ContentHash != schemaRef {
+		base = nil // prefetched against a different ref than this run binds to
+	}
+	if base == nil {
+		// annotate against the ref the row binds to, not `latest`, or a
+		// rebound schemaRef could store it bound to one hash, annotated
+		// from another
+		ref := history.NewRefLatest()
+		if schemaRef != "" {
+			ref = history.NewRefHash(schemaRef)
+		}
+		snap, err := store.GetSchema(ctx, key, ref)
+		if err != nil && !errors.Is(err, history.ErrSnapshotNotFound) {
+			return nil, fmt.Errorf("planner: read schema snapshot to annotate against: %w", err)
+		}
+		base = snap
+	}
+	return base, nil
+}
+
+func readStream(ctx context.Context, cap initCapturer, t captureTarget, stream, schemaRef string, rowCap int, opts captureRunOptions) (streamRead, error) {
+	switch stream {
+	case "planner":
+		p, err := cap.CapturePlanner(ctx, schemaRef)
+		return streamRead{planner: p}, err
+
+	case "activity":
+		a, err := cap.CaptureActivity(ctx, schemaRef, t.Label)
+		return streamRead{activity: a}, err
+
+	case "query":
+		q, err := cap.CaptureQueryStats(ctx, schemaRef, t.Label, rowCap)
+		// a replica without the extension must not fail a fleet run every
+		// tick; every other capture path treats this as best-effort
+		if errors.Is(err, schema.ErrQueryStatsUnavailable) {
+			return streamRead{}, errStreamUnavailable
+		}
+		return streamRead{query: q}, err
+
+	case "schema":
+		// a standby here is role = "auto" on a replica or a failover since the
+		// config edit; skip like an absent pg_stat_statements
+		switch t.DetectedRole {
+		case history.NodeRoleStandby:
+			return streamRead{}, errStreamUnavailable
+		case history.NodeRolePrimary:
+		default:
+			return streamRead{}, fmt.Errorf("node role was not detected before capture")
+		}
+		snap, err := cap.Introspect(ctx)
+		return streamRead{schema: snap}, err
+	}
+	return streamRead{}, fmt.Errorf("unknown stream %q", stream)
+}
+
+func persistStreams(ctx context.Context, store captureStore, key history.SnapshotKey, t captureTarget, reads []streamRead, base *schema.SchemaSnapshot, opts captureRunOptions) ([]string, error) {
+	var done []string
+	for _, r := range reads {
+		n, err := persistStream(ctx, store, key, t, r, base, opts)
+		switch {
+		case r.unavailable:
+			done = append(done, r.stream+"=n/a")
+		case errors.Is(err, errStreamUnchanged):
+			done = append(done, r.stream+"=unchanged")
+		case err != nil:
+			return done, fmt.Errorf("%s: %w", r.stream, err)
+		default:
+			done = append(done, fmt.Sprintf("%s=%d", r.stream, n))
+		}
+		// a skipped project-scoped stream must not satisfy the fleet's clock
+		if !(r.unavailable && history.StreamIsProjectScoped(r.stream)) {
+			markCaptureAttempt(ctx, store, key, t.Label, r.stream)
+		}
+	}
 	return done, nil
+}
+
+func persistStream(ctx context.Context, store captureStore, key history.SnapshotKey, t captureTarget, r streamRead, base *schema.SchemaSnapshot, opts captureRunOptions) (int, error) {
+	if r.unavailable {
+		return 0, nil
+	}
+	if !r.hasDocument() {
+		return 0, fmt.Errorf("capture returned no document")
+	}
+	switch r.stream {
+	case "planner":
+		p := r.planner
+		// planner rows carry pg_statistic MCVs and histogram bounds, so they
+		// go through the same masking `snapshot take` applies -- push ships
+		// whatever lands in history.db
+		bloat.Annotate(p, base)
+		masked := datamask.MaskPlanner(opts.MaskPolicy, p)
+		p.Masking = &schema.MaskingInfo{
+			Applied:       opts.MaskPolicy != nil,
+			ColumnsMasked: masked,
+			JSONBStripped: true,
+		}
+		out, err := store.PutPlanner(ctx, key, p)
+		if err != nil {
+			return 0, err
+		}
+		if opts.docs != nil {
+			opts.docs.Planner = p
+		}
+		if out == history.PutDeduped {
+			return 0, errStreamUnchanged
+		}
+		return len(p.Tables), nil
+
+	case "activity":
+		a := r.activity
+		warnNodeIdentityDrift(ctx, store, key, a.Node.Source, a.Node, opts.AllowRotation || t.Pool)
+		if _, err := store.PutActivity(ctx, key, a); err != nil {
+			return 0, err
+		}
+		if opts.docs != nil {
+			opts.docs.Activity = a
+		}
+		return len(a.Tables), nil
+
+	case "query":
+		q := r.query
+		warnNodeIdentityDrift(ctx, store, key, q.Node.Source, q.Node, opts.AllowRotation || t.Pool)
+		out, err := store.PutQueryStats(ctx, key, q)
+		if err != nil {
+			return 0, err
+		}
+		if out == history.PutDeduped {
+			return 0, errStreamUnchanged
+		}
+		return len(q.Queries), nil
+
+	case "schema":
+		snap := r.schema
+		out, err := store.PutSchema(ctx, key, snap)
+		if err != nil {
+			return 0, err
+		}
+		if opts.docs != nil {
+			opts.docs.Schema = snap
+		}
+		if out == history.PutDeduped {
+			return 0, errStreamUnchanged
+		}
+		return len(snap.Tables), nil
+	}
+	return 0, fmt.Errorf("unknown stream %q", r.stream)
 }
 
 // schema writes the hash every other stream binds to, so it leads regardless
@@ -528,116 +695,6 @@ func schemaFirst(streams []string) []string {
 		}
 	})
 	return out
-}
-
-// The second return is set only by the schema stream: the content hash it
-// stored (or already held on a dedup), which the rest of the run binds to.
-func captureStream(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, t captureTarget, stream, schemaRef string, rowCap int, opts captureRunOptions) (int, string, error) {
-	switch stream {
-	case "planner":
-		// planner rows carry pg_statistic MCVs and histogram bounds, so they
-		// go through the same masking `snapshot take` applies -- push ships
-		// whatever lands in history.db
-		// annotate against the ref the row binds to, not `latest`, or a
-		// rebound schemaRef could store it bound to one hash, annotated
-		// from another
-		ref := history.NewRefLatest()
-		if schemaRef != "" {
-			ref = history.NewRefHash(schemaRef)
-		}
-		snap, err := store.GetSchema(ctx, key, ref)
-		if err != nil && !errors.Is(err, history.ErrSnapshotNotFound) {
-			return 0, "", fmt.Errorf("read schema snapshot to annotate against: %w", err)
-		}
-		if snap == nil {
-			return 0, "", fmt.Errorf("planner stats need a schema snapshot to annotate against; capture the schema stream on the primary first")
-		}
-		p, err := cap.CapturePlanner(ctx, schemaRef)
-		if err != nil {
-			return 0, "", err
-		}
-		bloat.Annotate(p, snap)
-		masked := datamask.MaskPlanner(opts.MaskPolicy, p)
-		p.Masking = &schema.MaskingInfo{
-			Applied:       opts.MaskPolicy != nil,
-			ColumnsMasked: masked,
-			JSONBStripped: true,
-		}
-		out, err := store.PutPlanner(ctx, key, p)
-		if err != nil {
-			return 0, "", err
-		}
-		if opts.docs != nil {
-			opts.docs.Planner = p
-		}
-		if out == history.PutDeduped {
-			return 0, "", errStreamUnchanged
-		}
-		return len(p.Tables), "", nil
-
-	case "activity":
-		a, err := cap.CaptureActivity(ctx, schemaRef, t.Label)
-		if err != nil {
-			return 0, "", err
-		}
-		warnNodeIdentityDrift(ctx, store, key, a.Node.Source, a.Node, opts.AllowRotation || t.Pool)
-		if _, err := store.PutActivity(ctx, key, a); err != nil {
-			return 0, "", err
-		}
-		if opts.docs != nil {
-			opts.docs.Activity = a
-		}
-		return len(a.Tables), "", nil
-
-	case "query":
-		q, err := cap.CaptureQueryStats(ctx, schemaRef, t.Label, rowCap)
-		if err != nil {
-			// a replica without the extension must not fail a fleet run every
-			// tick; every other capture path treats this as best-effort
-			if errors.Is(err, schema.ErrQueryStatsUnavailable) {
-				return 0, "", errStreamUnavailable
-			}
-			return 0, "", err
-		}
-		warnNodeIdentityDrift(ctx, store, key, q.Node.Source, q.Node, opts.AllowRotation || t.Pool)
-		out, err := store.PutQueryStats(ctx, key, q)
-		if err != nil {
-			return 0, "", err
-		}
-		if out == history.PutDeduped {
-			return 0, "", errStreamUnchanged
-		}
-		return len(q.Queries), "", nil
-
-	case "schema":
-		// a standby here is role = "auto" on a replica or a failover since the
-		// config edit; skip like an absent pg_stat_statements
-		switch t.DetectedRole {
-		case history.NodeRoleStandby:
-			return 0, "", errStreamUnavailable
-		case history.NodeRolePrimary:
-		default:
-			return 0, "", fmt.Errorf("node role was not detected before capture")
-		}
-		snap, err := cap.Introspect(ctx)
-		if err != nil {
-			return 0, "", err
-		}
-		out, err := store.PutSchema(ctx, key, snap)
-		if err != nil {
-			return 0, "", err
-		}
-		if opts.docs != nil {
-			opts.docs.Schema = snap
-		}
-		// the rest of the run binds to this hash either way: PutDeduped means
-		// the store already holds this content
-		if out == history.PutDeduped {
-			return 0, snap.ContentHash, errStreamUnchanged
-		}
-		return len(snap.Tables), snap.ContentHash, nil
-	}
-	return 0, "", fmt.Errorf("unknown stream %q", stream)
 }
 
 // What the node could capture, without knowing its role yet: the union is

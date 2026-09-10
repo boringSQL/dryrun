@@ -377,7 +377,7 @@ func putQueryAt(t *testing.T, s *history.Store, key history.SnapshotKey, hash, l
 // `capture` writes planner rows that `push` ships to a registry, so it must
 // mask exactly as `snapshot take` does. Before this test the planner stream
 // bypassed masking, bloat annotation and Masking entirely.
-func TestCaptureStream_PlannerMasksLikeTake(t *testing.T) {
+func TestCaptureStreams_PlannerMasksLikeTake(t *testing.T) {
 	ctx := context.Background()
 	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "testdb"}
 	target := captureTarget{Label: "primary"}
@@ -398,9 +398,10 @@ func TestCaptureStream_PlannerMasksLikeTake(t *testing.T) {
 			}}
 			w := &stubWriter{Stored: &schema.SchemaSnapshot{ContentHash: "sr-1"}}
 
-			if _, _, err := captureStream(ctx, cap, w, key, target, "planner", "sr-1", 0,
+			if _, err := captureStreams(ctx, cap, w, key, target,
+				[]string{"planner"}, "sr-1", 0,
 				captureRunOptions{MaskPolicy: tc.policy}); err != nil {
-				t.Fatalf("captureStream: %v", err)
+				t.Fatalf("captureStreams: %v", err)
 			}
 			if w.LastPlanner == nil {
 				t.Fatal("PutPlanner never received a snapshot")
@@ -422,55 +423,102 @@ func TestCaptureStream_PlannerMasksLikeTake(t *testing.T) {
 	}
 }
 
+// Planner rows are useless without a schema to annotate against, and the
+// schema read skips on a standby -- so the base has to come from the store,
+// resolved before the capture tx opens.
+func TestCaptureStreams_PlannerAnnotatesWhenTheSchemaReadSkips(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	target := captureTarget{Label: "replica", DetectedRole: history.NodeRoleStandby}
+
+	t.Run("a stored schema is what the planner rows annotate against", func(t *testing.T) {
+		stored := &schema.SchemaSnapshot{ContentHash: "sr-1", Tables: []schema.Table{{Schema: "public", Name: "users"}}}
+		cap := &stubCapturer{}
+		w := &stubWriter{Stored: stored}
+
+		done, err := captureStreams(ctx, cap, w, key, target,
+			[]string{"schema", "planner"}, "sr-1", 0, captureRunOptions{})
+		if err != nil {
+			t.Fatalf("captureStreams: %v", err)
+		}
+		if strings.Join(done, " ") != "schema=n/a planner=0" {
+			t.Fatalf("done=%v, want the standby to skip schema and still capture planner", done)
+		}
+		if w.LastPlanner == nil || w.LastPlanner.SchemaRefHash != "sr-1" {
+			t.Fatalf("planner stored as %+v, want it bound to the stored schema", w.LastPlanner)
+		}
+	})
+
+	t.Run("nothing to annotate against refuses before the capture", func(t *testing.T) {
+		cap := &stubCapturer{}
+		w := &stubWriter{} // no stored schema
+
+		_, err := captureStreams(ctx, cap, w, key, target,
+			[]string{"schema", "planner"}, "", 0, captureRunOptions{AllowOrphan: true})
+		if err == nil || !strings.Contains(err.Error(), "annotate against") {
+			t.Fatalf("err=%v, want the run refused for want of a schema", err)
+		}
+		if cap.PlannerN != 0 || w.PlannerN != 0 {
+			t.Errorf("planner captured=%d stored=%d, want neither", cap.PlannerN, w.PlannerN)
+		}
+	})
+}
+
 // A node without pg_stat_statements must be skipped, not fail the fleet run
 // every five minutes forever.
-func TestCaptureStream_QueryStatsUnavailableIsSkipped(t *testing.T) {
+func TestCaptureStreams_QueryStatsUnavailableIsSkipped(t *testing.T) {
 	cap := &stubCapturer{QueryStatsErr: schema.ErrQueryStatsUnavailable}
 	w := &stubWriter{Stored: &schema.SchemaSnapshot{ContentHash: "sr-1"}}
 
-	_, _, err := captureStream(context.Background(), cap, w,
+	done, err := captureStreams(context.Background(), cap, w,
 		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"},
-		captureTarget{Label: "replica"}, "query", "sr-1", 0, captureRunOptions{})
-	if !errors.Is(err, errStreamUnavailable) {
-		t.Errorf("got %v, want errStreamUnavailable", err)
+		captureTarget{Label: "replica"}, []string{"query"}, "sr-1", 0, captureRunOptions{})
+	if err != nil {
+		t.Fatalf("captureStreams: %v", err)
+	}
+	if strings.Join(done, " ") != "query=n/a" {
+		t.Errorf("done=%v, want the stream reported unavailable", done)
+	}
+	if w.QueryStatsN != 0 {
+		t.Errorf("stored %d query-stats rows for an unavailable stream, want 0", w.QueryStatsN)
 	}
 }
 
-func TestCaptureStream_Schema(t *testing.T) {
+func TestCaptureStreams_Schema(t *testing.T) {
 	ctx := context.Background()
 	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
 
 	t.Run("a primary introspects and stores", func(t *testing.T) {
 		cap := &stubCapturer{}
 		w := &stubWriter{}
-		n, hash, err := captureStream(ctx, cap, w, key,
+		done, err := captureStreams(ctx, cap, w, key,
 			captureTarget{Label: "primary", DetectedRole: history.NodeRolePrimary},
-			"schema", "", 0, captureRunOptions{})
+			[]string{"schema"}, "", 0, captureRunOptions{})
 		if err != nil {
-			t.Fatalf("captureStream: %v", err)
+			t.Fatalf("captureStreams: %v", err)
 		}
 		if cap.IntrospectN != 1 || w.SchemaN != 1 {
 			t.Errorf("introspects=%d puts=%d, want 1 each", cap.IntrospectN, w.SchemaN)
 		}
-		if hash != "schema-hash-1" {
-			t.Errorf("hash=%q, want the captured snapshot's", hash)
+		if w.LastSchema == nil || w.LastSchema.ContentHash != "schema-hash-1" {
+			t.Errorf("stored %+v, want the captured snapshot", w.LastSchema)
 		}
-		if n != 3 {
-			t.Errorf("n=%d, want the stub's 3 tables", n)
+		if strings.Join(done, " ") != "schema=3" {
+			t.Errorf("done=%v, want the stub's 3 tables", done)
 		}
 	})
 
-	t.Run("an unchanged schema dedups and still reports its hash", func(t *testing.T) {
+	t.Run("an unchanged schema dedups and still reports", func(t *testing.T) {
 		cap := &stubCapturer{}
 		w := &stubWriter{SchemaDedups: true}
-		_, hash, err := captureStream(ctx, cap, w, key,
+		done, err := captureStreams(ctx, cap, w, key,
 			captureTarget{Label: "primary", DetectedRole: history.NodeRolePrimary},
-			"schema", "", 0, captureRunOptions{})
-		if !errors.Is(err, errStreamUnchanged) {
-			t.Fatalf("err=%v, want errStreamUnchanged", err)
+			[]string{"schema"}, "", 0, captureRunOptions{})
+		if err != nil {
+			t.Fatalf("captureStreams: %v", err)
 		}
-		if hash != "schema-hash-1" {
-			t.Errorf("hash=%q, want the deduped content's hash", hash)
+		if strings.Join(done, " ") != "schema=unchanged" {
+			t.Errorf("done=%v, want the dedup reported", done)
 		}
 	})
 
@@ -478,11 +526,14 @@ func TestCaptureStream_Schema(t *testing.T) {
 	t.Run("a standby skips instead of failing", func(t *testing.T) {
 		cap := &stubCapturer{}
 		w := &stubWriter{}
-		_, _, err := captureStream(ctx, cap, w, key,
+		done, err := captureStreams(ctx, cap, w, key,
 			captureTarget{Label: "replica", DetectedRole: history.NodeRoleStandby},
-			"schema", "", 0, captureRunOptions{})
-		if !errors.Is(err, errStreamUnavailable) {
-			t.Fatalf("err=%v, want errStreamUnavailable", err)
+			[]string{"schema"}, "", 0, captureRunOptions{})
+		if err != nil {
+			t.Fatalf("captureStreams: %v", err)
+		}
+		if strings.Join(done, " ") != "schema=n/a" {
+			t.Errorf("done=%v, want the stream reported unavailable", done)
 		}
 		if cap.IntrospectN != 0 || w.SchemaN != 0 {
 			t.Errorf("standby introspected=%d stored=%d, want neither", cap.IntrospectN, w.SchemaN)
@@ -755,20 +806,49 @@ func TestCaptureStreams_SchemaRunsFirst(t *testing.T) {
 	}
 }
 
-// Swaps the stream function for one that records the schemaRef each stream was
+// Swaps the read function for one that records the schemaRef each stream was
 // called with, so the threading can be pinned before the schema branch stops
-// refusing.
+// refusing. The stub speaks the pre-split contract -- (rows, hash, err) -- and
+// is translated into the document the persist phase expects.
 func stubStreams(t *testing.T, fn func(stream, schemaRef string) (int, string, error)) *[]string {
 	t.Helper()
 	var refs []string
-	prev := captureStreamFn
-	captureStreamFn = func(_ context.Context, _ initCapturer, _ initWriter, _ history.SnapshotKey,
-		_ captureTarget, stream, schemaRef string, _ int, _ captureRunOptions) (int, string, error) {
+	prev := readStreamFn
+	readStreamFn = func(_ context.Context, _ initCapturer, _ captureTarget,
+		stream, schemaRef string, _ int, _ captureRunOptions) (streamRead, error) {
 		refs = append(refs, stream+"@"+schemaRef)
-		return fn(stream, schemaRef)
+		n, hash, err := fn(stream, schemaRef)
+		// dedup is a store outcome now, not something a read can report; the
+		// document is still what rebinds the streams after it
+		if errors.Is(err, errStreamUnchanged) {
+			err = nil
+		}
+		if err != nil {
+			return streamRead{}, err
+		}
+		return stubStreamRead(stream, hash, n), nil
 	}
-	t.Cleanup(func() { captureStreamFn = prev })
+	t.Cleanup(func() { readStreamFn = prev })
 	return &refs
+}
+
+// n becomes the row count the run reports for the stream
+func stubStreamRead(stream, hash string, n int) streamRead {
+	switch stream {
+	case "schema":
+		return streamRead{schema: &schema.SchemaSnapshot{
+			ContentHash: hash, Tables: make([]schema.Table, n)}}
+	case "planner":
+		return streamRead{planner: &schema.PlannerStatsSnapshot{
+			ContentHash: hash, Tables: make([]schema.TableSizingEntry, n)}}
+	case "activity":
+		return streamRead{activity: &schema.ActivityStatsSnapshot{
+			ContentHash: hash, Tables: make([]schema.TableActivityEntry, n)}}
+	case "query":
+		return streamRead{query: &schema.QueryStatsSnapshot{
+			ContentHash: hash, Queries: make([]schema.QueryStatsEntry, n)}}
+	}
+	return streamRead{}
 }
 
 // §4.2: a stream captured after schema in the same run must bind to the hash
@@ -1072,5 +1152,192 @@ func TestSchemaNodesFirst(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "a,b,c" {
 		t.Errorf("order = %v, want a stable sort", got)
+	}
+}
+
+// The whole run reads on one REPEATABLE READ tx, and the session sets a 10s
+// idle_in_transaction_session_timeout: a history-store call between two reads
+// leaves the backend idle long enough to be killed, and the next read comes
+// back as SQLSTATE 25P03 ("planner: fetch gucs: ..."). So every read has to
+// happen before the store is touched at all, and the tx released in between.
+func TestCaptureStreams_NoStoreIOBetweenReads(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	var log []string
+	cap := &loggingCapturer{stubCapturer: &stubCapturer{}, log: &log}
+	store := &loggingWriter{stubWriter: &stubWriter{}, log: &log}
+
+	if _, err := captureStreams(ctx, cap, store, key,
+		captureTarget{Label: "primary", DetectedRole: history.NodeRolePrimary},
+		[]string{"schema", "planner", "activity", "query"}, "", 0,
+		captureRunOptions{}); err != nil {
+		t.Fatalf("captureStreams: %v", err)
+	}
+
+	assertNoStoreInsideTx(t, log)
+	if len(log) == 0 || !strings.Contains(strings.Join(log, " "), "release") {
+		t.Fatalf("log did not exercise both phases: %v", log)
+	}
+}
+
+// The invariant, read off a phase log: once a read has opened the capture tx,
+// nothing may touch the history store until the tx is released.
+func assertNoStoreInsideTx(t *testing.T, log []string) {
+	t.Helper()
+	open := false
+	for i, e := range log {
+		switch {
+		case strings.HasPrefix(e, "read:"):
+			open = true
+		case e == "release":
+			open = false
+		case strings.HasPrefix(e, "store:") && open:
+			t.Fatalf("%s at %d runs with the capture tx open: %v", e, i, log)
+		}
+	}
+}
+
+// init opens the same tx and used to write the schema to the store before
+// capturing planner stats, which is the gap that killed the connection.
+func TestRunInitCapture_NoStoreIOInsideTheCaptureTx(t *testing.T) {
+	var log []string
+	cap := &loggingCapturer{stubCapturer: &stubCapturer{}, log: &log}
+	store := &loggingWriter{stubWriter: &stubWriter{}, log: &log}
+
+	if err := runInitCapture(context.Background(), cap, store,
+		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"},
+		initOptions{Source: "primary"}); err != nil {
+		t.Fatalf("runInitCapture: %v", err)
+	}
+	assertNoStoreInsideTx(t, log)
+}
+
+type loggingCapturer struct {
+	*stubCapturer
+	log *[]string
+}
+
+func (c *loggingCapturer) note(s string) { *c.log = append(*c.log, s) }
+
+func (c *loggingCapturer) ReleaseTx(_ context.Context) { c.note("release") }
+
+func (c *loggingCapturer) Introspect(ctx context.Context) (*schema.SchemaSnapshot, error) {
+	c.note("read:schema")
+	return c.stubCapturer.Introspect(ctx)
+}
+
+func (c *loggingCapturer) CapturePlanner(ctx context.Context, ref string) (*schema.PlannerStatsSnapshot, error) {
+	c.note("read:planner")
+	return c.stubCapturer.CapturePlanner(ctx, ref)
+}
+
+func (c *loggingCapturer) CaptureActivity(ctx context.Context, ref, src string) (*schema.ActivityStatsSnapshot, error) {
+	c.note("read:activity")
+	return c.stubCapturer.CaptureActivity(ctx, ref, src)
+}
+
+func (c *loggingCapturer) CaptureQueryStats(ctx context.Context, ref, src string, rowCap int) (*schema.QueryStatsSnapshot, error) {
+	c.note("read:query")
+	return c.stubCapturer.CaptureQueryStats(ctx, ref, src, rowCap)
+}
+
+type loggingWriter struct {
+	*stubWriter
+	log *[]string
+}
+
+func (w *loggingWriter) note(s string) { *w.log = append(*w.log, "store:"+s) }
+
+func (w *loggingWriter) GetSchema(ctx context.Context, key history.SnapshotKey, at history.SnapshotRef) (*schema.SchemaSnapshot, error) {
+	w.note("GetSchema")
+	return w.stubWriter.GetSchema(ctx, key, at)
+}
+
+func (w *loggingWriter) PutSchema(ctx context.Context, key history.SnapshotKey, s *schema.SchemaSnapshot) (history.PutOutcome, error) {
+	w.note("PutSchema")
+	return w.stubWriter.PutSchema(ctx, key, s)
+}
+
+func (w *loggingWriter) PutPlanner(ctx context.Context, key history.SnapshotKey, p *schema.PlannerStatsSnapshot) (history.PutOutcome, error) {
+	w.note("PutPlanner")
+	return w.stubWriter.PutPlanner(ctx, key, p)
+}
+
+func (w *loggingWriter) PutActivity(ctx context.Context, key history.SnapshotKey, a *schema.ActivityStatsSnapshot) (history.PutOutcome, error) {
+	w.note("PutActivity")
+	return w.stubWriter.PutActivity(ctx, key, a)
+}
+
+func (w *loggingWriter) PutQueryStats(ctx context.Context, key history.SnapshotKey, q *schema.QueryStatsSnapshot) (history.PutOutcome, error) {
+	w.note("PutQueryStats")
+	return w.stubWriter.PutQueryStats(ctx, key, q)
+}
+
+func (w *loggingWriter) MarkCaptureAttempt(ctx context.Context, key history.SnapshotKey, label, stream string, at time.Time) error {
+	w.note("MarkCaptureAttempt")
+	return w.stubWriter.MarkCaptureAttempt(ctx, key, label, stream, at)
+}
+
+func (w *loggingWriter) RecentNodeFingerprints(ctx context.Context, key history.SnapshotKey, label string) ([]history.NodeFingerprint, error) {
+	w.note("RecentNodeFingerprints")
+	return w.stubWriter.RecentNodeFingerprints(ctx, key, label)
+}
+
+func (w *loggingWriter) LatestNodeRole(ctx context.Context, key history.SnapshotKey, label string) (string, error) {
+	w.note("LatestNodeRole")
+	return w.stubWriter.LatestNodeRole(ctx, key, label)
+}
+
+// The read phase aborts on a real error, but what it already read is paid for
+// and must still be stored -- and only the streams that were actually attempted
+// may stamp their clock, or a broken stream buys itself a quiet interval.
+func TestCaptureStreams_ReadErrorKeepsWhatCameBefore(t *testing.T) {
+	ctx := context.Background()
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	store := testStoreAt(t, t.TempDir())
+	cap := &stubCapturer{QueryStatsErr: errors.New("connection reset")}
+
+	done, err := captureStreams(ctx, cap, store, key,
+		captureTarget{Label: "primary"}, []string{"activity", "query"}, "sr-1", 0,
+		captureRunOptions{})
+	if err == nil || !strings.HasPrefix(err.Error(), "query: ") {
+		t.Fatalf("err=%v, want it prefixed with the failing stream", err)
+	}
+	if strings.Join(done, " ") != "activity=0" {
+		t.Errorf("done=%v, want the activity capture reported", done)
+	}
+	if _, ok, err := store.LastCaptureAttemptAt(ctx, key, "primary", "activity"); err != nil || !ok {
+		t.Errorf("activity attempt recorded=%t err=%v, want the stream that succeeded marked", ok, err)
+	}
+	if _, ok, err := store.LastCaptureAttemptAt(ctx, key, "primary", "query"); err != nil || ok {
+		t.Errorf("query attempt recorded=%t err=%v, want a real error to leave the clock untouched", ok, err)
+	}
+}
+
+// Nothing can bind to a hashless schema, so the row is worse than useless in
+// the store: `latest` would hand it to readers that cannot use it.
+func TestCaptureStreams_HashlessSchemaIsNotStored(t *testing.T) {
+	w := &stubWriter{}
+	stubStreams(t, func(stream, _ string) (int, string, error) { return 0, "", nil })
+
+	if _, err := captureStreams(context.Background(), &stubCapturer{}, w,
+		history.SnapshotKey{ProjectID: "p", DatabaseID: "d"},
+		captureTarget{Label: "primary"}, []string{"schema"}, "", 0,
+		captureRunOptions{}); err == nil {
+		t.Fatal("want an error when schema returns no content hash")
+	}
+	if w.SchemaN != 0 {
+		t.Errorf("stored %d schema rows, want a hashless snapshot left unstored", w.SchemaN)
+	}
+}
+
+// Close is deferred on every command and ReleaseTx runs mid-flow, so the second
+// call has to be a no-op rather than a rollback on a released tx.
+func TestPgxCapturer_ReleaseTxIsIdempotent(t *testing.T) {
+	c := &pgxCapturer{}
+	c.ReleaseTx(context.Background())
+	c.Close(context.Background())
+	if c.tx != nil {
+		t.Error("tx set after release")
 	}
 }

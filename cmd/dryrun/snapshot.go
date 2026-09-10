@@ -54,10 +54,7 @@ func snapshotActivityCmd() *cobra.Command {
 			}
 			defer conn.Close()
 
-			cap, err := newPgxCapturer(ctx, conn.Pool())
-			if err != nil {
-				return err
-			}
+			cap := newPgxCapturer(ctx, conn.Pool())
 			defer cap.Close(ctx)
 
 			store, err := openHistoryStore(historyDB)
@@ -98,8 +95,7 @@ func snapshotActivityCmd() *cobra.Command {
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
 	cmd.Flags().BoolVar(&pushAfter, "push", false, "push the snapshot to a remote after capture")
 	cmd.Flags().StringVar(&pushRemote, "remote", "", "configured [[remote]] name (with --push)")
-	// activity captures query stats best-effort too, so the migration keeps both
-	// streams; dropping "query" would silently stop feeding list_top_queries
+	// keep "query" in the replacement: activity captures it best-effort too
 	markCaptureSuperseded(cmd, "dryrun snapshot capture --from <url> --label <name> --streams activity,query")
 	return cmd
 }
@@ -274,10 +270,7 @@ func snapshotQueryStatsCmd() *cobra.Command {
 			}
 			defer conn.Close()
 
-			cap, err := newPgxCapturer(ctx, conn.Pool())
-			if err != nil {
-				return err
-			}
+			cap := newPgxCapturer(ctx, conn.Pool())
 			defer cap.Close(ctx)
 
 			store, err := openHistoryStore(historyDB)
@@ -327,6 +320,7 @@ func runSnapshotQueryStats(ctx context.Context, cap initCapturer, store initWrit
 	}
 
 	qs, err := cap.CaptureQueryStats(ctx, schemaRef, opts.Label, opts.RowCap)
+	releaseCaptureTx(ctx, cap)
 	if err != nil {
 		if errors.Is(err, schema.ErrQueryStatsUnavailable) {
 			return errors.New(pgssUnavailable)
@@ -374,6 +368,7 @@ func runSnapshotActivity(ctx context.Context, cap initCapturer, store initWriter
 	}
 
 	activity, err := cap.CaptureActivity(ctx, schemaRef, opts.Label)
+	releaseCaptureTx(ctx, cap)
 	if err != nil {
 		return fmt.Errorf("capture activity stats: %w", err)
 	}

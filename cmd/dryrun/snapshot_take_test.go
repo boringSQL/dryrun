@@ -233,7 +233,10 @@ func TestRunSnapshotTake_PutErrorFailsTheRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("a failed PutSchema must fail take, not be warned about")
 	}
-	if cap.PlannerN != 0 {
-		t.Errorf("planner ran after the schema write failed (%d calls)", cap.PlannerN)
+	// the reads all happen before the first write (the capture tx must not
+	// stay open across store I/O), so planner is captured either way -- what
+	// must not happen is storing it after the schema write failed
+	if w.PlannerN != 0 {
+		t.Errorf("planner stored after the schema write failed (%d puts)", w.PlannerN)
 	}
 }
