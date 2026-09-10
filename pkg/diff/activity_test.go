@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boringsql/dryrun/pkg/snapshot"
 )
@@ -342,5 +343,99 @@ func TestRenderConsole_DispatchesActivity(t *testing.T) {
 	RenderConsoleMinPct(&buf, env, DefaultMinPct)
 	if !strings.Contains(buf.String(), "activity diff") {
 		t.Errorf("expected RenderConsole to route to the activity renderer, got:\n%s", buf.String())
+	}
+}
+
+// --- counter regressions (2.5.3) ---
+//
+// ActivityRegressed is the retroactive drift signal: it must fire on the
+// interleaved-series symptom (a cumulative counter falling to a substantial
+// non-zero value) and stay quiet on every benign explanation -- a reset to
+// zero, a moved stats_reset, a changed boot, a falling gauge, or an object
+// that simply appeared or vanished.
+func TestActivityRegressed(t *testing.T) {
+	boot := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	later := boot.Add(48 * time.Hour)
+	resetA := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	resetB := resetA.Add(24 * time.Hour)
+
+	withBoot := func(a *snapshot.ActivityStatsSnapshot, at time.Time) *snapshot.ActivityStatsSnapshot {
+		a.Node.PostmasterStartTime = &at
+		return a
+	}
+	withReset := func(a *snapshot.ActivityStatsSnapshot, at time.Time) *snapshot.ActivityStatsSnapshot {
+		a.Database = &snapshot.DatabaseActivity{StatsReset: &at}
+		return a
+	}
+	table := func(hash string, idx int64) *snapshot.ActivityStatsSnapshot {
+		a := emptyActivity(hash)
+		a.Tables = []snapshot.TableActivityEntry{
+			tblAct("public", "t", snapshot.TableActivity{IdxScan: idx}),
+		}
+		return a
+	}
+	gaugeFrom := emptyActivity("a")
+	gaugeFrom.Tables = []snapshot.TableActivityEntry{
+		tblAct("public", "t", snapshot.TableActivity{NDeadTup: 500_000}),
+	}
+	gaugeTo := emptyActivity("b")
+	gaugeTo.Tables = []snapshot.TableActivityEntry{
+		tblAct("public", "t", snapshot.TableActivity{NDeadTup: 12}),
+	}
+
+	tests := []struct {
+		name string
+		from *snapshot.ActivityStatsSnapshot
+		to   *snapshot.ActivityStatsSnapshot
+		want bool
+	}{
+		{"interleaving series fall to a substantial non-zero value",
+			table("a", 16_824_968), table("b", 13_120_003), true},
+		{"reset to zero is not a regression",
+			table("a", 581_434), table("b", 0), false},
+		{"a moved stats_reset explains the fall",
+			withReset(table("a", 581_434), resetA), withReset(table("b", 18), resetB), false},
+		{"a changed boot explains the fall",
+			withBoot(table("a", 581_434), boot), withBoot(table("b", 18), later), false},
+		{"a falling gauge is not a cumulative counter",
+			gaugeFrom, gaugeTo, false},
+		{"a table present on only one side is not compared",
+			emptyActivity("a"), table("b", 1), false},
+		{"growth is not a regression",
+			table("a", 100), table("b", 300), false},
+		{"nil snapshots are not regressions",
+			nil, table("b", 1), false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ActivityRegressed(tc.from, tc.to); got != tc.want {
+				t.Errorf("ActivityRegressed=%t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+// An index carries its own cumulative counters; a fall there is the same signal
+// as a fall on a table. The database section counts too when both sides read it.
+func TestActivityRegressed_IndexAndDatabase(t *testing.T) {
+	from := emptyActivity("a")
+	from.Indexes = []snapshot.IndexActivityEntry{
+		idxAct("public", "t", "t_idx", snapshot.IndexActivity{IdxScan: 9_000}),
+	}
+	to := emptyActivity("b")
+	to.Indexes = []snapshot.IndexActivityEntry{
+		idxAct("public", "t", "t_idx", snapshot.IndexActivity{IdxScan: 3}),
+	}
+	if !ActivityRegressed(from, to) {
+		t.Error("a rolled-back index counter was not reported")
+	}
+
+	from = emptyActivity("a")
+	from.Database = &snapshot.DatabaseActivity{XactCommit: 5_000_000}
+	to = emptyActivity("b")
+	to.Database = &snapshot.DatabaseActivity{XactCommit: 40_000}
+	if !ActivityRegressed(from, to) {
+		t.Error("a rolled-back pg_stat_database counter was not reported")
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/boringsql/dryrun/internal/schema"
 )
 
 // Seeds one activity row at an explicit time. The fixtures stamp time.Now(),
@@ -695,4 +697,219 @@ func TestLastCaptureAt_IgnoresPulledRows(t *testing.T) {
 		}
 		assertLocal(t, store, key, "", "planner")
 	})
+}
+
+// putNodeActivityCounterAt seeds one activity row whose only meaningful counter
+// is idx_scan, so a series can be built a row at a time. mutate layers in the
+// reset/boot fields a case needs.
+func putNodeActivityCounterAt(t *testing.T, s *Store, key SnapshotKey, label, hash string, idxScan int64, ts time.Time, mutate func(*schema.ActivityStatsSnapshot)) {
+	t.Helper()
+	a := activityFixture("sr", hash, label, false)
+	a.Node.Timestamp = ts
+	a.Tables[0].Activity = schema.TableActivity{IdxScan: idxScan}
+	if mutate != nil {
+		mutate(a)
+	}
+	if _, err := s.PutActivity(context.Background(), key, a); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The exact symptom that started 2.3.1: one label, two replicas behind an
+// endpoint, the top index's idx_scan interleaving. Nothing in dryrun reports
+// it today; counter regressions are the retroactive signal that does.
+func TestListNodes_CounterRegressions(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	base := time.Date(2026, 7, 26, 2, 0, 0, 0, time.UTC)
+
+	series := []int64{16_824_968, 13_120_003, 19_217_011, 16_163_386, 23_083_675, 18_468_777}
+	for i, idx := range series {
+		putNodeActivityCounterAt(t, store, key, "replica", fmt.Sprintf("r-%d", i), idx,
+			base.Add(time.Duration(i)*24*time.Hour), nil)
+	}
+	putNodeActivityCounterAt(t, store, key, "steady", "s-1", 100, base, nil)
+	putNodeActivityCounterAt(t, store, key, "steady", "s-2", 200, base.Add(time.Hour), nil)
+
+	nodes, err := store.ListNodes(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := findNode(t, nodes, "replica")
+	if r.Regressions != 3 {
+		t.Errorf("replica regressions %d, want 3 (rows 2, 4 and 6 fall)", r.Regressions)
+	}
+	if r.RegressionFirst == nil || !r.RegressionFirst.Equal(base.Add(24*time.Hour)) {
+		t.Errorf("first regression %v, want %v", r.RegressionFirst, base.Add(24*time.Hour))
+	}
+	if r.RegressionLast == nil || !r.RegressionLast.Equal(base.Add(5*24*time.Hour)) {
+		t.Errorf("last regression %v, want %v", r.RegressionLast, base.Add(5*24*time.Hour))
+	}
+
+	if s := findNode(t, nodes, "steady"); s.Regressions != 0 || s.RegressionFirst != nil {
+		t.Errorf("a rising series regressed: %+v", s)
+	}
+}
+
+// Every benign explanation for backwards counters must stay quiet: a reset to
+// zero, a moved stats_reset, a changed postmaster start time (2.5.1 names
+// those), and a fall in a point-in-time gauge rather than a cumulative counter.
+func TestListNodes_CounterRegressions_Excluded(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	base := time.Date(2026, 7, 26, 2, 0, 0, 0, time.UTC)
+	hour := time.Hour
+
+	// a counter back to zero is a reset, not interleaving
+	putNodeActivityCounterAt(t, store, key, "zeroed", "z-1", 581_434, base, nil)
+	putNodeActivityCounterAt(t, store, key, "zeroed", "z-2", 0, base.Add(hour), nil)
+
+	// a moved pg_stat_database.stats_reset proves the reset
+	resetA, resetB := base, base.Add(hour)
+	putNodeActivityCounterAt(t, store, key, "statsreset", "sr-1", 581_434, base, func(a *schema.ActivityStatsSnapshot) {
+		a.Database = &schema.DatabaseActivity{StatsReset: &resetA}
+	})
+	putNodeActivityCounterAt(t, store, key, "statsreset", "sr-2", 18, base.Add(hour), func(a *schema.ActivityStatsSnapshot) {
+		a.Database = &schema.DatabaseActivity{StatsReset: &resetB}
+	})
+
+	// a changed boot is a restart or a replacement, 2.5.1's territory
+	bootA, bootB := base, base.Add(hour)
+	putNodeActivityCounterAt(t, store, key, "rebooted", "b-1", 581_434, base, func(a *schema.ActivityStatsSnapshot) {
+		a.Node.PostmasterStartTime = &bootA
+	})
+	putNodeActivityCounterAt(t, store, key, "rebooted", "b-2", 18, base.Add(hour), func(a *schema.ActivityStatsSnapshot) {
+		a.Node.PostmasterStartTime = &bootB
+	})
+
+	// a falling gauge alone is not a cumulative counter
+	putNodeActivityCounterAt(t, store, key, "gauge", "g-1", 0, base, func(a *schema.ActivityStatsSnapshot) {
+		a.Tables[0].Activity = schema.TableActivity{NDeadTup: 500_000}
+	})
+	putNodeActivityCounterAt(t, store, key, "gauge", "g-2", 0, base.Add(hour), func(a *schema.ActivityStatsSnapshot) {
+		a.Tables[0].Activity = schema.TableActivity{NDeadTup: 12}
+	})
+
+	nodes, err := store.ListNodes(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{"zeroed", "statsreset", "rebooted", "gauge"} {
+		if n := findNode(t, nodes, label); n.Regressions != 0 {
+			t.Errorf("%s: %d regressions, want none -- %+v", label, n.Regressions, n)
+		}
+	}
+}
+
+// Like every other reader in ListNodes, the regression walk must survive a row
+// it cannot read and compare across it, not fail the whole inventory.
+func TestListNodes_CounterRegressions_SurvivesBadRows(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	base := time.Date(2026, 7, 26, 2, 0, 0, 0, time.UTC)
+
+	putNodeActivityCounterAt(t, store, key, "bad", "g-1", 1_000, base, nil)
+	insertRawActivity(t, store, key, "g-badjson", "bad",
+		base.Add(time.Minute).Format(time.RFC3339), `{"tables":[`)
+	insertRawActivity(t, store, key, "g-badts", "bad",
+		"not-a-timestamp", nodePayload(false, "PostgreSQL 17.0"))
+	putNodeActivityCounterAt(t, store, key, "bad", "g-2", 3, base.Add(2*time.Hour), nil)
+
+	nodes, err := store.ListNodes(ctx, key)
+	if err != nil {
+		t.Fatalf("an unreadable row failed the inventory: %v", err)
+	}
+	if n := findNode(t, nodes, "bad"); n.Regressions != 1 {
+		t.Errorf("regressions %d, want 1 across the unreadable rows", n.Regressions)
+	}
+}
+
+// Query counters are excluded: pgss deallocation makes their decreases routine
+// (2.8.4), so a falling calls count is not evidence of anything.
+func TestListNodes_CounterRegressions_QueryIgnored(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	base := time.Date(2026, 7, 26, 2, 0, 0, 0, time.UTC)
+
+	for i, calls := range []int64{500, 5} {
+		q := queryStatsFixture("sr", fmt.Sprintf("q-%d", i), "qonly")
+		q.Node.Timestamp = base.Add(time.Duration(i) * time.Hour)
+		q.Queries[0].Members[0].Calls = calls
+		q.Queries[0].Calls = calls
+		if _, err := store.PutQueryStats(ctx, key, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	nodes, err := store.ListNodes(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := findNode(t, nodes, "qonly"); n.Regressions != 0 {
+		t.Errorf("query rows produced %d regressions, want none", n.Regressions)
+	}
+}
+
+// stats_reset *present but unmoved* must not suppress the count: a fall with no
+// recorded reset is exactly the signal. This also pins the accepted false
+// positive -- pg_stat_reset_single_table_counters never moves stats_reset, so a
+// single-table reset followed by re-accumulation registers here.
+func TestListNodes_CounterRegressions_StatsResetUnchangedCounts(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	base := time.Date(2026, 7, 26, 2, 0, 0, 0, time.UTC)
+	resetAt := base.Add(-30 * 24 * time.Hour)
+	withReset := func(a *schema.ActivityStatsSnapshot) {
+		a.Database = &schema.DatabaseActivity{StatsReset: &resetAt}
+	}
+
+	putNodeActivityCounterAt(t, store, key, "n", "n-1", 581_434, base, withReset)
+	putNodeActivityCounterAt(t, store, key, "n", "n-2", 18, base.Add(time.Hour), withReset)
+
+	nodes, err := store.ListNodes(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := findNode(t, nodes, "n"); n.Regressions != 1 {
+		t.Errorf("regressions %d, want 1 -- an unmoved stats_reset explains nothing", n.Regressions)
+	}
+}
+
+// An idle node's repeated captures share a content hash. Twin runs interleaved
+// with a fall must neither inflate the count (each twin run is one series
+// position) nor suppress it (the fall still compares against the right
+// predecessor).
+func TestListNodes_CounterRegressions_ContentTwins(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	base := time.Date(2026, 7, 26, 2, 0, 0, 0, time.UTC)
+
+	rows := []struct {
+		hash string
+		idx  int64
+	}{
+		{"h1", 1_000}, {"h1", 1_000}, // twin pair
+		{"h2", 3}, {"h2", 3}, // twin pair, the fall
+		{"h3", 900}, // back up
+	}
+	for i, r := range rows {
+		putNodeActivityCounterAt(t, store, key, "twins", r.hash, r.idx,
+			base.Add(time.Duration(i)*time.Hour), nil)
+	}
+
+	nodes, err := store.ListNodes(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := findNode(t, nodes, "twins")
+	if n.Regressions != 1 {
+		t.Errorf("regressions %d, want exactly 1 (h1 -> h2)", n.Regressions)
+	}
 }

@@ -3,10 +3,14 @@ package history
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/pkg/diff"
 )
 
 type (
@@ -34,6 +38,11 @@ type (
 		// rows in the window that carry a fingerprint at all: without it
 		// "no rotation" is indistinguishable from "no evidence"
 		Fingerprinted int `json:"fingerprinted_rows"`
+		// captures whose cumulative counters fell to a non-zero value with no
+		// reset or boot change recorded; the retroactive drift signal (2.5.3)
+		Regressions     int        `json:"regressions,omitempty"`
+		RegressionFirst *time.Time `json:"regression_first,omitempty"`
+		RegressionLast  *time.Time `json:"regression_last,omitempty"`
 	}
 
 	// which server a capture came from: boot time identifies the member,
@@ -129,6 +138,11 @@ func (s *Store) ListNodes(ctx context.Context, key SnapshotKey) ([]NodeSummary, 
 		}
 		n.Fingerprinted = len(fps)
 		n.Members, n.Oscillating = summariseMembers(fps)
+		regs, first, last, err := s.counterRegressions(ctx, key, n.Label)
+		if err != nil {
+			return nil, err
+		}
+		n.Regressions, n.RegressionFirst, n.RegressionLast = regs, first, last
 		out = append(out, *n)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
@@ -189,6 +203,57 @@ func (s *Store) RecentNodeFingerprints(ctx context.Context, key SnapshotKey, nod
 		out = append(out, NodeFingerprint{StartedAt: at, ServerAddr: addr.String})
 	}
 	return out, rows.Err()
+}
+
+// Counter regressions (2.5.3): the drift signal computable from stored payloads
+// alone. A cumulative counter that fell to a non-zero value with no reset or
+// boot change to explain it means two nodes are interleaving under one label.
+// Walks the activity stream in capture order; query counters are excluded
+// because pgss deallocation makes their decreases routine (2.8.4).
+func (s *Store) counterRegressions(ctx context.Context, key SnapshotKey, nodeLabel string) (count int, first, last *time.Time, err error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT timestamp, content_hash, payload_json FROM activity_stats
+		  WHERE project_id = ? AND database_id = ? AND node_source = ?
+		  ORDER BY timestamp ASC, id ASC`,
+		string(key.ProjectID), string(key.DatabaseID), nodeLabel)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer rows.Close()
+
+	var prev *schema.ActivityStatsSnapshot
+	prevHash := ""
+	for rows.Next() {
+		var ts, hash, payload string
+		if err := rows.Scan(&ts, &hash, &payload); err != nil {
+			return 0, nil, nil, err
+		}
+		// Byte-identical content cannot have moved a counter, so an idle node's
+		// repeated captures collapse and decode once. Only trust a non-empty
+		// hash: pre-digest rows would all share "".
+		if prev != nil && hash != "" && hash == prevHash {
+			continue
+		}
+		at, ok := parseHistoryTS(ts)
+		if !ok {
+			continue
+		}
+		var cur schema.ActivityStatsSnapshot
+		if jerr := json.Unmarshal([]byte(payload), &cur); jerr != nil {
+			continue
+		}
+		if prev != nil && diff.ActivityRegressed(prev, &cur) {
+			count++
+			if first == nil {
+				t := at
+				first = &t
+			}
+			t := at
+			last = &t
+		}
+		prev, prevHash = &cur, hash
+	}
+	return count, first, last, rows.Err()
 }
 
 // Newest locally-captured row for a stream; pulled rows share the table but

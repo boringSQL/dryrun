@@ -170,6 +170,98 @@ func indexReset(a, b snapshot.IndexActivity) bool {
 	return b.IdxScan < a.IdxScan || b.IdxTupRead < a.IdxTupRead || b.IdxTupFetch < a.IdxTupFetch
 }
 
+// ActivityRegressed reports whether any cumulative counter shared by both
+// captures fell to a non-zero value with no reset or boot change to explain it.
+// On one machine that cannot happen: pg_stat_* counters only move forward, a
+// reset zeroes them, and a changed postmaster start time is a different server.
+// A fall that survives both exclusions means two nodes' series interleave under
+// one label (2.3.1), so every delta across them is wrong.
+func ActivityRegressed(from, to *snapshot.ActivityStatsSnapshot) bool {
+	if from == nil || to == nil {
+		return false
+	}
+	if databaseResetAdvanced(from, to) || bootChanged(from, to) {
+		return false
+	}
+
+	fromT := indexBy(from.Tables, func(e snapshot.TableActivityEntry) string { return e.Table.String() })
+	for _, b := range to.Tables {
+		a, ok := fromT[b.Table.String()]
+		if !ok {
+			continue
+		}
+		if tableRegressed(a.Activity, b.Activity) {
+			return true
+		}
+	}
+
+	fromI := indexBy(from.Indexes, func(e snapshot.IndexActivityEntry) string {
+		return e.Table.String() + "\x00" + e.Index
+	})
+	for _, b := range to.Indexes {
+		a, ok := fromI[b.Table.String()+"\x00"+b.Index]
+		if !ok {
+			continue
+		}
+		if indexRegressed(a.Activity, b.Activity) {
+			return true
+		}
+	}
+
+	return databaseRegressed(from.Database, to.Database)
+}
+
+// A moved pg_stat_database.stats_reset is the one proof a pg_stat_reset landed
+// between the captures; when it is absent (older rows) the caller falls back to
+// the fall-to-zero rule inside the per-counter predicates.
+func databaseResetAdvanced(from, to *snapshot.ActivityStatsSnapshot) bool {
+	a, b := from.Database, to.Database
+	if a == nil || b == nil || a.StatsReset == nil || b.StatsReset == nil {
+		return false
+	}
+	return b.StatsReset.After(*a.StatsReset)
+}
+
+// A changed boot is a restart, a replacement, or rotation; 2.5.1 already names
+// each of those, so it is not this signal's job to count it too.
+func bootChanged(from, to *snapshot.ActivityStatsSnapshot) bool {
+	a, b := from.Node.PostmasterStartTime, to.Node.PostmasterStartTime
+	if a == nil || b == nil {
+		return false
+	}
+	return !a.Equal(*b)
+}
+
+// Falling *to* zero is how a reset presents, so it is excluded; anything else
+// that falls has no benign reading. Mirrors tableReset's cumulative field set.
+func tableRegressed(a, b snapshot.TableActivity) bool {
+	return fellToNonZero(a.SeqScan, b.SeqScan) || fellToNonZero(a.SeqTupRead, b.SeqTupRead) ||
+		fellToNonZero(a.IdxScan, b.IdxScan) || fellToNonZero(a.IdxTupFetch, b.IdxTupFetch) ||
+		fellToNonZero(a.NTupIns, b.NTupIns) || fellToNonZero(a.NTupUpd, b.NTupUpd) ||
+		fellToNonZero(a.NTupDel, b.NTupDel) || fellToNonZero(a.NTupHotUpd, b.NTupHotUpd) ||
+		fellToNonZero(a.VacuumCount, b.VacuumCount) || fellToNonZero(a.AutovacuumCount, b.AutovacuumCount) ||
+		fellToNonZero(a.AnalyzeCount, b.AnalyzeCount) || fellToNonZero(a.AutoanalyzeCount, b.AutoanalyzeCount)
+}
+
+func indexRegressed(a, b snapshot.IndexActivity) bool {
+	return fellToNonZero(a.IdxScan, b.IdxScan) || fellToNonZero(a.IdxTupRead, b.IdxTupRead) ||
+		fellToNonZero(a.IdxTupFetch, b.IdxTupFetch)
+}
+
+func databaseRegressed(a, b *snapshot.DatabaseActivity) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return fellToNonZero(a.Deadlocks, b.Deadlocks) || fellToNonZero(a.TempFiles, b.TempFiles) ||
+		fellToNonZero(a.TempBytes, b.TempBytes) || fellToNonZero(a.XactCommit, b.XactCommit) ||
+		fellToNonZero(a.XactRollback, b.XactRollback) || fellToNonZero(a.BlksHit, b.BlksHit) ||
+		fellToNonZero(a.BlksRead, b.BlksRead) || fellToNonZero(a.Conflicts, b.Conflicts)
+}
+
+// gauge fields (n_live_tup, n_dead_tup) are deliberately absent: they are
+// point-in-time estimates that legitimately fall.
+func fellToNonZero(a, b int64) bool { return b < a && b > 0 }
+
 func sortCounters(rows []CounterDelta) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]

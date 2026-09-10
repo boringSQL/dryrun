@@ -126,6 +126,11 @@ func printNodeWarnings(nodes []history.NodeSummary) {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: %d different servers seen, one after another (a restart or a replacement).", n.Label, n.Members))
 		}
+		if n.Regressions > 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: cumulative counters went backwards in %d capture(s)%s with no restart or stats reset recorded; "+
+					"deltas across them are wrong -- two servers may share this label.", n.Label, n.Regressions, regressionSpan(n)))
+		}
 		if n.OrphanRows > 0 {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: %d row(s) bound to no schema snapshot.", n.Label, n.OrphanRows))
@@ -146,6 +151,19 @@ func printNodeWarnings(nodes []history.NodeSummary) {
 	for _, w := range warnings {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
+}
+
+// " (2026-07-27 .. 2026-07-31)", or a single date when the falls are on one day.
+func regressionSpan(n history.NodeSummary) string {
+	if n.RegressionFirst == nil || n.RegressionLast == nil {
+		return ""
+	}
+	first := n.RegressionFirst.Format("2006-01-02")
+	last := n.RegressionLast.Format("2006-01-02")
+	if first == last {
+		return " (" + first + ")"
+	}
+	return " (" + first + " .. " + last + ")"
 }
 
 // "PostgreSQL 17.0 on x86_64..." -> "17.0"
