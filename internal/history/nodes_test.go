@@ -631,3 +631,68 @@ func TestRecentNodeFingerprints_UnfingerprintedRowsDoNotEatTheWindow(t *testing.
 		t.Errorf("got %+v", seen[0])
 	}
 }
+
+// A pulled row lands in the same table as a local capture but must not set the
+// --due clock. Covers a node-scoped stream and the project-scoped tables.
+func TestLastCaptureAt_IgnoresPulledRows(t *testing.T) {
+	ctx := context.Background()
+	at := time.Now().UTC().Truncate(time.Second).Add(-2 * time.Hour)
+
+	assertLocal := func(t *testing.T, store *Store, key SnapshotKey, label, stream string) {
+		t.Helper()
+		got, ok, err := store.LastCaptureAt(ctx, key, label, stream)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok || !got.Equal(at) {
+			t.Fatalf("LastCaptureAt(%s) = %v, %v; want local row %v", stream, got, ok, at)
+		}
+	}
+
+	t.Run("node-scoped query", func(t *testing.T) {
+		store := testStore(t)
+		key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+		putNodeQueryStatsAt(t, store, key, "q-local", "node", at)
+
+		q := queryStatsFixture("sr", "q-remote", "node")
+		q.Node.Timestamp = at.Add(time.Hour)
+		if _, err := store.Put(ctx, key, WrapQueryStats(q)); err != nil {
+			t.Fatal(err)
+		}
+		assertLocal(t, store, key, "node", "query")
+	})
+
+	t.Run("project-scoped schema", func(t *testing.T) {
+		store := testStore(t)
+		key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+		local := testSnapshot("local", "db")
+		local.Timestamp = at
+		if _, err := store.PutSchema(ctx, key, local); err != nil {
+			t.Fatal(err)
+		}
+
+		remote := testSnapshot("remote", "db")
+		remote.Timestamp = at.Add(time.Hour)
+		if _, err := store.Put(ctx, key, WrapSchema(remote)); err != nil {
+			t.Fatal(err)
+		}
+		assertLocal(t, store, key, "", "schema")
+	})
+
+	t.Run("project-scoped planner", func(t *testing.T) {
+		store := testStore(t)
+		key := SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+		local := plannerFixture("sr", "pl-local", "db")
+		local.Timestamp = at
+		if _, err := store.PutPlanner(ctx, key, local); err != nil {
+			t.Fatal(err)
+		}
+
+		remote := plannerFixture("sr", "pl-remote", "db")
+		remote.Timestamp = at.Add(time.Hour)
+		if _, err := store.Put(ctx, key, WrapPlanner(remote)); err != nil {
+			t.Fatal(err)
+		}
+		assertLocal(t, store, key, "", "planner")
+	})
+}

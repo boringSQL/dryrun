@@ -161,6 +161,72 @@ func TestOpenAdoptsPreMarkerGoStore(t *testing.T) {
 	}
 }
 
+// A pre-v5 store lacks the origin column; Open must add it with DEFAULT 1 so
+// existing rows read as locally captured.
+func TestOpenBackfillsCapturedLocally(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v4.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("create raw db: %v", err)
+	}
+	_, err = raw.Exec(`
+		CREATE TABLE snapshots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, db_url_hash TEXT NOT NULL,
+			timestamp TEXT NOT NULL, content_hash TEXT NOT NULL,
+			database_name TEXT NOT NULL, snapshot_json TEXT NOT NULL,
+			project_id TEXT, database_id TEXT);
+		CREATE TABLE planner_stats (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT, database_id TEXT,
+			schema_ref_hash TEXT NOT NULL, content_hash TEXT NOT NULL,
+			timestamp TEXT NOT NULL, payload_json TEXT NOT NULL,
+			UNIQUE(schema_ref_hash, content_hash));
+		CREATE TABLE activity_stats (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT, database_id TEXT,
+			schema_ref_hash TEXT NOT NULL, content_hash TEXT NOT NULL,
+			node_source TEXT NOT NULL, timestamp TEXT NOT NULL,
+			payload_json TEXT NOT NULL);
+		CREATE TABLE query_stats (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT, database_id TEXT,
+			schema_ref_hash TEXT NOT NULL, content_hash TEXT NOT NULL,
+			node_source TEXT NOT NULL, timestamp TEXT NOT NULL,
+			payload_json TEXT NOT NULL);
+		INSERT INTO query_stats
+			(project_id, database_id, schema_ref_hash, content_hash, node_source, timestamp, payload_json)
+			VALUES ('p', 'd', 'sr', 'h', 'node', '2026-01-01T00:00:00Z', '{}');
+		PRAGMA user_version = 4;
+	`)
+	if err != nil {
+		t.Fatalf("seed v4 schema: %v", err)
+	}
+	raw.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	var flag int
+	if err := s.db.QueryRow(
+		`SELECT captured_locally FROM query_stats WHERE content_hash = 'h'`).Scan(&flag); err != nil {
+		t.Fatalf("read backfilled flag: %v", err)
+	}
+	if flag != 1 {
+		t.Errorf("backfilled captured_locally = %d, want 1", flag)
+	}
+	// the ALTER must reach every row table, not just the sampled one
+	for _, tbl := range []string{"snapshots", "planner_stats", "activity_stats", "query_stats"} {
+		var n int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('` + tbl + `') WHERE name = 'captured_locally'`).Scan(&n); err != nil {
+			t.Fatalf("table_info(%s): %v", tbl, err)
+		}
+		if n != 1 {
+			t.Errorf("%s has no captured_locally column", tbl)
+		}
+	}
+}
+
 // The pragma rides the DSN; set via db.Exec it would land on one pooled connection only.
 func TestOpenSetsBusyTimeoutOnEveryConnection(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "history.db"))

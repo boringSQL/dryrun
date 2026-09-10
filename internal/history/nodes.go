@@ -191,15 +191,14 @@ func (s *Store) RecentNodeFingerprints(ctx context.Context, key SnapshotKey, nod
 	return out, rows.Err()
 }
 
-// Newest capture for one node's stream, for cadence decisions. Pulled rows
-// land in the same tables, so a pull can make a node look recently captured;
-// v0.17's captured_locally column is what fixes that.
+// Newest locally-captured row for a stream; pulled rows share the table but
+// must not satisfy the --due clock.
 func (s *Store) LastCaptureAt(ctx context.Context, key SnapshotKey, nodeLabel, stream string) (time.Time, bool, error) {
 	src, ok := streamSources[stream]
 	if !ok {
 		return time.Time{}, false, fmt.Errorf("unknown stream %q", stream)
 	}
-	q := `SELECT timestamp FROM ` + src.table + ` WHERE project_id = ? AND database_id = ?`
+	q := `SELECT timestamp FROM ` + src.table + ` WHERE project_id = ? AND database_id = ? AND captured_locally = 1`
 	args := []any{string(key.ProjectID), string(key.DatabaseID)}
 	if src.perNode {
 		q += " AND node_source = ?"

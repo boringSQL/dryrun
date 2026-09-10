@@ -77,3 +77,34 @@ func TestOpenHistoryStoreNewerWarnsButOpens(t *testing.T) {
 		t.Errorf("got Compat %v, want newer", s2.Compat())
 	}
 }
+
+// Pull writes into history.db, so it must refuse a newer-dryrun db as capture does.
+func TestSnapshotPullRefusesNewerHistoryDB(t *testing.T) {
+	srcDir := t.TempDir()
+	if _, err := history.NewFilesystemStore(srcDir); err != nil {
+		t.Fatalf("seed source store: %v", err)
+	}
+
+	localPath := filepath.Join(t.TempDir(), "history.db")
+	s, err := history.Open(localPath)
+	if err != nil {
+		t.Fatalf("history.Open: %v", err)
+	}
+	s.Close()
+
+	raw, err := sql.Open("sqlite", localPath)
+	if err != nil {
+		t.Fatalf("reopen raw: %v", err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 999"); err != nil {
+		t.Fatalf("forge future version: %v", err)
+	}
+	raw.Close()
+
+	cmd := snapshotPullCmd()
+	cmd.SetArgs([]string{"--from-path", srcDir, "--history-db", localPath, "--all"})
+	err = cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "newer dryrun") {
+		t.Fatalf("pull into a newer db = %v, want a newer-dryrun refusal", err)
+	}
+}

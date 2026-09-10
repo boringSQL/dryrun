@@ -195,6 +195,36 @@ func TestDueStreams(t *testing.T) {
 	})
 }
 
+// A pulled row must not hold the node's stream back from --due.
+func TestDueStreams_PulledRowDoesNotSatisfyTheClock(t *testing.T) {
+	ctx := context.Background()
+	store := testStoreAt(t, t.TempDir())
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+	target := captureTarget{Label: "primary", Interval: time.Hour}
+
+	q := &schema.QueryStatsSnapshot{
+		SchemaRefHash: "sr",
+		ContentHash:   "pulled",
+		Node:          schema.NodeIdentity{Source: "primary", Timestamp: time.Now().UTC().Add(-time.Minute)},
+		Queries: []schema.QueryStatsEntry{{
+			Fingerprint: "fp-pulled",
+			Members:     []schema.QueryStatsMember{{QueryID: 7, Calls: 1}},
+			Calls:       1,
+		}},
+	}
+	if _, err := store.Put(ctx, key, history.WrapQueryStats(q)); err != nil {
+		t.Fatal(err)
+	}
+
+	run, skipped, err := dueStreams(ctx, store, key, target, []string{"query"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run) != 1 || len(skipped) != 0 {
+		t.Errorf("run=%v skipped=%v, want the pulled row to leave query due", run, skipped)
+	}
+}
+
 func TestLockCaptures(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "history.db")

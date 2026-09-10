@@ -709,9 +709,8 @@ func candidateStreams(t captureTarget) []string {
 	return config.DefaultStreamsFor("primary")
 }
 
-// --due keys off the newer of the newest stored row and this host's last
-// attempt. Pulled rows land in the same tables, so a pull can make a node look
-// freshly captured; it self-heals on the next tick.
+// --due keys off the newest locally-captured row or this host's last attempt;
+// pulled rows are excluded at the store.
 func dueStreams(ctx context.Context, store *history.Store, key history.SnapshotKey, t captureTarget, wanted []string, due bool) (run, skipped []string, err error) {
 	if !due {
 		return wanted, nil, nil

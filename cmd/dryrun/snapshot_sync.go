@@ -96,6 +96,10 @@ func snapshotPullCmd() *cobra.Command {
 				return err
 			}
 			defer dst.Close()
+			// pull writes into history.db; refuse a newer-dryrun db, as capture does
+			if err := historyUsable(dst); err != nil {
+				return err
+			}
 			return runSync(cmd.Context(), src, dst, all, scope, os.Stdout)
 		},
 	}

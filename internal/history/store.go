@@ -21,7 +21,8 @@ import (
 // PRAGMA user_version; 1-2 were the rust codebase, need to restart from 3.
 // Purely additive tables (CREATE TABLE IF NOT EXISTS, no rename/drop) don't bump this.
 // 4: UNIQUE(project_id, database_id, content_hash) on query_stats
-const HistorySchemaVersion = 4
+// 5: captured_locally on every row table, so --due ignores pulled rows
+const HistorySchemaVersion = 5
 
 type (
 	Compat int
@@ -219,7 +220,8 @@ func (s *Store) migrate() error {
 			database_name TEXT NOT NULL,
 			snapshot_json TEXT NOT NULL,
 			project_id    TEXT,
-			database_id   TEXT
+			database_id   TEXT,
+			captured_locally INTEGER NOT NULL DEFAULT 1
 		);
 		CREATE INDEX IF NOT EXISTS idx_snapshots_content_hash
 			ON snapshots(content_hash);
@@ -234,6 +236,7 @@ func (s *Store) migrate() error {
 			content_hash    TEXT NOT NULL,
 			timestamp       TEXT NOT NULL,
 			payload_json    TEXT NOT NULL,
+			captured_locally INTEGER NOT NULL DEFAULT 1,
 			UNIQUE(schema_ref_hash, content_hash)
 		);
 		CREATE INDEX IF NOT EXISTS planner_stats_by_key_taken_at
@@ -249,7 +252,8 @@ func (s *Store) migrate() error {
 			content_hash    TEXT NOT NULL,
 			node_source     TEXT NOT NULL,
 			timestamp       TEXT NOT NULL,
-			payload_json    TEXT NOT NULL
+			payload_json    TEXT NOT NULL,
+			captured_locally INTEGER NOT NULL DEFAULT 1
 		);
 		CREATE INDEX IF NOT EXISTS activity_stats_by_key_taken_at
 			ON activity_stats(project_id, database_id, timestamp DESC);
@@ -264,7 +268,8 @@ func (s *Store) migrate() error {
 			content_hash    TEXT NOT NULL,
 			node_source     TEXT NOT NULL,
 			timestamp       TEXT NOT NULL,
-			payload_json    TEXT NOT NULL
+			payload_json    TEXT NOT NULL,
+			captured_locally INTEGER NOT NULL DEFAULT 1
 		);
 		CREATE INDEX IF NOT EXISTS query_stats_by_key_taken_at
 			ON query_stats(project_id, database_id, timestamp DESC);
@@ -301,6 +306,17 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_snapshots_db_url_hash
 		ON snapshots(db_url_hash, timestamp DESC)`); err != nil {
 		return fmt.Errorf("migration failed (idx_snapshots_db_url_hash): %w", err)
+	}
+
+	// v4 -> v5: existing rows backfill as local via DEFAULT 1; table is a
+	// caller-side literal, never user input.
+	for _, tbl := range []string{"snapshots", "planner_stats", "activity_stats", "query_stats"} {
+		if _, err := s.db.Exec("ALTER TABLE " + tbl +
+			" ADD COLUMN captured_locally INTEGER NOT NULL DEFAULT 1"); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				return fmt.Errorf("migration failed (%s.captured_locally): %w", tbl, err)
+			}
+		}
 	}
 
 	// v3 -> v4: pre-constraint DBs can hold duplicate query_stats hashes (an idle
@@ -352,6 +368,11 @@ func syntheticDBURLHash(key SnapshotKey) string {
 
 // schema-specific wrapper; mirror of Rust's `put_schema` default method.
 func (s *Store) PutSchema(ctx context.Context, key SnapshotKey, snap *schema.SchemaSnapshot) (PutOutcome, error) {
+	return s.putSchema(ctx, key, snap, true)
+}
+
+// capturedLocally is false on the pull path; see Store.Put.
+func (s *Store) putSchema(ctx context.Context, key SnapshotKey, snap *schema.SchemaSnapshot, capturedLocally bool) (PutOutcome, error) {
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
 
@@ -375,10 +396,10 @@ func (s *Store) PutSchema(ctx context.Context, key SnapshotKey, snap *schema.Sch
 
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO snapshots (db_url_hash, timestamp, content_hash, database_name,
-		                        snapshot_json, project_id, database_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		                        snapshot_json, project_id, database_id, captured_locally)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		syntheticDBURLHash(key), formatHistoryTS(snap.Timestamp),
-		snap.ContentHash, snap.Database, string(data), pid, did,
+		snap.ContentHash, snap.Database, string(data), pid, did, localFlag(capturedLocally),
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save snapshot: %w", err)
@@ -386,6 +407,13 @@ func (s *Store) PutSchema(ctx context.Context, key SnapshotKey, snap *schema.Sch
 
 	slog.Info("snapshot put", "hash", snap.ContentHash, "project", pid, "database", did)
 	return PutInserted, nil
+}
+
+func localFlag(capturedLocally bool) int {
+	if capturedLocally {
+		return 1
+	}
+	return 0
 }
 
 var ErrSnapshotNotFound = errors.New("snapshot not found")
@@ -948,17 +976,18 @@ func (s *Store) ListKeys(ctx context.Context) ([]SnapshotKey, error) {
 	return out, rows.Err()
 }
 
-// Put dispatches on the StoredSnapshot variant to the right kind-specific path.
+// Put is the sync/pull entry point, so rows land captured_locally=0; local
+// capture uses the typed PutX methods.
 func (s *Store) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (PutOutcome, error) {
 	switch {
 	case snap.AsSchema() != nil:
-		return s.PutSchema(ctx, key, snap.AsSchema())
+		return s.putSchema(ctx, key, snap.AsSchema(), false)
 	case snap.AsPlanner() != nil:
-		return s.PutPlanner(ctx, key, snap.AsPlanner())
+		return s.putPlanner(ctx, key, snap.AsPlanner(), false)
 	case snap.AsActivity() != nil:
-		return s.PutActivity(ctx, key, snap.AsActivity())
+		return s.putActivity(ctx, key, snap.AsActivity(), false)
 	case snap.AsQueryStats() != nil:
-		return s.PutQueryStats(ctx, key, snap.AsQueryStats())
+		return s.putQueryStats(ctx, key, snap.AsQueryStats(), false)
 	}
 	return PutInserted, fmt.Errorf("empty StoredSnapshot")
 }

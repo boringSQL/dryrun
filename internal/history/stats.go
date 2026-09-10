@@ -15,6 +15,11 @@ import (
 
 // idempotent on (schema_ref_hash, content_hash); re-puts collapse to a no-op
 func (s *Store) PutPlanner(ctx context.Context, key SnapshotKey, p *schema.PlannerStatsSnapshot) (PutOutcome, error) {
+	return s.putPlanner(ctx, key, p, true)
+}
+
+// false on the pull path; see putSchema.
+func (s *Store) putPlanner(ctx context.Context, key SnapshotKey, p *schema.PlannerStatsSnapshot, capturedLocally bool) (PutOutcome, error) {
 	data, err := json.Marshal(p)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot serialize planner stats: %w", err)
@@ -22,10 +27,11 @@ func (s *Store) PutPlanner(ctx context.Context, key SnapshotKey, p *schema.Plann
 
 	res, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO planner_stats
-		   (project_id, database_id, schema_ref_hash, content_hash, timestamp, payload_json)
-		   VALUES (?, ?, ?, ?, ?, ?)`,
+		   (project_id, database_id, schema_ref_hash, content_hash, timestamp, payload_json, captured_locally)
+		   VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		string(key.ProjectID), string(key.DatabaseID),
 		p.SchemaRefHash, p.ContentHash, formatHistoryTS(p.Timestamp), string(data),
+		localFlag(capturedLocally),
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save planner stats: %w", err)
@@ -41,6 +47,11 @@ func (s *Store) PutPlanner(ctx context.Context, key SnapshotKey, p *schema.Plann
 
 // activity is per-node and append-only; replicas write one row per probe cycle
 func (s *Store) PutActivity(ctx context.Context, key SnapshotKey, a *schema.ActivityStatsSnapshot) (PutOutcome, error) {
+	return s.putActivity(ctx, key, a, true)
+}
+
+// false on the pull path; see putSchema.
+func (s *Store) putActivity(ctx context.Context, key SnapshotKey, a *schema.ActivityStatsSnapshot, capturedLocally bool) (PutOutcome, error) {
 	data, err := json.Marshal(a)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot serialize activity stats: %w", err)
@@ -48,11 +59,12 @@ func (s *Store) PutActivity(ctx context.Context, key SnapshotKey, a *schema.Acti
 
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO activity_stats
-		   (project_id, database_id, schema_ref_hash, content_hash, node_source, timestamp, payload_json)
-		   VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		   (project_id, database_id, schema_ref_hash, content_hash, node_source, timestamp, payload_json, captured_locally)
+		   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(key.ProjectID), string(key.DatabaseID),
 		a.SchemaRefHash, a.ContentHash, a.Node.Source,
 		formatHistoryTS(a.Node.Timestamp), string(data),
+		localFlag(capturedLocally),
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save activity stats: %w", err)
@@ -73,6 +85,11 @@ func hasQueryMembers(q *schema.QueryStatsSnapshot) bool {
 }
 
 func (s *Store) PutQueryStats(ctx context.Context, key SnapshotKey, q *schema.QueryStatsSnapshot) (PutOutcome, error) {
+	return s.putQueryStats(ctx, key, q, true)
+}
+
+// false on the pull path; see putSchema.
+func (s *Store) putQueryStats(ctx context.Context, key SnapshotKey, q *schema.QueryStatsSnapshot, capturedLocally bool) (PutOutcome, error) {
 	// Pre-Members payloads all digest alike; reject them (pull path only,
 	// the migration clears local ones).
 	if len(q.Queries) > 0 && !hasQueryMembers(q) {
@@ -95,11 +112,12 @@ func (s *Store) PutQueryStats(ctx context.Context, key SnapshotKey, q *schema.Qu
 
 	res, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO query_stats
-		   (project_id, database_id, schema_ref_hash, content_hash, node_source, timestamp, payload_json)
-		   VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		   (project_id, database_id, schema_ref_hash, content_hash, node_source, timestamp, payload_json, captured_locally)
+		   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(key.ProjectID), string(key.DatabaseID),
 		q.SchemaRefHash, q.ContentHash, q.Node.Source,
 		formatHistoryTS(q.Node.Timestamp), string(data),
+		localFlag(capturedLocally),
 	)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot save query stats: %w", err)
