@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/boringsql/dryrun/internal/history"
+	"github.com/boringsql/dryrun/internal/schema"
 )
 
 // diffOperands is the whole selection grammar boiled down to one pure function:
@@ -394,6 +395,64 @@ func TestBuildSnapshotDiff(t *testing.T) {
 		}
 		if env.Schema != nil || env.Planner != nil {
 			t.Fatal("only the activity slot should be populated")
+		}
+	})
+
+	// the CLI rolls partitions up against each row's own schema_ref, and only
+	// when both resolve
+	t.Run("activity rolls up per row schema_ref", func(t *testing.T) {
+		parts := syncTestSchema("parts", "appdb", now)
+		parts.Tables = []schema.Table{
+			{Schema: "public", Name: "events", PartitionInfo: &schema.PartitionInfo{
+				Strategy: schema.PartitionRange, Key: "id",
+				Children: []schema.PartitionChild{{Schema: "public", Name: "events_2026"}},
+			}},
+			{Schema: "public", Name: "events_2026"},
+		}
+		if _, err := store.Put(ctx, key, history.WrapSchema(parts)); err != nil {
+			t.Fatal(err)
+		}
+		child := func(ref, hash string, ts time.Time, seq int64) history.StoredSnapshot {
+			a := syncTestActivity(ref, hash, "primary", ts, false)
+			a.Tables = []schema.TableActivityEntry{{
+				Table:    schema.QualifiedName{Schema: "public", Name: "events_2026"},
+				Activity: schema.TableActivity{SeqScan: seq},
+			}}
+			return history.WrapActivity(a)
+		}
+		hasParent := func(from, to history.StoredSnapshot) bool {
+			env, err := buildSnapshotDiff(ctx, store, key, history.ActivityKind("primary"), from, to)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for _, c := range env.Activity.Counters {
+				if c.Identity.Name == "events" {
+					return true
+				}
+			}
+			return false
+		}
+
+		if !hasParent(child("parts", "roll-a", now.Add(-time.Hour), 10), child("parts", "roll-b", now, 25)) {
+			t.Fatal("both refs resolve: the parent should be rolled up")
+		}
+		if hasParent(child("parts", "roll-c", now.Add(-time.Hour), 10), child("unknown", "roll-d", now, 25)) {
+			t.Fatal("one ref unresolved: rollup must be skipped on both sides")
+		}
+	})
+
+	t.Run("query fills the query slot", func(t *testing.T) {
+		from := history.WrapQueryStats(syncTestQueryStats("sh", "query-a", "primary", now.Add(-time.Hour)))
+		to := history.WrapQueryStats(syncTestQueryStats("sh", "query-b", "primary", now))
+		env, err := buildSnapshotDiff(ctx, store, key, history.QueryKind("primary"), from, to)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if env.Kind != "query" || env.Query == nil {
+			t.Fatalf("expected a query envelope, got kind=%q query=%v", env.Kind, env.Query)
+		}
+		if env.Schema != nil || env.Planner != nil || env.Activity != nil {
+			t.Fatal("only the query slot should be populated")
 		}
 	})
 }

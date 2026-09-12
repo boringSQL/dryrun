@@ -264,26 +264,19 @@ func assembleMoment(ctx context.Context, store *history.Store, key history.Snaps
 	return m
 }
 
-// only nodes captured on both sides; rolled up all-or-nothing per pair so a
-// partitioned parent never appears on one side and reads as zero on the other
+// only nodes captured on both sides
 func diffActivityByNode(from, to *moment) []NodeActivityDelta {
-	rollUp := from.schema != nil && to.schema != nil
-
 	var out []NodeActivityDelta
 	for node, a := range from.activity {
 		b, ok := to.activity[node]
 		if !ok {
 			continue
 		}
-		fromA, toA := a, b
-		if rollUp {
-			fromA, toA = snapshot.RollUpActivitySnapshot(a, from.schema), snapshot.RollUpActivitySnapshot(b, to.schema)
-		}
-		d, err := diff.DiffActivity(fromA, toA)
-		if err != nil || d.IsEmpty() {
+		d, err := DiffNodePair(history.WrapActivity(a), history.WrapActivity(b), from.schema, to.schema)
+		if err != nil || d.Activity.IsEmpty() {
 			continue
 		}
-		out = append(out, NodeActivityDelta{Node: node, Delta: d})
+		out = append(out, NodeActivityDelta{Node: node, Delta: d.Activity})
 	}
 	return out
 }
@@ -297,14 +290,14 @@ func diffQueryByNode(from, to *moment) []NodeQueryDelta {
 		if !ok {
 			continue
 		}
-		d, err := diff.DiffQueryStats(a, b)
-		if err != nil || d == nil {
+		d, err := DiffNodePair(history.WrapQueryStats(a), history.WrapQueryStats(b), nil, nil)
+		if err != nil || d.Query == nil {
 			continue
 		}
-		if !worthReporting(d) {
+		if !worthReporting(d.Query) {
 			continue
 		}
-		out = append(out, NodeQueryDelta{Node: node, Delta: d})
+		out = append(out, NodeQueryDelta{Node: node, Delta: d.Query})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
 	return out

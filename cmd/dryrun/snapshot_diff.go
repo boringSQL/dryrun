@@ -3,13 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/boringsql/dryrun/internal/history"
-	"github.com/boringsql/dryrun/internal/schema"
+	"github.com/boringsql/dryrun/internal/snapdiff"
 	"github.com/boringsql/dryrun/pkg/diff"
 )
 
@@ -182,45 +181,23 @@ func buildSnapshotDiff(ctx context.Context, store *history.Store, key history.Sn
 		}
 		env.Kind, env.Planner = "planner", d
 	case history.KindActivity:
-		fromActivity, toActivity := rollUpActivityPairForDiff(ctx, store, key, from.AsActivity(), to.AsActivity())
-		d, err := diff.DiffActivity(fromActivity, toActivity)
+		d, err := snapdiff.DiffNodePair(from, to,
+			snapdiff.RowSchema(ctx, store, key, from.AsActivity()),
+			snapdiff.RowSchema(ctx, store, key, to.AsActivity()))
 		if err != nil {
 			return nil, err
 		}
-		env.Kind, env.Activity = "activity", d
+		env.Kind, env.Activity = "activity", d.Activity
 	case history.KindQuery:
-		d, err := diff.DiffQueryStats(from.AsQueryStats(), to.AsQueryStats())
+		d, err := snapdiff.DiffNodePair(from, to, nil, nil)
 		if err != nil {
 			return nil, err
 		}
-		env.Kind, env.Query = "query", d
+		env.Kind, env.Query = "query", d.Query
 	default:
 		return nil, fmt.Errorf("unsupported diff kind %s", kind)
 	}
 	return env, nil
-}
-
-// All-or-nothing: rolling up only one side would make DiffActivity read the
-// other's absent partitioned parents as zero, fabricating huge deltas.
-func rollUpActivityPairForDiff(ctx context.Context, store *history.Store, key history.SnapshotKey, from, to *schema.ActivityStatsSnapshot) (*schema.ActivityStatsSnapshot, *schema.ActivityStatsSnapshot) {
-	fromSchema, fromOK := resolveActivitySchema(ctx, store, key, from)
-	toSchema, toOK := resolveActivitySchema(ctx, store, key, to)
-	if !fromOK || !toOK {
-		return from, to
-	}
-	return schema.RollUpActivitySnapshot(from, fromSchema), schema.RollUpActivitySnapshot(to, toSchema)
-}
-
-func resolveActivitySchema(ctx context.Context, store *history.Store, key history.SnapshotKey, a *schema.ActivityStatsSnapshot) (*schema.SchemaSnapshot, bool) {
-	if a == nil || a.SchemaRefHash == "" {
-		return nil, false
-	}
-	snap, err := store.GetSchemaByExactHash(ctx, key, a.SchemaRefHash)
-	if err != nil {
-		slog.Debug("activity rollup skipped: schema not resolved", "schema_ref_hash", a.SchemaRefHash, "err", err)
-		return nil, false
-	}
-	return snap, true
 }
 
 func emitDiff(env *diff.SnapshotDiff, jsonDiff, prettyDiff bool, minPct float64) error {
