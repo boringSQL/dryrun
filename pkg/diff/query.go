@@ -124,7 +124,7 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 	// The label alone does not prove one machine -- that is the whole reason
 	// captures record which server answered. Two servers under one label have
 	// unrelated counters, and subtracting them fabricates growth.
-	if why, refuse := serverChanged(from, to); why != "" {
+	if why, refuse := serverChanged(from.Node, to.Node); why != "" {
 		if refuse {
 			d.Incomparable = why
 			return d, nil
@@ -225,27 +225,6 @@ func missingStatus(truncated bool) string {
 		return QueryEvicted
 	}
 	return QueryGone
-}
-
-// A restart gives the same machine a new postmaster start time, and
-// pg_stat_statements survives a clean restart, so a moved start time alone is
-// not grounds to refuse. Two different addresses are: those are two machines,
-// and their counters have nothing to do with each other.
-func serverChanged(from, to *snapshot.QueryStatsSnapshot) (why string, refuse bool) {
-	// the two identity fields are independently optional, so the strong signal
-	// must not sit behind the weak one
-	fa, fb := from.Node.ServerAddr, to.Node.ServerAddr
-	if fa != "" && fb != "" && fa != fb {
-		return fmt.Sprintf("label %q covered two servers (%s and %s): their counters are unrelated",
-			to.Node.Source, fa, fb), true
-	}
-	a, b := from.Node.PostmasterStartTime, to.Node.PostmasterStartTime
-	if a == nil || b == nil || a.Equal(*b) {
-		return "", false
-	}
-	return fmt.Sprintf("the server behind %q restarted or was replaced between the captures (started %s, then %s); "+
-		"if it was replaced these deltas are not increments",
-		to.Node.Source, a.UTC().Format(time.RFC3339), b.UTC().Format(time.RFC3339)), false
 }
 
 // stats_reset moving is the only proof of a reset. dealloc moves under
@@ -435,12 +414,7 @@ func RenderQueryConsole(w io.Writer, env *SnapshotDiff) {
 	if unchanged > 0 {
 		fmt.Fprintf(w, "  (%d unchanged)\n", unchanged)
 	}
-	for _, c := range d.Caveats {
-		fmt.Fprintf(w, "\n  note: %s", c)
-	}
-	if len(d.Caveats) > 0 {
-		fmt.Fprintln(w)
-	}
+	renderNotes(w, d.Caveats)
 }
 
 // Shows the window mean and, when the shape ran before too, where it moved

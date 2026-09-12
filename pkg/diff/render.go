@@ -268,3 +268,12 @@ func short(h string) string {
 	}
 	return h
 }
+
+func renderNotes(w io.Writer, caveats []string) {
+	for _, c := range caveats {
+		fmt.Fprintf(w, "\n  note: %s", c)
+	}
+	if len(caveats) > 0 {
+		fmt.Fprintln(w)
+	}
+}

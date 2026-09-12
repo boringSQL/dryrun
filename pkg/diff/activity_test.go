@@ -439,3 +439,132 @@ func TestActivityRegressed_IndexAndDatabase(t *testing.T) {
 		t.Error("a rolled-back pg_stat_database counter was not reported")
 	}
 }
+
+// A label that moved servers used to diff in silence. Two addresses refuse and
+// a moved boot caveats, through the serverChanged DiffQueryStats also uses.
+func TestDiffActivity_ServerChangedCaveat(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	bootA, bootB := t0.Add(-72*time.Hour), t0.Add(-2*time.Hour)
+
+	pair := func(fromBoot, toBoot *time.Time, fromAddr, toAddr string) *ActivityDelta {
+		t.Helper()
+		from := emptyActivity("a")
+		from.Node = snapshot.NodeIdentity{Source: "replica", Timestamp: t0, PostmasterStartTime: fromBoot, ServerAddr: fromAddr}
+		from.Tables = []snapshot.TableActivityEntry{tblAct("public", "t", snapshot.TableActivity{SeqScan: 100})}
+		to := emptyActivity("b")
+		to.Node = snapshot.NodeIdentity{Source: "replica", Timestamp: t0.Add(time.Hour), PostmasterStartTime: toBoot, ServerAddr: toAddr}
+		to.Tables = []snapshot.TableActivityEntry{tblAct("public", "t", snapshot.TableActivity{SeqScan: 150})}
+		d, err := DiffActivity(from, to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	has := func(d *ActivityDelta, sub string) bool {
+		for _, c := range d.Caveats {
+			if strings.Contains(c, sub) {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("new boot is caveated, deltas still produced", func(t *testing.T) {
+		d := pair(&bootA, &bootB, "10.0.0.1", "10.0.0.1")
+		if !has(d, "restarted or was replaced") {
+			t.Errorf("restart not caveated: %v", d.Caveats)
+		}
+		if r := findCounter(t, d.Counters, "t", MetricSeqScan); r.Delta == nil || *r.Delta != 50 {
+			t.Errorf("caveat must not suppress the delta, got %+v", r)
+		}
+	})
+
+	// same refusal as query stats: a note beside two servers' subtracted
+	// counters would contradict the numbers it sits next to
+	t.Run("two addresses are refused with no rows", func(t *testing.T) {
+		d := pair(&bootA, &bootB, "10.0.0.1", "10.0.0.2")
+		if !strings.Contains(d.Incomparable, "covered two servers") {
+			t.Errorf("two servers not refused: %q", d.Incomparable)
+		}
+		if len(d.Counters) != 0 || len(d.Caveats) != 0 {
+			t.Errorf("a refusal must carry no rows or caveats, got %d rows, %v", len(d.Counters), d.Caveats)
+		}
+	})
+
+	// the strong signal must not sit behind the weak one: one known address
+	// proves nothing, so a moved boot is a restart caveat, not a refusal
+	t.Run("address known on one side only is a restart caveat", func(t *testing.T) {
+		d := pair(&bootA, &bootB, "10.0.0.1", "")
+		if d.Incomparable != "" {
+			t.Errorf("refused on a one-sided address: %q", d.Incomparable)
+		}
+		if !has(d, "restarted or was replaced") {
+			t.Errorf("restart not caveated: %v", d.Caveats)
+		}
+	})
+
+	t.Run("same server is silent", func(t *testing.T) {
+		if d := pair(&bootA, &bootA, "10.0.0.1", "10.0.0.1"); len(d.Caveats) != 0 {
+			t.Errorf("unchanged server caveated: %v", d.Caveats)
+		}
+	})
+
+	t.Run("unfingerprinted side is silent", func(t *testing.T) {
+		if d := pair(nil, &bootB, "", ""); len(d.Caveats) != 0 {
+			t.Errorf("missing fingerprint caveated: %v", d.Caveats)
+		}
+	})
+}
+
+func TestRenderActivityConsole_ShowsServerCaveat(t *testing.T) {
+	from := emptyActivity("aaaaaaaaaaaa")
+	from.Tables = []snapshot.TableActivityEntry{tblAct("public", "hot", snapshot.TableActivity{IdxScan: 1_000})}
+	to := emptyActivity("bbbbbbbbbbbb")
+	to.Tables = []snapshot.TableActivityEntry{tblAct("public", "hot", snapshot.TableActivity{IdxScan: 5_000})}
+
+	delta, _ := DiffActivity(from, to)
+	delta.Caveats = []string{"the server behind \"replica\" restarted or was replaced"}
+	env := &SnapshotDiff{Kind: "activity", FromHash: from.ContentHash, ToHash: to.ContentHash, Activity: delta}
+
+	var buf bytes.Buffer
+	RenderActivityConsole(&buf, env, DefaultMinPct)
+	if out := buf.String(); !strings.Contains(out, "note: the server behind") {
+		t.Errorf("expected the caveat as a note, got:\n%s", out)
+	}
+}
+
+func TestRenderActivityConsole_RefusalAndFlatCaveat(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	bootA, bootB := t0.Add(-72*time.Hour), t0.Add(-2*time.Hour)
+	render := func(fromAddr, toAddr string, fromScan, toScan int64) string {
+		from := emptyActivity("aaaaaaaaaaaa")
+		from.Node = snapshot.NodeIdentity{Source: "replica", PostmasterStartTime: &bootA, ServerAddr: fromAddr}
+		from.Tables = []snapshot.TableActivityEntry{tblAct("public", "t", snapshot.TableActivity{IdxScan: fromScan})}
+		to := emptyActivity("bbbbbbbbbbbb")
+		to.Node = snapshot.NodeIdentity{Source: "replica", PostmasterStartTime: &bootB, ServerAddr: toAddr}
+		to.Tables = []snapshot.TableActivityEntry{tblAct("public", "t", snapshot.TableActivity{IdxScan: toScan})}
+		delta, _ := DiffActivity(from, to)
+		var buf bytes.Buffer
+		RenderActivityConsole(&buf, &SnapshotDiff{Kind: "activity", FromHash: from.ContentHash, ToHash: to.ContentHash, Activity: delta}, DefaultMinPct)
+		return buf.String()
+	}
+
+	if out := render("10.0.0.1", "10.0.0.2", 1_000, 5_000); !strings.Contains(out, "not comparable: label \"replica\" covered two servers") ||
+		strings.Contains(out, "top movers") {
+		t.Errorf("two servers must render as a refusal with no movers, got:\n%s", out)
+	}
+	if out := render("10.0.0.1", "10.0.0.1", 1_000, 1_000); !strings.Contains(out, "no movers") ||
+		!strings.Contains(out, "note: the server behind \"replica\" restarted") {
+		t.Errorf("a flat pair across a restart must still print the note, got:\n%s", out)
+	}
+}
+
+func TestActivityDelta_RefusedIsNilSafe(t *testing.T) {
+	var d *ActivityDelta
+	if d.Refused() || !d.IsEmpty() {
+		t.Fatal("a nil delta is empty and not refused")
+	}
+	if !(&ActivityDelta{Incomparable: "two servers"}).Refused() {
+		t.Fatal("Incomparable set must read as refused")
+	}
+}

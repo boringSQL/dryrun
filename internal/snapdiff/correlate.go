@@ -92,6 +92,7 @@ func Build(ctx context.Context, store *history.Store, key history.SnapshotKey, o
 	res.Objects = buildObjects(res.SchemaDelta, res.PlannerDelta, res.ActivityDelta)
 	res.Summary = buildSummary(res)
 	res.Correlation = buildCorrelation(opt.Window, fromKind, toKind, fromM, toM)
+	res.Correlation.Notes = append(res.Correlation.Notes, activityNotes(res.ActivityDelta)...)
 
 	return res, nil
 }
@@ -273,11 +274,14 @@ func diffActivityByNode(from, to *moment) []NodeActivityDelta {
 			continue
 		}
 		d, err := DiffNodePair(history.WrapActivity(a), history.WrapActivity(b), from.schema, to.schema)
-		if err != nil || d.Activity.IsEmpty() {
+		// a refusal carries no rows but must still reach the reader
+		if err != nil || (d.Activity.IsEmpty() && !d.Activity.Refused()) {
 			continue
 		}
 		out = append(out, NodeActivityDelta{Node: node, Delta: d.Activity})
 	}
+	// map order would reorder nodes and their notes between runs
+	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
 	return out
 }
 

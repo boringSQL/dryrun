@@ -71,9 +71,11 @@ type (
 		// shapes present but not subtractable (a reset, or a truncated baseline)
 		QueryUnknown int `json:"query_unknown,omitempty"`
 		// nodes whose query pair could not be diffed at all
-		QueryRefused   int      `json:"query_refused,omitempty"`
-		ObjectsChanged int      `json:"objects_changed"`
-		TopObjects     []string `json:"top_objects,omitempty"`
+		QueryRefused int `json:"query_refused,omitempty"`
+		// nodes whose activity pair spanned two servers under one label
+		ActivityRefused int      `json:"activity_refused,omitempty"`
+		ObjectsChanged  int      `json:"objects_changed"`
+		TopObjects      []string `json:"top_objects,omitempty"`
 	}
 
 	CategoryCounts struct {
@@ -128,7 +130,7 @@ func (r *Result) IsEmpty() bool {
 
 func hasActivity(nds []NodeActivityDelta) bool {
 	for _, nd := range nds {
-		if !nd.Delta.IsEmpty() {
+		if !nd.Delta.IsEmpty() || nd.Delta.Refused() {
 			return true
 		}
 	}

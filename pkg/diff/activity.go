@@ -14,6 +14,10 @@ type (
 		FromHash string         `json:"from_hash"`
 		ToHash   string         `json:"to_hash"`
 		Counters []CounterDelta `json:"counters"`
+		// two servers under one label: subtracting them fabricates growth, so no rows
+		Incomparable string `json:"incomparable,omitempty"`
+		// a moved boot diffs anyway: per-object resets flag counters that fell
+		Caveats []string `json:"caveats,omitempty"`
 	}
 
 	CounterDelta struct {
@@ -62,6 +66,9 @@ const (
 
 func (d *ActivityDelta) IsEmpty() bool { return d == nil || len(d.Counters) == 0 }
 
+// a refusal is empty too, so callers that drop empties must check this first
+func (d *ActivityDelta) Refused() bool { return d != nil && d.Incomparable != "" }
+
 var (
 	tableMetrics = []tableMetric{
 		{MetricSeqScan, func(a snapshot.TableActivity) float64 { return float64(a.SeqScan) }, true},
@@ -88,6 +95,11 @@ var (
 )
 
 func DiffActivity(from, to *snapshot.ActivityStatsSnapshot) (*ActivityDelta, error) {
+	why, refuse := serverChanged(from.Node, to.Node)
+	if refuse {
+		return &ActivityDelta{FromHash: from.ContentHash, ToHash: to.ContentHash, Incomparable: why}, nil
+	}
+
 	var rows []CounterDelta
 
 	fromT := indexBy(from.Tables, func(e snapshot.TableActivityEntry) string { return e.Table.String() })
@@ -138,7 +150,11 @@ func DiffActivity(from, to *snapshot.ActivityStatsSnapshot) (*ActivityDelta, err
 	}
 
 	sortCounters(rows)
-	return &ActivityDelta{FromHash: from.ContentHash, ToHash: to.ContentHash, Counters: rows}, nil
+	d := &ActivityDelta{FromHash: from.ContentHash, ToHash: to.ContentHash, Counters: rows}
+	if why != "" {
+		d.Caveats = append(d.Caveats, why)
+	}
+	return d, nil
 }
 
 func counterRow(ref ObjectRef, metric string, a, b float64, reset bool) CounterDelta {
@@ -225,11 +241,7 @@ func databaseResetAdvanced(from, to *snapshot.ActivityStatsSnapshot) bool {
 // A changed boot is a restart, a replacement, or rotation; 2.5.1 already names
 // each of those, so it is not this signal's job to count it too.
 func bootChanged(from, to *snapshot.ActivityStatsSnapshot) bool {
-	a, b := from.Node.PostmasterStartTime, to.Node.PostmasterStartTime
-	if a == nil || b == nil {
-		return false
-	}
-	return !a.Equal(*b)
+	return bootMoved(from.Node, to.Node)
 }
 
 // Falling *to* zero is how a reset presents, so it is excluded; anything else
@@ -280,6 +292,10 @@ func sortCounters(rows []CounterDelta) {
 
 func RenderActivityConsole(w io.Writer, env *SnapshotDiff, minPct float64) {
 	fmt.Fprintf(w, "activity diff  %s → %s\n", short(env.FromHash), short(env.ToHash))
+	if env.Activity != nil && env.Activity.Incomparable != "" {
+		fmt.Fprintf(w, "  not comparable: %s\n", env.Activity.Incomparable)
+		return
+	}
 	if env.Activity.IsEmpty() {
 		fmt.Fprintln(w, "  no changes")
 		return
@@ -287,6 +303,7 @@ func RenderActivityConsole(w io.Writer, env *SnapshotDiff, minPct float64) {
 	groups := counterMovers(env.Activity.Counters, minPct)
 	if len(groups) == 0 {
 		fmt.Fprintf(w, "  no movers ≥ %g%%\n", minPct)
+		renderNotes(w, env.Activity.Caveats)
 		return
 	}
 	fmt.Fprintf(w, "  %s changed, top movers:\n\n", plural(len(groups), "object", "objects"))
@@ -296,6 +313,7 @@ func RenderActivityConsole(w io.Writer, env *SnapshotDiff, minPct float64) {
 			fmt.Fprintf(w, "    %s\n", describeCounter(r))
 		}
 	}
+	renderNotes(w, env.Activity.Caveats)
 }
 
 func counterMovers(rows []CounterDelta, minPct float64) []counterGroup {

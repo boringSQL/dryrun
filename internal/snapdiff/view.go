@@ -107,6 +107,11 @@ func buildSummary(r *Result) Summary {
 		s.PlannerMovers += len(o.Sizing)
 		s.ActivityMovers += len(o.Activity)
 	}
+	for _, nd := range r.ActivityDelta {
+		if nd.Delta.Refused() {
+			s.ActivityRefused++
+		}
+	}
 	for _, nd := range r.QueryDelta {
 		if nd.Delta.Incomparable != "" {
 			s.QueryRefused++
@@ -155,6 +160,9 @@ func headline(r *Result, s Summary) string {
 	if s.QueryUnknown > 0 {
 		parts = append(parts, fmt.Sprintf("%s with no comparable baseline", plural(s.QueryUnknown, "shape", "shapes")))
 	}
+	if s.ActivityRefused > 0 {
+		parts = append(parts, fmt.Sprintf("activity not comparable on %s", plural(s.ActivityRefused, "node", "nodes")))
+	}
 	if s.QueryRefused > 0 {
 		parts = append(parts, fmt.Sprintf("query stats not comparable on %s", plural(s.QueryRefused, "node", "nodes")))
 	}
@@ -201,6 +209,23 @@ func correlationNotes(window time.Duration, from, to *moment) []string {
 		}
 		if len(side.m.activity) == 0 {
 			notes = append(notes, fmt.Sprintf("%s: no activity capture within %dm of the anchor", side.name, mins))
+		}
+	}
+	return notes
+}
+
+// the summary view drops raw deltas; notes are where a refusal or caveat survives it
+func activityNotes(nds []NodeActivityDelta) []string {
+	var notes []string
+	for _, nd := range nds {
+		if nd.Delta == nil {
+			continue
+		}
+		if nd.Delta.Refused() {
+			notes = append(notes, "activity: "+nd.Delta.Incomparable)
+		}
+		for _, c := range nd.Delta.Caveats {
+			notes = append(notes, "activity: "+c)
 		}
 	}
 	return notes
@@ -326,7 +351,8 @@ func filterActivityDeltas(nds []NodeActivityDelta, sf, tf string) []NodeActivity
 				cs = append(cs, r)
 			}
 		}
-		if len(cs) == 0 {
+		// a refusal has no rows to match but must survive the filter
+		if len(cs) == 0 && !nd.Delta.Refused() {
 			continue
 		}
 		cpd := *nd.Delta

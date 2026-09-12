@@ -633,3 +633,91 @@ func TestBuild_TableFilterKeepsIndexRows(t *testing.T) {
 		t.Error("an unrelated table must be filtered out")
 	}
 }
+
+// Summary view drops raw deltas, so an activity caveat has to reach the agent
+// through Correlation.Notes or it is lost.
+func TestBuild_ActivityServerCaveatSurvivesSummary(t *testing.T) {
+	store := openStore(t)
+	t0 := time.Now().Truncate(time.Second).Add(-2 * time.Hour)
+	bootA, bootB := t0.Add(-72*time.Hour), t0.Add(-time.Minute)
+
+	from := mkActivity("sh", "act-1", "replica", t0, 100)
+	from.Node.PostmasterStartTime = &bootA
+	to := mkActivity("sh", "act-2", "replica", t0.Add(time.Hour), 400)
+	to.Node.PostmasterStartTime = &bootB
+	put(t, store, history.WrapActivity(from))
+	put(t, store, history.WrapActivity(to))
+
+	res, err := Build(context.Background(), store, key(), Options{From: "latest~1", To: "latest", Kind: "activity"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	summary := res.ForView("summary", 0)
+	joined := strings.Join(summary.Correlation.Notes, " | ")
+	if !strings.Contains(joined, "activity: the server behind \"replica\" restarted or was replaced") {
+		t.Errorf("caveat missing from summary notes: %q", joined)
+	}
+}
+
+// Two nodes, one restarted (caveat) and one spanning two servers (refused).
+// Map iteration must not reorder them, the refused node must survive with no
+// rows, and the headline must not claim "no changes" around a refusal.
+func TestBuild_ActivityRefusalAndCaveatAcrossNodes(t *testing.T) {
+	store := openStore(t)
+	t0 := time.Now().Truncate(time.Second).Add(-3 * time.Hour)
+	t1 := t0.Add(2 * time.Hour)
+	bootA, bootB := t0.Add(-72*time.Hour), t1.Add(-time.Minute)
+
+	act := func(ref, hash, node string, ts time.Time, seq int64, boot time.Time, addr string) history.StoredSnapshot {
+		a := mkActivity(ref, hash, node, ts, seq)
+		b := boot
+		a.Node.PostmasterStartTime, a.Node.ServerAddr = &b, addr
+		return history.WrapActivity(a)
+	}
+	put(t, store, history.WrapSchema(mkSchema("schema-a", t0, table("users", "id"))))
+	put(t, store, act("schema-a", "primary-a", "primary", t0.Add(time.Minute), 10, bootA, "10.0.0.9"))
+	put(t, store, act("schema-a", "replica-a", "replica", t0.Add(time.Minute), 10, bootA, "10.0.0.1"))
+	put(t, store, history.WrapSchema(mkSchema("schema-b", t1, table("users", "id"))))
+	put(t, store, act("schema-b", "primary-b", "primary", t1.Add(time.Minute), 100, bootB, "10.0.0.9"))
+	put(t, store, act("schema-b", "replica-b", "replica", t1.Add(time.Minute), 100, bootB, "10.0.0.2"))
+
+	for range 5 {
+		res, err := Build(context.Background(), store, key(), Options{From: "latest~1", To: "latest", Kind: "schema"})
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		if len(res.ActivityDelta) != 2 || res.ActivityDelta[0].Node != "primary" || res.ActivityDelta[1].Node != "replica" {
+			t.Fatalf("want [primary replica] in order, got %+v", res.ActivityDelta)
+		}
+		if d := res.ActivityDelta[1].Delta; d.Incomparable == "" || len(d.Counters) != 0 {
+			t.Fatalf("replica must be refused with no rows, got %+v", d)
+		}
+		if res.Summary.ActivityRefused != 1 || !strings.Contains(res.Summary.Headline, "activity not comparable on 1 node") {
+			t.Errorf("headline hides the refusal: %q (refused=%d)", res.Summary.Headline, res.Summary.ActivityRefused)
+		}
+
+		notes := res.ForView("summary", 0).Correlation.Notes
+		var act []string
+		for _, n := range notes {
+			if strings.HasPrefix(n, "activity: ") {
+				act = append(act, n)
+			}
+		}
+		if len(act) != 2 || !strings.Contains(act[0], `"primary" restarted`) || !strings.Contains(act[1], `"replica" covered two servers`) {
+			t.Fatalf("want primary caveat then replica refusal in notes, got %q", act)
+		}
+
+		filtered, err := Build(context.Background(), store, key(), Options{From: "latest~1", To: "latest", Kind: "schema", Table: "users"})
+		if err != nil {
+			t.Fatalf("Build with table filter: %v", err)
+		}
+		if len(filtered.ActivityDelta) != 2 || filtered.ActivityDelta[1].Delta.Incomparable == "" {
+			t.Errorf("table filter dropped the refused node: %+v", filtered.ActivityDelta)
+		}
+
+		full := res.ForView("full", 0)
+		if len(full.ActivityDelta[0].Delta.Caveats) != 1 {
+			t.Errorf("full view dropped the primary caveat: %+v", full.ActivityDelta[0].Delta)
+		}
+	}
+}
