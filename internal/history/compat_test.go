@@ -115,6 +115,10 @@ func TestOpenNewerStoreIsCompatNewer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	// ...without the label index, so the reopen shows whether migrate touched it...
+	if _, err := s.db.Exec("DROP INDEX activity_stats_by_node_taken_at"); err != nil {
+		t.Fatalf("drop index: %v", err)
+	}
 	// ...then we forge a version from the future and reopen.
 	if _, err := s.db.Exec("PRAGMA user_version = 999"); err != nil {
 		t.Fatalf("bump user_version: %v", err)
@@ -128,6 +132,11 @@ func TestOpenNewerStoreIsCompatNewer(t *testing.T) {
 	defer s2.Close()
 	if s2.Compat() != CompatNewer {
 		t.Errorf("future-versioned store: got Compat %v, want newer", s2.Compat())
+	}
+	// a newer schema is not ours to add indexes to
+	var n int
+	if err := s2.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'activity_stats_by_node_taken_at'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("newer store gained the label index (count=%d, err=%v)", n, err)
 	}
 }
 

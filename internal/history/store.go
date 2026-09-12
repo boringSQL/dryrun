@@ -357,6 +357,15 @@ func (s *Store) migrate() error {
 		ON query_stats(project_id, database_id, content_hash)`); err != nil {
 		return fmt.Errorf("migration failed (query_stats_by_content_key): %w", err)
 	}
+
+	// Best-effort read-only index: a read-only or busy history.db must still open.
+	// Ascending timestamp + rowid tail yields "timestamp DESC, id DESC" without a sort.
+	for _, table := range []string{"activity_stats", "query_stats"} {
+		if _, err := s.db.Exec("CREATE INDEX IF NOT EXISTS " + table + "_by_node_taken_at ON " + table +
+			"(project_id, database_id, node_source, timestamp)"); err != nil {
+			slog.Debug("label index not created", "table", table, "err", err)
+		}
+	}
 	return nil
 }
 

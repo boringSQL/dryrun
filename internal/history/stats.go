@@ -155,18 +155,7 @@ func (s *Store) GetPlanner(ctx context.Context, key SnapshotKey, schemaRefHash s
 
 // latest row per node, joined under the requested schema_ref_hash
 func (s *Store) GetActivity(ctx context.Context, key SnapshotKey, schemaRefHash string) ([]schema.ActivityStatsSnapshot, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT payload_json FROM activity_stats AS a
-		  WHERE project_id = ? AND database_id = ? AND schema_ref_hash = ?
-		    AND id = (
-		      SELECT id FROM activity_stats
-		       WHERE project_id = a.project_id
-		         AND database_id = a.database_id
-		         AND schema_ref_hash = a.schema_ref_hash
-		         AND node_source = a.node_source
-		       ORDER BY timestamp DESC, id DESC LIMIT 1
-		    )
-		  ORDER BY node_source`,
+	rows, err := s.db.QueryContext(ctx, latestPerNodeByRefSQL("activity_stats"),
 		string(key.ProjectID), string(key.DatabaseID), schemaRefHash,
 	)
 	if err != nil {
@@ -189,21 +178,27 @@ func (s *Store) GetActivity(ctx context.Context, key SnapshotKey, schemaRefHash 
 	return out, rows.Err()
 }
 
+// Newest row per node under one schema_ref. The unary plus keeps project_id out
+// of index selection: history.db is never analyzed, so the planner would take
+// the label index and walk every row of the key.
+func latestPerNodeByRefSQL(table string) string {
+	return `SELECT payload_json FROM ` + table + ` AS r
+	         WHERE +project_id = ? AND database_id = ? AND schema_ref_hash = ?
+	           AND id = (
+	             SELECT id FROM ` + table + `
+	              WHERE +project_id = r.project_id
+	                AND database_id = r.database_id
+	                AND schema_ref_hash = r.schema_ref_hash
+	                AND node_source = r.node_source
+	              ORDER BY timestamp DESC, id DESC LIMIT 1
+	           )
+	         ORDER BY node_source`
+}
+
 // latest row per node, joined under the requested schema_ref_hash; id
 // tiebreak keeps a node to one row on same-second captures
 func (s *Store) GetQueryStats(ctx context.Context, key SnapshotKey, schemaRefHash string) ([]schema.QueryStatsSnapshot, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT payload_json FROM query_stats AS q
-		  WHERE project_id = ? AND database_id = ? AND schema_ref_hash = ?
-		    AND id = (
-		      SELECT id FROM query_stats
-		       WHERE project_id = q.project_id
-		         AND database_id = q.database_id
-		         AND schema_ref_hash = q.schema_ref_hash
-		         AND node_source = q.node_source
-		       ORDER BY timestamp DESC, id DESC LIMIT 1
-		    )
-		  ORDER BY node_source`,
+	rows, err := s.db.QueryContext(ctx, latestPerNodeByRefSQL("query_stats"),
 		string(key.ProjectID), string(key.DatabaseID), schemaRefHash,
 	)
 	if err != nil {

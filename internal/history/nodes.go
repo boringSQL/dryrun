@@ -161,28 +161,26 @@ const (
 // Newest first, fingerprinted rows only. Unparseable rows are skipped:
 // corruption is not evidence the node moved.
 func (s *Store) RecentNodeFingerprints(ctx context.Context, key SnapshotKey, nodeLabel string) ([]NodeFingerprint, error) {
-	pid, did := string(key.ProjectID), string(key.DatabaseID)
-	since := formatHistoryTS(time.Now().Add(-nodeFingerprintAge))
-	// each arm orders and limits on its own so the index supplies the order;
-	// sorting the whole window to return 20 rows runs on every capture
-	arm := func(table string) string {
-		return `SELECT timestamp AS ts, id, ` + nodeJSONExpr("", "$.node.postmaster_start_time") + ` AS started,
-		               ` + nodeJSONExpr("", "$.node.server_addr") + ` AS addr
-		          FROM ` + table + `
-		         WHERE project_id = ? AND database_id = ? AND node_source = ? AND timestamp >= ?
-		           AND ` + nodeJSONExpr("", "$.node.postmaster_start_time") + ` IS NOT NULL
-		         ORDER BY timestamp DESC, id DESC LIMIT ?`
+	return s.fingerprintWindow(ctx, key, nodeLabel, time.Time{})
+}
+
+// The same window ending at upTo; zero upTo means now, no upper bound.
+func (s *Store) fingerprintWindow(ctx context.Context, key SnapshotKey, nodeLabel string, upTo time.Time) ([]NodeFingerprint, error) {
+	end, bound, until := time.Now(), "", []any(nil)
+	if !upTo.IsZero() {
+		end, bound, until = upTo, " AND timestamp <= ?", []any{formatHistoryTS(upTo)}
 	}
+	armArgs := append([]any{string(key.ProjectID), string(key.DatabaseID), nodeLabel, formatHistoryTS(end.Add(-nodeFingerprintAge))}, until...)
+	armArgs = append(armArgs, nodeFingerprintRows)
+	args := append(append(append([]any{}, armArgs...), armArgs...), nodeFingerprintRows)
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT started, addr FROM (
-		   SELECT ts, id, 0 AS stream, started, addr FROM (`+arm("activity_stats")+`)
+		   SELECT ts, id, 0 AS stream, started, addr FROM (`+fingerprintArmSQL("activity_stats", bound)+`)
 		   UNION ALL
-		   SELECT ts, id, 1, started, addr FROM (`+arm("query_stats")+`)
+		   SELECT ts, id, 1, started, addr FROM (`+fingerprintArmSQL("query_stats", bound)+`)
 		 ) WHERE started IS NOT NULL
 		 ORDER BY ts DESC, stream ASC, id DESC LIMIT ?`,
-		pid, did, nodeLabel, since, nodeFingerprintRows,
-		pid, did, nodeLabel, since, nodeFingerprintRows,
-		nodeFingerprintRows,
+		args...,
 	)
 	if err != nil {
 		return nil, err
@@ -376,4 +374,15 @@ func nodeJSONExpr(prefix, path string) string {
 
 func nodeStandbyExpr(prefix string) string {
 	return nodeJSONExpr(prefix, "$.node.is_standby")
+}
+
+// Each arm orders and limits on its own so the label index supplies the order;
+// sorting the whole window would run on every capture.
+func fingerprintArmSQL(table, bound string) string {
+	return `SELECT timestamp AS ts, id, ` + nodeJSONExpr("", "$.node.postmaster_start_time") + ` AS started,
+	               ` + nodeJSONExpr("", "$.node.server_addr") + ` AS addr
+	          FROM ` + table + `
+	         WHERE project_id = ? AND database_id = ? AND node_source = ? AND timestamp >= ?` + bound + `
+	           AND ` + nodeJSONExpr("", "$.node.postmaster_start_time") + ` IS NOT NULL
+	         ORDER BY timestamp DESC, id DESC LIMIT ?`
 }
