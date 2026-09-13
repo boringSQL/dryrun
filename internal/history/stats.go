@@ -260,8 +260,9 @@ func (s *Store) LatestQueryStats(ctx context.Context, key SnapshotKey) ([]schema
 	return out, rows.Err()
 }
 
-// PreviousQueryStats returns the second-newest snapshot per node_source, the
-// capture LatestQueryStats supersedes. Nodes with only one capture are absent.
+// PreviousQueryStats returns, per node_source, the capture the newest one is
+// compared with: the second-newest, or on a rotating label the newest server's
+// own earlier capture. Nodes with only one are absent.
 func (s *Store) PreviousQueryStats(ctx context.Context, key SnapshotKey) ([]schema.QueryStatsSnapshot, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT payload_json FROM query_stats AS q
@@ -293,7 +294,12 @@ func (s *Store) PreviousQueryStats(ctx context.Context, key SnapshotKey) ([]sche
 		}
 		out = append(out, q)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// close now: the pool pass below queries again and would hold this connection
+	rows.Close()
+	return s.previousWithinMember(ctx, key, out)
 }
 
 func (s *Store) LatestPlanner(ctx context.Context, key SnapshotKey) (*schema.PlannerStatsSnapshot, error) {

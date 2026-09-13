@@ -76,7 +76,20 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 		slog.Debug("previous query stats unavailable; comparability caveats skipped", "error", err)
 		previous = nil
 	}
-	hint := joinCaveats(queryStatsCaveats(snaps, previous))
+	pools := map[string]bool{}
+	for _, snap := range snaps {
+		// unfingerprinted newest capture keeps the plain previous, so skip the rotation claim
+		if snap.Node.PostmasterStartTime == nil {
+			continue
+		}
+		pool, err := hist.IsPool(ctx, key, snap.Node.Source, snap.Node.Timestamp)
+		if err != nil {
+			slog.Debug("pool check unavailable; rotation caveat skipped", "node", snap.Node.Source, "error", err)
+			continue
+		}
+		pools[snap.Node.Source] = pool
+	}
+	hint := joinCaveats(queryStatsCaveats(snaps, previous, pools))
 
 	minCalls := int64(getFloatArg(req, "min_calls", 2))
 

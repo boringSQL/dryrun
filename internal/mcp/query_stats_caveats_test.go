@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestCrossNodeWindowCaveatFiresOnUnequalWindows(t *testing.T) {
 		snap("primary", now.Add(-11*time.Hour), now),
 	}
 
-	got := queryStatsCaveats(latest, nil)
+	got := queryStatsCaveats(latest, nil, nil)
 	if !hasBand(got, "BLOCKING:") {
 		t.Fatalf("unequal windows must produce a BLOCKING caveat, got %#v", got)
 	}
@@ -75,7 +76,7 @@ func TestCrossNodeWindowCaveatSilentWhenWindowsMatch(t *testing.T) {
 	if c := crossNodeWindowCaveat(latest); c != "" {
 		t.Errorf("30m of skew is under tolerance and must not warn: %s", c)
 	}
-	if got := queryStatsCaveats(latest, nil); len(got) != 0 {
+	if got := queryStatsCaveats(latest, nil, nil); len(got) != 0 {
 		t.Errorf("nothing to say, want no caveats, got %#v", got)
 	}
 }
@@ -143,7 +144,7 @@ func TestTrackNoneIsBlocking(t *testing.T) {
 	s := snap("primary", now.Add(-100*time.Hour), now)
 	s.PgssTrack = trackPtr("none")
 
-	got := queryStatsCaveats([]schema.QueryStatsSnapshot{s}, nil)
+	got := queryStatsCaveats([]schema.QueryStatsSnapshot{s}, nil, nil)
 	if len(matching(got, "track = 'none'")) != 1 {
 		t.Fatalf("want a track='none' caveat, got %#v", got)
 	}
@@ -296,12 +297,12 @@ func TestChangeCaveatsWarnOnUnversionedQshapeBoundary(t *testing.T) {
 func TestYoungCountersWarnButOldOnesDoNot(t *testing.T) {
 	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
 
-	young := queryStatsCaveats([]schema.QueryStatsSnapshot{snap("primary", now.Add(-2*time.Hour), now)}, nil)
+	young := queryStatsCaveats([]schema.QueryStatsSnapshot{snap("primary", now.Add(-2*time.Hour), now)}, nil, nil)
 	if len(matching(young, "cover only")) != 1 {
 		t.Errorf("a 2h window is too short to stand in for steady state: %#v", young)
 	}
 
-	old := queryStatsCaveats([]schema.QueryStatsSnapshot{snap("primary", now.Add(-200*time.Hour), now)}, nil)
+	old := queryStatsCaveats([]schema.QueryStatsSnapshot{snap("primary", now.Add(-200*time.Hour), now)}, nil, nil)
 	if len(old) != 0 {
 		t.Errorf("an established window needs no caveat, got %#v", old)
 	}
@@ -320,7 +321,7 @@ func TestUnknownEpochIsReportedNotSilent(t *testing.T) {
 		},
 	}
 	for name, s := range cases {
-		got := queryStatsCaveats([]schema.QueryStatsSnapshot{s}, nil)
+		got := queryStatsCaveats([]schema.QueryStatsSnapshot{s}, nil, nil)
 		if len(matching(got, "unknown for")) != 1 {
 			t.Errorf("%s: want an explicit unknown-epoch caveat, got %#v", name, got)
 		}
@@ -333,13 +334,13 @@ func TestStraddledCaptureIsBlocking(t *testing.T) {
 
 	reset := snap("primary", now.Add(-100*time.Hour), now)
 	reset.InfoAfter = &schema.QueryStatsInfo{StatsReset: now.Add(-time.Minute)}
-	if got := queryStatsCaveats([]schema.QueryStatsSnapshot{reset}, nil); len(matching(got, "was reset while")) != 1 {
+	if got := queryStatsCaveats([]schema.QueryStatsSnapshot{reset}, nil, nil); len(matching(got, "was reset while")) != 1 {
 		t.Errorf("a reset mid-capture must be reported, got %#v", got)
 	}
 
 	evict := snap("primary", now.Add(-100*time.Hour), now)
 	evict.InfoBefore.Dealloc, evict.InfoAfter.Dealloc = 1, 4
-	got := queryStatsCaveats([]schema.QueryStatsSnapshot{evict}, nil)
+	got := queryStatsCaveats([]schema.QueryStatsSnapshot{evict}, nil, nil)
 	if len(matching(got, "evicted entries while")) != 1 {
 		t.Errorf("eviction mid-capture makes the rows inconsistent, got %#v", got)
 	}
@@ -502,5 +503,51 @@ func TestChangeCaveatsReportRowCapMoveOnlyWhenBinding(t *testing.T) {
 	// it is not a meaningful "from" for a comparison.
 	if got := mk(0, 500, 2000); len(matching(got, "row cap moved")) != 0 {
 		t.Errorf("an unversioned cap must not be compared numerically: %#v", got)
+	}
+}
+
+// A rotating label's newest capture is one server's corpus. The note must
+// survive the caveat cap, so it is comparability, and it names only pools.
+func TestPoolCaveatNamesRotatingLabelsOnly(t *testing.T) {
+	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
+	latest := []schema.QueryStatsSnapshot{
+		snap("pool", now.Add(-48*time.Hour), now),
+		snap("primary", now.Add(-48*time.Hour), now),
+	}
+	got := queryStatsCaveats(latest, nil, map[string]bool{"pool": true, "primary": false})
+
+	pool := matching(got, "rotates between servers")
+	if len(pool) != 1 {
+		t.Fatalf("want one rotation caveat, got %v", got)
+	}
+	if !strings.HasPrefix(pool[0], "COMPARABILITY: label pool rotates") {
+		t.Errorf("rotation caveat must be a comparability caveat naming the label, got %q", pool[0])
+	}
+	if len(matching(got, "label primary rotates")) != 0 {
+		t.Errorf("a label that does not rotate was named: %v", got)
+	}
+}
+
+func TestPoolCaveatSurvivesTheCap(t *testing.T) {
+	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
+	var latest []schema.QueryStatsSnapshot
+	pools := map[string]bool{}
+	// ten nodes with short windows and no info view fill scope past the cap
+	for i := range 10 {
+		s := snap(fmt.Sprintf("n%d", i), now.Add(-time.Hour), now)
+		s.RawRows, s.RowCap = 500, 500
+		latest = append(latest, s)
+	}
+	latest = append(latest, snap("pool", now.Add(-48*time.Hour), now))
+	pools["pool"] = true
+
+	got := queryStatsCaveats(latest, nil, pools)
+	rot := matching(got, "label pool rotates")
+	if len(rot) != 1 {
+		t.Fatalf("rotation caveat was capped away: %v", got)
+	}
+	// survives by band order, so pin the band
+	if !strings.HasPrefix(rot[0], "COMPARABILITY: ") {
+		t.Errorf("rotation caveat moved band: %q", rot[0])
 	}
 }

@@ -228,3 +228,19 @@ func TestMemberBaseline_ScanLimit(t *testing.T) {
 		}
 	})
 }
+
+// a cancelled request must surface as an error, however it was wrapped; every
+// other failure of the pool pass only drops a label
+func TestCtxErr(t *testing.T) {
+	for err, want := range map[error]bool{
+		context.Canceled:                                 true,
+		context.DeadlineExceeded:                         true,
+		fmt.Errorf("query stats: %w", context.Canceled):  true,
+		fmt.Errorf("no such table: activity_stats"):      false,
+		fmt.Errorf("wrapped: %w", fmt.Errorf("corrupt")): false,
+	} {
+		if got := ctxErr(err); got != want {
+			t.Errorf("ctxErr(%v) = %v, want %v", err, got, want)
+		}
+	}
+}

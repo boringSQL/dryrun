@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/boringsql/dryrun/internal/schema"
@@ -109,4 +110,59 @@ func memberBaselineSQL(table string) string {
 	          FROM ` + table + `
 	         WHERE project_id = ? AND database_id = ? AND node_source = ? AND timestamp <= ?
 	         ORDER BY timestamp DESC, id DESC LIMIT ?`
+}
+
+// A rotating label's second-newest capture is usually another server's; pair the newest with its own server's earlier one, or none.
+func (s *Store) previousWithinMember(ctx context.Context, key SnapshotKey, prev []schema.QueryStatsSnapshot) ([]schema.QueryStatsSnapshot, error) {
+	if len(prev) == 0 {
+		return prev, nil
+	}
+	latest, err := s.LatestQueryStats(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	newest := make(map[string]schema.QueryStatsSnapshot, len(latest))
+	for _, l := range latest {
+		newest[l.Node.Source] = l
+	}
+
+	out := make([]schema.QueryStatsSnapshot, 0, len(prev))
+	for _, p := range prev {
+		l, ok := newest[p.Node.Source]
+		started := l.Node.PostmasterStartTime
+		// same server already, or nothing to pair on
+		if !ok || started == nil || (p.Node.PostmasterStartTime != nil && p.Node.PostmasterStartTime.Equal(*started)) {
+			out = append(out, p)
+			continue
+		}
+		// leave out on failure: keeping p is the cross-server comparison this avoids
+		pool, err := s.IsPool(ctx, key, l.Node.Source, l.Node.Timestamp)
+		if err != nil {
+			if ctxErr(err) {
+				return nil, err
+			}
+			slog.Debug("pool check failed; previous capture left out", "node", l.Node.Source, "error", err)
+			continue
+		}
+		if !pool {
+			out = append(out, p)
+			continue
+		}
+		base, found, err := s.MemberBaseline(ctx, key, QueryKind(l.Node.Source), *started, l.Node.Timestamp, l.Node.Timestamp)
+		if err != nil {
+			if ctxErr(err) {
+				return nil, err
+			}
+			slog.Debug("member baseline failed; previous capture left out", "node", l.Node.Source, "error", err)
+			continue
+		}
+		if found {
+			out = append(out, *base.AsQueryStats())
+		}
+	}
+	return out, nil
+}
+
+func ctxErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

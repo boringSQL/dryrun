@@ -16,8 +16,9 @@ const (
 
 // queryStatsCaveats qualifies how the captured counters can be read, banded by
 // severity: BLOCKING (the obvious reading is wrong), COMPARABILITY (not
-// comparable to something else), SCOPE (narrower than it looks).
-func queryStatsCaveats(latest, previous []schema.QueryStatsSnapshot) []string {
+// comparable to something else), SCOPE (narrower than it looks). pools names
+// labels that rotate between servers as of their newest capture.
+func queryStatsCaveats(latest, previous []schema.QueryStatsSnapshot, pools map[string]bool) []string {
 	prev := make(map[string]schema.QueryStatsSnapshot, len(previous))
 	for _, p := range previous {
 		prev[p.Node.Source] = p
@@ -51,6 +52,17 @@ func queryStatsCaveats(latest, previous []schema.QueryStatsSnapshot) []string {
 				blocking = append(blocking, fmt.Sprintf(
 					"pg_stat_statements evicted entries while %s was being captured: the rows are not a consistent set", node))
 			}
+		}
+
+		// comparability, not scope: this decides whether the totals describe the label at all
+		if pools[node] {
+			server := "the one that answered at " + captureStamp(snap)
+			if st := snap.Node.PostmasterStartTime; st != nil {
+				server += " (started " + st.UTC().Format(time.RFC3339) + ")"
+			}
+			comparability = append(comparability, fmt.Sprintf(
+				"label %s rotates between servers: these totals are from %s, counted since its own reset; they are not the label's workload and not comparable with a capture another server answered",
+				node, server))
 		}
 
 		if p, ok := prev[node]; ok {
