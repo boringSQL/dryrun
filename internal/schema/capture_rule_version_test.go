@@ -23,7 +23,7 @@ var captureRuleFingerprints = map[int]string{
 	// during preflight instead). Row selection in fetch-query-stats and
 	// fetch-query-stats-toplevel is byte-identical, so no capture changes shape
 	// and nothing stops being comparable with an earlier one.
-	2: "5c53036c582842b53007dd303372d2a1f2015e45b400bd042da87ea25afda0d0",
+	2: "58055c6746d9b478f8eb87a18e589eb1a3bc22eda256869756d85872fb85c24a",
 }
 
 // TestCaptureRuleVersionMatchesSQL is the coupling between the constant and the

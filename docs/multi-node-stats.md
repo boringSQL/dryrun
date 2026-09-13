@@ -210,6 +210,16 @@ dryrun snapshot capture --node primary --streams schema
 
 `pool = true` says the label names a read pool rather than one machine. Members rotate by design there, so the identity-drift warning is suppressed for that label — see the fingerprint paragraph above. Do not set it on a label that is supposed to be one node: the warning is the only thing that tells you two servers' counters are interleaving.
 
+### How a rotating label is read
+
+Reads do not depend on `pool = true`. A label counts as rotating when its recorded fingerprints recur (A, B, A) within its last 20 captures or 30 days, whichever is shorter. That judgement comes from the stored rows, so pulled history and the MCP server see it too. A one-way change is a restart and reads as before.
+
+- `snapshot diff` and `snapshot_diff` compare the server behind the newer capture with that same server's own earlier capture, and say so in a note. If that server has no earlier capture, or the captures are given newest first, the diff is refused rather than subtracting two servers' counters.
+- `list_top_queries` compares each label's newest capture with the same server's previous one, so another server's `stats_reset` no longer reads as a reset. Its hint says the totals are one server's, counted since that server's own reset.
+- Unused indexes, scan totals and `anomalies` add up the newest row of every server the label rotated through, so an index used only through another server is not reported as unused. `node_imbalance` still compares labels, not the servers inside one. `describe_table`'s node breakdown lists each server with `started_at`.
+
+A server that restarts inside the window counts twice until its old row ages out. That inflates totals; it never hides use. None of this adds a pool's servers into one pool-wide diff: a diff describes one server.
+
 Then capture the whole fleet:
 
 ```sh

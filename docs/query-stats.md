@@ -44,6 +44,8 @@ Console output shows movers only, 25 rows at most. `--json` has every shape.
 
 The diff also checks which server answered. Two captures whose `inet_server_addr` differ are two machines under one label, and it refuses them. A changed postmaster start time alone is reported but not refused, since pg_stat_statements survives a clean restart. When the address is unknown — a Unix socket, or a tunnel where every member shows 127.0.0.1 — the change is a caveat rather than a refusal.
 
+On a label that rotates between servers (a read pool behind a Service, a reader endpoint or a port-forward), the diff compares the newer capture's server with its own earlier capture instead of the capture immediately before it, and notes which capture it used. See [How a rotating label is read](multi-node-stats.md#how-a-rotating-label-is-read).
+
 ## Storage
 
 Rows go to `.dryrun/history.db` under `(project_id, database_id, kind, schema_ref_hash, node_label)`. Query rows dedup by content hash, so an idle node adds nothing. Same-second captures order by row id; `--latest` and `--latest~1` never pick the same row. `snapshot list --node X --kind query` shows the series.
