@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/bloat"
@@ -66,7 +67,12 @@ func perNodeBreakdown(a *schema.AnnotatedSchema, qualified string) string {
 	for _, n := range a.Merged.Nodes {
 		for _, ts := range n.Tables {
 			if ts.Table == q {
-				lines = append(lines, fmt.Sprintf("  %s: seq_scan=%d, idx_scan=%d", n.Node.Source, ts.Activity.SeqScan, ts.Activity.IdxScan))
+				name := n.Node.Source
+				// a label rotating between servers lists once per server
+				if st := n.Node.PostmasterStartTime; st != nil && a.Merged.LabelRepeats(name) {
+					name += " (started " + st.UTC().Format(time.RFC3339) + ")"
+				}
+				lines = append(lines, fmt.Sprintf("  %s: seq_scan=%d, idx_scan=%d", name, ts.Activity.SeqScan, ts.Activity.IdxScan))
 			}
 		}
 	}

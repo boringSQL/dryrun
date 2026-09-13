@@ -64,6 +64,12 @@ func TestLabelQueriesUseLabelIndex(t *testing.T) {
 			}
 		}
 	}
+	// activity only: pool servers for GetAnnotated
+	plan := explainPlan(t, s.db, activityMembersSQL(),
+		"p", "d", "pool", "sh", "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", memberBaselineScan)
+	if !strings.Contains(plan, "activity_stats_by_node_taken_at") || strings.Contains(plan, "TEMP B-TREE") {
+		t.Errorf("pool server scan left the label index or sorts: %s", plan)
+	}
 }
 
 // The label index has the longer equality prefix, so without the unary plus

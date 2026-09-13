@@ -39,7 +39,7 @@ func SummarizeTableStats(a *AnnotatedSchema) []TableSummary {
 			}
 			s.TotalSeqScan += ts.Activity.SeqScan
 			s.TotalIdxScan += ts.Activity.IdxScan
-			s.PerNodeSeq = append(s.PerNodeSeq, NodeSeqEntry{Source: n.Node.Source, SeqScan: ts.Activity.SeqScan})
+			s.PerNodeSeq = addNodeSeq(s.PerNodeSeq, n.Node.Source, ts.Activity.SeqScan)
 		}
 	}
 
@@ -211,15 +211,11 @@ func DetectSeqScanImbalance(a *AnnotatedSchema, q QualifiedName) *NodeImbalanceI
 	if a == nil || a.Merged == nil {
 		return nil
 	}
-	type entry struct {
-		source  string
-		seqScan int64
-	}
-	var entries []entry
+	var entries []NodeSeqEntry
 	for _, n := range a.Merged.Nodes {
 		for _, ts := range n.Tables {
 			if ts.Table == q {
-				entries = append(entries, entry{n.Node.Source, ts.Activity.SeqScan})
+				entries = addNodeSeq(entries, n.Node.Source, ts.Activity.SeqScan)
 			}
 		}
 	}
@@ -227,9 +223,9 @@ func DetectSeqScanImbalance(a *AnnotatedSchema, q QualifiedName) *NodeImbalanceI
 		return nil
 	}
 
-	var nonzero []entry
+	var nonzero []NodeSeqEntry
 	for _, e := range entries {
-		if e.seqScan > 0 {
+		if e.SeqScan > 0 {
 			nonzero = append(nonzero, e)
 		}
 	}
@@ -237,14 +233,14 @@ func DetectSeqScanImbalance(a *AnnotatedSchema, q QualifiedName) *NodeImbalanceI
 		return nil
 	}
 
-	sort.Slice(nonzero, func(i, j int) bool { return nonzero[i].seqScan < nonzero[j].seqScan })
-	minVal := nonzero[0].seqScan
+	sort.Slice(nonzero, func(i, j int) bool { return nonzero[i].SeqScan < nonzero[j].SeqScan })
+	minVal := nonzero[0].SeqScan
 	maxEntry := nonzero[len(nonzero)-1]
 
-	if minVal > 0 && maxEntry.seqScan/minVal >= 5 {
+	if minVal > 0 && maxEntry.SeqScan/minVal >= 5 {
 		return &NodeImbalanceInfo{
-			HotNode:    maxEntry.source,
-			Multiplier: maxEntry.seqScan / minVal,
+			HotNode:    maxEntry.Source,
+			Multiplier: maxEntry.SeqScan / minVal,
 		}
 	}
 	return nil
@@ -371,4 +367,15 @@ func DetectBloatedIndexes(a *AnnotatedSchema, threshold float64) []BloatedIndexE
 		return entries[i].BloatRatio > entries[j].BloatRatio
 	})
 	return entries
+}
+
+// sum a rotating label's rows: a restart must not read as imbalance between nodes
+func addNodeSeq(entries []NodeSeqEntry, source string, seq int64) []NodeSeqEntry {
+	for i := range entries {
+		if entries[i].Source == source {
+			entries[i].SeqScan += seq
+			return entries
+		}
+	}
+	return append(entries, NodeSeqEntry{Source: source, SeqScan: seq})
 }

@@ -9,9 +9,23 @@ type AnnotatedSchema struct {
 	QueryStats []QueryStatsSnapshot
 }
 
-// Activity across nodes for a single SchemaSnapshot; one entry per node
+// one entry per node, except a label that rotates between servers: one per server
 type MergedActivity struct {
 	Nodes []NodeActivity
+}
+
+// true when several servers share this label, so listings must tell them apart
+func (m *MergedActivity) LabelRepeats(source string) bool {
+	if m == nil {
+		return false
+	}
+	seen := 0
+	for i := range m.Nodes {
+		if m.Nodes[i].Node.Source == source {
+			seen++
+		}
+	}
+	return seen > 1
 }
 
 type NodeActivity struct {
@@ -57,6 +71,7 @@ func (a *AnnotatedSchema) IndexSizingFor(table QualifiedName, index string) *Ind
 	return nil
 }
 
+// the label's newest row; on a rotating label that is one server, not a sum
 func (a *AnnotatedSchema) ActivityForNode(source string, q QualifiedName) *TableActivity {
 	if a == nil || a.Merged == nil {
 		return nil
@@ -74,6 +89,7 @@ func (a *AnnotatedSchema) ActivityForNode(source string, q QualifiedName) *Table
 	return nil
 }
 
+// the label's newest row; on a rotating label that is one server, not a sum
 func (a *AnnotatedSchema) IndexActivityForNode(source string, table QualifiedName, index string) *IndexActivity {
 	if a == nil || a.Merged == nil {
 		return nil
@@ -92,13 +108,18 @@ func (a *AnnotatedSchema) IndexActivityForNode(source string, table QualifiedNam
 	return nil
 }
 
+// one identity per label: a rotating label's first entry, its newest row
 func (a *AnnotatedSchema) Nodes() []NodeIdentity {
 	if a == nil || a.Merged == nil {
 		return nil
 	}
-	out := make([]NodeIdentity, len(a.Merged.Nodes))
+	seen := map[string]bool{}
+	out := make([]NodeIdentity, 0, len(a.Merged.Nodes))
 	for i := range a.Merged.Nodes {
-		out[i] = a.Merged.Nodes[i].Node
+		if n := a.Merged.Nodes[i].Node; !seen[n.Source] {
+			seen[n.Source] = true
+			out = append(out, n)
+		}
 	}
 	return out
 }

@@ -257,7 +257,13 @@ func (s *Server) captureTimes() captureStamps {
 // the oldest node, not the newest: a fresh primary beside a three-week replica
 // is three weeks stale; an undated node is missing info, not a dawn-of-time capture
 func oldestActivityStamp(nodes []schema.NodeActivity) (at time.Time, source string) {
+	// a rotating label lists every server, newest first; count only that row
+	seen := map[string]bool{}
 	for _, n := range nodes {
+		if seen[n.Node.Source] {
+			continue
+		}
+		seen[n.Node.Source] = true
 		if n.Node.Timestamp.IsZero() {
 			continue
 		}

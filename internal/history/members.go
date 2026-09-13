@@ -166,3 +166,105 @@ func (s *Store) previousWithinMember(ctx context.Context, key SnapshotKey, prev 
 func ctxErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
+
+// adds the other servers' newest rows for a rotating label; a restart inside
+// the window counts twice until it ages out: inflates, never hides use
+func (s *Store) activityMembers(ctx context.Context, key SnapshotKey, schemaRef string, newest schema.ActivityStatsSnapshot) ([]schema.ActivityStatsSnapshot, error) {
+	started := newest.Node.PostmasterStartTime
+	if started == nil {
+		return nil, nil
+	}
+	fps, err := s.fingerprintWindow(ctx, key, newest.Node.Source, newest.Node.Timestamp)
+	if err != nil {
+		return nil, err
+	}
+	if _, oscillating := summariseMembers(fps); !oscillating {
+		return nil, nil
+	}
+	var others []time.Time
+	for _, f := range fps {
+		if f.StartedAt.Equal(*started) || containsTime(others, f.StartedAt) {
+			continue
+		}
+		others = append(others, f.StartedAt)
+	}
+
+	// lower bound matches the fingerprint window: a hash returning months
+	// later must not pull that server's old counters in
+	rows, err := s.db.QueryContext(ctx, activityMembersSQL(),
+		string(key.ProjectID), string(key.DatabaseID), newest.Node.Source, schemaRef,
+		formatHistoryTS(newest.Node.Timestamp.Add(-nodeFingerprintAge)), formatHistoryTS(newest.Node.Timestamp),
+		memberBaselineScan)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		ids   []int64
+		found []time.Time
+	)
+	for rows.Next() {
+		var (
+			id int64
+			st sql.NullString
+		)
+		if err := rows.Scan(&id, &st); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if !st.Valid {
+			continue
+		}
+		at, perr := time.Parse(time.RFC3339Nano, st.String)
+		if perr != nil || !containsTime(others, at) || containsTime(found, at) {
+			continue
+		}
+		ids = append(ids, id)
+		found = append(found, at)
+		// every later row parses a full payload for nothing
+		if len(found) == len(others) {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	out := make([]schema.ActivityStatsSnapshot, 0, len(ids))
+	for _, id := range ids {
+		var payload string
+		err := s.db.QueryRowContext(ctx, "SELECT payload_json FROM activity_stats WHERE id = ?", id).Scan(&payload)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		var a schema.ActivityStatsSnapshot
+		// one unreadable row loses that server, not the others
+		if err := json.Unmarshal([]byte(payload), &a); err != nil {
+			slog.Debug("corrupt pool server activity skipped", "id", id, "error", err)
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+func activityMembersSQL() string {
+	return `SELECT id, ` + nodeJSONExpr("", "$.node.postmaster_start_time") + `
+	          FROM activity_stats
+	         WHERE project_id = ? AND database_id = ? AND node_source = ? AND schema_ref_hash = ?
+	           AND timestamp >= ? AND timestamp <= ?
+	         ORDER BY timestamp DESC, id DESC LIMIT ?`
+}
+
+func containsTime(ts []time.Time, t time.Time) bool {
+	for _, x := range ts {
+		if x.Equal(t) {
+			return true
+		}
+	}
+	return false
+}

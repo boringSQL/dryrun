@@ -178,3 +178,29 @@ func TestDetectBloatedIndexes_NonBtreeSkipped(t *testing.T) {
 		t.Errorf("expected 0 for gin index, got %d", len(got))
 	}
 }
+
+// A label rotating between servers carries one row per server. Imbalance is a
+// between-labels signal: a restart or a load balancer inside one label must not
+// read as one node carrying disproportionate scans.
+func TestSeqScanImbalanceComparesLabelsNotServers(t *testing.T) {
+	users := qual("public", "users")
+	row := func(source string, seq int64) NodeActivity {
+		return NodeActivity{Node: NodeIdentity{Source: source}, Tables: []TableActivityEntry{{Table: users, Activity: TableActivity{SeqScan: seq}}}}
+	}
+
+	oneLabel := &AnnotatedSchema{Merged: &MergedActivity{Nodes: []NodeActivity{row("pool", 1000), row("pool", 10)}}}
+	if got := DetectSeqScanImbalance(oneLabel, users); got != nil {
+		t.Errorf("servers of one label were compared: %+v", got)
+	}
+
+	twoLabels := &AnnotatedSchema{Merged: &MergedActivity{Nodes: []NodeActivity{row("pool", 600), row("pool", 400), row("replica", 100)}}}
+	got := DetectSeqScanImbalance(twoLabels, users)
+	if got == nil || got.HotNode != "pool" || got.Multiplier != 10 {
+		t.Errorf("want pool 10x replica from summed servers, got %+v", got)
+	}
+
+	sums := SummarizeTableStats(twoLabels)
+	if len(sums) != 1 || len(sums[0].PerNodeSeq) != 2 || sums[0].PerNodeSeq[0] != (NodeSeqEntry{Source: "pool", SeqScan: 1000}) {
+		t.Errorf("per_node_seq must hold one entry per label, got %+v", sums)
+	}
+}

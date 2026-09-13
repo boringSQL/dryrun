@@ -179,3 +179,30 @@ func TestPerNodeBreakdown_InvalidQualified(t *testing.T) {
 		t.Errorf("expected empty string for invalid qualified name, got: %s", got)
 	}
 }
+
+// servers of one rotating label are told apart by start time; a plain label is
+// printed as before
+func TestPerNodeBreakdown_RotatingLabelNamesServers(t *testing.T) {
+	q := schema.QualifiedName{Schema: "public", Name: "orders"}
+	bootA := time.Date(2026, 7, 1, 8, 0, 0, 0, time.UTC)
+	bootB := time.Date(2026, 7, 2, 8, 0, 0, 0, time.UTC)
+	row := func(source string, boot *time.Time, seq int64) schema.NodeActivity {
+		return schema.NodeActivity{
+			Node:   schema.NodeIdentity{Source: source, PostmasterStartTime: boot},
+			Tables: []schema.TableActivityEntry{{Table: q, Activity: schema.TableActivity{SeqScan: seq}}},
+		}
+	}
+	a := &schema.AnnotatedSchema{Merged: &schema.MergedActivity{Nodes: []schema.NodeActivity{
+		row("pool", &bootA, 100), row("pool", &bootB, 200), row("primary", &bootA, 300),
+	}}}
+	got := perNodeBreakdown(a, "public.orders")
+	for _, want := range []string{
+		"pool (started 2026-07-01T08:00:00Z): seq_scan=100",
+		"pool (started 2026-07-02T08:00:00Z): seq_scan=200",
+		"  primary: seq_scan=300",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}

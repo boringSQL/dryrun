@@ -153,11 +153,16 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 				if ts.Table != qual {
 					continue
 				}
-				nodeBreakdown = append(nodeBreakdown, map[string]any{
+				entry := map[string]any{
 					"source":    n.Node.Source,
 					"timestamp": stamp(n.Node.Timestamp),
 					"activity":  ts.Activity,
-				})
+				}
+				// a label rotating between servers lists once per server
+				if st := n.Node.PostmasterStartTime; st != nil && a.Merged.LabelRepeats(n.Node.Source) {
+					entry["started_at"] = stamp(*st)
+				}
+				nodeBreakdown = append(nodeBreakdown, entry)
 			}
 		}
 		if len(nodeBreakdown) > 0 {

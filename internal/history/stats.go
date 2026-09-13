@@ -343,13 +343,25 @@ func (s *Store) GetAnnotated(ctx context.Context, key SnapshotKey, at SnapshotRe
 		return nil, err
 	}
 	if len(acts) > 0 {
-		nodes := make([]schema.NodeActivity, len(acts))
+		var nodes []schema.NodeActivity
+		// newest row per label stays first: oldestActivityStamp and
+		// PrimaryActivity read the first entry per label
+		add := func(r schema.ActivityStatsSnapshot) {
+			tables, indexes := schema.RollUpPartitionActivity(snap, r.Tables, r.Indexes)
+			nodes = append(nodes, schema.NodeActivity{Node: r.Node, Tables: tables, Indexes: indexes})
+		}
 		for i := range acts {
-			tables, indexes := schema.RollUpPartitionActivity(snap, acts[i].Tables, acts[i].Indexes)
-			nodes[i] = schema.NodeActivity{
-				Node:    acts[i].Node,
-				Tables:  tables,
-				Indexes: indexes,
+			// best-effort: without them the label keeps its newest row
+			members, err := s.activityMembers(ctx, key, snap.ContentHash, acts[i])
+			if err != nil {
+				if ctxErr(err) {
+					return nil, err
+				}
+				slog.Debug("pool servers unavailable; label keeps its newest row", "node", acts[i].Node.Source, "error", err)
+			}
+			add(acts[i])
+			for _, m := range members {
+				add(m)
 			}
 		}
 		out.Merged = &schema.MergedActivity{Nodes: nodes}

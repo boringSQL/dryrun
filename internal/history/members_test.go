@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/boringsql/dryrun/internal/schema"
 )
 
 // IsPool and MemberBaseline are how a diff over a read pool keeps both sides on
@@ -242,5 +244,258 @@ func TestCtxErr(t *testing.T) {
 		if got := ctxErr(err); got != want {
 			t.Errorf("ctxErr(%v) = %v, want %v", err, got, want)
 		}
+	}
+}
+
+// GetAnnotated feeds unused-index advice, which sums idx_scan across nodes. On
+// a label rotating between servers the newest row is one server's: an index
+// used only through the other server must not read as unused.
+
+func putPoolActivityAt(t *testing.T, s *Store, key SnapshotKey, ref, hash, label string, rowTS, started time.Time, idxScan int64) {
+	t.Helper()
+	a := activityFixture(ref, hash, label, true)
+	a.Node.Timestamp = rowTS
+	a.Node.PostmasterStartTime = &started
+	a.Indexes = []schema.IndexActivityEntry{{
+		Table:    schema.QualifiedName{Schema: "public", Name: "users"},
+		Index:    "users_email_idx",
+		Activity: schema.IndexActivity{IdxScan: idxScan},
+	}}
+	if _, err := s.PutActivity(context.Background(), key, a); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func putIndexedSchema(t *testing.T, s *Store, key SnapshotKey, ref string) {
+	t.Helper()
+	snap := testSnapshot(ref, "appdb")
+	snap.Tables[0].Indexes = []schema.Index{{Name: "users_email_idx", IndexType: "btree", Columns: []string{"email"}}}
+	if _, err := s.PutSchema(context.Background(), key, snap); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func poolEntries(t *testing.T, a *schema.AnnotatedSchema, label string) []schema.NodeActivity {
+	t.Helper()
+	if a.Merged == nil {
+		t.Fatal("no activity joined")
+	}
+	var out []schema.NodeActivity
+	for _, n := range a.Merged.Nodes {
+		if n.Node.Source == label {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func TestGetAnnotated_RotatingLabelHasOneRowPerServer(t *testing.T) {
+	ctx := context.Background()
+	k := key("acme", "primary")
+	t0 := time.Now().UTC().Truncate(time.Second).Add(-10 * time.Hour)
+	bootA, bootB := t0.Add(-72*time.Hour), t0.Add(-48*time.Hour)
+
+	s := testStore(t)
+	putIndexedSchema(t, s, k, "sref-A")
+	// the index is only ever used through server A
+	putPoolActivityAt(t, s, k, "sref-A", "a1", "pool", t0, bootA, 40)
+	putPoolActivityAt(t, s, k, "sref-A", "b2", "pool", t0.Add(time.Hour), bootB, 0)
+	putPoolActivityAt(t, s, k, "sref-A", "a3", "pool", t0.Add(2*time.Hour), bootA, 90)
+	putPoolActivityAt(t, s, k, "sref-A", "b4", "pool", t0.Add(3*time.Hour), bootB, 0)
+
+	a, err := s.GetAnnotated(ctx, k, NewRefLatest())
+	if err != nil {
+		t.Fatalf("GetAnnotated: %v", err)
+	}
+	got := poolEntries(t, a, "pool")
+	if len(got) != 2 || !got[0].Node.Timestamp.Equal(t0.Add(3*time.Hour)) || !got[1].Node.Timestamp.Equal(t0.Add(2*time.Hour)) {
+		t.Fatalf("want b4 then a3, got %+v", got)
+	}
+	users := schema.QualifiedName{Schema: "public", Name: "users"}
+	if n := a.TotalIndexScans(users, "users_email_idx"); n != 90 {
+		t.Errorf("TotalIndexScans = %d, want 90 from server A", n)
+	}
+	for _, u := range schema.DetectUnusedIndexes(a) {
+		if u.IndexName == "users_email_idx" {
+			t.Errorf("an index used through another server was reported unused: %+v", u)
+		}
+	}
+	if !a.Merged.LabelRepeats("pool") {
+		t.Error("LabelRepeats must see the rotating label")
+	}
+}
+
+func TestGetAnnotated_OnlyRotatingLabelsExpand(t *testing.T) {
+	ctx := context.Background()
+	k := key("acme", "primary")
+	t0 := time.Now().UTC().Truncate(time.Second).Add(-10 * time.Hour)
+	bootA, bootA2, bootB := t0.Add(-72*time.Hour), t0.Add(90*time.Minute), t0.Add(-48*time.Hour)
+
+	t.Run("a restart keeps one row", func(t *testing.T) {
+		s := testStore(t)
+		putIndexedSchema(t, s, k, "sref-A")
+		putPoolActivityAt(t, s, k, "sref-A", "a1", "node", t0, bootA, 40)
+		putPoolActivityAt(t, s, k, "sref-A", "a2", "node", t0.Add(time.Hour), bootA, 50)
+		putPoolActivityAt(t, s, k, "sref-A", "a3", "node", t0.Add(2*time.Hour), bootA2, 3)
+		a, err := s.GetAnnotated(ctx, k, NewRefLatest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := poolEntries(t, a, "node"); len(got) != 1 {
+			t.Fatalf("a restart must stay one row, got %d", len(got))
+		}
+	})
+
+	t.Run("an unfingerprinted newest row keeps one row", func(t *testing.T) {
+		s := testStore(t)
+		putIndexedSchema(t, s, k, "sref-A")
+		putPoolActivityAt(t, s, k, "sref-A", "a1", "pool", t0, bootA, 40)
+		putPoolActivityAt(t, s, k, "sref-A", "b2", "pool", t0.Add(time.Hour), bootB, 0)
+		putPoolActivityAt(t, s, k, "sref-A", "a3", "pool", t0.Add(2*time.Hour), bootA, 90)
+		// same schema ref, no start time
+		x := activityFixture("sref-A", "x4", "pool", true)
+		x.Node.Timestamp = t0.Add(3 * time.Hour)
+		if _, err := s.PutActivity(ctx, k, x); err != nil {
+			t.Fatal(err)
+		}
+		a, err := s.GetAnnotated(ctx, k, NewRefLatest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := poolEntries(t, a, "pool"); len(got) != 1 {
+			t.Fatalf("want the newest row only, got %d", len(got))
+		}
+	})
+
+	// the bundle is per schema: another server's rows under an older schema
+	// describe different objects
+	t.Run("other servers only under the same schema ref", func(t *testing.T) {
+		s := testStore(t)
+		putIndexedSchema(t, s, k, "sref-old")
+		putPoolActivityAt(t, s, k, "sref-old", "a1", "pool", t0, bootA, 40)
+		putPoolActivityAt(t, s, k, "sref-old", "b2", "pool", t0.Add(time.Hour), bootB, 0)
+		putPoolActivityAt(t, s, k, "sref-old", "a3", "pool", t0.Add(2*time.Hour), bootA, 90)
+		putIndexedSchema(t, s, k, "sref-new")
+		putPoolActivityAt(t, s, k, "sref-new", "b4", "pool", t0.Add(3*time.Hour), bootB, 0)
+		a, err := s.GetAnnotated(ctx, k, NewRefLatest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := poolEntries(t, a, "pool"); len(got) != 1 {
+			t.Fatalf("want b4 alone under sref-new, got %d", len(got))
+		}
+	})
+
+	// a server gone from the recent window no longer answers for the label
+	t.Run("a server outside the fingerprint window is left out", func(t *testing.T) {
+		s := testStore(t)
+		putIndexedSchema(t, s, k, "sref-A")
+		bootC := t0.Add(-24 * time.Hour)
+		putPoolActivityAt(t, s, k, "sref-A", "c0", "pool", t0.Add(-time.Hour), bootC, 7)
+		for i := range nodeFingerprintRows {
+			boot := bootA
+			if i%2 == 1 {
+				boot = bootB
+			}
+			putPoolActivityAt(t, s, k, "sref-A", fmt.Sprintf("r%d", i), "pool", t0.Add(time.Duration(i)*time.Minute), boot, 1)
+		}
+		a, err := s.GetAnnotated(ctx, k, NewRefLatest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := poolEntries(t, a, "pool"); len(got) != 2 {
+			t.Fatalf("want servers A and B only, got %d", len(got))
+		}
+	})
+}
+
+// one bundle, a pool next to a plain label: the plain label is untouched and
+// each label's rows stay together, newest first
+func TestGetAnnotated_PoolNextToPlainLabel(t *testing.T) {
+	ctx := context.Background()
+	k := key("acme", "primary")
+	t0 := time.Now().UTC().Truncate(time.Second).Add(-10 * time.Hour)
+	bootA, bootB, bootP := t0.Add(-72*time.Hour), t0.Add(-48*time.Hour), t0.Add(-96*time.Hour)
+
+	s := testStore(t)
+	putIndexedSchema(t, s, k, "sref-A")
+	putPoolActivityAt(t, s, k, "sref-A", "p1", "aaa-primary", t0, bootP, 5)
+	putPoolActivityAt(t, s, k, "sref-A", "p2", "aaa-primary", t0.Add(time.Hour), bootP, 6)
+	putPoolActivityAt(t, s, k, "sref-A", "a1", "pool", t0, bootA, 40)
+	putPoolActivityAt(t, s, k, "sref-A", "b2", "pool", t0.Add(time.Hour), bootB, 0)
+	putPoolActivityAt(t, s, k, "sref-A", "a3", "pool", t0.Add(2*time.Hour), bootA, 90)
+	putPoolActivityAt(t, s, k, "sref-A", "b4", "pool", t0.Add(3*time.Hour), bootB, 0)
+
+	a, err := s.GetAnnotated(ctx, k, NewRefLatest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, n := range a.Merged.Nodes {
+		got = append(got, n.Node.Source+"@"+n.Node.Timestamp.Sub(t0).String())
+	}
+	want := []string{"aaa-primary@1h0m0s", "pool@3h0m0s", "pool@2h0m0s"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("want %v, got %v", want, got)
+	}
+	if a.Merged.LabelRepeats("aaa-primary") {
+		t.Error("a plain label must not repeat")
+	}
+}
+
+// a valid-JSON payload that will not decode loses that server only
+func TestGetAnnotated_CorruptServerRowSkipsOnlyThatServer(t *testing.T) {
+	ctx := context.Background()
+	k := key("acme", "primary")
+	t0 := time.Now().UTC().Truncate(time.Second).Add(-10 * time.Hour)
+	bootA, bootB, bootC := t0.Add(-72*time.Hour), t0.Add(-48*time.Hour), t0.Add(-24*time.Hour)
+
+	s := testStore(t)
+	putIndexedSchema(t, s, k, "sref-A")
+	putPoolActivityAt(t, s, k, "sref-A", "a1", "pool", t0, bootA, 1)
+	putPoolActivityAt(t, s, k, "sref-A", "b2", "pool", t0.Add(time.Hour), bootB, 1)
+	putPoolActivityAt(t, s, k, "sref-A", "c3", "pool", t0.Add(2*time.Hour), bootC, 1)
+	putPoolActivityAt(t, s, k, "sref-A", "a4", "pool", t0.Add(3*time.Hour), bootA, 1)
+	putPoolActivityAt(t, s, k, "sref-A", "c5", "pool", t0.Add(4*time.Hour), bootC, 1)
+	putPoolActivityAt(t, s, k, "sref-A", "b6", "pool", t0.Add(5*time.Hour), bootB, 1)
+	// still carries C's start time, so the scan picks it, but tables will not decode
+	bad := fmt.Sprintf(`{"node":{"source":"pool","postmaster_start_time":%q},"tables":"oops"}`, bootC.Format(time.RFC3339Nano))
+	if _, err := s.db.ExecContext(ctx, `UPDATE activity_stats SET payload_json = ? WHERE content_hash = 'c5'`, bad); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := s.GetAnnotated(ctx, k, NewRefLatest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := poolEntries(t, a, "pool")
+	if len(got) != 2 || !got[0].Node.Timestamp.Equal(t0.Add(5*time.Hour)) || !got[1].Node.Timestamp.Equal(t0.Add(3*time.Hour)) {
+		t.Fatalf("want b6 and a4 with C left out, got %+v", got)
+	}
+}
+
+// Schema X, then Y, then X again. Server B's only row under X is two months
+// old: those counters describe a past that the current bundle does not cover.
+func TestGetAnnotated_RecurringSchemaIgnoresOldServerRows(t *testing.T) {
+	ctx := context.Background()
+	k := key("acme", "primary")
+	t0 := time.Now().UTC().Truncate(time.Second).Add(-10 * time.Hour)
+	bootA, bootB := t0.Add(-72*time.Hour), t0.Add(-48*time.Hour)
+
+	s := testStore(t)
+	putIndexedSchema(t, s, k, "sref-X")
+	putPoolActivityAt(t, s, k, "sref-X", "bx0", "pool", t0.Add(-60*24*time.Hour), bootB, 500)
+	putIndexedSchema(t, s, k, "sref-Y")
+	putPoolActivityAt(t, s, k, "sref-Y", "a1", "pool", t0, bootA, 1)
+	putPoolActivityAt(t, s, k, "sref-Y", "b2", "pool", t0.Add(time.Hour), bootB, 1)
+	putPoolActivityAt(t, s, k, "sref-Y", "a3", "pool", t0.Add(2*time.Hour), bootA, 1)
+	putPoolActivityAt(t, s, k, "sref-X", "ax4", "pool", t0.Add(3*time.Hour), bootA, 1)
+
+	a, err := s.GetAnnotated(ctx, k, NewRefHash("sref-X"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := poolEntries(t, a, "pool"); len(got) != 1 {
+		t.Fatalf("B's two-month-old row under X must stay out, got %d rows", len(got))
 	}
 }
