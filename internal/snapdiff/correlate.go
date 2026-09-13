@@ -80,8 +80,8 @@ func Build(ctx context.Context, store *history.Store, key history.SnapshotKey, o
 	if fromM.planner != nil && toM.planner != nil {
 		res.PlannerDelta, _ = diff.DiffPlanner(fromM.planner, toM.planner)
 	}
-	res.ActivityDelta = diffActivityByNode(fromM, toM)
-	res.QueryDelta = diffQueryByNode(fromM, toM)
+	res.ActivityDelta = diffActivityByNode(ctx, store, key, fromM, toM)
+	res.QueryDelta = diffQueryByNode(ctx, store, key, fromM, toM)
 
 	if opt.Schema != "" || opt.Table != "" {
 		res.SchemaDelta = filterSchemaDelta(res.SchemaDelta, opt.Schema, opt.Table)
@@ -93,6 +93,7 @@ func Build(ctx context.Context, store *history.Store, key history.SnapshotKey, o
 	res.Summary = buildSummary(res)
 	res.Correlation = buildCorrelation(opt.Window, fromKind, toKind, fromM, toM)
 	res.Correlation.Notes = append(res.Correlation.Notes, activityNotes(res.ActivityDelta)...)
+	res.Correlation.Notes = append(res.Correlation.Notes, queryNotes(res.QueryDelta)...)
 
 	return res, nil
 }
@@ -266,17 +267,20 @@ func assembleMoment(ctx context.Context, store *history.Store, key history.Snaps
 }
 
 // only nodes captured on both sides
-func diffActivityByNode(from, to *moment) []NodeActivityDelta {
+func diffActivityByNode(ctx context.Context, store *history.Store, key history.SnapshotKey, from, to *moment) []NodeActivityDelta {
 	var out []NodeActivityDelta
 	for node, a := range from.activity {
 		b, ok := to.activity[node]
 		if !ok {
 			continue
 		}
-		d, err := DiffNodePair(history.WrapActivity(a), history.WrapActivity(b), from.schema, to.schema)
+		d, err := DiffNodePair(ctx, store, key, history.WrapActivity(a), history.WrapActivity(b), from.schema, to.schema)
 		// a refusal carries no rows but must still reach the reader
 		if err != nil || (d.Activity.IsEmpty() && !d.Activity.Refused()) {
 			continue
+		}
+		if used := d.From; used.ContentHash() != a.ContentHash || !used.Timestamp().Equal(a.Node.Timestamp) {
+			from.repointActivityMatch(node, used)
 		}
 		out = append(out, NodeActivityDelta{Node: node, Delta: d.Activity})
 	}
@@ -285,23 +289,36 @@ func diffActivityByNode(from, to *moment) []NodeActivityDelta {
 	return out
 }
 
+// pairing diffed a different capture than the one matched; correlation must
+// name the row the numbers came from
+func (m *moment) repointActivityMatch(node string, used history.StoredSnapshot) {
+	for i := range m.activityMatch {
+		if m.activityMatch[i].Node == node {
+			m.activityMatch[i] = MatchInfo{
+				Node: node, Hash: used.ContentHash(), TakenAt: used.Timestamp(),
+				SkewSeconds: used.Timestamp().Sub(m.takenAt).Seconds(), Source: "member",
+			}
+		}
+	}
+}
+
 // Query shapes are not schema objects, so they never join the per-object
 // rollup; they are reported per node alongside it.
-func diffQueryByNode(from, to *moment) []NodeQueryDelta {
+func diffQueryByNode(ctx context.Context, store *history.Store, key history.SnapshotKey, from, to *moment) []NodeQueryDelta {
 	var out []NodeQueryDelta
 	for node, a := range from.query {
 		b, ok := to.query[node]
 		if !ok {
 			continue
 		}
-		d, err := DiffNodePair(history.WrapQueryStats(a), history.WrapQueryStats(b), nil, nil)
+		d, err := DiffNodePair(ctx, store, key, history.WrapQueryStats(a), history.WrapQueryStats(b), nil, nil)
 		if err != nil || d.Query == nil {
 			continue
 		}
 		if !worthReporting(d.Query) {
 			continue
 		}
-		out = append(out, NodeQueryDelta{Node: node, Delta: d.Query})
+		out = append(out, NodeQueryDelta{Node: node, Delta: d.Query, note: d.Note})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
 	return out

@@ -181,19 +181,22 @@ func buildSnapshotDiff(ctx context.Context, store *history.Store, key history.Sn
 		}
 		env.Kind, env.Planner = "planner", d
 	case history.KindActivity:
-		d, err := snapdiff.DiffNodePair(from, to,
+		d, err := snapdiff.DiffNodePair(ctx, store, key, from, to,
 			snapdiff.RowSchema(ctx, store, key, from.AsActivity()),
 			snapdiff.RowSchema(ctx, store, key, to.AsActivity()))
 		if err != nil {
 			return nil, err
 		}
 		env.Kind, env.Activity = "activity", d.Activity
+		// a pool label may have diffed a different capture than the one named
+		env.FromHash, env.FromTakenAt = d.From.ContentHash(), d.From.Timestamp()
 	case history.KindQuery:
-		d, err := snapdiff.DiffNodePair(from, to, nil, nil)
+		d, err := snapdiff.DiffNodePair(ctx, store, key, from, to, nil, nil)
 		if err != nil {
 			return nil, err
 		}
 		env.Kind, env.Query = "query", d.Query
+		env.FromHash, env.FromTakenAt = d.From.ContentHash(), d.From.Timestamp()
 	default:
 		return nil, fmt.Errorf("unsupported diff kind %s", kind)
 	}

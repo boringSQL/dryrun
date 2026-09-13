@@ -231,6 +231,24 @@ func activityNotes(nds []NodeActivityDelta) []string {
 	return notes
 }
 
+// Only what changes how the numbers read: a refusal, a changed server, a
+// pairing. Row-cap and eviction caveats fire on most busy servers and stay in
+// the full view.
+func queryNotes(nds []NodeQueryDelta) []string {
+	var notes []string
+	for _, nd := range nds {
+		if nd.Delta == nil {
+			continue
+		}
+		for _, n := range []string{nd.Delta.Incomparable, nd.Delta.ServerChanged, nd.note} {
+			if n != "" {
+				notes = append(notes, "query: "+n)
+			}
+		}
+	}
+	return notes
+}
+
 // ranking weights, not risk judgment
 func schemaScore(c diff.Change) float64 {
 	switch c.Type {

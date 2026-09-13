@@ -159,6 +159,17 @@ func (s StoredSnapshot) Timestamp() time.Time {
 	return time.Time{}
 }
 
+// zero for schema and planner, which are not per node
+func (s StoredSnapshot) Node() schema.NodeIdentity {
+	switch {
+	case s.activity != nil:
+		return s.activity.Node
+	case s.query != nil:
+		return s.query.Node
+	}
+	return schema.NodeIdentity{}
+}
+
 func (s StoredSnapshot) ContentHash() string {
 	switch {
 	case s.schema != nil:

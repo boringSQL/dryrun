@@ -92,6 +92,8 @@ type (
 	NodeQueryDelta struct {
 		Node  string           `json:"node"`
 		Delta *diff.QueryDelta `json:"delta"`
+		// pairing note for summary notes; the full view has it in Delta.Caveats
+		note string
 	}
 
 	// which planner/activity captures matched each anchor, and the time skew
@@ -116,7 +118,7 @@ type (
 		Hash        string    `json:"hash"`
 		TakenAt     time.Time `json:"taken_at"`
 		SkewSeconds float64   `json:"skew_seconds"`
-		Source      string    `json:"source"` // anchor | schema_ref | window
+		Source      string    `json:"source"` // anchor | schema_ref | window | member (paired within one server)
 	}
 )
 

@@ -441,6 +441,70 @@ func TestBuildSnapshotDiff(t *testing.T) {
 		}
 	})
 
+	// the envelope must name the capture that was actually differenced
+	t.Run("pool label reports the paired capture", func(t *testing.T) {
+		t0 := now.Add(-10 * time.Hour)
+		bootA, bootB := t0.Add(-72*time.Hour), t0.Add(-48*time.Hour)
+		member := func(hash string, ts, boot time.Time) history.StoredSnapshot {
+			a := syncTestActivity("sh", hash, "pool", ts, false)
+			b := boot
+			a.Node.PostmasterStartTime = &b
+			s := history.WrapActivity(a)
+			if _, err := store.Put(ctx, key, s); err != nil {
+				t.Fatal(err)
+			}
+			return s
+		}
+		member("pool-a1", t0, bootA)
+		member("pool-b2", t0.Add(time.Hour), bootB)
+		a3 := member("pool-a3", t0.Add(2*time.Hour), bootA)
+		b4 := member("pool-b4", t0.Add(3*time.Hour), bootB)
+
+		env, err := buildSnapshotDiff(ctx, store, key, history.ActivityKind("pool"), a3, b4)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if env.FromHash != "pool-b2" || !env.FromTakenAt.Equal(t0.Add(time.Hour)) {
+			t.Errorf("envelope names %q at %s, want the paired pool-b2", env.FromHash, env.FromTakenAt)
+		}
+	})
+
+	t.Run("pool query reports the paired capture, a refusal keeps the anchor", func(t *testing.T) {
+		t0 := now.Add(-20 * time.Hour)
+		bootA, bootB, bootC := t0.Add(-72*time.Hour), t0.Add(-48*time.Hour), t0.Add(-time.Hour)
+		member := func(hash string, ts, boot time.Time) history.StoredSnapshot {
+			q := syncTestQueryStats("sh", hash, "qpool", ts)
+			b := boot
+			q.Node.PostmasterStartTime = &b
+			s := history.WrapQueryStats(q)
+			if _, err := store.Put(ctx, key, s); err != nil {
+				t.Fatal(err)
+			}
+			return s
+		}
+		member("qpool-a1", t0, bootA)
+		member("qpool-b2", t0.Add(time.Hour), bootB)
+		a3 := member("qpool-a3", t0.Add(2*time.Hour), bootA)
+		b4 := member("qpool-b4", t0.Add(3*time.Hour), bootB)
+		c5 := member("qpool-c5", t0.Add(4*time.Hour), bootC)
+
+		env, err := buildSnapshotDiff(ctx, store, key, history.QueryKind("qpool"), a3, b4)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if env.FromHash != "qpool-b2" || env.Query.Incomparable != "" {
+			t.Errorf("paired envelope names %q (%q), want qpool-b2", env.FromHash, env.Query.Incomparable)
+		}
+
+		env, err = buildSnapshotDiff(ctx, store, key, history.QueryKind("qpool"), b4, c5)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if env.FromHash != "qpool-b4" || env.Query.Incomparable == "" {
+			t.Errorf("refusal envelope names %q (%q), want the anchor qpool-b4 and a refusal", env.FromHash, env.Query.Incomparable)
+		}
+	})
+
 	t.Run("query fills the query slot", func(t *testing.T) {
 		from := history.WrapQueryStats(syncTestQueryStats("sh", "query-a", "primary", now.Add(-time.Hour)))
 		to := history.WrapQueryStats(syncTestQueryStats("sh", "query-b", "primary", now))

@@ -52,7 +52,7 @@ func TestDiffNodePair_ActivityRollsUpOnlyWithBothSchemas(t *testing.T) {
 	s := partitionedSchema("sh", now)
 
 	t.Run("both schemas roll the parent up", func(t *testing.T) {
-		d, err := DiffNodePair(from, to, s, s)
+		d, err := DiffNodePair(context.Background(), nil, history.SnapshotKey{}, from, to, s, s)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -70,7 +70,7 @@ func TestDiffNodePair_ActivityRollsUpOnlyWithBothSchemas(t *testing.T) {
 			"to nil":   {s, nil},
 			"both nil": {nil, nil},
 		} {
-			d, err := DiffNodePair(from, to, pair[0], pair[1])
+			d, err := DiffNodePair(context.Background(), nil, history.SnapshotKey{}, from, to, pair[0], pair[1])
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
@@ -87,7 +87,7 @@ func TestDiffNodePair_ActivityRollsUpOnlyWithBothSchemas(t *testing.T) {
 	// the to side instead
 	t.Run("schemas apply to their own side", func(t *testing.T) {
 		plain := mkSchema("plain", now, table("events", "id"), table("events_2026", "id"))
-		d, err := DiffNodePair(from, to, s, plain)
+		d, err := DiffNodePair(context.Background(), nil, history.SnapshotKey{}, from, to, s, plain)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -110,7 +110,7 @@ func TestDiffNodePair_DifferentLabelsAreIncomparableNotErrors(t *testing.T) {
 	from := history.WrapQueryStats(mkQuery("sh", "q1", "primary", now.Add(-time.Hour), 10, 100))
 	to := history.WrapQueryStats(mkQuery("sh", "q2", "replica", now, 30, 400))
 
-	d, err := DiffNodePair(from, to, nil, nil)
+	d, err := DiffNodePair(context.Background(), nil, history.SnapshotKey{}, from, to, nil, nil)
 	if err != nil {
 		t.Fatalf("different labels must not error: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestDiffNodePair_QueryFillsQuery(t *testing.T) {
 	from := history.WrapQueryStats(mkQuery("sh", "q1", "primary", now.Add(-time.Hour), 10, 100))
 	to := history.WrapQueryStats(mkQuery("sh", "q2", "primary", now, 30, 400))
 
-	d, err := DiffNodePair(from, to, nil, nil)
+	d, err := DiffNodePair(context.Background(), nil, history.SnapshotKey{}, from, to, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,10 +142,10 @@ func TestDiffNodePair_RefusesMismatchedAndNonNodeKinds(t *testing.T) {
 	qry := history.WrapQueryStats(mkQuery("sh", "q1", "primary", now, 1, 1))
 	sch := history.WrapSchema(mkSchema("sh", now, table("users", "id")))
 
-	if _, err := DiffNodePair(act, qry, nil, nil); err == nil {
+	if _, err := DiffNodePair(context.Background(), nil, history.SnapshotKey{}, act, qry, nil, nil); err == nil {
 		t.Fatal("activity vs query must not be comparable")
 	}
-	if _, err := DiffNodePair(sch, sch, nil, nil); err == nil {
+	if _, err := DiffNodePair(context.Background(), nil, history.SnapshotKey{}, sch, sch, nil, nil); err == nil {
 		t.Fatal("schema is not a per-node stream")
 	}
 }
