@@ -401,3 +401,176 @@ ALTER TABLE accounts_profile ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERE
 		}
 	}
 }
+
+func decodeCheckMigration(t *testing.T, out string) map[string]any {
+	t.Helper()
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("expected JSON output: %v\n%s", err, out)
+	}
+	return decoded
+}
+
+// A pasted migration file is split by its framework markers; the default up
+// direction must not sweep in the down statements, and direction=down must not
+// re-analyze the up half.
+func TestCheckMigration_GooseFileDirection(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "-- +goose Up\nCREATE INDEX idx_tasks_status ON tasks (status);\n-- +goose Down\nDROP TABLE tasks;\n"
+
+	up := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
+	if up["framework"] != "goose" || up["direction"] != "up" {
+		t.Errorf("expected framework=goose direction=up, got %v/%v", up["framework"], up["direction"])
+	}
+	upChecks, _ := up["checks"].([]any)
+	if len(upChecks) != 1 {
+		t.Fatalf("up should yield one check, got %v", up["checks"])
+	}
+	if op, _ := upChecks[0].(map[string]any)["operation"].(string); !strings.Contains(op, "CREATE INDEX") {
+		t.Errorf("up check should be the index, got %q", op)
+	}
+
+	down := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl, "direction": "down"}))
+	downChecks, _ := down["checks"].([]any)
+	if len(downChecks) != 1 {
+		t.Fatalf("down should yield one check, got %v", down["checks"])
+	}
+	if op, _ := downChecks[0].(map[string]any)["operation"].(string); op != "DROP TABLE" {
+		t.Errorf("down check should be the DROP, got %q", op)
+	}
+}
+
+func TestCheckMigration_DownOnPlainErrors(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "check_migration", map[string]any{
+		"ddl":       "DROP TABLE tasks;",
+		"direction": "down",
+	})
+	if !strings.Contains(out, "no down section") {
+		t.Errorf("expected a no-down-section error, got %q", out)
+	}
+}
+
+// direction is an enum at the protocol layer, so a bad value never reaches the
+// handler.
+func TestCheckMigration_InvalidDirectionRejectedBySchema(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "check_migration", map[string]any{
+		"ddl":       "ALTER TABLE tasks ADD COLUMN x int;",
+		"direction": "sideways",
+	})
+	if !strings.Contains(out, "direction") {
+		t.Errorf("expected the direction enum to reject the value, got %q", out)
+	}
+}
+
+// A goose rewrite that introduces CONCURRENTLY must come back as a goose file
+// that can actually run it, with the down half preserved.
+func TestCheckMigration_GooseMigrationSQL(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "-- +goose Up\nCREATE INDEX idx_tasks_status ON tasks (status);\n-- +goose Down\nDROP INDEX idx_tasks_status;\n"
+	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
+
+	migrationSQL, _ := decoded["migration_sql"].(string)
+	for _, want := range []string{"-- +goose NO TRANSACTION", "-- +goose Up", "CONCURRENTLY", "-- +goose Down", "DROP INDEX idx_tasks_status;"} {
+		if !strings.Contains(migrationSQL, want) {
+			t.Errorf("migration_sql missing %q:\n%s", want, migrationSQL)
+		}
+	}
+	if _, err := pg_query.Parse(migrationSQL); err != nil {
+		t.Errorf("migration_sql does not parse: %v\n%s", err, migrationSQL)
+	}
+
+	meta, _ := decoded["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if !strings.Contains(hint, "down section") {
+		t.Errorf("hint should point at the down section, got %q", hint)
+	}
+}
+
+// A goose file already declaring NO TRANSACTION needs no transaction lecture.
+func TestCheckMigration_GooseNoTransactionHint(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "-- +goose NO TRANSACTION\n-- +goose Up\nCREATE INDEX idx_tasks_status ON tasks (status);\n"
+	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
+
+	meta, _ := decoded["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if !strings.Contains(hint, "already configured") {
+		t.Errorf("hint should acknowledge the configured no-transaction mode, got %q", hint)
+	}
+	if strings.Contains(hint, "cannot run inside a transaction") {
+		t.Errorf("hint should not warn about transactions the file opted out of, got %q", hint)
+	}
+}
+
+func TestCheckMigration_DbmateMigrationSQL(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "-- migrate:up\nCREATE INDEX idx_tasks_status ON tasks (status);\n-- migrate:down\nDROP INDEX idx_tasks_status;\n"
+	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
+
+	if decoded["framework"] != "dbmate" {
+		t.Errorf("expected framework=dbmate, got %v", decoded["framework"])
+	}
+	migrationSQL, _ := decoded["migration_sql"].(string)
+	for _, want := range []string{"-- migrate:up transaction:false", "CONCURRENTLY", "-- migrate:down", "DROP INDEX idx_tasks_status;"} {
+		if !strings.Contains(migrationSQL, want) {
+			t.Errorf("migration_sql missing %q:\n%s", want, migrationSQL)
+		}
+	}
+}
+
+// tern wraps every migration in a transaction with no opt-out, so a CONCURRENTLY
+// rewrite must not be shipped as a runnable tern file.
+func TestCheckMigration_TernSuppressesMigrationSQL(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "CREATE INDEX idx_tasks_status ON tasks (status);\n---- create above / drop below ----\nDROP INDEX idx_tasks_status;\n"
+	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
+
+	if decoded["framework"] != "tern" {
+		t.Errorf("expected framework=tern, got %v", decoded["framework"])
+	}
+	if _, ok := decoded["migration_sql"]; ok {
+		t.Errorf("tern + CONCURRENTLY should not ship migration_sql, got %v", decoded["migration_sql"])
+	}
+	meta, _ := decoded["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if !strings.Contains(hint, "tern") {
+		t.Errorf("hint should name the tern limitation, got %q", hint)
+	}
+}
+
+// When a statement already uses CONCURRENTLY directly (e.g. DROP INDEX CONCURRENTLY
+// which is Safe), the runner-specific transaction warning must still fire if the
+// runner wraps migrations.
+func TestCheckMigration_DirectConcurrentStatementHint(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "-- +goose Up\nDROP INDEX CONCURRENTLY idx_tasks_status;\n"
+	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
+
+	meta, _ := decoded["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if !strings.Contains(hint, "-- +goose NO TRANSACTION") {
+		t.Errorf("hint should warn that goose needs NO TRANSACTION even for direct CONCURRENTLY, got %q", hint)
+	}
+}
+
+// When direction=down on dbmate, the concurrency hint must name -- migrate:down,
+// not -- migrate:up.
+func TestCheckMigration_DbmateDownDirectionHint(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "-- migrate:up\nCREATE TABLE foo (id int);\n-- migrate:down\nDROP INDEX CONCURRENTLY idx_tasks_status;\n"
+	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{
+		"ddl":       ddl,
+		"direction": "down",
+	}))
+
+	meta, _ := decoded["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if !strings.Contains(hint, "-- migrate:down") {
+		t.Errorf("hint should name -- migrate:down for direction=down, got %q", hint)
+	}
+	if strings.Contains(hint, "-- migrate:up") {
+		t.Errorf("hint should NOT name -- migrate:up for direction=down, got %q", hint)
+	}
+}

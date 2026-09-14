@@ -176,10 +176,12 @@ var (
 
 	checkMigrationOutputSchema = json.RawMessage(`{
 		"type": "object",
-		"description": "checks holds one entry per DDL operation identified in the input: operation, safety, lock_type/lock_duration, and recommendation always; rationale (reason, plus note where one applies) is the same finding as structured fields rather than prose; safer_sql where a mechanical rewrite exists. table, version_behavior and rollback_ddl are omitted when not applicable to that operation. Empty only when the input contains no DDL statements at all. migration_sql bundles the whole input as one runnable file -- unsafe statements replaced by safer_sql, safe ones (e.g. SET, DROP INDEX, DROP CONSTRAINT) passed through unchanged -- present only when at least one check is unsafe and every unsafe check has a rewrite; a statement type check_migration cannot analyze, or a BEGIN/COMMIT/ROLLBACK (which the file cannot safely wrap a rewrite in), suppresses migration_sql for the whole input rather than silently mishandling it.",
+		"description": "checks holds one entry per DDL operation identified in the input: operation, safety, lock_type/lock_duration, and recommendation always; rationale (reason, plus note where one applies) is the same finding as structured fields rather than prose; safer_sql where a mechanical rewrite exists. table, version_behavior and rollback_ddl are omitted when not applicable to that operation. Empty only when the input contains no DDL statements at all. framework names the migration file format detected in ddl (plain, goose, dbmate or tern) and direction which half was analyzed. migration_sql bundles the analyzed half as one runnable file -- unsafe statements replaced by safer_sql, safe ones (e.g. SET, DROP INDEX, DROP CONSTRAINT) passed through unchanged, and the other half of a goose/dbmate/tern file preserved verbatim; present only when at least one check is unsafe and every unsafe check has a rewrite. A statement type check_migration cannot analyze, a BEGIN/COMMIT/ROLLBACK (which the file cannot safely wrap a rewrite in), or a tern file whose rewrite needs CONCURRENTLY (which tern cannot run) suppresses migration_sql rather than emitting a file that would fail.",
 		"properties": {
 			"checks": {"type": "array"},
 			"migration_sql": {"type": "string"},
+			"framework": {"type": "string"},
+			"direction": {"type": "string"},
 			` + metaProperty + `
 		},
 		"additionalProperties": true

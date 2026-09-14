@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -123,12 +124,27 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 		return errResult(err.Error()), nil
 	}
 
-	checks, err := query.CheckMigration(getArg(req, "ddl"), annotated)
+	direction := strings.ToLower(strings.TrimSpace(getArg(req, "direction")))
+	if direction == "" {
+		direction = "up"
+	}
+	env := query.ParseMigrationEnvelope(getArg(req, "ddl"))
+	section, err := env.Section(direction)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+
+	wrapper := map[string]any{
+		"framework": string(env.Framework),
+		"direction": direction,
+	}
+
+	checks, err := query.CheckMigration(section.DDL, annotated)
 	if err != nil {
 		return errResult(fmt.Sprintf("DDL parse error: %v", err)), nil
 	}
 	if len(checks) == 0 {
-		wrapper := map[string]any{"checks": []query.MigrationCheck{}}
+		wrapper["checks"] = []query.MigrationCheck{}
 		s.injectMeta(wrapper, "Could not identify a specific DDL operation to check.", nil)
 		return jsonResult(wrapper), nil
 	}
@@ -136,6 +152,9 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 	var unsafe, rewritten, multiStep int
 	concurrentIndex := false
 	for _, c := range checks {
+		if strings.Contains(c.Operation, "CONCURRENTLY") || c.Operation == "CREATE INDEX" {
+			concurrentIndex = true
+		}
 		if c.Safety == query.SafetySafe {
 			continue
 		}
@@ -147,12 +166,12 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 		if len(c.SaferSQL) > 1 {
 			multiStep++
 		}
-		if c.Operation == "CREATE INDEX" {
-			concurrentIndex = true
-		}
 	}
 
-	migrationSQL := query.ComposeMigrationSQL(checks)
+	composed := query.ComposeMigrationSQL(checks)
+	// FormatMigrationFile returns "" when no runnable file exists -- tern + a
+	// CONCURRENTLY rewrite. The concurrency hint below explains that case.
+	migrationSQL := query.FormatMigrationFile(env, direction, composed)
 
 	hint := ""
 	switch {
@@ -167,19 +186,42 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 	}
 	// one wrapping transaction would hold the first statement's lock across the
 	// scan in the second
-	if multiStep > 0 {
+	if multiStep > 0 && !section.NoTransaction {
 		hint = joinHints(hint, "Run each statement in safer_sql in its own transaction. A migration runner that wraps the file in one holds the ACCESS EXCLUSIVE taken by the first statement across the scan in the second, which is worse than the input.")
 	}
 	if concurrentIndex {
-		hint = joinHints(hint, "CREATE INDEX CONCURRENTLY cannot run inside a transaction at all, so that statement has to be outside whatever the runner wraps.")
+		hint = joinHints(hint, migrationConcurrencyHint(env.Framework, direction, section.NoTransaction))
+	}
+	if direction == "up" && env.Down != nil {
+		hint = joinHints(hint, "This file has a down section; call again with direction='down' to check the rollback too.")
 	}
 
-	wrapper := map[string]any{"checks": checks}
 	if migrationSQL != "" {
 		wrapper["migration_sql"] = migrationSQL
 	}
+	wrapper["checks"] = checks
 	s.injectMeta(wrapper, hint, nil)
 	return jsonResult(wrapper), nil
+}
+
+func migrationConcurrencyHint(framework query.MigrationFramework, direction string, noTx bool) string {
+	if noTx {
+		return "This migration is already configured to run without a surrounding transaction, which is what CREATE INDEX CONCURRENTLY needs."
+	}
+	switch framework {
+	case query.FrameworkGoose:
+		return "CREATE INDEX CONCURRENTLY cannot run inside a transaction, and goose wraps each migration in one by default -- the file needs `-- +goose NO TRANSACTION` at the top, or the statement fails at runtime."
+	case query.FrameworkDbmate:
+		marker := "-- migrate:up"
+		if strings.EqualFold(direction, "down") {
+			marker = "-- migrate:down"
+		}
+		return fmt.Sprintf("CREATE INDEX CONCURRENTLY cannot run inside a transaction, and dbmate wraps each migration in one by default -- add `transaction:false` to the `%s` marker, or the statement fails at runtime.", marker)
+	case query.FrameworkTern:
+		return "CREATE INDEX CONCURRENTLY cannot run inside a transaction, and tern wraps every migration in one with no opt-out, so there is no migration_sql for it -- run this statement out-of-band."
+	default:
+		return "CREATE INDEX CONCURRENTLY cannot run inside a transaction at all, so that statement has to be outside whatever the runner wraps."
+	}
 }
 
 type (
