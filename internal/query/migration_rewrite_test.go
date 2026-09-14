@@ -615,13 +615,13 @@ func TestComposeMigrationSQLAbsentWhenRenamePresent(t *testing.T) {
 	}
 }
 
-// A statement type CheckMigration cannot analyze (e.g. CREATE TABLE, or a
+// A statement type CheckMigration cannot analyze (e.g. CREATE SEQUENCE, or a
 // DROP that isn't DROP TABLE) must not silently vanish from migration_sql: it
 // becomes its own unrewritable check, which suppresses the whole file rather
 // than emitting one with that statement quietly missing.
 func TestComposeMigrationSQLAbsentWhenStatementIsUnrecognized(t *testing.T) {
 	for _, ddl := range []string{
-		"ALTER TABLE orders ADD CHECK (total >= 0);\nCREATE TABLE audit_log (id bigint)",
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nCREATE SEQUENCE audit_seq",
 		"ALTER TABLE orders ADD CHECK (total >= 0);\nDROP VIEW some_view", // a DROP that isn't DROP TABLE or DROP INDEX
 	} {
 		checks, err := CheckMigration(ddl, migrationTestAnnotated())

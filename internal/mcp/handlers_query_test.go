@@ -366,3 +366,38 @@ func TestCheckMigration_SurfacesSizingAndScalesSmallTable(t *testing.T) {
 		t.Errorf("expected small-table note, got %q", note)
 	}
 }
+
+// A table created in the same file is recognized as empty: CREATE TABLE itself
+// is safe, and follow-up index/constraint statements on it are safe without
+// being flagged dangerous or needing rewrites.
+func TestCheckMigration_TableCreatedInSameFile(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := `
+CREATE TABLE accounts_profile (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id bigint NOT NULL,
+    bio text
+);
+CREATE INDEX idx_accounts_profile_user_id ON accounts_profile (user_id);
+ALTER TABLE accounts_profile ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id);
+`
+	out := callTool(t, c, "check_migration", map[string]any{"ddl": ddl})
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("expected JSON: %v\n%s", err, out)
+	}
+	checks, ok := decoded["checks"].([]any)
+	if !ok || len(checks) != 3 {
+		t.Fatalf("expected 3 checks, got %v", decoded["checks"])
+	}
+	for i, raw := range checks {
+		check := raw.(map[string]any)
+		if check["safety"] != "safe" {
+			t.Errorf("check[%d] (%s on %v): expected safe, got %v",
+				i, check["operation"], check["table"], check["safety"])
+		}
+		if _, hasSafer := check["safer_sql"]; hasSafer {
+			t.Errorf("check[%d]: empty table operations must not offer safer_sql rewrites", i)
+		}
+	}
+}

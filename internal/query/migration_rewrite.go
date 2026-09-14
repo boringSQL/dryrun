@@ -125,13 +125,16 @@ func rewriteAddConstraint(stmt *pg_query.AlterTableStmt, cmd *pg_query.AlterTabl
 	return runnable([]string{add + ";", validate + ";"})
 }
 
-func rewriteCreateIndex(idx *pg_query.IndexStmt, names *nameAllocator) (steps []string, name string) {
+func rewriteCreateIndex(idx *pg_query.IndexStmt, names *nameAllocator, cat *fileCatalog) (steps []string, name string) {
 	if idx == nil || idx.Concurrent || idx.GetRelation() == nil {
 		return nil, ""
 	}
-	// CONCURRENTLY is rejected on a partitioned parent; building per-partition
-	// and attaching is a decision, not a mechanical rewrite
+	// CONCURRENTLY is rejected on a partitioned parent; the file catalog
+	// catches one created earlier in this same migration
 	if t := lookupTable(names.snap, idx.GetRelation()); t != nil && t.PartitionInfo != nil {
+		return nil, ""
+	}
+	if cat != nil && cat.isPartitioned(idx.GetRelation()) {
 		return nil, ""
 	}
 	c := proto.Clone(idx).(*pg_query.IndexStmt)

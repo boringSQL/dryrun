@@ -60,6 +60,7 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 
 	var checks []MigrationCheck
 	names := newNameAllocator(a.Schema)
+	cat := newFileCatalog()
 
 	for _, stmt := range result.Stmts {
 		if stmt.Stmt == nil {
@@ -67,13 +68,17 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 		}
 		switch n := stmt.Stmt.Node.(type) {
 		case *pg_query.Node_AlterTableStmt:
+			// ATTACH PARTITION can bring rows into a table this file created empty
+			if alterAttachesPartition(n.AlterTableStmt) {
+				cat.invalidate(n.AlterTableStmt.GetRelation())
+			}
 			for _, cmdNode := range n.AlterTableStmt.Cmds {
 				cmd, ok := cmdNode.Node.(*pg_query.Node_AlterTableCmd)
 				if !ok {
 					checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
 					continue
 				}
-				if check := analyzeAlterTableCmd(cmd.AlterTableCmd, n.AlterTableStmt, a, names); check != nil {
+				if check := analyzeAlterTableCmd(cmd.AlterTableCmd, n.AlterTableStmt, a, names, cat); check != nil {
 					checks = append(checks, *check)
 				} else {
 					// this command's text alone -- siblings have their own checks
@@ -81,12 +86,47 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 				}
 			}
 		case *pg_query.Node_IndexStmt:
-			checks = append(checks, analyzeCreateIndex(n.IndexStmt, a, names))
+			checks = append(checks, analyzeCreateIndex(n.IndexStmt, a, names, cat))
+		case *pg_query.Node_CreateStmt:
+			checks = append(checks, analyzeCreateTable(n.CreateStmt, stmt.Stmt))
+			// IF NOT EXISTS may be a no-op on a populated table, never empty
+			if !n.CreateStmt.IfNotExists {
+				cat.markCreated(n.CreateStmt.GetRelation(), isPartitionedParent(n.CreateStmt))
+			}
+		case *pg_query.Node_CreateTableAsStmt:
+			checks = append(checks, analyzeCreateTableAs(n.CreateTableAsStmt, stmt.Stmt))
+			// CTAS is born populated: never tracked as empty
+		case *pg_query.Node_InsertStmt:
+			cat.invalidate(n.InsertStmt.GetRelation())
+			checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+		case *pg_query.Node_CopyStmt:
+			if n.CopyStmt.IsFrom {
+				cat.invalidate(n.CopyStmt.GetRelation())
+			}
+			checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+		case *pg_query.Node_DoStmt:
+			// procedural code can insert into any table we created
+			cat.invalidateAll()
+			checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+		case *pg_query.Node_CallStmt:
+			// a procedure can insert into any table we created
+			cat.invalidateAll()
+			checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+		case *pg_query.Node_MergeStmt:
+			// MERGE's WHEN NOT MATCHED branch inserts rows
+			cat.invalidate(n.MergeStmt.GetRelation())
+			checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
 		case *pg_query.Node_RenameStmt:
+			if n.RenameStmt.GetRenameType() == pg_query.ObjectType_OBJECT_TABLE {
+				cat.rekey(n.RenameStmt.GetRelation(), n.RenameStmt.GetNewname())
+			}
 			checks = append(checks, analyzeRename(a.Schema))
 		case *pg_query.Node_DropStmt:
 			switch n.DropStmt.RemoveType {
 			case pg_query.ObjectType_OBJECT_TABLE:
+				for _, key := range dropTableKeys(n.DropStmt) {
+					delete(cat.empty, key)
+				}
 				checks = append(checks, dropTableCheck())
 			case pg_query.ObjectType_OBJECT_INDEX:
 				checks = append(checks, dropIndexCheck(n.DropStmt, stmt.Stmt))
@@ -107,7 +147,108 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 	return checks, nil
 }
 
-func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, a *schema.AnnotatedSchema, names *nameAllocator) *MigrationCheck {
+// fileCatalog tracks tables this file created, so later statements are not
+// sized against a pre-existing table.
+type (
+	fileCatalog struct {
+		empty       map[string]bool // relKey of tables created empty in this file
+		partitioned map[string]bool // relKey of partitioned parents created in this file
+	}
+)
+
+func newFileCatalog() *fileCatalog {
+	return &fileCatalog{
+		empty:       map[string]bool{},
+		partitioned: map[string]bool{},
+	}
+}
+
+func (c *fileCatalog) markCreated(rel *pg_query.RangeVar, partitioned bool) {
+	if rel == nil {
+		return
+	}
+	c.empty[relKey(rel)] = true
+	if partitioned {
+		c.partitioned[relKey(rel)] = true
+	}
+}
+
+func (c *fileCatalog) invalidate(rel *pg_query.RangeVar) {
+	if rel == nil {
+		return
+	}
+	delete(c.empty, relKey(rel))
+}
+
+func (c *fileCatalog) invalidateAll() {
+	c.empty = map[string]bool{}
+}
+
+func (c *fileCatalog) isEmpty(rel *pg_query.RangeVar) bool {
+	return c != nil && rel != nil && c.empty[relKey(rel)]
+}
+
+func (c *fileCatalog) isPartitioned(rel *pg_query.RangeVar) bool {
+	return c != nil && rel != nil && c.partitioned[relKey(rel)]
+}
+
+func (c *fileCatalog) rekey(oldRel *pg_query.RangeVar, newName string) {
+	if oldRel == nil || newName == "" {
+		return
+	}
+	schemaName := schemaOf(oldRel)
+	oldKey := relKey(oldRel)
+	newKey := schemaName + "." + newName
+	if c.empty[oldKey] {
+		delete(c.empty, oldKey)
+		c.empty[newKey] = true
+	}
+	if c.partitioned[oldKey] {
+		delete(c.partitioned, oldKey)
+		c.partitioned[newKey] = true
+	}
+}
+
+// A partition (Partbound set) is an ordinary empty table, not a parent.
+func isPartitionedParent(c *pg_query.CreateStmt) bool {
+	return c.GetPartspec() != nil && c.GetPartbound() == nil
+}
+
+func alterAttachesPartition(stmt *pg_query.AlterTableStmt) bool {
+	for _, cmdNode := range stmt.GetCmds() {
+		cmd, ok := cmdNode.Node.(*pg_query.Node_AlterTableCmd)
+		if ok && pg_query.AlterTableType(cmd.AlterTableCmd.GetSubtype()) == pg_query.AlterTableType_AT_AttachPartition {
+			return true
+		}
+	}
+	return false
+}
+
+// DROP TABLE's objects are [schema, name] string lists.
+func dropTableKeys(drop *pg_query.DropStmt) []string {
+	var keys []string
+	for _, obj := range drop.GetObjects() {
+		list, ok := obj.GetNode().(*pg_query.Node_List)
+		if !ok || list.List == nil {
+			continue
+		}
+		var parts []string
+		for _, item := range list.List.GetItems() {
+			if s, ok := item.GetNode().(*pg_query.Node_String_); ok {
+				parts = append(parts, s.String_.GetSval())
+			}
+		}
+		switch len(parts) {
+		case 1:
+			keys = append(keys, "public."+parts[0])
+		case 2:
+			keys = append(keys, parts[0]+"."+parts[1])
+		}
+	}
+	return keys
+}
+
+func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, a *schema.AnnotatedSchema, names *nameAllocator, cat *fileCatalog) *MigrationCheck {
 	tableName := ""
 	if stmt.Relation != nil {
 		if stmt.Relation.Schemaname != "" {
@@ -119,6 +260,13 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 	qual := schema.QualifiedName{Schema: schemaOf(stmt.GetRelation()), Name: stmt.GetRelation().GetRelname()}
 	tableSize, rowEstimate, small := lookupTableStats(a, qual)
 	statement := alterCmdStatement(stmt, cmd)
+
+	// empty table: the size-dependent verdicts below do not apply
+	if cat.isEmpty(stmt.GetRelation()) {
+		if check := analyzeEmptyTableAlterCmd(cmd, tableName, statement); check != nil {
+			return check
+		}
+	}
 
 	subtype := pg_query.AlterTableType(cmd.Subtype)
 
@@ -184,6 +332,108 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 		}
 	}
 	return nil
+}
+
+func analyzeEmptyTableAlterCmd(cmd *pg_query.AlterTableCmd, tableName, statement string) *MigrationCheck {
+	var operation string
+	switch pg_query.AlterTableType(cmd.Subtype) {
+	case pg_query.AlterTableType_AT_AddColumn:
+		operation = "ADD COLUMN"
+	case pg_query.AlterTableType_AT_SetNotNull:
+		operation = "SET NOT NULL"
+	case pg_query.AlterTableType_AT_AlterColumnType:
+		operation = "ALTER COLUMN TYPE"
+	case pg_query.AlterTableType_AT_AddConstraint:
+		operation = addConstraintOperation(cmd)
+	default:
+		return nil
+	}
+
+	const rec = "Table is created empty earlier in this migration: the scan or rewrite touches 0 rows and is instant. The lock is still taken and can queue behind an in-flight transaction -- set lock_timeout and retry on timeout."
+	note := ""
+	if pg_query.AlterTableType(cmd.Subtype) == pg_query.AlterTableType_AT_AddConstraint {
+		if con := constraintOf(cmd); con != nil && pg_query.ConstrType(con.Contype) == pg_query.ConstrType_CONSTR_FOREIGN {
+			if con.GetPktable() != nil {
+				note = fmt.Sprintf("A brief SHARE ROW EXCLUSIVE lock is taken on the referenced table %s to install the FK triggers.", relationName(con.GetPktable()))
+			} else {
+				note = "A brief SHARE ROW EXCLUSIVE lock is taken on the referenced table to install the FK triggers."
+			}
+		}
+	}
+	zero := 0.0
+	return &MigrationCheck{
+		Operation: operation, Table: strp(tableName), Safety: SafetySafe,
+		LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (0 rows)",
+		TableSize: strp("0 bytes"), RowEstimate: &zero,
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec, Note: note},
+		Statement:      statement,
+	}
+}
+
+func analyzeCreateTable(stmt *pg_query.CreateStmt, stmtNode *pg_query.Node) MigrationCheck {
+	tableName := relationName(stmt.GetRelation())
+	const rec = "Creates an empty table -- metadata-only, no data movement. Inline PRIMARY KEY/UNIQUE build empty indexes immediately."
+	var inlineFK []string
+	inlineFK = referencedTables(stmt)
+	note := ""
+	if len(inlineFK) > 0 {
+		note = fmt.Sprintf("Inline foreign key references %s: a brief SHARE ROW EXCLUSIVE lock is taken there to install the FK triggers.", strings.Join(inlineFK, ", "))
+	}
+	zero := 0.0
+	return MigrationCheck{
+		Operation: "CREATE TABLE", Table: strp(tableName), Safety: SafetySafe,
+		LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
+		TableSize: strp("0 bytes"), RowEstimate: &zero,
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec, Note: note},
+		Statement:      topLevelStatement(stmtNode),
+	}
+}
+
+func analyzeCreateTableAs(stmt *pg_query.CreateTableAsStmt, stmtNode *pg_query.Node) MigrationCheck {
+	tableName := ""
+	if stmt.GetInto() != nil {
+		tableName = relationName(stmt.GetInto().GetRel())
+	}
+	const rec = "Materializes the query result into a new table. Duration tracks the source scan and row count; carries no indexes, constraints or defaults from the source."
+	return MigrationCheck{
+		Operation: "CREATE TABLE AS", Table: strp(tableName), Safety: SafetyCaution,
+		LockType: "ACCESS EXCLUSIVE", LockDuration: "proportional to query result size",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      topLevelStatement(stmtNode),
+	}
+}
+
+func referencedTables(stmt *pg_query.CreateStmt) []string {
+	var out []string
+	collect := func(c *pg_query.Constraint) {
+		if c == nil || pg_query.ConstrType(c.Contype) != pg_query.ConstrType_CONSTR_FOREIGN {
+			return
+		}
+		if c.GetPktable() != nil {
+			out = append(out, relationName(c.GetPktable()))
+		}
+	}
+	for _, elt := range stmt.GetTableElts() {
+		switch e := elt.GetNode().(type) {
+		case *pg_query.Node_Constraint:
+			collect(e.Constraint)
+		case *pg_query.Node_ColumnDef:
+			for _, cc := range e.ColumnDef.GetConstraints() {
+				if c, ok := cc.GetNode().(*pg_query.Node_Constraint); ok {
+					collect(c.Constraint)
+				}
+			}
+		}
+	}
+	for _, con := range stmt.GetConstraints() {
+		if c, ok := con.GetNode().(*pg_query.Node_Constraint); ok {
+			collect(c.Constraint)
+		}
+	}
+	return out
 }
 
 func analyzeAddColumn(cmd *pg_query.AlterTableCmd, tableName string, tableSize *string, rowEstimate *float64, statement string) *MigrationCheck {
@@ -309,27 +559,31 @@ func analyzeSetNotNull(colName, tableName string, qual schema.QualifiedName, tab
 	}
 }
 
+func addConstraintOperation(cmd *pg_query.AlterTableCmd) string {
+	con := constraintOf(cmd)
+	if con == nil {
+		return "ADD CONSTRAINT"
+	}
+	switch pg_query.ConstrType(con.Contype) {
+	case pg_query.ConstrType_CONSTR_FOREIGN:
+		return "ADD FOREIGN KEY"
+	case pg_query.ConstrType_CONSTR_CHECK:
+		return "ADD CHECK CONSTRAINT"
+	case pg_query.ConstrType_CONSTR_PRIMARY:
+		return "ADD PRIMARY KEY"
+	case pg_query.ConstrType_CONSTR_UNIQUE:
+		return "ADD UNIQUE CONSTRAINT"
+	case pg_query.ConstrType_CONSTR_EXCLUSION:
+		return "ADD EXCLUSION CONSTRAINT"
+	}
+	return "ADD CONSTRAINT"
+}
+
 func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, small bool, names *nameAllocator, statement string) *MigrationCheck {
 	isNotValid := false
-	operation := "ADD CONSTRAINT"
-
-	if cmd.Def != nil {
-		if con, ok := cmd.Def.Node.(*pg_query.Node_Constraint); ok && con.Constraint != nil {
-			isNotValid = con.Constraint.SkipValidation
-			conType := pg_query.ConstrType(con.Constraint.Contype)
-			switch conType {
-			case pg_query.ConstrType_CONSTR_FOREIGN:
-				operation = "ADD FOREIGN KEY"
-			case pg_query.ConstrType_CONSTR_CHECK:
-				operation = "ADD CHECK CONSTRAINT"
-			case pg_query.ConstrType_CONSTR_PRIMARY:
-				operation = "ADD PRIMARY KEY"
-			case pg_query.ConstrType_CONSTR_UNIQUE:
-				operation = "ADD UNIQUE CONSTRAINT"
-			case pg_query.ConstrType_CONSTR_EXCLUSION:
-				operation = "ADD EXCLUSION CONSTRAINT"
-			}
-		}
+	operation := addConstraintOperation(cmd)
+	if con := constraintOf(cmd); con != nil {
+		isNotValid = con.SkipValidation
 	}
 
 	var safety SafetyRating
@@ -404,7 +658,7 @@ func constraintColumns(con *pg_query.Constraint) []string {
 	return []string{"<cols>"}
 }
 
-func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, names *nameAllocator) MigrationCheck {
+func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, names *nameAllocator, cat *fileCatalog) MigrationCheck {
 	tableName := ""
 	if idx.Relation != nil {
 		if idx.Relation.Schemaname != "" {
@@ -431,6 +685,20 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, name
 	colStr := strings.Join(idxCols, ", ")
 	statement := indexStmtStatement(idx)
 
+	// empty table: the blocking form is fine, no CONCURRENTLY rewrite needed
+	if !idx.Concurrent && cat.isEmpty(idx.GetRelation()) {
+		const rec = "Table is created empty earlier in this migration: the index build touches 0 rows and is instant. The lock is still taken and can queue behind an in-flight transaction -- set lock_timeout and retry on timeout."
+		zero := 0.0
+		return MigrationCheck{
+			Operation: "CREATE INDEX", Table: strp(tableName), Safety: SafetySafe,
+			LockType: "SHARE (brief, 0 rows)", LockDuration: "brief (0 rows)",
+			TableSize: strp("0 bytes"), RowEstimate: &zero,
+			Recommendation: rec,
+			Rationale:      &Rationale{Reason: rec},
+			Statement:      statement,
+		}
+	}
+
 	var safety SafetyRating
 	var recommendation, lockType string
 	var rationale *Rationale
@@ -445,7 +713,7 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, name
 		lockType = "SHARE (blocks writes)"
 	}
 
-	safer, builtName := rewriteCreateIndex(idx, names)
+	safer, builtName := rewriteCreateIndex(idx, names, cat)
 	idxName := idx.Idxname
 	if builtName != "" {
 		idxName = builtName
