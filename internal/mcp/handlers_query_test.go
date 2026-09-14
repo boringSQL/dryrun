@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/boringsql/dryrun/pkg/lint"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
@@ -318,5 +319,50 @@ func TestCheckMigration_MigrationSQLAbsentWhenAnyUnsafeHasNoRewrite(t *testing.T
 				t.Errorf("expected no migration_sql, got %v", v)
 			}
 		})
+	}
+}
+
+// The handler must feed the annotated schema (planner sizing) into
+// check_migration: a known table carries table_size, and a small one scales
+// the verdict down to caution without ever going safe.
+func TestCheckMigration_SurfacesSizingAndScalesSmallTable(t *testing.T) {
+	snap := loadDemoSchema(t)
+
+	firstCheck := func(out string) map[string]any {
+		t.Helper()
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+			t.Fatalf("expected JSON output: %v\n%s", err, out)
+		}
+		checks, _ := decoded["checks"].([]any)
+		if len(checks) != 1 {
+			t.Fatalf("expected one check, got %v", decoded["checks"])
+		}
+		check, _ := checks[0].(map[string]any)
+		return check
+	}
+
+	ddl := "CREATE INDEX idx_tasks_status ON tasks (status)"
+
+	large := serveOffline(t, NewOfflineServerAnnotated(annotate(snap, 2_000_000), lint.DefaultConfig()))
+	check := firstCheck(callTool(t, large, "check_migration", map[string]any{"ddl": ddl}))
+	if size, _ := check["table_size"].(string); size == "" {
+		t.Errorf("expected table_size from planner sizing, got %v", check["table_size"])
+	}
+	if rows, _ := check["row_estimate"].(float64); rows != 2_000_000 {
+		t.Errorf("expected row_estimate 2000000, got %v", check["row_estimate"])
+	}
+	if check["safety"] != "dangerous" {
+		t.Errorf("large table should stay dangerous, got %v", check["safety"])
+	}
+
+	small := serveOffline(t, NewOfflineServerAnnotated(annotate(snap, 2_000), lint.DefaultConfig()))
+	check = firstCheck(callTool(t, small, "check_migration", map[string]any{"ddl": ddl}))
+	if check["safety"] != "caution" {
+		t.Errorf("small table should be caution, got %v", check["safety"])
+	}
+	rationale, _ := check["rationale"].(map[string]any)
+	if note, _ := rationale["note"].(string); !strings.Contains(note, "Table is small") {
+		t.Errorf("expected small-table note, got %q", note)
 	}
 }

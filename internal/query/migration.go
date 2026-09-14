@@ -49,14 +49,17 @@ const (
 )
 
 // parses DDL and returns safety assessments per statement
-func CheckMigration(ddl string, snap *schema.SchemaSnapshot) ([]MigrationCheck, error) {
+func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, error) {
 	result, err := pg_query.Parse(ddl)
 	if err != nil {
 		return nil, fmt.Errorf("DDL parse error: %w", err)
 	}
+	if a == nil {
+		a = &schema.AnnotatedSchema{}
+	}
 
 	var checks []MigrationCheck
-	names := newNameAllocator(snap)
+	names := newNameAllocator(a.Schema)
 
 	for _, stmt := range result.Stmts {
 		if stmt.Stmt == nil {
@@ -70,7 +73,7 @@ func CheckMigration(ddl string, snap *schema.SchemaSnapshot) ([]MigrationCheck, 
 					checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
 					continue
 				}
-				if check := analyzeAlterTableCmd(cmd.AlterTableCmd, n.AlterTableStmt, snap, names); check != nil {
+				if check := analyzeAlterTableCmd(cmd.AlterTableCmd, n.AlterTableStmt, a, names); check != nil {
 					checks = append(checks, *check)
 				} else {
 					// this command's text alone -- siblings have their own checks
@@ -78,9 +81,9 @@ func CheckMigration(ddl string, snap *schema.SchemaSnapshot) ([]MigrationCheck, 
 				}
 			}
 		case *pg_query.Node_IndexStmt:
-			checks = append(checks, analyzeCreateIndex(n.IndexStmt, snap, names))
+			checks = append(checks, analyzeCreateIndex(n.IndexStmt, a, names))
 		case *pg_query.Node_RenameStmt:
-			checks = append(checks, analyzeRename(snap))
+			checks = append(checks, analyzeRename(a.Schema))
 		case *pg_query.Node_DropStmt:
 			switch n.DropStmt.RemoveType {
 			case pg_query.ObjectType_OBJECT_TABLE:
@@ -104,7 +107,7 @@ func CheckMigration(ddl string, snap *schema.SchemaSnapshot) ([]MigrationCheck, 
 	return checks, nil
 }
 
-func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, snap *schema.SchemaSnapshot, names *nameAllocator) *MigrationCheck {
+func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, a *schema.AnnotatedSchema, names *nameAllocator) *MigrationCheck {
 	tableName := ""
 	if stmt.Relation != nil {
 		if stmt.Relation.Schemaname != "" {
@@ -113,7 +116,8 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			tableName = stmt.Relation.Relname
 		}
 	}
-	tableSize, rowEstimate := lookupTableStats(snap, tableName)
+	qual := schema.QualifiedName{Schema: schemaOf(stmt.GetRelation()), Name: stmt.GetRelation().GetRelname()}
+	tableSize, rowEstimate, small := lookupTableStats(a, qual)
 	statement := alterCmdStatement(stmt, cmd)
 
 	subtype := pg_query.AlterTableType(cmd.Subtype)
@@ -147,20 +151,26 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			Statement:      statement,
 		}
 	case pg_query.AlterTableType_AT_SetNotNull:
-		return analyzeSetNotNull(cmd.Name, tableName, tableSize, rowEstimate, snap, stmt, names, statement)
+		return analyzeSetNotNull(cmd.Name, tableName, qual, tableSize, rowEstimate, a, stmt, names, statement)
 	case pg_query.AlterTableType_AT_AlterColumnType:
 		colName := cmd.Name
 		e := jit.AlterColumnType(tableName, colName, "<new_type>")
+		safety := SafetyDangerous
+		rationale := &Rationale{Reason: e.Reason, Note: e.Note}
+		if small {
+			safety = SafetyCaution
+			rationale.Note = joinNotes(rationale.Note, smallTableNote(*rowEstimate, *tableSize))
+		}
 		return &MigrationCheck{
-			Operation: "ALTER COLUMN TYPE", Table: strp(tableName), Safety: SafetyDangerous,
+			Operation: "ALTER COLUMN TYPE", Table: strp(tableName), Safety: safety,
 			LockType: "ACCESS EXCLUSIVE", LockDuration: "proportional to table size (full rewrite)",
 			TableSize: tableSize, RowEstimate: rowEstimate,
 			Recommendation: e.String(),
-			Rationale:      &Rationale{Reason: e.Reason, Note: e.Note},
+			Rationale:      rationale,
 			Statement:      statement,
 		}
 	case pg_query.AlterTableType_AT_AddConstraint:
-		return analyzeAddConstraint(cmd, stmt, tableName, tableSize, rowEstimate, names, statement)
+		return analyzeAddConstraint(cmd, stmt, tableName, tableSize, rowEstimate, small, names, statement)
 	case pg_query.AlterTableType_AT_ValidateConstraint:
 		const rec = "Safe - validates existing rows with a weaker lock that allows concurrent reads and writes."
 		return &MigrationCheck{
@@ -255,7 +265,7 @@ func deparse(typeName *pg_query.TypeName) string {
 	return strings.Join(parts, ".")
 }
 
-func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate *float64, snap *schema.SchemaSnapshot, stmt *pg_query.AlterTableStmt, names *nameAllocator, statement string) *MigrationCheck {
+func analyzeSetNotNull(colName, tableName string, qual schema.QualifiedName, tableSize *string, rowEstimate *float64, a *schema.AnnotatedSchema, stmt *pg_query.AlterTableStmt, names *nameAllocator, statement string) *MigrationCheck {
 	displayCol := colName
 	if displayCol == "" {
 		displayCol = "<col>"
@@ -271,8 +281,19 @@ func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate
 		rec = e.Warning()
 	}
 
-	// column NULL-fraction refinement migrated to AnnotatedSchema; CheckMigration doesn't carry one yet
-	_ = snap
+	if colName != "" {
+		if col := a.ColumnStats(qual, colName); col != nil && col.NullFrac != nil {
+			nf := *col.NullFrac
+			if nf == 0 {
+				rec += "\n\nDATA CHECK: Column currently has 0% NULLs. The scan will pass, but ACCESS EXCLUSIVE lock is still held."
+			} else if rowEstimate != nil && *rowEstimate >= 0 {
+				nullRows := int64(nf * *rowEstimate)
+				rec += fmt.Sprintf("\n\nDATA CHECK: Column has ~%.0f%% NULLs (~%d rows) that must be backfilled before this constraint can be applied.", nf*100, nullRows)
+			} else {
+				rec += fmt.Sprintf("\n\nDATA CHECK: Column has ~%.0f%% NULLs that must be backfilled before this constraint can be applied.", nf*100)
+			}
+		}
+	}
 
 	return &MigrationCheck{
 		Operation: "SET NOT NULL", Table: strp(tableName), Safety: safety,
@@ -288,7 +309,7 @@ func analyzeSetNotNull(colName, tableName string, tableSize *string, rowEstimate
 	}
 }
 
-func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, names *nameAllocator, statement string) *MigrationCheck {
+func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, small bool, names *nameAllocator, statement string) *MigrationCheck {
 	isNotValid := false
 	operation := "ADD CONSTRAINT"
 
@@ -342,6 +363,10 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			// two differently-named migrations in one response is worse than one
 			recommendation = e.Warning()
 		}
+		if small {
+			safety = SafetyCaution
+			rationale.Note = joinNotes(rationale.Note, smallTableNote(*rowEstimate, *tableSize))
+		}
 		lockDuration = "proportional to table size"
 		lockType = "ACCESS EXCLUSIVE"
 	}
@@ -379,7 +404,7 @@ func constraintColumns(con *pg_query.Constraint) []string {
 	return []string{"<cols>"}
 }
 
-func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, names *nameAllocator) MigrationCheck {
+func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, names *nameAllocator) MigrationCheck {
 	tableName := ""
 	if idx.Relation != nil {
 		if idx.Relation.Schemaname != "" {
@@ -388,7 +413,8 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, na
 			tableName = idx.Relation.Relname
 		}
 	}
-	tableSize, rowEstimate := lookupTableStats(snap, tableName)
+	qual := schema.QualifiedName{Schema: schemaOf(idx.GetRelation()), Name: idx.GetRelation().GetRelname()}
+	tableSize, rowEstimate, small := lookupTableStats(a, qual)
 	// index method and columns for jit
 	idxMethod := "btree"
 	if idx.AccessMethod != "" {
@@ -433,10 +459,14 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, snap *schema.SchemaSnapshot, na
 		rationale = &Rationale{Reason: e.Reason, Note: e.Note}
 		if len(safer) > 0 {
 			recommendation = e.Warning()
-		} else if t := lookupTable(snap, idx.GetRelation()); t != nil && t.PartitionInfo != nil {
+		} else if t := lookupTable(a.Schema, idx.GetRelation()); t != nil && t.PartitionInfo != nil {
 			partitionNote := "CONCURRENTLY is rejected on a partitioned table. Build the index on each partition concurrently, then CREATE INDEX on the parent and ATTACH them."
 			recommendation += "\nNOTE: " + partitionNote
 			rationale.Note = joinNotes(rationale.Note, partitionNote)
+		}
+		if small {
+			safety = SafetyCaution
+			rationale.Note = joinNotes(rationale.Note, smallTableNote(*rowEstimate, *tableSize))
 		}
 	}
 
@@ -617,18 +647,33 @@ func unmodeledCheck(statement string) MigrationCheck {
 	}
 }
 
-func lookupTableStats(snap *schema.SchemaSnapshot, tableName string) (*string, *float64) {
-	schemaPart, namePart := "public", tableName
-	if i := strings.LastIndex(tableName, "."); i >= 0 {
-		schemaPart = tableName[:i]
-		namePart = tableName[i+1:]
-	}
+const smallTableMaxRows = 100_000
 
-	// size/row hints come from AnnotatedSchema now; CheckMigration receives only DDL
-	_ = namePart
-	_ = schemaPart
-	_ = snap
-	return nil, nil
+func lookupTableStats(a *schema.AnnotatedSchema, q schema.QualifiedName) (sizeText *string, rows *float64, small bool) {
+	sz := a.SizingFor(q)
+	if sz == nil {
+		return nil, nil, false
+	}
+	size := formatBytes(sz.TableSize)
+	r := sz.Reltuples
+	return &size, &r, r >= 0 && r <= smallTableMaxRows
+}
+
+func smallTableNote(rows float64, sizeText string) string {
+	return fmt.Sprintf("Table is small (~%d rows, %s): the operation is brief, but the lock still queues behind any in-flight transaction -- set lock_timeout and retry on timeout.", int64(rows), sizeText)
+}
+
+func formatBytes(bytes int64) string {
+	switch {
+	case bytes >= 1_073_741_824:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/1_073_741_824)
+	case bytes >= 1_048_576:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/1_048_576)
+	case bytes >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	default:
+		return fmt.Sprintf("%d bytes", bytes)
+	}
 }
 
 func stringList(nodes []*pg_query.Node) []string {

@@ -12,7 +12,7 @@ import (
 
 func rewriteFor(t *testing.T, ddl string) []string {
 	t.Helper()
-	checks, err := CheckMigration(ddl, migrationTestSchema())
+	checks, err := CheckMigration(ddl, migrationTestAnnotated())
 	if err != nil {
 		t.Fatalf("%s: %v", ddl, err)
 	}
@@ -261,7 +261,7 @@ func TestSaferSQLIsActuallySafer(t *testing.T) {
 		if len(steps) == 1 && steps[0] == ddl+";" {
 			t.Fatalf("%s: the rewrite is the input", ddl)
 		}
-		rechecked, err := CheckMigration(strings.Join(steps, "\n"), migrationTestSchema())
+		rechecked, err := CheckMigration(strings.Join(steps, "\n"), migrationTestAnnotated())
 		if err != nil {
 			t.Fatalf("%s: the rewrite does not parse: %v", ddl, err)
 		}
@@ -292,7 +292,7 @@ func TestSaferSQLOnlyOnUnsafeChecks(t *testing.T) {
 		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
 	}
 	for _, ddl := range ddls {
-		checks, err := CheckMigration(ddl, migrationTestSchema())
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -354,7 +354,7 @@ func TestIndexBackedConstraintRecommendation(t *testing.T) {
 		{"ALTER TABLE orders ADD EXCLUDE USING gist (status WITH =)", "ADD EXCLUSION CONSTRAINT",
 			[]string{"CREATE INDEX CONCURRENTLY"}},
 	} {
-		checks, err := CheckMigration(tc.ddl, migrationTestSchema())
+		checks, err := CheckMigration(tc.ddl, migrationTestAnnotated())
 		if err != nil {
 			t.Fatalf("%s: %v", tc.ddl, err)
 		}
@@ -385,7 +385,7 @@ func TestRecommendationDropsTheFixWhereThereIsARewrite(t *testing.T) {
 		"CREATE INDEX idx_o ON orders (user_id)",
 		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
 	} {
-		checks, err := CheckMigration(ddl, migrationTestSchema())
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
 		if err != nil {
 			t.Fatalf("%s: %v", ddl, err)
 		}
@@ -422,7 +422,7 @@ func TestRationalePresentAcrossConstructionSites(t *testing.T) {
 		"DROP TABLE orders", // fallback keyword check
 	}
 	for _, ddl := range ddls {
-		checks, err := CheckMigration(ddl, migrationTestSchema())
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
 		if err != nil {
 			t.Fatalf("%s: %v", ddl, err)
 		}
@@ -456,8 +456,14 @@ func TestRationaleMatchesJitEntry(t *testing.T) {
 		{"CREATE INDEX idx_o ON orders (user_id)", jit.CreateIndexBlocking("orders", "idx_o", "btree", "user_id")},
 		{"ALTER TABLE orders RENAME COLUMN total TO amount", jit.Rename("<old_name>", "<new_name>")},
 	}
+	// large sizing throughout: the small-table downgrade appends to Note, and
+	// this test is pinning the jit wording underneath it
+	large := migrationTestAnnotated()
+	for i := range large.Planner.Tables {
+		large.Planner.Tables[i].Sizing.Reltuples = 2_000_000
+	}
 	for _, tc := range tests {
-		checks, err := CheckMigration(tc.ddl, migrationTestSchema())
+		checks, err := CheckMigration(tc.ddl, large)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.ddl, err)
 		}
@@ -485,11 +491,11 @@ func TestRationaleMatchesJitEntry(t *testing.T) {
 // counterpart to compare against; SET NOT NULL is the one site where both
 // sides of the downgrade are actually observable.
 func TestRationaleSurvivesStringToWarningDowngrade(t *testing.T) {
-	withRewrite, err := CheckMigration("ALTER TABLE orders ALTER COLUMN status SET NOT NULL", migrationTestSchema())
+	withRewrite, err := CheckMigration("ALTER TABLE orders ALTER COLUMN status SET NOT NULL", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
-	withoutRewrite, err := CheckMigration("ALTER TABLE ONLY orders ALTER COLUMN status SET NOT NULL", migrationTestSchema())
+	withoutRewrite, err := CheckMigration("ALTER TABLE ONLY orders ALTER COLUMN status SET NOT NULL", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +521,7 @@ func TestRationaleSurvivesStringToWarningDowngrade(t *testing.T) {
 // case -- it must land in Note as detail, not as Rationale.Reason, or an
 // agent reading only rationale gets an answer stronger than the evidence.
 func TestRationaleHedgesAddColumnDefault(t *testing.T) {
-	checks, err := CheckMigration("ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT now()", migrationTestSchema())
+	checks, err := CheckMigration("ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT now()", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +546,7 @@ func TestRationaleHedgesAddColumnDefault(t *testing.T) {
 // at the same site. Both must survive in rationale.Note; neither may clobber
 // the other.
 func TestRationaleJoinsPartitionNote(t *testing.T) {
-	checks, err := CheckMigration("CREATE INDEX ON events (created_at)", migrationTestSchema())
+	checks, err := CheckMigration("CREATE INDEX ON events (created_at)", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +569,7 @@ func TestRationaleJoinsPartitionNote(t *testing.T) {
 func TestComposeMigrationSQLPresentWhenAllRewritable(t *testing.T) {
 	checks, err := CheckMigration(
 		"ALTER TABLE orders ADD CHECK (total >= 0);\nCREATE INDEX ON orders (status)",
-		migrationTestSchema())
+		migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,7 +592,7 @@ func TestComposeMigrationSQLPresentWhenAllRewritable(t *testing.T) {
 func TestComposeMigrationSQLAbsentWhenAnyUnsafeHasNoRewrite(t *testing.T) {
 	checks, err := CheckMigration(
 		"ALTER TABLE orders ADD CHECK (total >= 0);\nALTER TABLE orders ALTER COLUMN total TYPE bigint",
-		migrationTestSchema())
+		migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +606,7 @@ func TestComposeMigrationSQLAbsentWhenAnyUnsafeHasNoRewrite(t *testing.T) {
 func TestComposeMigrationSQLAbsentWhenRenamePresent(t *testing.T) {
 	checks, err := CheckMigration(
 		"ALTER TABLE orders ADD CHECK (total >= 0);\nALTER TABLE orders RENAME COLUMN total TO amount",
-		migrationTestSchema())
+		migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +624,7 @@ func TestComposeMigrationSQLAbsentWhenStatementIsUnrecognized(t *testing.T) {
 		"ALTER TABLE orders ADD CHECK (total >= 0);\nCREATE TABLE audit_log (id bigint)",
 		"ALTER TABLE orders ADD CHECK (total >= 0);\nDROP VIEW some_view", // a DROP that isn't DROP TABLE or DROP INDEX
 	} {
-		checks, err := CheckMigration(ddl, migrationTestSchema())
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
 		if err != nil {
 			t.Fatalf("%s: %v", ddl, err)
 		}
@@ -644,7 +650,7 @@ func TestComposeMigrationSQLAbsentWhenStatementIsUnrecognized(t *testing.T) {
 func TestComposeMigrationSQLPassesThroughSetStatement(t *testing.T) {
 	checks, err := CheckMigration(
 		"SET lock_timeout = '3s';\nALTER TABLE orders ADD CHECK (total >= 0);",
-		migrationTestSchema())
+		migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +690,7 @@ func TestComposeMigrationSQLAbsentWhenTransactionControlPresent(t *testing.T) {
 		"BEGIN;\nALTER TABLE orders ADD CHECK (total >= 0);\nCOMMIT;",
 		"BEGIN;\nSAVEPOINT sp1;\nALTER TABLE orders ADD CHECK (total >= 0);\nROLLBACK;",
 	} {
-		checks, err := CheckMigration(ddl, migrationTestSchema())
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
 		if err != nil {
 			t.Fatalf("%s: %v", ddl, err)
 		}
@@ -702,7 +708,7 @@ func TestComposeMigrationSQLAbsentWhenTransactionControlPresent(t *testing.T) {
 func TestAlterSystemSetIsUnrecognizedNotSetPassthrough(t *testing.T) {
 	checks, err := CheckMigration(
 		"ALTER SYSTEM SET work_mem = '1GB';\nALTER TABLE orders ADD CHECK (total >= 0);",
-		migrationTestSchema())
+		migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -731,7 +737,7 @@ func TestComposeMigrationSQLPassesThroughDropIndex(t *testing.T) {
 		"ALTER TABLE orders ADD CHECK (total >= 0);\nDROP INDEX orders_user_id_idx",
 		"ALTER TABLE orders ADD CHECK (total >= 0);\nDROP INDEX CONCURRENTLY orders_user_id_idx",
 	} {
-		checks, err := CheckMigration(ddl, migrationTestSchema())
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
 		if err != nil {
 			t.Fatalf("%s: %v", ddl, err)
 		}
@@ -749,14 +755,14 @@ func TestComposeMigrationSQLPassesThroughDropIndex(t *testing.T) {
 // the constraint the index backs, and foreign keys referencing it), so it
 // gets the same caution rating rather than the plain form's safe.
 func TestDropIndexCascadeIsCaution(t *testing.T) {
-	plain, err := CheckMigration("DROP INDEX orders_user_id_idx", migrationTestSchema())
+	plain, err := CheckMigration("DROP INDEX orders_user_id_idx", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plain[0].Safety != SafetySafe {
 		t.Fatalf("plain DROP INDEX should be safe, got %s", plain[0].Safety)
 	}
-	cascade, err := CheckMigration("DROP INDEX orders_user_id_idx CASCADE", migrationTestSchema())
+	cascade, err := CheckMigration("DROP INDEX orders_user_id_idx CASCADE", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -770,7 +776,7 @@ func TestDropIndexCascadeIsCaution(t *testing.T) {
 	// DROP CONSTRAINT -- the file must not look saveable with it inside
 	mixed, err := CheckMigration(
 		"ALTER TABLE orders ADD CHECK (total >= 0);\nDROP INDEX orders_user_id_idx CASCADE",
-		migrationTestSchema())
+		migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,14 +789,14 @@ func TestDropIndexCascadeIsCaution(t *testing.T) {
 // other tables), so it is downgraded from the plain, safe case rather than
 // passed through with the same "metadata-only" framing.
 func TestDropConstraintCascadeIsCaution(t *testing.T) {
-	plain, err := CheckMigration("ALTER TABLE orders DROP CONSTRAINT old_check", migrationTestSchema())
+	plain, err := CheckMigration("ALTER TABLE orders DROP CONSTRAINT old_check", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plain[0].Safety != SafetySafe {
 		t.Fatalf("plain DROP CONSTRAINT should be safe, got %s", plain[0].Safety)
 	}
-	cascade, err := CheckMigration("ALTER TABLE orders DROP CONSTRAINT old_check CASCADE", migrationTestSchema())
+	cascade, err := CheckMigration("ALTER TABLE orders DROP CONSTRAINT old_check CASCADE", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +815,7 @@ func TestDropConstraintCascadeIsCaution(t *testing.T) {
 func TestComposeMigrationSQLPassesThroughDropConstraint(t *testing.T) {
 	checks, err := CheckMigration(
 		"ALTER TABLE orders ADD CHECK (total >= 0);\nALTER TABLE orders DROP CONSTRAINT old_check",
-		migrationTestSchema())
+		migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -825,7 +831,7 @@ func TestComposeMigrationSQLPassesThroughDropConstraint(t *testing.T) {
 // Absent when nothing is unsafe -- there is nothing to rewrite, so a bundle
 // would just be the input back.
 func TestComposeMigrationSQLAbsentWhenNothingUnsafe(t *testing.T) {
-	checks, err := CheckMigration("ALTER TABLE orders DROP COLUMN legacy", migrationTestSchema())
+	checks, err := CheckMigration("ALTER TABLE orders DROP COLUMN legacy", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -839,7 +845,7 @@ func TestComposeMigrationSQLAbsentWhenNothingUnsafe(t *testing.T) {
 func TestComposeMigrationSQLPassThroughFidelity(t *testing.T) {
 	checks, err := CheckMigration(
 		"ALTER TABLE IF EXISTS ONLY orders VALIDATE CONSTRAINT fk, ADD CHECK (total >= 0)",
-		migrationTestSchema())
+		migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -872,7 +878,7 @@ func TestComposeMigrationSQLHasNoPlaceholders(t *testing.T) {
 		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
 	}
 	for _, ddl := range ddls {
-		checks, err := CheckMigration(ddl, migrationTestSchema())
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
 		if err != nil {
 			t.Fatalf("%s: %v", ddl, err)
 		}

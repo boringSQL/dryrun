@@ -118,12 +118,12 @@ func (s *Server) handleExplainQuery(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	snap, err := s.getSchema()
+	annotated, err := s.getAnnotated()
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
 
-	checks, err := query.CheckMigration(getArg(req, "ddl"), snap)
+	checks, err := query.CheckMigration(getArg(req, "ddl"), annotated)
 	if err != nil {
 		return errResult(fmt.Sprintf("DDL parse error: %v", err)), nil
 	}
