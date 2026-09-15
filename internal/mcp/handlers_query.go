@@ -143,6 +143,7 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 	if err != nil {
 		return errResult(fmt.Sprintf("DDL parse error: %v", err)), nil
 	}
+	query.MarkConcurrentInTransaction(env, section, checks)
 	if len(checks) == 0 {
 		wrapper["checks"] = []query.MigrationCheck{}
 		s.injectMeta(wrapper, "Could not identify a specific DDL operation to check.", nil)
@@ -198,7 +199,7 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 		hint = joinHints(hint, "Run each statement in safer_sql in its own transaction. A migration runner that wraps the file in one holds the ACCESS EXCLUSIVE taken by the first statement across the scan in the second, which is worse than the input.")
 	}
 	if concurrentIndex {
-		hint = joinHints(hint, migrationConcurrencyHint(env.Framework, direction, section.NoTransaction))
+		hint = joinHints(hint, migrationConcurrencyHint(env.Framework, direction, section.NoTransaction, migrationSQL != ""))
 	}
 	if direction == "up" && env.Down != nil {
 		hint = joinHints(hint, "This file has a down section; call again with direction='down' to check the rollback too.")
@@ -212,17 +213,23 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 	return jsonResult(wrapper), nil
 }
 
-func migrationConcurrencyHint(framework query.MigrationFramework, direction string, noTx bool) string {
+func migrationConcurrencyHint(framework query.MigrationFramework, direction string, noTx, fileEmitted bool) string {
 	if noTx {
 		return "This migration is already configured to run without a surrounding transaction, which is what CREATE INDEX CONCURRENTLY needs."
 	}
 	switch framework {
 	case query.FrameworkGoose:
+		if fileEmitted {
+			return "CREATE INDEX CONCURRENTLY cannot run inside a transaction, and goose wraps each migration in one by default -- migration_sql adds `-- +goose NO TRANSACTION` at the top, or the statement fails at runtime."
+		}
 		return "CREATE INDEX CONCURRENTLY cannot run inside a transaction, and goose wraps each migration in one by default -- the file needs `-- +goose NO TRANSACTION` at the top, or the statement fails at runtime."
 	case query.FrameworkDbmate:
 		marker := "-- migrate:up"
 		if strings.EqualFold(direction, "down") {
 			marker = "-- migrate:down"
+		}
+		if fileEmitted {
+			return fmt.Sprintf("CREATE INDEX CONCURRENTLY cannot run inside a transaction, and dbmate wraps each migration in one by default -- migration_sql adds `transaction:false` to the `%s` marker, or the statement fails at runtime.", marker)
 		}
 		return fmt.Sprintf("CREATE INDEX CONCURRENTLY cannot run inside a transaction, and dbmate wraps each migration in one by default -- add `transaction:false` to the `%s` marker, or the statement fails at runtime.", marker)
 	case query.FrameworkTern:

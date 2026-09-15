@@ -327,3 +327,133 @@ func TestParseMigrationEnvelopeTern_CaseInsensitive(t *testing.T) {
 		t.Fatal("expected down section")
 	}
 }
+
+func concurrentCheck(op, stmt string) MigrationCheck {
+	return MigrationCheck{
+		Operation: op, Safety: SafetySafe,
+		Statement:      stmt,
+		Rationale:      &Rationale{Reason: "safe"},
+		Recommendation: "safe",
+	}
+}
+
+// A CONCURRENTLY statement in a goose/dbmate section the runner wraps in a
+// transaction fails at apply: the check must become dangerous, with the
+// statement carried as SaferSQL so the marker gets injected downstream.
+func TestMarkConcurrentInTransaction(t *testing.T) {
+	const stmt = "DROP INDEX CONCURRENTLY idx_users;"
+
+	tests := []struct {
+		name        string
+		content     string
+		direction   string
+		op          string
+		wantSafe    bool
+		wantRewrite bool
+		wantSub     string
+	}{
+		{
+			name:        "goose transactional",
+			content:     "-- +goose Up\n" + stmt + "\n-- +goose Down\nSELECT 1;\n",
+			direction:   "up",
+			op:          "DROP INDEX CONCURRENTLY",
+			wantRewrite: true,
+			wantSub:     "goose",
+		},
+		{
+			name:      "goose no transaction",
+			content:   "-- +goose NO TRANSACTION\n-- +goose Up\n" + stmt + "\n",
+			direction: "up",
+			op:        "DROP INDEX CONCURRENTLY",
+			wantSafe:  true,
+		},
+		{
+			name:        "dbmate transactional",
+			content:     "-- migrate:up\n" + stmt + "\n-- migrate:down\nSELECT 1;\n",
+			direction:   "up",
+			op:          "DROP INDEX CONCURRENTLY",
+			wantRewrite: true,
+			wantSub:     "dbmate",
+		},
+		{
+			name:      "dbmate transaction false",
+			content:   "-- migrate:up transaction:false\n" + stmt + "\n-- migrate:down\nSELECT 1;\n",
+			direction: "up",
+			op:        "DROP INDEX CONCURRENTLY",
+			wantSafe:  true,
+		},
+		{
+			name:      "tern no opt-out",
+			content:   stmt + "\n---- create above / drop below ----\nSELECT 1;\n",
+			direction: "up",
+			op:        "DROP INDEX CONCURRENTLY",
+			wantSub:   "no opt-out",
+		},
+		{
+			name:      "plain runner unknown",
+			content:   stmt + "\n",
+			direction: "up",
+			op:        "DROP INDEX CONCURRENTLY",
+			wantSafe:  true,
+		},
+		{
+			name:      "non-concurrent statement untouched",
+			content:   "-- +goose Up\nCREATE INDEX idx ON users (email);\n",
+			direction: "up",
+			op:        "CREATE INDEX",
+			wantSafe:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := ParseMigrationEnvelope(tc.content)
+			sec, err := env.Section(tc.direction)
+			if err != nil {
+				t.Fatalf("section: %v", err)
+			}
+			checks := []MigrationCheck{concurrentCheck(tc.op, "DROP INDEX CONCURRENTLY idx_users;")}
+			MarkConcurrentInTransaction(env, sec, checks)
+
+			if tc.wantSafe {
+				if checks[0].Safety != SafetySafe {
+					t.Errorf("safety = %q, want safe", checks[0].Safety)
+				}
+				return
+			}
+			if checks[0].Safety != SafetyDangerous {
+				t.Errorf("safety = %q, want dangerous", checks[0].Safety)
+			}
+			if tc.wantSub != "" && !strings.Contains(checks[0].Rationale.Reason+checks[0].Recommendation, tc.wantSub) {
+				t.Errorf("reason/recommendation missing %q: %q / %q", tc.wantSub, checks[0].Rationale.Reason, checks[0].Recommendation)
+			}
+			switch {
+			case tc.wantRewrite:
+				if len(checks[0].SaferSQL) != 1 || checks[0].SaferSQL[0] != checks[0].Statement {
+					t.Errorf("SaferSQL = %v, want the statement itself", checks[0].SaferSQL)
+				}
+			default:
+				if len(checks[0].SaferSQL) != 0 {
+					t.Errorf("SaferSQL = %v, want none (no in-file opt-out)", checks[0].SaferSQL)
+				}
+			}
+		})
+	}
+}
+
+// The other half of a goose file can carry the marker, so direction=down must
+// read its own section rather than the up section's transaction mode.
+func TestMarkConcurrentInTransaction_DownSection(t *testing.T) {
+	const stmt = "DROP INDEX CONCURRENTLY idx_users;"
+	content := "-- +goose NO TRANSACTION\n-- +goose Up\nSELECT 1;\n-- +goose Down\n" + stmt + "\n"
+	env := ParseMigrationEnvelope(content)
+	sec, err := env.Section("down")
+	if err != nil {
+		t.Fatalf("section: %v", err)
+	}
+	checks := []MigrationCheck{concurrentCheck("DROP INDEX CONCURRENTLY", stmt)}
+	MarkConcurrentInTransaction(env, sec, checks)
+	if checks[0].Safety != SafetySafe {
+		t.Errorf("file-level NO TRANSACTION should cover the down half, got %q", checks[0].Safety)
+	}
+}

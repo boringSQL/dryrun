@@ -323,6 +323,42 @@ func containsConcurrently(s string) bool {
 	return concurrentWordRe.MatchString(s)
 }
 
+// MarkConcurrentInTransaction flips safe CONCURRENTLY checks to dangerous when
+// the runner wraps this section in a transaction: the statement fails at apply.
+// SaferSQL is the statement itself -- the fix is the no-transaction marker
+// FormatMigrationFile injects; tern has no opt-out, so it gets no rewrite.
+// Mutates checks in place.
+func MarkConcurrentInTransaction(env MigrationEnvelope, section MigrationSection, checks []MigrationCheck) {
+	if section.NoTransaction || env.Framework == FrameworkPlain {
+		return
+	}
+	for i := range checks {
+		c := &checks[i]
+		if c.Safety != SafetySafe || !concurrentWordRe.MatchString(c.Operation) {
+			continue
+		}
+		c.Safety = SafetyDangerous
+		c.Rationale = &Rationale{Reason: fmt.Sprintf("%s cannot run inside the transaction %s wraps this file in.", c.Operation, env.Framework)}
+		c.Recommendation = c.Rationale.Reason + " " + concurrentTransactionFix(env.Framework)
+		// tern has no opt-out, so no rewrite to offer; the marker-adding
+		// frameworks get the statement passed through as SaferSQL.
+		if c.Statement != "" && env.Framework != FrameworkTern {
+			c.SaferSQL = []string{c.Statement}
+		}
+	}
+}
+
+func concurrentTransactionFix(framework MigrationFramework) string {
+	switch framework {
+	case FrameworkGoose:
+		return "Add `-- +goose NO TRANSACTION` at the top of the file so the statement runs outside it."
+	case FrameworkDbmate:
+		return "Add `transaction:false` to the section's migrate marker so the statement runs outside it."
+	default:
+		return "There is no opt-out, so run this statement out-of-band."
+	}
+}
+
 func downward(direction string) bool {
 	return strings.EqualFold(strings.TrimSpace(direction), "down")
 }

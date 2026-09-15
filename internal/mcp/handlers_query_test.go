@@ -587,17 +587,111 @@ func TestCheckMigration_TernSuppressesMigrationSQL(t *testing.T) {
 }
 
 // When a statement already uses CONCURRENTLY directly (e.g. DROP INDEX CONCURRENTLY
-// which is Safe), the runner-specific transaction warning must still fire if the
-// runner wraps migrations.
+// which is Safe standalone), a goose file without NO TRANSACTION wraps it in the
+// transaction it cannot run in: the check is dangerous and migration_sql adds the
+// marker.
 func TestCheckMigration_DirectConcurrentStatementHint(t *testing.T) {
 	c := setupOfflineTest(t)
 	ddl := "-- +goose Up\nDROP INDEX CONCURRENTLY idx_tasks_status;\n"
 	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
 
+	checks, _ := decoded["checks"].([]any)
+	if len(checks) != 1 {
+		t.Fatalf("expected one check, got %v", decoded["checks"])
+	}
+	check := checks[0].(map[string]any)
+	if check["safety"] != "dangerous" {
+		t.Errorf("CONCURRENTLY in a transactional goose file must be dangerous, got %v", check["safety"])
+	}
+
+	migrationSQL, _ := decoded["migration_sql"].(string)
+	for _, want := range []string{"-- +goose NO TRANSACTION", "DROP INDEX CONCURRENTLY idx_tasks_status;"} {
+		if !strings.Contains(migrationSQL, want) {
+			t.Errorf("migration_sql missing %q:\n%s", want, migrationSQL)
+		}
+	}
+	if _, err := pg_query.Parse(migrationSQL); err != nil {
+		t.Errorf("emitted goose file does not parse: %v\n%s", err, migrationSQL)
+	}
+
 	meta, _ := decoded["_meta"].(map[string]any)
 	hint, _ := meta["hint"].(string)
 	if !strings.Contains(hint, "-- +goose NO TRANSACTION") {
-		t.Errorf("hint should warn that goose needs NO TRANSACTION even for direct CONCURRENTLY, got %q", hint)
+		t.Errorf("hint should mention the marker, got %q", hint)
+	}
+	if !strings.Contains(hint, "migration_sql adds") {
+		t.Errorf("hint should say migration_sql already adds the marker, got %q", hint)
+	}
+}
+
+// A goose file already carrying NO TRANSACTION runs the statement fine: the
+// check stays safe and there is nothing for migration_sql to emit.
+func TestCheckMigration_DirectConcurrentNoTransactionStaysSafe(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "-- +goose NO TRANSACTION\n-- +goose Up\nDROP INDEX CONCURRENTLY idx_tasks_status;\n"
+	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
+
+	checks, _ := decoded["checks"].([]any)
+	if len(checks) != 1 {
+		t.Fatalf("expected one check, got %v", decoded["checks"])
+	}
+	if check := checks[0].(map[string]any); check["safety"] != "safe" {
+		t.Errorf("NO TRANSACTION file should keep the direct CONCURRENTLY check safe, got %v", check["safety"])
+	}
+	if _, ok := decoded["migration_sql"]; ok {
+		t.Errorf("nothing to rewrite, so migration_sql must be absent, got %v", decoded["migration_sql"])
+	}
+}
+
+// dbmate without transaction:false is transactional too: a direct CONCURRENTLY
+// statement is dangerous and the emitted file carries the marker.
+func TestCheckMigration_DbmateDirectConcurrentStatement(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "-- migrate:up\nDROP INDEX CONCURRENTLY idx_tasks_status;\n"
+	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
+
+	checks, _ := decoded["checks"].([]any)
+	if len(checks) != 1 {
+		t.Fatalf("expected one check, got %v", decoded["checks"])
+	}
+	if check := checks[0].(map[string]any); check["safety"] != "dangerous" {
+		t.Errorf("CONCURRENTLY in a transactional dbmate file must be dangerous, got %v", check["safety"])
+	}
+
+	migrationSQL, _ := decoded["migration_sql"].(string)
+	if !strings.Contains(migrationSQL, "-- migrate:up transaction:false") {
+		t.Errorf("migration_sql should add transaction:false, got:\n%s", migrationSQL)
+	}
+}
+
+// tern has no opt-out: a direct CONCURRENTLY statement is dangerous and no
+// migration_sql can be shipped for it.
+func TestCheckMigration_TernDirectConcurrentStatement(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "DROP INDEX CONCURRENTLY idx_tasks_status;\n---- create above / drop below ----\nCREATE INDEX idx_tasks_status ON tasks (status);\n"
+	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
+
+	if decoded["framework"] != "tern" {
+		t.Errorf("expected framework=tern, got %v", decoded["framework"])
+	}
+	checks, _ := decoded["checks"].([]any)
+	if len(checks) != 1 {
+		t.Fatalf("expected one check, got %v", decoded["checks"])
+	}
+	check := checks[0].(map[string]any)
+	if check["safety"] != "dangerous" {
+		t.Errorf("CONCURRENTLY in tern must be dangerous, got %v", check["safety"])
+	}
+	if _, hasSafer := check["safer_sql"]; hasSafer {
+		t.Errorf("tern has no in-file rewrite, so safer_sql must be absent, got %v", check["safer_sql"])
+	}
+	if _, ok := decoded["migration_sql"]; ok {
+		t.Errorf("tern + CONCURRENTLY should not ship migration_sql, got %v", decoded["migration_sql"])
+	}
+	meta, _ := decoded["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if !strings.Contains(hint, "tern") || !strings.Contains(hint, "out-of-band") {
+		t.Errorf("hint should name the tern limitation and the out-of-band remedy, got %q", hint)
 	}
 }
 
