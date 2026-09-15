@@ -896,3 +896,99 @@ func TestComposeMigrationSQLHasNoPlaceholders(t *testing.T) {
 		}
 	}
 }
+
+// A5: safe DML and COMMENT ON now carry a Statement, so they pass through the
+// gate instead of suppressing the file.
+func TestComposeMigrationSQLPassesThroughCommentAndDML(t *testing.T) {
+	for _, ddl := range []string{
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nCOMMENT ON TABLE orders IS 'orders'",
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nINSERT INTO orders (id) VALUES (1)",
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nUPDATE orders SET status = 'x' WHERE id = 1",
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nDELETE FROM orders WHERE id = 1",
+	} {
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		got := ComposeMigrationSQL(checks)
+		if got == "" {
+			t.Fatalf("%s: expected migration_sql", ddl)
+		}
+		if !strings.Contains(got, "NOT VALID;") {
+			t.Errorf("%s: rewrite missing:\n%s", ddl, got)
+		}
+		if _, err := pg_query.Parse(got); err != nil {
+			t.Fatalf("%s: migration_sql does not parse: %v\n%s", ddl, err, got)
+		}
+	}
+}
+
+// A5: a full-table UPDATE is a caution with no mechanical rewrite, so it must
+// keep suppressing the composed file rather than letting the file look safe.
+func TestComposeMigrationSQLAbsentForFullTableUpdate(t *testing.T) {
+	checks, err := CheckMigration(
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nUPDATE users SET email = 'x'",
+		migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ComposeMigrationSQL(checks); got != "" {
+		t.Errorf("expected no migration_sql with a full-table UPDATE, got:\n%s", got)
+	}
+}
+
+// A5: DO is unanalyzable and carries no Statement, so it still suppresses the
+// file -- caution, not a silent drop.
+func TestComposeMigrationSQLAbsentForDoBlock(t *testing.T) {
+	checks, err := CheckMigration(
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nDO $$ BEGIN NULL; END $$",
+		migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ComposeMigrationSQL(checks); got != "" {
+		t.Errorf("expected no migration_sql with a DO block, got:\n%s", got)
+	}
+}
+
+// A5: safe DROP TRIGGER/FUNCTION/REINDEX CONCURRENTLY pass through the gate.
+func TestComposeMigrationSQLPassesThroughDropAndReindex(t *testing.T) {
+	for _, safe := range []string{
+		"DROP TRIGGER trg ON orders",
+		"DROP FUNCTION my_func(integer)",
+		"REINDEX INDEX CONCURRENTLY orders_user_id_idx",
+	} {
+		ddl := "ALTER TABLE orders ADD CHECK (total >= 0);\n" + safe
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		got := ComposeMigrationSQL(checks)
+		if got == "" {
+			t.Fatalf("%s: expected migration_sql", ddl)
+		}
+		if strings.Contains(safe, "CONCURRENTLY") && !strings.Contains(got, "CONCURRENTLY") {
+			t.Errorf("%s: migration_sql lost CONCURRENTLY:\n%s", ddl, got)
+		}
+		if _, err := pg_query.Parse(got); err != nil {
+			t.Fatalf("%s: migration_sql does not parse: %v\n%s", ddl, err, got)
+		}
+	}
+}
+
+// A CASCADE DROP TRIGGER/FUNCTION is a caution without a rewrite, so it blocks
+// the composed file.
+func TestComposeMigrationSQLAbsentForCascadeDrop(t *testing.T) {
+	for _, ddl := range []string{
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nDROP TRIGGER trg ON orders CASCADE",
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nDROP FUNCTION my_func(integer) CASCADE",
+	} {
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		if got := ComposeMigrationSQL(checks); got != "" {
+			t.Errorf("%s: expected no migration_sql, got:\n%s", ddl, got)
+		}
+	}
+}

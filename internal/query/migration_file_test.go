@@ -457,3 +457,76 @@ func TestMarkConcurrentInTransaction_DownSection(t *testing.T) {
 		t.Errorf("file-level NO TRANSACTION should cover the down half, got %q", checks[0].Safety)
 	}
 }
+
+// A5 closes the A4 hole: the caution carried by DROP INDEX CONCURRENTLY ...
+// CASCADE must also flip inside a transactional file, with the CASCADE note
+// preserved.
+func TestMarkConcurrentInTransaction_FlipsCautionCascade(t *testing.T) {
+	const stmt = "DROP INDEX CONCURRENTLY idx_users CASCADE;"
+	content := "-- +goose Up\n" + stmt + "\n-- +goose Down\nSELECT 1;\n"
+	env := ParseMigrationEnvelope(content)
+	sec, err := env.Section("up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := []MigrationCheck{{
+		Operation:      "DROP INDEX CONCURRENTLY",
+		Safety:         SafetyCaution,
+		Statement:      stmt,
+		Rationale:      &Rationale{Reason: "CASCADE drops dependents", Note: "confirm what references it"},
+		Recommendation: "CASCADE drops dependents",
+	}}
+	MarkConcurrentInTransaction(env, sec, checks)
+	if checks[0].Safety != SafetyDangerous {
+		t.Fatalf("caution CONCURRENTLY must flip to dangerous in a transaction, got %q", checks[0].Safety)
+	}
+	if !strings.Contains(checks[0].Rationale.Reason, "goose") {
+		t.Errorf("reason should name the framework: %q", checks[0].Rationale.Reason)
+	}
+	if checks[0].Rationale.Note != "confirm what references it" {
+		t.Errorf("the CASCADE note must survive the flip, got %q", checks[0].Rationale.Note)
+	}
+}
+
+// REINDEX CONCURRENTLY is named CONCURRENTLY so the same flip catches it.
+func TestMarkConcurrentInTransaction_FlipsReindex(t *testing.T) {
+	const stmt = "REINDEX INDEX CONCURRENTLY idx_users;"
+	content := "-- +goose Up\n" + stmt + "\n-- +goose Down\nSELECT 1;\n"
+	env := ParseMigrationEnvelope(content)
+	sec, err := env.Section("up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := []MigrationCheck{concurrentCheck("REINDEX CONCURRENTLY", stmt)}
+	MarkConcurrentInTransaction(env, sec, checks)
+	if checks[0].Safety != SafetyDangerous {
+		t.Fatalf("REINDEX CONCURRENTLY in a transactional file must be dangerous, got %q", checks[0].Safety)
+	}
+	// A non-transactional goose file leaves it safe.
+	envNT := ParseMigrationEnvelope("-- +goose NO TRANSACTION\n-- +goose Up\n" + stmt + "\n")
+	secNT, err := envNT.Section("up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checksNT := []MigrationCheck{concurrentCheck("REINDEX CONCURRENTLY", stmt)}
+	MarkConcurrentInTransaction(envNT, secNT, checksNT)
+	if checksNT[0].Safety != SafetySafe {
+		t.Errorf("NO TRANSACTION must leave REINDEX CONCURRENTLY safe, got %q", checksNT[0].Safety)
+	}
+}
+
+// DETACH PARTITION CONCURRENTLY cannot run in a transaction block either, and
+// the check names itself CONCURRENTLY so the flip catches it.
+func TestMarkConcurrentInTransaction_FlipsDetachPartition(t *testing.T) {
+	const stmt = "ALTER TABLE events DETACH PARTITION events_2025 CONCURRENTLY;"
+	env := ParseMigrationEnvelope("-- +goose Up\n" + stmt + "\n-- +goose Down\nSELECT 1;\n")
+	sec, err := env.Section("up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := []MigrationCheck{concurrentCheck("DETACH PARTITION CONCURRENTLY", stmt)}
+	MarkConcurrentInTransaction(env, sec, checks)
+	if checks[0].Safety != SafetyDangerous {
+		t.Fatalf("DETACH PARTITION CONCURRENTLY in a transactional file must be dangerous, got %q", checks[0].Safety)
+	}
+}

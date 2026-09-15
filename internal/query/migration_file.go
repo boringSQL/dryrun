@@ -334,11 +334,17 @@ func MarkConcurrentInTransaction(env MigrationEnvelope, section MigrationSection
 	}
 	for i := range checks {
 		c := &checks[i]
-		if c.Safety != SafetySafe || !concurrentWordRe.MatchString(c.Operation) {
+		// danger is settled; only safe/caution CONCURRENTLY checks are broken
+		// by the wrapper (e.g. DROP INDEX CONCURRENTLY ... CASCADE).
+		if c.Safety == SafetyDangerous || !concurrentWordRe.MatchString(c.Operation) {
 			continue
 		}
 		c.Safety = SafetyDangerous
-		c.Rationale = &Rationale{Reason: fmt.Sprintf("%s cannot run inside the transaction %s wraps this file in.", c.Operation, env.Framework)}
+		note := ""
+		if c.Rationale != nil {
+			note = c.Rationale.Note
+		}
+		c.Rationale = &Rationale{Reason: fmt.Sprintf("%s cannot run inside the transaction %s wraps this file in.", c.Operation, env.Framework), Note: note}
 		c.Recommendation = c.Rationale.Reason + " " + concurrentTransactionFix(env.Framework)
 		// tern has no opt-out, so no rewrite to offer; the marker-adding
 		// frameworks get the statement passed through as SaferSQL.

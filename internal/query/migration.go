@@ -101,7 +101,13 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 			// CTAS is born populated: never tracked as empty
 		case *pg_query.Node_InsertStmt:
 			cat.invalidate(n.InsertStmt.GetRelation())
-			checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+			checks = append(checks, analyzeDML("INSERT", n.InsertStmt.GetRelation(), true, a, cat, stmt.Stmt))
+		case *pg_query.Node_UpdateStmt:
+			checks = append(checks, analyzeDML("UPDATE", n.UpdateStmt.GetRelation(), n.UpdateStmt.WhereClause != nil, a, cat, stmt.Stmt))
+		case *pg_query.Node_DeleteStmt:
+			checks = append(checks, analyzeDML("DELETE", n.DeleteStmt.GetRelation(), n.DeleteStmt.WhereClause != nil, a, cat, stmt.Stmt))
+		case *pg_query.Node_CommentStmt:
+			checks = append(checks, analyzeComment(n.CommentStmt, a, stmt.Stmt))
 		case *pg_query.Node_CopyStmt:
 			if n.CopyStmt.IsFrom {
 				cat.invalidate(n.CopyStmt.GetRelation())
@@ -110,7 +116,7 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 		case *pg_query.Node_DoStmt:
 			// procedural code can insert into any table we created
 			cat.invalidateAll()
-			checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+			checks = append(checks, doCheck())
 		case *pg_query.Node_CallStmt:
 			// a procedure can insert into any table we created
 			cat.invalidateAll()
@@ -119,6 +125,8 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 			// MERGE's WHEN NOT MATCHED branch inserts rows
 			cat.invalidate(n.MergeStmt.GetRelation())
 			checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+		case *pg_query.Node_ReindexStmt:
+			checks = append(checks, analyzeReindex(n.ReindexStmt, a, cat))
 		case *pg_query.Node_RenameStmt:
 			if n.RenameStmt.GetRenameType() == pg_query.ObjectType_OBJECT_TABLE {
 				cat.rekey(n.RenameStmt.GetRelation(), n.RenameStmt.GetNewname())
@@ -136,6 +144,10 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 				checks = append(checks, dropTableCheck())
 			case pg_query.ObjectType_OBJECT_INDEX:
 				checks = append(checks, dropIndexCheck(n.DropStmt, stmt.Stmt))
+			case pg_query.ObjectType_OBJECT_TRIGGER:
+				checks = append(checks, dropTriggerCheck(n.DropStmt, a, stmt.Stmt))
+			case pg_query.ObjectType_OBJECT_FUNCTION, pg_query.ObjectType_OBJECT_PROCEDURE, pg_query.ObjectType_OBJECT_ROUTINE:
+				checks = append(checks, dropFunctionCheck(n.DropStmt, stmt.Stmt))
 			default:
 				checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
 			}
@@ -366,8 +378,130 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			Rationale:      &Rationale{Reason: rec},
 			Statement:      statement,
 		}
+	case pg_query.AlterTableType_AT_ColumnDefault:
+		return metadataAlterCmd("SET/DROP DEFAULT", "ACCESS EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only: the default is stored in the catalog and applies to future inserts only. Existing rows are unchanged.")
+	case pg_query.AlterTableType_AT_DropNotNull:
+		return metadataAlterCmd("DROP NOT NULL", "ACCESS EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only: the constraint is removed from the catalog, no scan of existing rows.")
+	case pg_query.AlterTableType_AT_SetStatistics:
+		return metadataAlterCmd("SET STATISTICS", "SHARE UPDATE EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only: changes the target for the next ANALYZE, which is where the sampling cost lands. Takes only SHARE UPDATE EXCLUSIVE.")
+	case pg_query.AlterTableType_AT_SetOptions, pg_query.AlterTableType_AT_ResetOptions:
+		return metadataAlterCmd("SET/RESET COLUMN OPTIONS", "SHARE UPDATE EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only: column-level planner options are catalog entries, and changing them takes only SHARE UPDATE EXCLUSIVE.")
+	case pg_query.AlterTableType_AT_SetStorage:
+		return metadataAlterCmd("SET STORAGE", "ACCESS EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only: changes how future writes are stored; existing rows keep the old storage until rewritten.")
+	case pg_query.AlterTableType_AT_SetCompression:
+		return metadataAlterCmd("SET COMPRESSION", "ACCESS EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only: applies to future writes; existing rows are not recompressed.")
+	case pg_query.AlterTableType_AT_ChangeOwner:
+		return metadataAlterCmd("OWNER TO", "ACCESS EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only: ownership is a catalog field. The new owner needs the privileges the role is expected to have.")
+	case pg_query.AlterTableType_AT_ClusterOn:
+		return metadataAlterCmd("CLUSTER ON", "SHARE UPDATE EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only: records the cluster index; the data is only reordered by a later CLUSTER. Takes only SHARE UPDATE EXCLUSIVE.")
+	case pg_query.AlterTableType_AT_DropCluster:
+		return metadataAlterCmd("SET WITHOUT CLUSTER", "SHARE UPDATE EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only: clears the recorded cluster index; the current physical order is untouched. Takes only SHARE UPDATE EXCLUSIVE.")
+	case pg_query.AlterTableType_AT_ReplicaIdentity:
+		return metadataAlterCmd("REPLICA IDENTITY", "ACCESS EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only, but it changes what logical replication can see: with REPLICA IDENTITY FULL every column of every update lands in the WAL, and without a usable identity updates and deletes are rejected downstream.")
+	case pg_query.AlterTableType_AT_SetRelOptions, pg_query.AlterTableType_AT_ResetRelOptions, pg_query.AlterTableType_AT_ReplaceRelOptions:
+		return metadataAlterCmd("SET/RESET TABLE OPTIONS", "SHARE UPDATE EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Metadata-only: fillfactor, toast and autovacuum options take SHARE UPDATE EXCLUSIVE; planner options apply from the next table lock. Existing pages keep the old setting until rewritten.")
+	case pg_query.AlterTableType_AT_DetachPartition, pg_query.AlterTableType_AT_DetachPartitionFinalize:
+		if detachConcurrently(cmd) {
+			return metadataAlterCmd("DETACH PARTITION CONCURRENTLY", "SHARE UPDATE EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+				"DETACH PARTITION CONCURRENTLY - SHARE UPDATE EXCLUSIVE on parent and partition, brief. Cannot run inside a transaction block.")
+		}
+		return metadataAlterCmd("DETACH PARTITION", "ACCESS EXCLUSIVE (partition) / SHARE UPDATE EXCLUSIVE (parent)", tableName, tableSize, rowEstimate, statement,
+			"Unlinks the partition from the catalog: ACCESS EXCLUSIVE on the partition, SHARE UPDATE EXCLUSIVE on the parent. CONCURRENTLY is weaker but cannot run in a transaction.")
+	case pg_query.AlterTableType_AT_DisableTrig, pg_query.AlterTableType_AT_DisableTrigAll, pg_query.AlterTableType_AT_DisableTrigUser:
+		return behaviorCautionAlterCmd("DISABLE TRIGGER", "SHARE ROW EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Brief SHARE ROW EXCLUSIVE lock. Whatever the trigger enforced -- auditing, denormalization, FK checks -- stops being enforced from here on, and the change is easy to forget about.")
+	case pg_query.AlterTableType_AT_EnableRowSecurity, pg_query.AlterTableType_AT_ForceRowSecurity:
+		return behaviorCautionAlterCmd("ENABLE ROW LEVEL SECURITY", "ACCESS EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
+			"Brief lock. If no policies exist yet, row-level security is default-deny: every non-owner query on the table returns no rows. Add the policies in the same migration, before the application reads.")
+	case pg_query.AlterTableType_AT_AttachPartition:
+		return analyzeAttachPartition(tableName, tableSize, rowEstimate, statement)
+	case pg_query.AlterTableType_AT_SetLogged, pg_query.AlterTableType_AT_SetUnLogged:
+		return analyzeRewriteAlterCmd("SET LOGGED/UNLOGGED", tableName, tableSize, rowEstimate, small, statement,
+			"Rewrites the whole table to change its persistence and WAL-logging: proportional to table size, and doubles the WAL during the rewrite.")
+	case pg_query.AlterTableType_AT_SetTableSpace:
+		return analyzeRewriteAlterCmd("SET TABLESPACE", tableName, tableSize, rowEstimate, small, statement,
+			"Copies every data file to the new tablespace under ACCESS EXCLUSIVE: proportional to table size and needs free space in the destination.")
+	case pg_query.AlterTableType_AT_SetAccessMethod:
+		return analyzeRewriteAlterCmd("SET ACCESS METHOD", tableName, tableSize, rowEstimate, small, statement,
+			"Rewrites the whole table into the new storage engine: proportional to table size.")
 	}
 	return nil
+}
+
+func metadataAlterCmd(operation, lockType, tableName string, tableSize *string, rowEstimate *float64, statement, reason string) *MigrationCheck {
+	return &MigrationCheck{
+		Operation: operation, Table: strp(tableName), Safety: SafetySafe,
+		LockType: lockType, LockDuration: "brief (metadata-only)",
+		TableSize: tableSize, RowEstimate: rowEstimate,
+		Recommendation: reason,
+		Rationale:      &Rationale{Reason: reason},
+		Statement:      statement,
+	}
+}
+
+// behaviorCautionAlterCmd: like metadataAlterCmd but the change silently
+// alters behavior.
+func behaviorCautionAlterCmd(operation, lockType, tableName string, tableSize *string, rowEstimate *float64, statement, reason string) *MigrationCheck {
+	return &MigrationCheck{
+		Operation: operation, Table: strp(tableName), Safety: SafetyCaution,
+		LockType: lockType, LockDuration: "brief (metadata-only)",
+		TableSize: tableSize, RowEstimate: rowEstimate,
+		Recommendation: reason,
+		Rationale:      &Rationale{Reason: reason},
+		Statement:      statement,
+	}
+}
+
+// DETACH PARTITION CONCURRENTLY is the PartitionCmd's concurrent flag.
+func detachConcurrently(cmd *pg_query.AlterTableCmd) bool {
+	pc, ok := cmd.GetDef().GetNode().(*pg_query.Node_PartitionCmd)
+	return ok && pc.PartitionCmd.GetConcurrent()
+}
+
+// analyzeAttachPartition: unlike plain metadata the attached table is scanned
+// to validate its bound unless a matching CHECK already proves it.
+func analyzeAttachPartition(tableName string, tableSize *string, rowEstimate *float64, statement string) *MigrationCheck {
+	const rec = "ATTACH PARTITION takes SHARE UPDATE EXCLUSIVE on the parent and ACCESS EXCLUSIVE on the table being attached, and scans that table to validate the partition bound unless a matching CHECK constraint lets it skip the scan. Validate the constraint first when the table is large."
+	return &MigrationCheck{
+		Operation: "ATTACH PARTITION", Table: strp(tableName), Safety: SafetyCaution,
+		LockType: "SHARE UPDATE EXCLUSIVE (parent)", LockDuration: "proportional to the attached table (validation scan)",
+		TableSize: tableSize, RowEstimate: rowEstimate,
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      statement,
+	}
+}
+
+// analyzeRewriteAlterCmd: full table rewrite; dangerous at size, caution on a
+// known-small table.
+func analyzeRewriteAlterCmd(operation, tableName string, tableSize *string, rowEstimate *float64, small bool, statement, reason string) *MigrationCheck {
+	safety := SafetyDangerous
+	recommendation := reason
+	var note string
+	if small {
+		safety = SafetyCaution
+		note = smallTableNote(*rowEstimate, *tableSize)
+		recommendation = note + "\n\n" + reason
+	}
+	return &MigrationCheck{
+		Operation: operation, Table: strp(tableName), Safety: safety,
+		LockType: "ACCESS EXCLUSIVE", LockDuration: "proportional to table size (full rewrite)",
+		TableSize: tableSize, RowEstimate: rowEstimate,
+		Recommendation: recommendation,
+		Rationale:      &Rationale{Reason: reason, Note: note},
+		Statement:      statement,
+	}
 }
 
 // IF NOT EXISTS was a no-op if the table already existed.
@@ -910,9 +1044,15 @@ func dropTableCheck() MigrationCheck {
 func dropIndexCheck(drop *pg_query.DropStmt, stmtNode *pg_query.Node) MigrationCheck {
 	statement := topLevelStatement(stmtNode)
 	if drop.Behavior == pg_query.DropBehavior_DROP_CASCADE {
+		// keep CONCURRENTLY in the name: the transaction flip keys on it, not
+		// on the CASCADE caution.
+		op := "DROP INDEX"
+		if drop.Concurrent {
+			op = "DROP INDEX CONCURRENTLY"
+		}
 		const rec = "Metadata-only, but CASCADE drops every object that depends on this index too -- including the constraint it backs and foreign keys referencing it. Confirm what references it first."
 		return MigrationCheck{
-			Operation: "DROP INDEX", Safety: SafetyCaution,
+			Operation: op, Safety: SafetyCaution,
 			LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
 			Recommendation: rec,
 			Rationale:      &Rationale{Reason: rec},
@@ -936,6 +1076,336 @@ func dropIndexCheck(drop *pg_query.DropStmt, stmtNode *pg_query.Node) MigrationC
 		Recommendation: rec,
 		Rationale:      &Rationale{Reason: rec},
 		Statement:      statement,
+	}
+}
+
+// DML: ROW EXCLUSIVE never blocks reads or unrelated writes, so only a
+// no-WHERE write on a table that is not known small is a caution.
+func analyzeDML(operation string, rel *pg_query.RangeVar, bounded bool, a *schema.AnnotatedSchema, cat *fileCatalog, stmtNode *pg_query.Node) MigrationCheck {
+	tableName := relationName(rel)
+	qual := schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()}
+	tableSize, rowEstimate, small := lookupTableStats(a, qual)
+	statement := topLevelStatement(stmtNode)
+
+	base := MigrationCheck{
+		Operation: operation, Table: strp(tableName), Safety: SafetySafe,
+		LockType: "ROW EXCLUSIVE", LockDuration: "brief (row locks held to commit)",
+		TableSize: tableSize, RowEstimate: rowEstimate,
+		Statement: statement,
+	}
+
+	// bounded: an INSERT, or an UPDATE/DELETE whose WHERE limits the rows.
+	if bounded {
+		const rec = "Leaf-level DML: ROW EXCLUSIVE does not block reads or unrelated writes. Row locks are held until the transaction commits, so keep the batch bounded."
+		base.Recommendation = rec
+		base.Rationale = &Rationale{Reason: rec}
+		return base
+	}
+
+	// full-table write: no WHERE
+	if cat.isEmpty(rel) || (rowEstimate != nil && *rowEstimate == 0) {
+		const rec = "Table is empty or created empty earlier in this migration: the statement touches 0 rows and is instant."
+		zero := 0.0
+		base.LockDuration = "brief (0 rows)"
+		base.TableSize = strp("0 bytes")
+		base.RowEstimate = &zero
+		base.Recommendation = rec
+		base.Rationale = &Rationale{Reason: rec}
+		return base
+	}
+
+	if small {
+		note := smallTableNote(*rowEstimate, *tableSize)
+		const rec = "No WHERE clause: every row is written in one statement. The table is small, so it is brief, but the same statement on a grown table is not -- add a WHERE clause or batch it."
+		base.Recommendation = note
+		base.Rationale = &Rationale{Reason: rec, Note: note}
+		return base
+	}
+
+	const rec = "No WHERE clause on a table that is not known small: the statement rewrites or removes every row, holding row locks and generating WAL for the whole table. Batch it (keyset pagination, ~10k rows per transaction) so locks, WAL and replication lag stay bounded, or add a WHERE clause."
+	var note string
+	if tableSize != nil && rowEstimate != nil {
+		note = smallTableNote(*rowEstimate, *tableSize)
+	}
+	base.Safety = SafetyCaution
+	base.LockDuration = "proportional to row count"
+	base.Recommendation = rec
+	base.Rationale = &Rationale{Reason: rec, Note: note}
+	return base
+}
+
+func analyzeComment(stmt *pg_query.CommentStmt, a *schema.AnnotatedSchema, stmtNode *pg_query.Node) MigrationCheck {
+	const rec = "COMMENT ON takes SHARE UPDATE EXCLUSIVE: it does not block reads or writes, and the comment text lives only in the catalog."
+	c := MigrationCheck{
+		Operation: "COMMENT",
+		Safety:    SafetySafe,
+		LockType:  "SHARE UPDATE EXCLUSIVE", LockDuration: "brief (metadata-only)",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      topLevelStatement(stmtNode),
+	}
+	if rel := commentRelation(stmt); rel != nil {
+		c.Table = strp(relationName(rel))
+		size, rows, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()})
+		c.TableSize = size
+		c.RowEstimate = rows
+	}
+	return c
+}
+
+// commentRelation: object path is [table] or [schema, table] for tables, and
+// [table, col] or [schema, table, col] for columns.
+func commentRelation(stmt *pg_query.CommentStmt) *pg_query.RangeVar {
+	list, ok := stmt.GetObject().GetNode().(*pg_query.Node_List)
+	if !ok || list.List == nil {
+		return nil
+	}
+	var parts []string
+	for _, item := range list.List.GetItems() {
+		if s, ok := item.GetNode().(*pg_query.Node_String_); ok {
+			parts = append(parts, s.String_.GetSval())
+		}
+	}
+	switch stmt.GetObjtype() {
+	case pg_query.ObjectType_OBJECT_TABLE:
+		switch len(parts) {
+		case 1:
+			return &pg_query.RangeVar{Relname: parts[0]}
+		case 2:
+			return &pg_query.RangeVar{Schemaname: parts[0], Relname: parts[1]}
+		}
+	case pg_query.ObjectType_OBJECT_COLUMN:
+		switch len(parts) {
+		case 2:
+			return &pg_query.RangeVar{Relname: parts[0]}
+		case 3:
+			return &pg_query.RangeVar{Schemaname: parts[0], Relname: parts[1]}
+		}
+	}
+	return nil
+}
+
+// DROP TRIGGER takes ACCESS EXCLUSIVE on the table, though only briefly: it is
+// a catalog unlink, and enforcement stops at once.
+func dropTriggerCheck(drop *pg_query.DropStmt, a *schema.AnnotatedSchema, stmtNode *pg_query.Node) MigrationCheck {
+	statement := topLevelStatement(stmtNode)
+	safety := SafetySafe
+	rec := "Brief ACCESS EXCLUSIVE lock to unlink the trigger from the catalog -- no scan, no rewrite. Whatever the trigger enforced (auditing, denormalization, sync) stops being enforced immediately."
+	if drop.Behavior == pg_query.DropBehavior_DROP_CASCADE {
+		safety = SafetyCaution
+		rec = "Metadata-only, but CASCADE also drops everything that depends on the trigger. Confirm what references it first."
+	}
+	c := MigrationCheck{
+		Operation: "DROP TRIGGER", Safety: safety,
+		LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      statement,
+	}
+	if rel := dropTriggerRelation(drop); rel != nil {
+		c.Table = strp(relationName(rel))
+		size, rows, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()})
+		c.TableSize = size
+		c.RowEstimate = rows
+	}
+	return c
+}
+
+// DROP TRIGGER's objects are [table, trigger] or [schema, table, trigger].
+func dropTriggerRelation(drop *pg_query.DropStmt) *pg_query.RangeVar {
+	if len(drop.GetObjects()) == 0 {
+		return nil
+	}
+	list, ok := drop.GetObjects()[0].GetNode().(*pg_query.Node_List)
+	if !ok || list.List == nil {
+		return nil
+	}
+	var parts []string
+	for _, item := range list.List.GetItems() {
+		if s, ok := item.GetNode().(*pg_query.Node_String_); ok {
+			parts = append(parts, s.String_.GetSval())
+		}
+	}
+	switch len(parts) {
+	case 2:
+		return &pg_query.RangeVar{Relname: parts[0]}
+	case 3:
+		return &pg_query.RangeVar{Schemaname: parts[0], Relname: parts[1]}
+	}
+	return nil
+}
+
+// DROP FUNCTION/PROCEDURE is catalog-only; CASCADE can take triggers and
+// expression indexes that use it.
+func dropFunctionCheck(drop *pg_query.DropStmt, stmtNode *pg_query.Node) MigrationCheck {
+	statement := topLevelStatement(stmtNode)
+	operation := "DROP FUNCTION"
+	switch drop.RemoveType {
+	case pg_query.ObjectType_OBJECT_PROCEDURE:
+		operation = "DROP PROCEDURE"
+	case pg_query.ObjectType_OBJECT_ROUTINE:
+		operation = "DROP ROUTINE"
+	}
+	if drop.Behavior == pg_query.DropBehavior_DROP_CASCADE {
+		const rec = "Metadata-only, but CASCADE drops everything that depends on it -- triggers, expression indexes, defaults and other functions. Confirm what references it first."
+		return MigrationCheck{
+			Operation: operation, Safety: SafetyCaution,
+			LockType: "none (catalog only)", LockDuration: "brief",
+			Recommendation: rec,
+			Rationale:      &Rationale{Reason: rec},
+			Statement:      statement,
+		}
+	}
+	const rec = "Catalog-only: no table is locked and nothing is rewritten. RESTRICT fails if anything still depends on the routine."
+	return MigrationCheck{
+		Operation: operation, Safety: SafetySafe,
+		LockType: "none (catalog only)", LockDuration: "brief",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      statement,
+	}
+}
+
+// analyzeReindex: the blocking form locks out writes and blocks reads through
+// the index; CONCURRENTLY is non-blocking but cannot run in a transaction.
+func analyzeReindex(stmt *pg_query.ReindexStmt, a *schema.AnnotatedSchema, cat *fileCatalog) MigrationCheck {
+	concurrent := reindexConcurrent(stmt)
+	statement := reindexStatement(stmt)
+
+	kind := "INDEX"
+	switch stmt.GetKind() {
+	case pg_query.ReindexObjectType_REINDEX_OBJECT_TABLE:
+		kind = "TABLE"
+	case pg_query.ReindexObjectType_REINDEX_OBJECT_SCHEMA:
+		kind = "SCHEMA"
+	case pg_query.ReindexObjectType_REINDEX_OBJECT_DATABASE:
+		kind = "DATABASE"
+	case pg_query.ReindexObjectType_REINDEX_OBJECT_SYSTEM:
+		kind = "SYSTEM"
+	}
+
+	if concurrent {
+		const rec = "REINDEX CONCURRENTLY - does not block reads or writes. Takes significantly longer, needs two table scans and waits for in-flight transactions. Cannot run inside a transaction. On failure it leaves an INVALID _ccnew index behind; drop it and retry."
+		return MigrationCheck{
+			Operation: "REINDEX CONCURRENTLY", Safety: SafetySafe,
+			LockType: "SHARE UPDATE EXCLUSIVE", LockDuration: "~2-3x normal rebuild time (non-blocking)",
+			Recommendation: rec,
+			Rationale:      &Rationale{Reason: rec},
+			Statement:      statement,
+		}
+	}
+
+	// created empty earlier in this migration: instant, 0 rows
+	if stmt.GetKind() == pg_query.ReindexObjectType_REINDEX_OBJECT_TABLE && cat.isEmpty(stmt.GetRelation()) {
+		zero := 0.0
+		const rec = "Table is created empty earlier in this migration: the reindex touches 0 rows and is instant."
+		return MigrationCheck{
+			Operation: "REINDEX TABLE", Table: strp(relationName(stmt.GetRelation())), Safety: SafetySafe,
+			LockType: "SHARE (brief, 0 rows)", LockDuration: "brief (0 rows)",
+			TableSize: strp("0 bytes"), RowEstimate: &zero,
+			Recommendation: rec,
+			Rationale:      &Rationale{Reason: rec},
+			Statement:      statement,
+		}
+	}
+
+	base := MigrationCheck{
+		Operation: "REINDEX " + kind, Safety: SafetyDangerous,
+		LockType:     "SHARE (blocks writes) + ACCESS EXCLUSIVE on the index",
+		LockDuration: "proportional to table size (blocking)",
+		Statement:    statement,
+	}
+
+	// only a single relation can be sized; SCHEMA/DATABASE/SYSTEM stay dangerous
+	if stmt.GetKind() == pg_query.ReindexObjectType_REINDEX_OBJECT_INDEX ||
+		stmt.GetKind() == pg_query.ReindexObjectType_REINDEX_OBJECT_TABLE {
+		hasSchema := stmt.GetRelation().GetSchemaname() != ""
+		qual := schema.QualifiedName{Schema: schemaOf(stmt.GetRelation()), Name: stmt.GetRelation().GetRelname()}
+		if stmt.GetKind() == pg_query.ReindexObjectType_REINDEX_OBJECT_INDEX {
+			qual = tableOfIndex(a, qual, hasSchema)
+		} else {
+			base.Table = strp(relationName(stmt.GetRelation()))
+		}
+		size, rows, small := lookupTableStats(a, qual)
+		base.TableSize = size
+		base.RowEstimate = rows
+		if small {
+			base.Safety = SafetyCaution
+			base.Rationale = &Rationale{Reason: "REINDEX blocks writes while it rebuilds; on a small table that is brief, but the lock still queues behind any in-flight transaction.", Note: smallTableNote(*rows, *size)}
+		} else {
+			base.Rationale = &Rationale{Reason: "Blocks writes for the whole rebuild and takes ACCESS EXCLUSIVE on the index, blocking reads that would use it."}
+		}
+	} else {
+		base.Rationale = &Rationale{Reason: "Rebuilds every index in scope, blocking writes throughout. Scope the reindex to a single index or table to make it measurable."}
+	}
+
+	base.Recommendation = base.Rationale.Reason
+	if base.Safety == SafetyCaution {
+		base.Recommendation = base.Rationale.Note + "\n\n" + base.Rationale.Reason
+	}
+	return base
+}
+
+// tableOfIndex resolves REINDEX INDEX's parent table so it can be sized. Unless
+// the statement qualified the schema, match the index name across schemas.
+func tableOfIndex(a *schema.AnnotatedSchema, idx schema.QualifiedName, hasSchema bool) schema.QualifiedName {
+	if a == nil || a.Schema == nil {
+		return idx
+	}
+	for _, t := range a.Schema.Tables {
+		for _, i := range t.Indexes {
+			if i.Name == idx.Name && (!hasSchema || idx.Schema == t.Schema) {
+				return schema.QualifiedName{Schema: t.Schema, Name: t.Name}
+			}
+		}
+	}
+	return idx
+}
+
+func reindexConcurrent(stmt *pg_query.ReindexStmt) bool {
+	for _, p := range stmt.GetParams() {
+		def, ok := p.GetNode().(*pg_query.Node_DefElem)
+		if !ok || def.DefElem.GetDefname() != "concurrently" {
+			continue
+		}
+		// a bare CONCURRENTLY has no argument and means true
+		if def.DefElem.GetArg() == nil {
+			return true
+		}
+		return defElemBool(def.DefElem.GetArg())
+	}
+	return false
+}
+
+func defElemBool(node *pg_query.Node) bool {
+	switch n := node.GetNode().(type) {
+	case *pg_query.Node_Integer:
+		return n.Integer.GetIval() != 0
+	case *pg_query.Node_String_:
+		switch strings.ToLower(n.String_.GetSval()) {
+		case "true", "on", "1":
+			return true
+		}
+	case *pg_query.Node_Boolean:
+		return n.Boolean.GetBoolval()
+	}
+	return false
+}
+
+func reindexStatement(stmt *pg_query.ReindexStmt) string {
+	node := &pg_query.Node{Node: &pg_query.Node_ReindexStmt{ReindexStmt: stmt}}
+	return topLevelStatement(node)
+}
+
+// doCheck: a DO body is invisible to the parser and can take any lock or change
+// data, and no Statement means it suppresses migration_sql.
+func doCheck() MigrationCheck {
+	const rec = "DO runs an anonymous procedural block. Its body can take any lock, rewrite any table, or change data, so check_migration cannot analyze it. Review the body by hand."
+	return MigrationCheck{
+		Operation: "DO", Safety: SafetyCaution,
+		LockType: "unknown", LockDuration: "unknown",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
 	}
 }
 

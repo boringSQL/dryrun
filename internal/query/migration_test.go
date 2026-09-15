@@ -261,6 +261,24 @@ func TestCheckMigrationProseNeverContradictsVerdict(t *testing.T) {
 		"SET statement_timeout = '5s'",
 		"DO $$ BEGIN NULL; END $$",
 		"INSERT INTO users (id) VALUES (1)",
+		// A5
+		"COMMENT ON TABLE users IS 'x'",
+		"UPDATE users SET email = 'x'",
+		"DELETE FROM users",
+		"UPDATE orders SET status = 'x'",
+		"DELETE FROM orders",
+		"DROP TRIGGER trg ON users",
+		"DROP TRIGGER trg ON users CASCADE",
+		"DROP FUNCTION my_func(integer)",
+		"DROP FUNCTION my_func(integer) CASCADE",
+		"REINDEX INDEX users_email_idx",
+		"REINDEX TABLE orders",
+		"REINDEX INDEX CONCURRENTLY users_email_idx",
+		"ALTER TABLE users DISABLE TRIGGER ALL",
+		"ALTER TABLE users ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE users SET LOGGED",
+		"ALTER TABLE orders SET LOGGED",
+		"ALTER TABLE events ATTACH PARTITION events_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
 	} {
 		checks, err := CheckMigration(ddl, migrationTestAnnotated())
 		if err != nil {
@@ -437,5 +455,474 @@ func TestCheckMigrationStalePlannerSetNotNullNoRowCount(t *testing.T) {
 	}
 	if strings.Contains(rec, "rows)") {
 		t.Errorf("no row count may be derived from stale rows: %q", rec)
+	}
+}
+
+// A5: COMMENT ON takes SHARE UPDATE EXCLUSIVE, which blocks neither reads nor
+// writes -- metadata-only.
+func TestCheckMigrationCommentOn(t *testing.T) {
+	for _, ddl := range []string{
+		"COMMENT ON TABLE users IS 'all users'",
+		"COMMENT ON COLUMN users.email IS 'login'",
+	} {
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		if checks[0].Operation != "COMMENT" {
+			t.Errorf("%s: got %q, want COMMENT", ddl, checks[0].Operation)
+		}
+		if checks[0].Safety != SafetySafe {
+			t.Errorf("%s: COMMENT is metadata-only, got %q", ddl, checks[0].Safety)
+		}
+		if checks[0].LockType != "SHARE UPDATE EXCLUSIVE" {
+			t.Errorf("%s: got lock %q, want SHARE UPDATE EXCLUSIVE", ddl, checks[0].LockType)
+		}
+	}
+}
+
+// COMMENT ON TABLE must carry the table's sizing so the with_size metric holds.
+func TestCheckMigrationCommentOnCarriesSize(t *testing.T) {
+	checks, err := CheckMigration("COMMENT ON TABLE users IS 'x'", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Table == nil || *checks[0].Table != "users" {
+		t.Errorf("expected table users, got %v", checks[0].Table)
+	}
+	if checks[0].TableSize == nil || checks[0].RowEstimate == nil {
+		t.Errorf("expected sizing for a known table, got %v/%v", checks[0].TableSize, checks[0].RowEstimate)
+	}
+}
+
+// A5: DML is ROW EXCLUSIVE; INSERT always passes, an UPDATE/DELETE with a
+// WHERE is bounded, and a full-table write is a caution on anything not known
+// small.
+func TestCheckMigrationDML(t *testing.T) {
+	tests := []struct {
+		ddl      string
+		safety   SafetyRating
+		op       string
+		wantLock string
+	}{
+		{"INSERT INTO users (id) VALUES (1)", SafetySafe, "INSERT", "ROW EXCLUSIVE"},
+		{"INSERT INTO users (id) SELECT id FROM legacy", SafetySafe, "INSERT", "ROW EXCLUSIVE"},
+		{"UPDATE users SET email = 'x' WHERE id = 1", SafetySafe, "UPDATE", "ROW EXCLUSIVE"},
+		{"DELETE FROM users WHERE id = 1", SafetySafe, "DELETE", "ROW EXCLUSIVE"},
+		{"UPDATE orders SET status = 'x'", SafetySafe, "UPDATE", "ROW EXCLUSIVE"},
+		{"DELETE FROM orders", SafetySafe, "DELETE", "ROW EXCLUSIVE"},
+		{"UPDATE users SET email = 'x'", SafetyCaution, "UPDATE", "ROW EXCLUSIVE"},
+		{"DELETE FROM users", SafetyCaution, "DELETE", "ROW EXCLUSIVE"},
+		{"UPDATE legacy SET total = 0", SafetyCaution, "UPDATE", "ROW EXCLUSIVE"},
+	}
+	for _, tt := range tests {
+		checks, err := CheckMigration(tt.ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", tt.ddl, err)
+		}
+		c := checks[0]
+		if c.Operation != tt.op {
+			t.Errorf("%s: got op %q, want %q", tt.ddl, c.Operation, tt.op)
+		}
+		if c.Safety != tt.safety {
+			t.Errorf("%s: got %q, want %q", tt.ddl, c.Safety, tt.safety)
+		}
+		if c.LockType != tt.wantLock {
+			t.Errorf("%s: got lock %q, want %q", tt.ddl, c.LockType, tt.wantLock)
+		}
+	}
+}
+
+// A full-table UPDATE/DELETE on a large table must recommend batching and
+// must not ship DANGEROUS prose under a caution verdict.
+func TestCheckMigrationFullTableDMLRecommendsBatching(t *testing.T) {
+	for _, ddl := range []string{"UPDATE users SET email = 'x'", "DELETE FROM users"} {
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		rec := checks[0].Recommendation
+		if !strings.Contains(rec, "atch") {
+			t.Errorf("%s: expected a batching recommendation, got %q", ddl, rec)
+		}
+		if strings.Contains(rec, "DANGEROUS") {
+			t.Errorf("%s: caution recommends with DANGEROUS prose: %q", ddl, rec)
+		}
+	}
+}
+
+// A table created empty earlier in the file makes a full-table write a 0-row
+// no-op, the same shortcut the other analyzers use.
+func TestCheckMigrationDMLOnCreatedEmptyTable(t *testing.T) {
+	ddl := "CREATE TABLE fresh (id bigint); UPDATE fresh SET id = 1"
+	checks, err := CheckMigration(ddl, migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := checks[len(checks)-1]
+	if update.Operation != "UPDATE" {
+		t.Fatalf("got %q, want UPDATE", update.Operation)
+	}
+	if update.Safety != SafetySafe {
+		t.Errorf("0-row update on a table created empty should be safe, got %q", update.Safety)
+	}
+}
+
+// A5: DO is its own operation with its own reason -- unanalyzable, caution.
+func TestCheckMigrationDoBlock(t *testing.T) {
+	checks, err := CheckMigration("DO $$ BEGIN NULL; END $$", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Operation != "DO" {
+		t.Errorf("got %q, want DO (no longer UNRECOGNIZED)", checks[0].Operation)
+	}
+	if checks[0].Safety != SafetyCaution {
+		t.Errorf("DO should be caution, got %q", checks[0].Safety)
+	}
+	if strings.Contains(checks[0].Recommendation, "DANGEROUS") {
+		t.Errorf("caution recommends with DANGEROUS prose: %q", checks[0].Recommendation)
+	}
+}
+
+// A5: DROP TRIGGER is a brief ACCESS EXCLUSIVE catalog unlink; CASCADE widens
+// the blast radius.
+func TestCheckMigrationDropTrigger(t *testing.T) {
+	checks, err := CheckMigration("DROP TRIGGER trg ON users", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Operation != "DROP TRIGGER" {
+		t.Errorf("got %q, want DROP TRIGGER", checks[0].Operation)
+	}
+	if checks[0].Safety != SafetySafe {
+		t.Errorf("plain DROP TRIGGER should be safe, got %q", checks[0].Safety)
+	}
+	if checks[0].LockType != "ACCESS EXCLUSIVE" {
+		t.Errorf("got lock %q, want ACCESS EXCLUSIVE", checks[0].LockType)
+	}
+
+	checks, err = CheckMigration("DROP TRIGGER trg ON users CASCADE", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Safety != SafetyCaution {
+		t.Errorf("DROP TRIGGER CASCADE should be caution, got %q", checks[0].Safety)
+	}
+}
+
+// A5: DROP FUNCTION/PROCEDURE only touches the catalog; CASCADE is caution.
+func TestCheckMigrationDropFunction(t *testing.T) {
+	for _, ddl := range []string{
+		"DROP FUNCTION my_func(integer)",
+		"DROP PROCEDURE my_proc(integer)",
+	} {
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		if checks[0].Safety != SafetySafe {
+			t.Errorf("%s: should be safe, got %q", ddl, checks[0].Safety)
+		}
+		if checks[0].LockType != "none (catalog only)" {
+			t.Errorf("%s: got lock %q, want catalog-only", ddl, checks[0].LockType)
+		}
+	}
+
+	checks, err := CheckMigration("DROP FUNCTION my_func(integer) CASCADE", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Safety != SafetyCaution {
+		t.Errorf("DROP FUNCTION CASCADE should be caution, got %q", checks[0].Safety)
+	}
+}
+
+// A5: REINDEX blocks writes at any size and blocks reads through the index;
+// CONCURRENTLY is safe but cannot run in a transaction.
+func TestCheckMigrationReindex(t *testing.T) {
+	tests := []struct {
+		ddl    string
+		safety SafetyRating
+	}{
+		{"REINDEX INDEX users_email_idx", SafetyDangerous},
+		{"REINDEX TABLE users", SafetyDangerous},
+		{"REINDEX SCHEMA public", SafetyDangerous},
+		{"REINDEX DATABASE test", SafetyDangerous},
+		{"REINDEX TABLE orders", SafetyCaution},
+		{"REINDEX INDEX CONCURRENTLY users_email_idx", SafetySafe},
+		{"REINDEX TABLE CONCURRENTLY users", SafetySafe},
+	}
+	for _, tt := range tests {
+		checks, err := CheckMigration(tt.ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", tt.ddl, err)
+		}
+		if checks[0].Safety != tt.safety {
+			t.Errorf("%s: got %q, want %q", tt.ddl, checks[0].Safety, tt.safety)
+		}
+	}
+}
+
+// A concurrent REINDEX names itself CONCURRENTLY so A4's transaction flip
+// matches it.
+func TestCheckMigrationReindexConcurrentNamed(t *testing.T) {
+	checks, err := CheckMigration("REINDEX INDEX CONCURRENTLY users_email_idx", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Operation != "REINDEX CONCURRENTLY" {
+		t.Errorf("got %q, want REINDEX CONCURRENTLY", checks[0].Operation)
+	}
+	if checks[0].LockType != "SHARE UPDATE EXCLUSIVE" {
+		t.Errorf("got lock %q, want SHARE UPDATE EXCLUSIVE", checks[0].LockType)
+	}
+}
+
+// A5: the metadata-only ALTER TABLE subcommands must be safe, not UNRECOGNIZED.
+func TestCheckMigrationAlterSubcommandsSafe(t *testing.T) {
+	for _, ddl := range []string{
+		"ALTER TABLE users ALTER COLUMN email SET DEFAULT 'x'",
+		"ALTER TABLE users ALTER COLUMN email DROP DEFAULT",
+		"ALTER TABLE users ALTER COLUMN email DROP NOT NULL",
+		"ALTER TABLE users ALTER COLUMN email SET STATISTICS 100",
+		"ALTER TABLE users ALTER COLUMN email SET STORAGE PLAIN",
+		"ALTER TABLE users ALTER COLUMN email SET COMPRESSION pglz",
+		"ALTER TABLE users OWNER TO postgres",
+		"ALTER TABLE users CLUSTER ON users_email_idx",
+		"ALTER TABLE users SET WITHOUT CLUSTER",
+		"ALTER TABLE users REPLICA IDENTITY FULL",
+		"ALTER TABLE users SET (fillfactor = 70)",
+		"ALTER TABLE users RESET (fillfactor)",
+	} {
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		c := checks[0]
+		if c.Operation == "UNRECOGNIZED" {
+			t.Errorf("%s: still UNRECOGNIZED", ddl)
+		}
+		if c.Safety != SafetySafe {
+			t.Errorf("%s: should be safe, got %q", ddl, c.Safety)
+		}
+		if c.Statement == "" {
+			t.Errorf("%s: safe check must carry its Statement for passthrough", ddl)
+		}
+	}
+}
+
+// A5: behavior-flipping ALTER TABLE subcommands are caution, not safe.
+func TestCheckMigrationAlterSubcommandsCaution(t *testing.T) {
+	for _, ddl := range []string{
+		"ALTER TABLE users DISABLE TRIGGER trg",
+		"ALTER TABLE users DISABLE TRIGGER ALL",
+		"ALTER TABLE users ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE users FORCE ROW LEVEL SECURITY",
+	} {
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		c := checks[0]
+		if c.Operation == "UNRECOGNIZED" {
+			t.Errorf("%s: still UNRECOGNIZED", ddl)
+		}
+		if c.Safety != SafetyCaution {
+			t.Errorf("%s: should be caution, got %q", ddl, c.Safety)
+		}
+		if strings.Contains(c.Recommendation, "DANGEROUS") {
+			t.Errorf("%s: caution recommends with DANGEROUS prose: %q", ddl, c.Recommendation)
+		}
+	}
+}
+
+// A5: rewrite-inducing ALTER TABLE subcommands are dangerous at size, caution
+// on a small table.
+func TestCheckMigrationAlterSubcommandsRewrite(t *testing.T) {
+	tests := []struct {
+		ddl    string
+		safety SafetyRating
+	}{
+		{"ALTER TABLE users SET LOGGED", SafetyDangerous},
+		{"ALTER TABLE users SET UNLOGGED", SafetyDangerous},
+		{"ALTER TABLE users SET TABLESPACE fastspace", SafetyDangerous},
+		{"ALTER TABLE orders SET LOGGED", SafetyCaution},
+		{"ALTER TABLE orders SET TABLESPACE fastspace", SafetyCaution},
+	}
+	for _, tt := range tests {
+		checks, err := CheckMigration(tt.ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", tt.ddl, err)
+		}
+		c := checks[0]
+		if c.Operation == "UNRECOGNIZED" {
+			t.Errorf("%s: still UNRECOGNIZED", tt.ddl)
+		}
+		if c.Safety != tt.safety {
+			t.Errorf("%s: got %q, want %q", tt.ddl, c.Safety, tt.safety)
+		}
+		if tt.safety != SafetyDangerous && strings.Contains(c.Recommendation, "DANGEROUS") {
+			t.Errorf("%s: caution recommends with DANGEROUS prose: %q", tt.ddl, c.Recommendation)
+		}
+	}
+}
+
+// A5: ATTACH PARTITION is caution -- it locks the attached table exclusively
+// and may scan it.
+func TestCheckMigrationAttachPartition(t *testing.T) {
+	ddl := "ALTER TABLE events ATTACH PARTITION events_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')"
+	checks, err := CheckMigration(ddl, migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Operation != "ATTACH PARTITION" {
+		t.Errorf("got %q, want ATTACH PARTITION", checks[0].Operation)
+	}
+	if checks[0].Safety != SafetyCaution {
+		t.Errorf("ATTACH PARTITION should be caution, got %q", checks[0].Safety)
+	}
+}
+
+// A concurrent DROP INDEX ... CASCADE keeps its CONCURRENTLY label so A4's
+// transaction flip can find it, while staying a caution for the CASCADE.
+func TestCheckMigrationDropIndexConcurrentCascade(t *testing.T) {
+	checks, err := CheckMigration("DROP INDEX CONCURRENTLY users_email_idx CASCADE", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Operation != "DROP INDEX CONCURRENTLY" {
+		t.Errorf("got %q, want DROP INDEX CONCURRENTLY", checks[0].Operation)
+	}
+	if checks[0].Safety != SafetyCaution {
+		t.Errorf("CASCADE should stay caution, got %q", checks[0].Safety)
+	}
+}
+
+// Lock levels must match PG16 ALTER TABLE: SET STATISTICS, attribute options,
+// CLUSTER ON and fillfactor take SHARE UPDATE EXCLUSIVE, not ACCESS EXCLUSIVE.
+func TestCheckMigrationAlterSubcommandLockTypes(t *testing.T) {
+	tests := []struct {
+		ddl  string
+		lock string
+	}{
+		{"ALTER TABLE users ALTER COLUMN email SET STATISTICS 100", "SHARE UPDATE EXCLUSIVE"},
+		{"ALTER TABLE users ALTER COLUMN email SET (n_distinct = 0.5)", "SHARE UPDATE EXCLUSIVE"},
+		{"ALTER TABLE users CLUSTER ON users_email_idx", "SHARE UPDATE EXCLUSIVE"},
+		{"ALTER TABLE users SET WITHOUT CLUSTER", "SHARE UPDATE EXCLUSIVE"},
+		{"ALTER TABLE users SET (fillfactor = 70)", "SHARE UPDATE EXCLUSIVE"},
+		{"ALTER TABLE users RESET (fillfactor)", "SHARE UPDATE EXCLUSIVE"},
+		{"ALTER TABLE users OWNER TO postgres", "ACCESS EXCLUSIVE"},
+		{"ALTER TABLE users REPLICA IDENTITY FULL", "ACCESS EXCLUSIVE"},
+	}
+	for _, tt := range tests {
+		checks, err := CheckMigration(tt.ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", tt.ddl, err)
+		}
+		if checks[0].LockType != tt.lock {
+			t.Errorf("%s: got lock %q, want %q", tt.ddl, checks[0].LockType, tt.lock)
+		}
+	}
+}
+
+// DETACH PARTITION is safe metadata; CONCURRENTLY names itself so A4 can flip
+// it inside a transactional file.
+func TestCheckMigrationDetachPartition(t *testing.T) {
+	plain, err := CheckMigration("ALTER TABLE events DETACH PARTITION events_2025", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain[0].Safety != SafetySafe {
+		t.Errorf("DETACH PARTITION should be safe, got %q", plain[0].Safety)
+	}
+	if !strings.Contains(plain[0].LockType, "ACCESS EXCLUSIVE (partition)") {
+		t.Errorf("plain DETACH should report the partition lock, got %q", plain[0].LockType)
+	}
+
+	conc, err := CheckMigration("ALTER TABLE events DETACH PARTITION events_2025 CONCURRENTLY", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conc[0].Operation != "DETACH PARTITION CONCURRENTLY" {
+		t.Errorf("got %q, want DETACH PARTITION CONCURRENTLY", conc[0].Operation)
+	}
+	if conc[0].LockType != "SHARE UPDATE EXCLUSIVE" {
+		t.Errorf("got lock %q, want SHARE UPDATE EXCLUSIVE", conc[0].LockType)
+	}
+}
+
+// COMMENT ON COLUMN on a schema-qualified table carries the qualified table and its size.
+func TestCheckMigrationCommentOnSchemaQualifiedColumn(t *testing.T) {
+	checks, err := CheckMigration("COMMENT ON COLUMN public.users.email IS 'login'", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Table == nil || *checks[0].Table != "public.users" {
+		t.Errorf("expected table public.users, got %v", checks[0].Table)
+	}
+	if checks[0].TableSize == nil || checks[0].RowEstimate == nil {
+		t.Errorf("expected sizing for public.users, got %v/%v", checks[0].TableSize, checks[0].RowEstimate)
+	}
+}
+
+// DROP TRIGGER on a known table must carry the table and its sizing.
+func TestCheckMigrationDropTriggerCarriesSize(t *testing.T) {
+	checks, err := CheckMigration("DROP TRIGGER trg ON users", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Table == nil || *checks[0].Table != "users" {
+		t.Errorf("expected table users, got %v", checks[0].Table)
+	}
+	if checks[0].TableSize == nil || checks[0].RowEstimate == nil {
+		t.Errorf("expected sizing for users, got %v/%v", checks[0].TableSize, checks[0].RowEstimate)
+	}
+}
+
+// REINDEX TABLE on a table created empty in the same migration is safe and 0 rows.
+func TestCheckMigrationReindexTableCreatedEmpty(t *testing.T) {
+	checks, err := CheckMigration("CREATE TABLE fresh (id bigint); REINDEX TABLE fresh;", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reindex := checks[len(checks)-1]
+	if reindex.Operation != "REINDEX TABLE" {
+		t.Fatalf("got %q, want REINDEX TABLE", reindex.Operation)
+	}
+	if reindex.Safety != SafetySafe {
+		t.Errorf("reindex on table created empty should be safe, got %q", reindex.Safety)
+	}
+	if reindex.RowEstimate == nil || *reindex.RowEstimate != 0 {
+		t.Errorf("expected 0 row estimate, got %v", reindex.RowEstimate)
+	}
+}
+
+// An unqualified REINDEX INDEX finds its parent table in the snapshot and carries its sizing.
+func TestCheckMigrationReindexIndexFindsParentTable(t *testing.T) {
+	checks, err := CheckMigration("REINDEX INDEX orders_user_id_idx", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := checks[0]
+	if c.Safety != SafetyCaution {
+		t.Errorf("REINDEX on small table orders should be caution, got %q", c.Safety)
+	}
+	if c.TableSize == nil || *c.TableSize != "128.0 KB" {
+		t.Errorf("expected table_size 128.0 KB, got %v", c.TableSize)
+	}
+}
+
+// Stale planner stats (> 7 days) must not allow a full-table write to be
+// treated as empty/safe; it must stay caution.
+func TestCheckMigrationStalePlannerDMLKeepsCaution(t *testing.T) {
+	a := migrationTestAnnotated()
+	a.Planner.Timestamp = time.Now().Add(-30 * 24 * time.Hour)
+	checks, err := CheckMigration("UPDATE events SET created_at = now()", a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Safety != SafetyCaution {
+		t.Errorf("stale planner stats on full-table UPDATE must keep caution, got %q", checks[0].Safety)
 	}
 }
