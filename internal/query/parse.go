@@ -61,7 +61,7 @@ type (
 )
 
 func ParseSQL(sql string) (*ParsedQuery, error) {
-	result, err := pg_query.Parse(sql)
+	result, err := pg_query.Parse(rewriteNamedParams(sql))
 	if err != nil {
 		return nil, fmt.Errorf("SQL parse error: %w", err)
 	}

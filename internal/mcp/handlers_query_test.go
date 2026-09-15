@@ -104,6 +104,26 @@ func TestValidateQuery_ReturnsCorrectedSQL(t *testing.T) {
 	}
 }
 
+// Named parameters are the boringSQL/queries dialect: they must parse, and a
+// correction must come back in the caller's dialect, not as $1.
+func TestValidateQuery_AcceptsNamedParams(t *testing.T) {
+	c := setupOfflineTest(t)
+	out := callTool(t, c, "validate_query", map[string]any{
+		"sql": "SELECT u.emial FROM users u WHERE u.user_id = :user_id",
+	})
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("expected JSON output: %v\n%s", err, out)
+	}
+	if decoded["valid"] != false {
+		t.Fatalf("expected the query to be invalid: %s", out)
+	}
+	if got := decoded["corrected_sql"]; got != "SELECT u.email FROM users u WHERE u.user_id = :user_id" {
+		t.Fatalf("corrected_sql = %v\n%s", got, out)
+	}
+}
+
 // Nothing is offered unless every error has one candidate; a half-corrected
 // query still fails and an agent would run it anyway.
 func TestValidateQuery_NoCorrectionWhenNotMechanical(t *testing.T) {
