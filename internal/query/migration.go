@@ -89,9 +89,11 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 			checks = append(checks, analyzeCreateIndex(n.IndexStmt, a, names, cat))
 		case *pg_query.Node_CreateStmt:
 			checks = append(checks, analyzeCreateTable(n.CreateStmt, stmt.Stmt))
-			// IF NOT EXISTS may be a no-op on a populated table, never empty
+			rel := n.CreateStmt.GetRelation()
 			if !n.CreateStmt.IfNotExists {
-				cat.markCreated(n.CreateStmt.GetRelation(), isPartitionedParent(n.CreateStmt))
+				cat.markCreated(rel, isPartitionedParent(n.CreateStmt), false)
+			} else if !cat.hasCreated(rel) && a.Schema != nil && lookupTable(a.Schema, rel) == nil {
+				cat.markCreated(rel, isPartitionedParent(n.CreateStmt), true)
 			}
 		case *pg_query.Node_CreateTableAsStmt:
 			checks = append(checks, analyzeCreateTableAs(n.CreateTableAsStmt, stmt.Stmt))
@@ -125,7 +127,10 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 			switch n.DropStmt.RemoveType {
 			case pg_query.ObjectType_OBJECT_TABLE:
 				for _, key := range dropTableKeys(n.DropStmt) {
+					delete(cat.created, key)
 					delete(cat.empty, key)
+					delete(cat.partitioned, key)
+					delete(cat.conditional, key)
 				}
 				checks = append(checks, dropTableCheck())
 			case pg_query.ObjectType_OBJECT_INDEX:
@@ -151,25 +156,34 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 // sized against a pre-existing table.
 type (
 	fileCatalog struct {
+		created     map[string]bool // relKey of tables created in this file
 		empty       map[string]bool // relKey of tables created empty in this file
 		partitioned map[string]bool // relKey of partitioned parents created in this file
+		conditional map[string]bool // relKey of entries created via IF NOT EXISTS
 	}
 )
 
 func newFileCatalog() *fileCatalog {
 	return &fileCatalog{
+		created:     map[string]bool{},
 		empty:       map[string]bool{},
 		partitioned: map[string]bool{},
+		conditional: map[string]bool{},
 	}
 }
 
-func (c *fileCatalog) markCreated(rel *pg_query.RangeVar, partitioned bool) {
+func (c *fileCatalog) markCreated(rel *pg_query.RangeVar, partitioned, conditional bool) {
 	if rel == nil {
 		return
 	}
-	c.empty[relKey(rel)] = true
+	key := relKey(rel)
+	c.created[key] = true
+	c.empty[key] = true
 	if partitioned {
-		c.partitioned[relKey(rel)] = true
+		c.partitioned[key] = true
+	}
+	if conditional {
+		c.conditional[key] = true
 	}
 }
 
@@ -178,10 +192,12 @@ func (c *fileCatalog) invalidate(rel *pg_query.RangeVar) {
 		return
 	}
 	delete(c.empty, relKey(rel))
+	delete(c.conditional, relKey(rel))
 }
 
 func (c *fileCatalog) invalidateAll() {
 	c.empty = map[string]bool{}
+	c.conditional = map[string]bool{}
 }
 
 func (c *fileCatalog) isEmpty(rel *pg_query.RangeVar) bool {
@@ -192,6 +208,14 @@ func (c *fileCatalog) isPartitioned(rel *pg_query.RangeVar) bool {
 	return c != nil && rel != nil && c.partitioned[relKey(rel)]
 }
 
+func (c *fileCatalog) isConditional(rel *pg_query.RangeVar) bool {
+	return c != nil && rel != nil && c.conditional[relKey(rel)]
+}
+
+func (c *fileCatalog) hasCreated(rel *pg_query.RangeVar) bool {
+	return c != nil && rel != nil && c.created[relKey(rel)]
+}
+
 func (c *fileCatalog) rekey(oldRel *pg_query.RangeVar, newName string) {
 	if oldRel == nil || newName == "" {
 		return
@@ -199,6 +223,10 @@ func (c *fileCatalog) rekey(oldRel *pg_query.RangeVar, newName string) {
 	schemaName := schemaOf(oldRel)
 	oldKey := relKey(oldRel)
 	newKey := schemaName + "." + newName
+	if c.created[oldKey] {
+		delete(c.created, oldKey)
+		c.created[newKey] = true
+	}
 	if c.empty[oldKey] {
 		delete(c.empty, oldKey)
 		c.empty[newKey] = true
@@ -206,6 +234,10 @@ func (c *fileCatalog) rekey(oldRel *pg_query.RangeVar, newName string) {
 	if c.partitioned[oldKey] {
 		delete(c.partitioned, oldKey)
 		c.partitioned[newKey] = true
+	}
+	if c.conditional[oldKey] {
+		delete(c.conditional, oldKey)
+		c.conditional[newKey] = true
 	}
 }
 
@@ -263,7 +295,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 
 	// empty table: the size-dependent verdicts below do not apply
 	if cat.isEmpty(stmt.GetRelation()) {
-		if check := analyzeEmptyTableAlterCmd(cmd, tableName, statement); check != nil {
+		if check := analyzeEmptyTableAlterCmd(cmd, tableName, statement, cat.isConditional(stmt.GetRelation())); check != nil {
 			return check
 		}
 	}
@@ -337,7 +369,10 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 	return nil
 }
 
-func analyzeEmptyTableAlterCmd(cmd *pg_query.AlterTableCmd, tableName, statement string) *MigrationCheck {
+// IF NOT EXISTS was a no-op if the table already existed.
+const conditionalEmptyNote = "Assumes the snapshot is current: IF NOT EXISTS is a no-op if the table already exists, and then this verdict does not hold."
+
+func analyzeEmptyTableAlterCmd(cmd *pg_query.AlterTableCmd, tableName, statement string, conditional bool) *MigrationCheck {
 	var operation string
 	switch pg_query.AlterTableType(cmd.Subtype) {
 	case pg_query.AlterTableType_AT_AddColumn:
@@ -363,12 +398,17 @@ func analyzeEmptyTableAlterCmd(cmd *pg_query.AlterTableCmd, tableName, statement
 			}
 		}
 	}
+	recommendation := rec
+	if conditional {
+		note = joinNotes(note, conditionalEmptyNote)
+		recommendation += "\n\n" + conditionalEmptyNote
+	}
 	zero := 0.0
 	return &MigrationCheck{
 		Operation: operation, Table: strp(tableName), Safety: SafetySafe,
 		LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (0 rows)",
 		TableSize: strp("0 bytes"), RowEstimate: &zero,
-		Recommendation: rec,
+		Recommendation: recommendation,
 		Rationale:      &Rationale{Reason: rec, Note: note},
 		Statement:      statement,
 	}
@@ -700,13 +740,19 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, name
 	// empty table: the blocking form is fine, no CONCURRENTLY rewrite needed
 	if !idx.Concurrent && cat.isEmpty(idx.GetRelation()) {
 		const rec = "Table is created empty earlier in this migration: the index build touches 0 rows and is instant. The lock is still taken and can queue behind an in-flight transaction -- set lock_timeout and retry on timeout."
+		note := ""
+		recommendation := rec
+		if cat.isConditional(idx.GetRelation()) {
+			note = conditionalEmptyNote
+			recommendation += "\n\n" + conditionalEmptyNote
+		}
 		zero := 0.0
 		return MigrationCheck{
 			Operation: "CREATE INDEX", Table: strp(tableName), Safety: SafetySafe,
 			LockType: "SHARE (brief, 0 rows)", LockDuration: "brief (0 rows)",
 			TableSize: strp("0 bytes"), RowEstimate: &zero,
-			Recommendation: rec,
-			Rationale:      &Rationale{Reason: rec},
+			Recommendation: recommendation,
+			Rationale:      &Rationale{Reason: rec, Note: note},
 			Statement:      statement,
 		}
 	}
