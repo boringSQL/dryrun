@@ -152,8 +152,16 @@ func (s *Server) handleCheckMigration(_ context.Context, req mcp.CallToolRequest
 	var unsafe, rewritten, multiStep int
 	concurrentIndex := false
 	for _, c := range checks {
-		if strings.Contains(c.Operation, "CONCURRENTLY") || c.Operation == "CREATE INDEX" {
+		// a plain index can be safe; only CONCURRENTLY warrants the lecture
+		if strings.Contains(c.Operation, "CONCURRENTLY") {
 			concurrentIndex = true
+		} else if c.Safety != query.SafetySafe {
+			for _, s := range c.SaferSQL {
+				if strings.Contains(s, "CONCURRENTLY") {
+					concurrentIndex = true
+					break
+				}
+			}
 		}
 		if c.Safety == query.SafetySafe {
 			continue

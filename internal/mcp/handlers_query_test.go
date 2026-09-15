@@ -284,6 +284,32 @@ func TestCheckMigration_Hints(t *testing.T) {
 	}
 }
 
+// A plain CREATE INDEX on a table the same migration creates is safe: the
+// blocking build touches zero rows, and the wrapping transaction is what keeps
+// it consistent. The handler must not fire the CONCURRENTLY/NO TRANSACTION
+// lecture at it -- the hint used to key off Operation == "CREATE INDEX" for
+// every plain index, including safe ones, telling authors to drop the very
+// transaction that makes them safe.
+func TestCheckMigration_PlainIndexOnNewTableNoConcurrencyHint(t *testing.T) {
+	c := setupOfflineTest(t)
+	ddl := "-- +goose Up\nCREATE TABLE brand_new_table (id bigint);\nCREATE INDEX idx_brand_new_table_id ON brand_new_table (id);\n"
+	decoded := decodeCheckMigration(t, callTool(t, c, "check_migration", map[string]any{"ddl": ddl}))
+
+	checks, _ := decoded["checks"].([]any)
+	if len(checks) != 2 {
+		t.Fatalf("expected two checks (CREATE TABLE, CREATE INDEX), got %v", decoded["checks"])
+	}
+	idxCheck, _ := checks[1].(map[string]any)
+	if idxCheck["safety"] != "safe" {
+		t.Fatalf("index on a same-file table should be safe, got %v", idxCheck["safety"])
+	}
+	meta, _ := decoded["_meta"].(map[string]any)
+	hint, _ := meta["hint"].(string)
+	if strings.Contains(hint, "NO TRANSACTION") || strings.Contains(hint, "CONCURRENTLY") {
+		t.Errorf("plain index on a same-file table must not get the concurrency hint, got %q", hint)
+	}
+}
+
 // migration_sql is present in the wrapper, parses, and holds both the rewrite
 // and the safe passthrough -- when every unsafe statement has a rewrite.
 func TestCheckMigration_MigrationSQLPresentWhenAllRewritable(t *testing.T) {
