@@ -1,6 +1,9 @@
 package jit
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // JIT error dictionary entry returned inline with tool responses
 type Entry struct {
@@ -26,6 +29,13 @@ func (e Entry) String() string {
 		s += "\nNOTE: " + e.Note
 	}
 	return s
+}
+
+// Caution keeps the operation descriptor but softens a DANGEROUS status, so
+// prose never contradicts a downgraded verdict.
+func (e Entry) Caution() Entry {
+	e.Status = strings.Replace(e.Status, "DANGEROUS", "CAUTION", 1)
+	return e
 }
 
 func AddColumnVolatileDefault(table, col, colType, defaultExpr string) Entry {

@@ -210,6 +210,70 @@ func TestCheckMigrationSmallTableDowngrades(t *testing.T) {
 		if c.Rationale == nil || !strings.Contains(c.Rationale.Note, "lock_timeout") {
 			t.Errorf("%s: expected lock_timeout guidance, got %v", ddl, c.Rationale)
 		}
+		if !strings.HasPrefix(c.Recommendation, "Table is small") {
+			t.Errorf("%s: small-table note should lead the recommendation, got %q", ddl, c.Recommendation)
+		}
+		if strings.Contains(c.Recommendation, "DANGEROUS") {
+			t.Errorf("%s: caution verdict recommends with DANGEROUS prose:\n%s", ddl, c.Recommendation)
+		}
+	}
+}
+
+// A2/D3: prose must agree with the verdict. Every analyzer that can soften a
+// verdict to caution/safe must not ship a recommendation that still opens
+// DANGEROUS -- a small table (ALTER TYPE, ADD CONSTRAINT, CREATE INDEX) or SET
+// NOT NULL, which is caution at any size.
+func TestCheckMigrationProseNeverContradictsVerdict(t *testing.T) {
+	for _, ddl := range []string{
+		// ADD COLUMN
+		"ALTER TABLE users ADD COLUMN age integer",
+		"ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT now()",
+		// ALTER COLUMN TYPE (caution on a small table, dangerous on a large one)
+		"ALTER TABLE orders ALTER COLUMN total TYPE bigint",
+		"ALTER TABLE users ALTER COLUMN email TYPE citext",
+		// SET NOT NULL -- caution at any size
+		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
+		"ALTER TABLE ONLY users ALTER COLUMN email SET NOT NULL",
+		// ADD CONSTRAINT, all forms
+		"ALTER TABLE orders ADD CHECK (total >= 0)",
+		"ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id)",
+		"ALTER TABLE orders ADD PRIMARY KEY (id)",
+		"ALTER TABLE orders ADD CONSTRAINT u UNIQUE (user_id)",
+		"ALTER TABLE orders ADD EXCLUDE USING gist (status WITH =)",
+		"ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users(id) NOT VALID",
+		"ALTER TABLE orders VALIDATE CONSTRAINT legacy_total_check",
+		// CREATE INDEX
+		"CREATE INDEX idx_o ON orders (status)",
+		"CREATE INDEX idx_u ON users (email)",
+		"CREATE INDEX CONCURRENTLY idx_u ON users (email)",
+		// table lifecycle, including the created-empty shortcut
+		"CREATE TABLE fresh (id bigint)",
+		"CREATE TABLE fresh AS SELECT 1 AS id",
+		"CREATE TABLE fresh (id bigint); CREATE INDEX idx_fresh ON fresh (id);",
+		"DROP TABLE orders",
+		"ALTER TABLE orders RENAME TO orders_old",
+		// DROP INDEX
+		"DROP INDEX orders_user_id_idx",
+		"DROP INDEX CONCURRENTLY orders_user_id_idx",
+		"DROP INDEX orders_user_id_idx CASCADE",
+		// passthrough / unmodeled
+		"SET statement_timeout = '5s'",
+		"DO $$ BEGIN NULL; END $$",
+		"INSERT INTO users (id) VALUES (1)",
+	} {
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		if len(checks) == 0 {
+			t.Errorf("%s: expected at least one check", ddl)
+			continue
+		}
+		for _, c := range checks {
+			if c.Safety != SafetyDangerous && strings.Contains(c.Recommendation, "DANGEROUS") {
+				t.Errorf("%s: %s verdict recommends with DANGEROUS prose:\n%s", ddl, c.Safety, c.Recommendation)
+			}
+		}
 	}
 }
 

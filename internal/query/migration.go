@@ -304,16 +304,19 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 		colName := cmd.Name
 		e := jit.AlterColumnType(tableName, colName, "<new_type>")
 		safety := SafetyDangerous
+		recommendation := e.String()
 		rationale := &Rationale{Reason: e.Reason, Note: e.Note}
 		if small {
 			safety = SafetyCaution
-			rationale.Note = joinNotes(rationale.Note, smallTableNote(*rowEstimate, *tableSize))
+			note := smallTableNote(*rowEstimate, *tableSize)
+			recommendation = note + "\n\n" + e.Caution().String()
+			rationale.Note = joinNotes(rationale.Note, note)
 		}
 		return &MigrationCheck{
 			Operation: "ALTER COLUMN TYPE", Table: strp(tableName), Safety: safety,
 			LockType: "ACCESS EXCLUSIVE", LockDuration: "proportional to table size (full rewrite)",
 			TableSize: tableSize, RowEstimate: rowEstimate,
-			Recommendation: e.String(),
+			Recommendation: recommendation,
 			Rationale:      rationale,
 			Statement:      statement,
 		}
@@ -520,7 +523,7 @@ func analyzeSetNotNull(colName, tableName string, qual schema.QualifiedName, tab
 	if displayCol == "" {
 		displayCol = "<col>"
 	}
-	e := jit.SetNotNull(tableName, displayCol)
+	e := jit.SetNotNull(tableName, displayCol).Caution()
 
 	safety := SafetyCaution
 
@@ -611,15 +614,24 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			e = jit.AddIndexBackedConstraint(tableName, indexBackedKind(operation),
 				strings.Join(constraintColumns(con), ", "))
 		}
-		recommendation = e.String()
-		rationale = &Rationale{Reason: e.Reason, Note: e.Note}
+		lead := ""
+		if small {
+			safety = SafetyCaution
+			lead = smallTableNote(*rowEstimate, *tableSize)
+			e = e.Caution()
+		}
 		if len(safer) > 0 {
 			// two differently-named migrations in one response is worse than one
 			recommendation = e.Warning()
+		} else {
+			recommendation = e.String()
 		}
-		if small {
-			safety = SafetyCaution
-			rationale.Note = joinNotes(rationale.Note, smallTableNote(*rowEstimate, *tableSize))
+		if lead != "" {
+			recommendation = lead + "\n\n" + recommendation
+		}
+		rationale = &Rationale{Reason: e.Reason, Note: e.Note}
+		if lead != "" {
+			rationale.Note = joinNotes(rationale.Note, lead)
 		}
 		lockDuration = "proportional to table size"
 		lockType = "ACCESS EXCLUSIVE"
@@ -723,18 +735,28 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, name
 	}
 	if !idx.Concurrent {
 		e := jit.CreateIndexBlocking(tableName, idxName, idxMethod, colStr)
-		recommendation = e.String()
-		rationale = &Rationale{Reason: e.Reason, Note: e.Note}
-		if len(safer) > 0 {
-			recommendation = e.Warning()
-		} else if t := lookupTable(a.Schema, idx.GetRelation()); t != nil && t.PartitionInfo != nil {
-			partitionNote := "CONCURRENTLY is rejected on a partitioned table. Build the index on each partition concurrently, then CREATE INDEX on the parent and ATTACH them."
-			recommendation += "\nNOTE: " + partitionNote
-			rationale.Note = joinNotes(rationale.Note, partitionNote)
-		}
+		lead := ""
 		if small {
 			safety = SafetyCaution
-			rationale.Note = joinNotes(rationale.Note, smallTableNote(*rowEstimate, *tableSize))
+			lead = smallTableNote(*rowEstimate, *tableSize)
+			e = e.Caution()
+		}
+		if len(safer) > 0 {
+			recommendation = e.Warning()
+		} else {
+			recommendation = e.String()
+			if t := lookupTable(a.Schema, idx.GetRelation()); t != nil && t.PartitionInfo != nil {
+				partitionNote := "CONCURRENTLY is rejected on a partitioned table. Build the index on each partition concurrently, then CREATE INDEX on the parent and ATTACH them."
+				recommendation += "\nNOTE: " + partitionNote
+				e.Note = joinNotes(e.Note, partitionNote)
+			}
+		}
+		if lead != "" {
+			recommendation = lead + "\n\n" + recommendation
+		}
+		rationale = &Rationale{Reason: e.Reason, Note: e.Note}
+		if lead != "" {
+			rationale.Note = joinNotes(rationale.Note, lead)
 		}
 	}
 
