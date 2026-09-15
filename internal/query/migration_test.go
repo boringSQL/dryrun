@@ -57,6 +57,7 @@ func migrationTestAnnotated() *schema.AnnotatedSchema {
 			},
 		},
 		Planner: &schema.PlannerStatsSnapshot{
+			Timestamp: time.Now().UTC(),
 			Tables: []schema.TableSizingEntry{
 				{Table: schema.QualifiedName{Schema: "public", Name: "users"}, Sizing: schema.TableSizing{Reltuples: 2_000_000, TableSize: 512 << 20}},
 				{Table: schema.QualifiedName{Schema: "public", Name: "orders"}, Sizing: schema.TableSizing{Reltuples: 2_000, TableSize: 128 << 10}},
@@ -350,5 +351,91 @@ func TestCheckMigrationSetNotNullNullFracUnknownRows(t *testing.T) {
 	}
 	if strings.Contains(rec, "rows)") {
 		t.Errorf("no row count may be derived from unknown rows: %q", rec)
+	}
+}
+
+// A8: a planner capture older than 7 days is not evidence of "small": the
+// worst case stands and no sizing is reported.
+func TestCheckMigrationStalePlannerKeepsWorstCase(t *testing.T) {
+	for _, ddl := range []string{
+		"CREATE INDEX idx_o ON orders (status)",
+		"ALTER TABLE orders ADD CHECK (total >= 0)",
+		"ALTER TABLE orders ALTER COLUMN total TYPE bigint",
+	} {
+		a := migrationTestAnnotated()
+		a.Planner.Timestamp = time.Now().Add(-30 * 24 * time.Hour)
+		checks, err := CheckMigration(ddl, a)
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		c := checks[0]
+		if c.Safety != SafetyDangerous {
+			t.Errorf("%s: stale planner must keep the worst case, got %q", ddl, c.Safety)
+		}
+		if c.TableSize != nil || c.RowEstimate != nil {
+			t.Errorf("%s: stale planner must report no sizing, got %v/%v", ddl, c.TableSize, c.RowEstimate)
+		}
+		if c.Rationale != nil && strings.Contains(c.Rationale.Note, "Table is small") {
+			t.Errorf("%s: stale planner must not carry the small-table note, got %v", ddl, c.Rationale)
+		}
+	}
+}
+
+// The 7-day threshold itself: just over is stale, just under still downgrades.
+func TestCheckMigrationStalePlannerBoundary(t *testing.T) {
+	ddl := "CREATE INDEX idx_o ON orders (status)"
+
+	a := migrationTestAnnotated()
+	a.Planner.Timestamp = time.Now().Add(-7*24*time.Hour - time.Hour)
+	checks, err := CheckMigration(ddl, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Safety != SafetyDangerous {
+		t.Errorf("7d+1h old is stale, expected dangerous, got %q", checks[0].Safety)
+	}
+
+	b := migrationTestAnnotated()
+	b.Planner.Timestamp = time.Now().Add(-7*24*time.Hour + time.Hour)
+	checks, err = CheckMigration(ddl, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Safety != SafetyCaution {
+		t.Errorf("7d-1h old is fresh, expected caution, got %q", checks[0].Safety)
+	}
+}
+
+// An undated planner cannot be trusted to soften a verdict.
+func TestCheckMigrationZeroPlannerTimestampIsStale(t *testing.T) {
+	a := migrationTestAnnotated()
+	a.Planner.Timestamp = time.Time{}
+	checks, err := CheckMigration("CREATE INDEX idx_o ON orders (status)", a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Safety != SafetyDangerous {
+		t.Errorf("zero planner timestamp must keep the worst case, got %q", checks[0].Safety)
+	}
+	if checks[0].TableSize != nil || checks[0].RowEstimate != nil {
+		t.Errorf("zero planner timestamp must report no sizing, got %v/%v", checks[0].TableSize, checks[0].RowEstimate)
+	}
+}
+
+// Stale sizing must not derive a row count for the SET NOT NULL backfill, but
+// the NULL fraction still matters.
+func TestCheckMigrationStalePlannerSetNotNullNoRowCount(t *testing.T) {
+	a := migrationTestAnnotated()
+	a.Planner.Timestamp = time.Now().Add(-30 * 24 * time.Hour)
+	checks, err := CheckMigration("ALTER TABLE users ALTER COLUMN email SET NOT NULL", a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := checks[0].Recommendation
+	if !strings.Contains(rec, "20% NULLs") {
+		t.Errorf("expected the NULL fraction to survive, got %q", rec)
+	}
+	if strings.Contains(rec, "rows)") {
+		t.Errorf("no row count may be derived from stale rows: %q", rec)
 	}
 }

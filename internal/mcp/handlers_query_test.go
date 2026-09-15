@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boringsql/dryrun/pkg/lint"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
@@ -410,6 +411,17 @@ func TestCheckMigration_SurfacesSizingAndScalesSmallTable(t *testing.T) {
 	rationale, _ := check["rationale"].(map[string]any)
 	if note, _ := rationale["note"].(string); !strings.Contains(note, "Table is small") {
 		t.Errorf("expected small-table note, got %q", note)
+	}
+
+	staleAnn := annotate(snap, 2_000)
+	staleAnn.Planner.Timestamp = time.Now().Add(-14 * 24 * time.Hour)
+	stale := serveOffline(t, NewOfflineServerAnnotated(staleAnn, lint.DefaultConfig()))
+	check = firstCheck(callTool(t, stale, "check_migration", map[string]any{"ddl": ddl}))
+	if check["safety"] != "dangerous" {
+		t.Errorf("stale small table should stay dangerous, got %v", check["safety"])
+	}
+	if check["table_size"] != nil || check["row_estimate"] != nil {
+		t.Errorf("stale small table should report no sizing, got %v/%v", check["table_size"], check["row_estimate"])
 	}
 }
 

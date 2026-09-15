@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 
@@ -983,9 +984,18 @@ func unmodeledCheck(statement string) MigrationCheck {
 	}
 }
 
-const smallTableMaxRows = 100_000
+const (
+	smallTableMaxRows = 100_000
+
+	// Planner sizing older than this is not evidence: tables grow. Stale or undated
+	// captures read as unknown size, which keeps the worst-case verdict.
+	plannerStaleAfter = 7 * 24 * time.Hour
+)
 
 func lookupTableStats(a *schema.AnnotatedSchema, q schema.QualifiedName) (sizeText *string, rows *float64, small bool) {
+	if a == nil || a.Planner == nil || a.Planner.Timestamp.IsZero() || time.Since(a.Planner.Timestamp) > plannerStaleAfter {
+		return nil, nil, false
+	}
 	sz := a.SizingFor(q)
 	if sz == nil {
 		return nil, nil, false

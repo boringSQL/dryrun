@@ -185,7 +185,7 @@ func finish(snap *schema.SchemaSnapshot) *schema.SchemaSnapshot {
 // bytes-per-page or index share gets a plausible number. No bloat.Annotate:
 // these fixtures must not trip the bloat rules.
 func annotate(snap *schema.SchemaSnapshot, rows float64) *schema.AnnotatedSchema {
-	planner := &schema.PlannerStatsSnapshot{}
+	planner := &schema.PlannerStatsSnapshot{Timestamp: time.Now().UTC()}
 	for _, t := range snap.Tables {
 		sizing := schema.TableSizing{Reltuples: rows}
 		// a partitioned parent holds no heap: relpages 0, relfrozenxid 0
