@@ -64,11 +64,15 @@ func main() {
 
 	root.AddCommand(
 		probeCmd(), initCmd(), setupCmd(), importCmd(), dumpSchemaCmd(),
-		lintCmd(), driftCmd(), snapshotCmd(), profileCmd(),
+		lintCmd(), driftCmd(), checkCmd(), snapshotCmd(), profileCmd(),
 		remoteCmd(), mcpServeCmd(), statsCmd(), versionCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
+		var exitErr *exitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.code)
+		}
 		os.Exit(1)
 	}
 }
