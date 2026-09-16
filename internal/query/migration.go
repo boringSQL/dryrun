@@ -1095,21 +1095,74 @@ func dropTableCheck() MigrationCheck {
 	}
 }
 
+// Fails at apply in every transaction mode: only a different statement helps.
+func rejectedDropIndexConcurrently(drop *pg_query.DropStmt, statement string) MigrationCheck {
+	multi := len(drop.GetObjects()) > 1
+	cascade := drop.Behavior == pg_query.DropBehavior_DROP_CASCADE
+	var reason string
+	switch {
+	case multi && cascade:
+		reason = "PostgreSQL rejects this form: DROP INDEX CONCURRENTLY does not support CASCADE or dropping multiple objects. Split it into one plain DROP INDEX CONCURRENTLY per index."
+	case multi:
+		reason = "PostgreSQL rejects this form: DROP INDEX CONCURRENTLY does not support dropping multiple objects. Split it into one DROP INDEX CONCURRENTLY per index."
+	default:
+		reason = "PostgreSQL rejects this form: DROP INDEX CONCURRENTLY does not support CASCADE. Drop the objects that CASCADE would take first, then drop the index without CASCADE."
+	}
+	rec := reason + " If the index backs a constraint, drop the constraint instead -- plain DROP INDEX on it fails too."
+	ifExists := ""
+	if drop.GetMissingOk() {
+		ifExists = "IF EXISTS "
+	}
+	safer := make([]string, 0, len(drop.GetObjects()))
+	for _, name := range dropIndexNames(drop) {
+		safer = append(safer, fmt.Sprintf("DROP INDEX CONCURRENTLY %s%s;", ifExists, name))
+	}
+	if len(safer) == 0 {
+		safer = nil
+	}
+	return MigrationCheck{
+		Operation: "DROP INDEX CONCURRENTLY", Safety: SafetyDangerous,
+		LockType: "SHARE UPDATE EXCLUSIVE", LockDuration: "brief (non-blocking)",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: reason},
+		Statement:      statement,
+		SaferSQL:       safer,
+	}
+}
+
+// DROP INDEX objects are qualified-name string lists.
+func dropIndexNames(drop *pg_query.DropStmt) []string {
+	var names []string
+	for _, obj := range drop.GetObjects() {
+		list, ok := obj.GetNode().(*pg_query.Node_List)
+		if !ok || list.List == nil {
+			continue
+		}
+		var parts []string
+		for _, item := range list.List.GetItems() {
+			if s, ok := item.GetNode().(*pg_query.Node_String_); ok {
+				parts = append(parts, quoteIdent(s.String_.GetSval()))
+			}
+		}
+		if len(parts) > 0 {
+			names = append(names, strings.Join(parts, "."))
+		}
+	}
+	return names
+}
+
 // dropIndexCheck passes through into migration_sql: CONCURRENTLY is
-// non-blocking, the plain form a brief metadata-only unlink. CASCADE is the
-// exception -- same reach as DROP CONSTRAINT CASCADE.
+// non-blocking, plain CASCADE the exception (same reach as DROP CONSTRAINT
+// CASCADE). CONCURRENTLY with CASCADE or several names is rejected outright.
 func dropIndexCheck(drop *pg_query.DropStmt, stmtNode *pg_query.Node) MigrationCheck {
 	statement := topLevelStatement(stmtNode)
+	if drop.Concurrent && (drop.Behavior == pg_query.DropBehavior_DROP_CASCADE || len(drop.GetObjects()) > 1) {
+		return rejectedDropIndexConcurrently(drop, statement)
+	}
 	if drop.Behavior == pg_query.DropBehavior_DROP_CASCADE {
-		// keep CONCURRENTLY in the name: the transaction flip keys on it, not
-		// on the CASCADE caution.
-		op := "DROP INDEX"
-		if drop.Concurrent {
-			op = "DROP INDEX CONCURRENTLY"
-		}
 		const rec = "Metadata-only, but CASCADE drops every object that depends on this index too -- including the constraint it backs and foreign keys referencing it. Confirm what references it first."
 		return MigrationCheck{
-			Operation: op, Safety: SafetyCaution,
+			Operation: "DROP INDEX", Safety: SafetyCaution,
 			LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
 			Recommendation: rec,
 			Rationale:      &Rationale{Reason: rec},

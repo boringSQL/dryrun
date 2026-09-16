@@ -837,18 +837,165 @@ func TestCheckMigrationAttachPartition(t *testing.T) {
 	}
 }
 
-// A concurrent DROP INDEX ... CASCADE keeps its CONCURRENTLY label so A4's
-// transaction flip can find it, while staying a caution for the CASCADE.
-func TestCheckMigrationDropIndexConcurrentCascade(t *testing.T) {
-	checks, err := CheckMigration("DROP INDEX CONCURRENTLY users_email_idx CASCADE", migrationTestAnnotated())
+// A9: PostgreSQL rejects DROP INDEX CONCURRENTLY combined with CASCADE or with
+// several index names, in any transaction mode. Both get a split safer_sql.
+func TestCheckMigrationDropIndexConcurrentlyRejectedForms(t *testing.T) {
+	tests := []struct {
+		name   string
+		ddl    string
+		reason string
+		safer  []string
+	}{
+		{
+			name:   "cascade",
+			ddl:    "DROP INDEX CONCURRENTLY users_email_idx CASCADE",
+			reason: "does not support CASCADE",
+			safer:  []string{"DROP INDEX CONCURRENTLY users_email_idx;"},
+		},
+		{
+			name:   "several names",
+			ddl:    "DROP INDEX CONCURRENTLY users_email_idx, users_login_idx",
+			reason: "does not support dropping multiple objects",
+			safer: []string{
+				"DROP INDEX CONCURRENTLY users_email_idx;",
+				"DROP INDEX CONCURRENTLY users_login_idx;",
+			},
+		},
+		{
+			name:   "cascade several names",
+			ddl:    "DROP INDEX CONCURRENTLY users_email_idx, users_login_idx CASCADE",
+			reason: "does not support CASCADE or dropping multiple objects",
+			safer: []string{
+				"DROP INDEX CONCURRENTLY users_email_idx;",
+				"DROP INDEX CONCURRENTLY users_login_idx;",
+			},
+		},
+		{
+			// IF EXISTS does not bypass the rejection, so the split keeps it.
+			name:   "if exists several names",
+			ddl:    "DROP INDEX CONCURRENTLY IF EXISTS users_email_idx, users_login_idx",
+			reason: "does not support dropping multiple objects",
+			safer: []string{
+				"DROP INDEX CONCURRENTLY IF EXISTS users_email_idx;",
+				"DROP INDEX CONCURRENTLY IF EXISTS users_login_idx;",
+			},
+		},
+		{
+			// names render qualified and quoted, PG-folding aside
+			name:   "qualified and quoted names",
+			ddl:    `DROP INDEX CONCURRENTLY myschema."Weird Name", users_login_idx`,
+			reason: "does not support dropping multiple objects",
+			safer: []string{
+				`DROP INDEX CONCURRENTLY myschema."Weird Name";`,
+				"DROP INDEX CONCURRENTLY users_login_idx;",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			checks, err := CheckMigration(tc.ddl, migrationTestAnnotated())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(checks) != 1 {
+				t.Fatalf("got %d checks, want 1", len(checks))
+			}
+			c := checks[0]
+			if c.Operation != "DROP INDEX CONCURRENTLY" {
+				t.Errorf("got operation %q, want DROP INDEX CONCURRENTLY", c.Operation)
+			}
+			if c.Safety != SafetyDangerous {
+				t.Errorf("got safety %q, want dangerous", c.Safety)
+			}
+			if !strings.Contains(c.Rationale.Reason, tc.reason) {
+				t.Errorf("reason %q should contain %q", c.Rationale.Reason, tc.reason)
+			}
+			if got := strings.Join(c.SaferSQL, "|"); got != strings.Join(tc.safer, "|") {
+				t.Errorf("safer_sql = %v, want %v", c.SaferSQL, tc.safer)
+			}
+		})
+	}
+}
+
+// A9: the reason survives the transaction flip -- the form fails either way, so
+// the wrapper message must not replace "PostgreSQL rejects this form".
+func TestCheckMigrationFileDropIndexConcurrentlyRejectedForms(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		reason  string
+	}{
+		{
+			name:    "transactional goose",
+			content: "-- +goose Up\nDROP INDEX CONCURRENTLY users_email_idx CASCADE;\n-- +goose Down\nDROP INDEX users_email_idx;\n",
+			reason:  "does not support CASCADE",
+		},
+		{
+			name:    "no transaction goose",
+			content: "-- +goose NO TRANSACTION\n-- +goose Up\nDROP INDEX CONCURRENTLY users_email_idx, users_login_idx;\n-- +goose Down\nDROP INDEX users_email_idx;\n",
+			reason:  "does not support dropping multiple objects",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report, err := CheckMigrationFile(tc.content, "up", migrationTestAnnotated())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Checks) != 1 {
+				t.Fatalf("got %d checks, want 1", len(report.Checks))
+			}
+			c := report.Checks[0]
+			if c.Safety != SafetyDangerous {
+				t.Errorf("got safety %q, want dangerous", c.Safety)
+			}
+			if !strings.Contains(c.Rationale.Reason, tc.reason) {
+				t.Errorf("reason %q should contain %q", c.Rationale.Reason, tc.reason)
+			}
+			if strings.Contains(c.Rationale.Reason, "wraps this file in") {
+				t.Errorf("wrapper message masked the real reason: %q", c.Rationale.Reason)
+			}
+			if len(c.SaferSQL) == 0 {
+				t.Error("expected a split safer_sql")
+			}
+		})
+	}
+}
+
+// A9: only CONCURRENTLY is rejected -- plain multi-name DROP INDEX stays safe.
+func TestCheckMigrationDropIndexNonConcurrentMultiName(t *testing.T) {
+	checks, err := CheckMigration("DROP INDEX users_email_idx, users_login_idx", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if checks[0].Operation != "DROP INDEX CONCURRENTLY" {
-		t.Errorf("got %q, want DROP INDEX CONCURRENTLY", checks[0].Operation)
+	if checks[0].Safety != SafetySafe {
+		t.Errorf("plain multi-name DROP INDEX should be safe, got %q", checks[0].Safety)
 	}
-	if checks[0].Safety != SafetyCaution {
-		t.Errorf("CASCADE should stay caution, got %q", checks[0].Safety)
+}
+
+// A9 end to end: the split remedy runs under NO TRANSACTION, one DROP INDEX
+// CONCURRENTLY per transaction. Verified live on postgres:18.6 -- the two
+// statements cannot share a psql invocation (one implicit transaction blocks
+// CONCURRENTLY), which is what the NO TRANSACTION marker and the multi-statement
+// header guard against.
+func TestCheckMigrationFileSplitRunsUnderNoTransaction(t *testing.T) {
+	report, err := CheckMigrationFile(
+		"-- +goose NO TRANSACTION\n-- +goose Up\nDROP INDEX CONCURRENTLY users_email_idx, users_login_idx;\n-- +goose Down\nSELECT 1;\n",
+		"up", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.MigrationSQL == "" {
+		t.Fatal("expected a migration_sql with the split drops")
+	}
+	for _, want := range []string{
+		"-- +goose NO TRANSACTION",
+		"DROP INDEX CONCURRENTLY users_email_idx;",
+		"DROP INDEX CONCURRENTLY users_login_idx;",
+		"Run each statement in its own transaction",
+	} {
+		if !strings.Contains(report.MigrationSQL, want) {
+			t.Errorf("migration_sql missing %q:\n%s", want, report.MigrationSQL)
+		}
 	}
 }
 

@@ -458,11 +458,12 @@ func TestMarkConcurrentInTransaction_DownSection(t *testing.T) {
 	}
 }
 
-// A5 closes the A4 hole: the caution carried by DROP INDEX CONCURRENTLY ...
-// CASCADE must also flip inside a transactional file, with the CASCADE note
-// preserved.
-func TestMarkConcurrentInTransaction_FlipsCautionCascade(t *testing.T) {
-	const stmt = "DROP INDEX CONCURRENTLY idx_users CASCADE;"
+// As of A9 no analyzer path emits a caution CONCURRENTLY check -- the last one
+// (DROP INDEX CONCURRENTLY ... CASCADE) is dangerous now. This pins the
+// function's contract for a future caution check: it flips inside a
+// transactional file and the original note survives the flip.
+func TestMarkConcurrentInTransaction_FlipsCaution(t *testing.T) {
+	const stmt = "REINDEX INDEX CONCURRENTLY idx_users;"
 	content := "-- +goose Up\n" + stmt + "\n-- +goose Down\nSELECT 1;\n"
 	env := ParseMigrationEnvelope(content)
 	sec, err := env.Section("up")
@@ -470,11 +471,11 @@ func TestMarkConcurrentInTransaction_FlipsCautionCascade(t *testing.T) {
 		t.Fatal(err)
 	}
 	checks := []MigrationCheck{{
-		Operation:      "DROP INDEX CONCURRENTLY",
+		Operation:      "REINDEX CONCURRENTLY",
 		Safety:         SafetyCaution,
 		Statement:      stmt,
-		Rationale:      &Rationale{Reason: "CASCADE drops dependents", Note: "confirm what references it"},
-		Recommendation: "CASCADE drops dependents",
+		Rationale:      &Rationale{Reason: "takes hours", Note: "confirm the window first"},
+		Recommendation: "takes hours",
 	}}
 	MarkConcurrentInTransaction(env, sec, checks)
 	if checks[0].Safety != SafetyDangerous {
@@ -483,8 +484,8 @@ func TestMarkConcurrentInTransaction_FlipsCautionCascade(t *testing.T) {
 	if !strings.Contains(checks[0].Rationale.Reason, "goose") {
 		t.Errorf("reason should name the framework: %q", checks[0].Rationale.Reason)
 	}
-	if checks[0].Rationale.Note != "confirm what references it" {
-		t.Errorf("the CASCADE note must survive the flip, got %q", checks[0].Rationale.Note)
+	if checks[0].Rationale.Note != "confirm the window first" {
+		t.Errorf("the original note must survive the flip, got %q", checks[0].Rationale.Note)
 	}
 }
 

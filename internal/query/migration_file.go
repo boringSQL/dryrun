@@ -335,7 +335,8 @@ func MarkConcurrentInTransaction(env MigrationEnvelope, section MigrationSection
 	for i := range checks {
 		c := &checks[i]
 		// danger is settled; only safe/caution CONCURRENTLY checks are broken
-		// by the wrapper (e.g. DROP INDEX CONCURRENTLY ... CASCADE).
+		// by the wrapper. A9's rejected forms are already dangerous, so their
+		// reason survives instead of being replaced by the framework message.
 		if c.Safety == SafetyDangerous || !concurrentWordRe.MatchString(c.Operation) {
 			continue
 		}
