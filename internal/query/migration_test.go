@@ -159,6 +159,56 @@ func TestCheckMigrationRename(t *testing.T) {
 	}
 }
 
+// A10: the verdict follows the object kind. Table, column and view renames
+// break every caller that names them; an index is never named by a query; a
+// constraint or sequence only breaks callers that spell the old name out.
+func TestCheckMigrationRenameByKind(t *testing.T) {
+	tests := []struct {
+		ddl    string
+		safety SafetyRating
+		prose  string
+	}{
+		{"ALTER TABLE users RENAME TO customers", SafetyDangerous, ""},
+		{"ALTER TABLE users RENAME COLUMN email TO login", SafetyDangerous, ""},
+		{"ALTER VIEW users_view RENAME TO accounts_view", SafetyDangerous, ""},
+		{"ALTER MATERIALIZED VIEW users_mv RENAME TO accounts_mv", SafetyDangerous, ""},
+		{"ALTER INDEX users_email_idx RENAME TO users_login_idx", SafetySafe, "pg_indexes"},
+		{"ALTER TABLE users RENAME CONSTRAINT users_email_key TO users_login_key", SafetyCaution, "ON CONFLICT"},
+		{"ALTER SEQUENCE users_id_seq RENAME TO customers_id_seq", SafetyCaution, "nextval"},
+	}
+	for _, tt := range tests {
+		checks, err := CheckMigration(tt.ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", tt.ddl, err)
+		}
+		c := checkByOp(t, checks, "RENAME")
+		if c.Safety != tt.safety {
+			t.Errorf("%s: got %q, want %q", tt.ddl, c.Safety, tt.safety)
+		}
+		if c.LockType != "ACCESS EXCLUSIVE" {
+			t.Errorf("%s: got lock %q, want ACCESS EXCLUSIVE", tt.ddl, c.LockType)
+		}
+		if tt.safety != SafetyDangerous && strings.Contains(c.Recommendation, "DANGEROUS") {
+			t.Errorf("%s: %s verdict recommends with DANGEROUS prose:\n%s", tt.ddl, tt.safety, c.Recommendation)
+		}
+		if tt.prose != "" && !strings.Contains(c.Recommendation, tt.prose) {
+			t.Errorf("%s: recommendation should mention %q, got:\n%s", tt.ddl, tt.prose, c.Recommendation)
+		}
+	}
+}
+
+// A rename kind A10 does not model (a trigger, a type) keeps the worst case
+// rather than falling through to a softened verdict.
+func TestCheckMigrationRenameUnknownKindStaysDangerous(t *testing.T) {
+	checks, err := CheckMigration("ALTER TRIGGER trg ON users RENAME TO trg2", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks[0].Safety != SafetyDangerous {
+		t.Errorf("an unmodeled rename kind must stay dangerous, got %q", checks[0].Safety)
+	}
+}
+
 // Regression for the fdd7995 stub: a known table must carry its sizing.
 func TestCheckMigrationCarriesTableSize(t *testing.T) {
 	checks, err := CheckMigration("CREATE INDEX idx_o ON orders (status)", migrationTestAnnotated())
@@ -253,6 +303,9 @@ func TestCheckMigrationProseNeverContradictsVerdict(t *testing.T) {
 		"CREATE TABLE fresh (id bigint); CREATE INDEX idx_fresh ON fresh (id);",
 		"DROP TABLE orders",
 		"ALTER TABLE orders RENAME TO orders_old",
+		"ALTER INDEX orders_user_id_idx RENAME TO orders_user_created_idx",
+		"ALTER TABLE orders RENAME CONSTRAINT orders_total_check TO orders_total_nonneg",
+		"ALTER SEQUENCE orders_id_seq RENAME TO sales_id_seq",
 		// DROP INDEX
 		"DROP INDEX orders_user_id_idx",
 		"DROP INDEX CONCURRENTLY orders_user_id_idx",

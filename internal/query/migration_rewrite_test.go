@@ -419,6 +419,9 @@ func TestRationalePresentAcrossConstructionSites(t *testing.T) {
 		"CREATE INDEX CONCURRENTLY idx_o ON orders (user_id)",                                       // CREATE INDEX, already concurrent
 		"CREATE INDEX idx_o ON orders (user_id)",                                                    // CREATE INDEX, rewrite offered
 		"ALTER TABLE orders RENAME COLUMN total TO amount",                                          // RENAME
+		"ALTER INDEX orders_user_id_idx RENAME TO orders_buyer_idx",                                 // RENAME INDEX
+		"ALTER TABLE orders RENAME CONSTRAINT orders_total_check TO orders_total_nonneg",            // RENAME CONSTRAINT
+		"ALTER SEQUENCE orders_id_seq RENAME TO sales_id_seq",                                       // RENAME SEQUENCE
 		"DROP TABLE orders", // fallback keyword check
 	}
 	for _, ddl := range ddls {
@@ -612,6 +615,46 @@ func TestComposeMigrationSQLAbsentWhenRenamePresent(t *testing.T) {
 	}
 	if got := ComposeMigrationSQL(checks); got != "" {
 		t.Errorf("expected no migration_sql, got:\n%s", got)
+	}
+}
+
+// A10: an index rename is safe and carries a Statement, so it passes through
+// migration_sql beside another statement's rewrite -- it must not silently
+// suppress the whole file the way the dangerous kinds do.
+func TestComposeMigrationSQLPassesThroughIndexRename(t *testing.T) {
+	checks, err := CheckMigration(
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nALTER INDEX orders_user_id_idx RENAME TO orders_buyer_idx",
+		migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ComposeMigrationSQL(checks)
+	if got == "" {
+		t.Fatal("expected migration_sql")
+	}
+	if !strings.Contains(got, "ALTER INDEX orders_user_id_idx RENAME TO orders_buyer_idx;") {
+		t.Errorf("migration_sql lost the index rename passthrough:\n%s", got)
+	}
+	if _, err := pg_query.Parse(got); err != nil {
+		t.Fatalf("migration_sql does not parse: %v\n%s", err, got)
+	}
+}
+
+// A10: a constraint or sequence rename is caution with no mechanical rewrite,
+// so like every other caution it suppresses migration_sql rather than letting
+// the file look saveable.
+func TestComposeMigrationSQLAbsentForCautionRename(t *testing.T) {
+	for _, ddl := range []string{
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nALTER TABLE orders RENAME CONSTRAINT orders_total_check TO orders_total_nonneg",
+		"ALTER TABLE orders ADD CHECK (total >= 0);\nALTER SEQUENCE orders_id_seq RENAME TO sales_id_seq",
+	} {
+		checks, err := CheckMigration(ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+		if got := ComposeMigrationSQL(checks); got != "" {
+			t.Errorf("%s: expected no migration_sql, got:\n%s", ddl, got)
+		}
 	}
 }
 
@@ -861,6 +904,35 @@ func TestComposeMigrationSQLPassThroughFidelity(t *testing.T) {
 	}
 	if _, err := pg_query.Parse(got); err != nil {
 		t.Fatalf("migration_sql does not parse: %v\n%s", err, got)
+	}
+}
+
+// RenameStatements must deparse faithfully for the migration_sql passthrough:
+// quoting, case-sensitive idents, schema qualification, IF EXISTS and ONLY all
+// survive round-trip. If the deparser ever drops a rename node, the safe index
+// path falls back to a hand-built statement that would lose IF EXISTS -- this
+// pin makes that visible.
+func TestRenameStatementPassthroughFidelity(t *testing.T) {
+	tests := []struct {
+		ddl  string
+		want string
+	}{
+		{`ALTER INDEX orders_user_id_idx RENAME TO orders_buyer_idx`, `ALTER INDEX orders_user_id_idx RENAME TO orders_buyer_idx;`},
+		{"ALTER INDEX public.\"Weird_Idx\" RENAME TO \"Weird_New\"", `ALTER INDEX public."Weird_Idx" RENAME TO "Weird_New";`},
+		{`ALTER INDEX IF EXISTS some_idx RENAME TO some_idx2`, `ALTER INDEX IF EXISTS some_idx RENAME TO some_idx2;`},
+		{`ALTER TABLE IF EXISTS ONLY orders RENAME TO orders2`, `ALTER TABLE IF EXISTS ONLY orders RENAME TO orders2;`},
+		{`ALTER TABLE public.users RENAME COLUMN "Email" TO "Login"`, `ALTER TABLE public.users RENAME COLUMN "Email" TO "Login";`},
+		{`ALTER SEQUENCE public."Seq_1" RENAME TO "Seq_2"`, `ALTER SEQUENCE public."Seq_1" RENAME TO "Seq_2";`},
+	}
+	for _, tc := range tests {
+		checks, err := CheckMigration(tc.ddl, migrationTestAnnotated())
+		if err != nil {
+			t.Fatalf("%s: %v", tc.ddl, err)
+		}
+		c := checkByOp(t, checks, "RENAME")
+		if c.Statement != tc.want {
+			t.Errorf("%s: statement = %q, want %q", tc.ddl, c.Statement, tc.want)
+		}
 	}
 }
 

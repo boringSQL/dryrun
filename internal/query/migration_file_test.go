@@ -488,6 +488,24 @@ func TestMarkConcurrentInTransaction_FlipsCautionCascade(t *testing.T) {
 	}
 }
 
+// A safe RENAME check names no CONCURRENTLY and the flip only looks at the
+// operation, so an index rename inside a transactional goose file stays safe.
+func TestMarkConcurrentInTransaction_LeavesRenameSafe(t *testing.T) {
+	env := ParseMigrationEnvelope("-- +goose Up\nALTER INDEX users_email_idx RENAME TO users_login_idx;\n-- +goose Down\nSELECT 1;\n")
+	sec, err := env.Section("up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks, err := CheckMigration("ALTER INDEX users_email_idx RENAME TO users_login_idx", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	MarkConcurrentInTransaction(env, sec, checks)
+	if checks[0].Safety != SafetySafe {
+		t.Errorf("index rename must stay safe inside a transactional file, got %q", checks[0].Safety)
+	}
+}
+
 // REINDEX CONCURRENTLY is named CONCURRENTLY so the same flip catches it.
 func TestMarkConcurrentInTransaction_FlipsReindex(t *testing.T) {
 	const stmt = "REINDEX INDEX CONCURRENTLY idx_users;"

@@ -131,7 +131,7 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 			if n.RenameStmt.GetRenameType() == pg_query.ObjectType_OBJECT_TABLE {
 				cat.rekey(n.RenameStmt.GetRelation(), n.RenameStmt.GetNewname())
 			}
-			checks = append(checks, analyzeRename(a.Schema))
+			checks = append(checks, analyzeRename(n.RenameStmt, stmt.Stmt))
 		case *pg_query.Node_DropStmt:
 			switch n.DropStmt.RemoveType {
 			case pg_query.ObjectType_OBJECT_TABLE:
@@ -1017,7 +1017,54 @@ func ComposeMigrationSQL(checks []MigrationCheck) string {
 	return header.String() + strings.Join(stmts, "\n")
 }
 
-func analyzeRename(snap *schema.SchemaSnapshot) MigrationCheck {
+// RENAME is dangerous for what callers name (table, column, view), safe for an
+// index, and caution for a constraint or sequence.
+func analyzeRename(stmt *pg_query.RenameStmt, stmtNode *pg_query.Node) MigrationCheck {
+	statement := topLevelStatement(stmtNode)
+	switch stmt.GetRenameType() {
+	case pg_query.ObjectType_OBJECT_INDEX:
+		const rec = "Renaming an index is metadata-only (brief ACCESS EXCLUSIVE on the index): queries never name indexes, so no query breaks. Only planner hints (pg_hint_plan) and scripts or later migrations that reference the old name -- pg_indexes readers, DROP INDEX, REINDEX INDEX -- need updating."
+		return MigrationCheck{
+			Operation: "RENAME", Safety: SafetySafe,
+			LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
+			Recommendation: rec,
+			Rationale:      &Rationale{Reason: rec},
+			RollbackDDL:    strp("ALTER INDEX ... RENAME TO <old_name>;"),
+			Statement:      indexRenameStatement(stmt, statement),
+		}
+	case pg_query.ObjectType_OBJECT_TABCONSTRAINT:
+		const rec = "Renaming a constraint is metadata-only (brief ACCESS EXCLUSIVE); its backing index is renamed with it. Only callers that spell out the old name break: a later migration or Down file with DROP CONSTRAINT <old_name> or REINDEX INDEX <old_name>, ON CONFLICT ON CONSTRAINT <old_name>, code matching constraint names in error messages, and scripts reading pg_constraint. Grep for the old name before applying."
+		return MigrationCheck{
+			Operation: "RENAME", Safety: SafetyCaution,
+			LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
+			Recommendation: rec,
+			Rationale:      &Rationale{Reason: rec},
+			RollbackDDL:    strp("ALTER TABLE ... RENAME CONSTRAINT ... TO <old_name>;"),
+			Statement:      statement,
+		}
+	case pg_query.ObjectType_OBJECT_SEQUENCE:
+		const rec = "Renaming a sequence is metadata-only (brief ACCESS EXCLUSIVE). DEFAULT expressions and OWNED BY reference it by OID and follow the rename, so only a literal nextval('<old_name>') in SQL or application code breaks -- plus any ORM that infers the sequence name from the table and column. Grep for the old name before applying."
+		return MigrationCheck{
+			Operation: "RENAME", Safety: SafetyCaution,
+			LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
+			Recommendation: rec,
+			Rationale:      &Rationale{Reason: rec},
+			RollbackDDL:    strp("ALTER SEQUENCE ... RENAME TO <old_name>;"),
+			Statement:      statement,
+		}
+	case pg_query.ObjectType_OBJECT_VIEW, pg_query.ObjectType_OBJECT_MATVIEW:
+		e := jit.Rename("<old_name>", "<new_name>")
+		return MigrationCheck{
+			Operation: "RENAME", Safety: SafetyDangerous,
+			LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
+			Recommendation: e.String(),
+			Rationale:      &Rationale{Reason: e.Reason, Note: e.Note},
+			RollbackDDL:    strp("ALTER VIEW/MATERIALIZED VIEW ... RENAME TO <old_name>;"),
+			Statement:      statement,
+		}
+	}
+
+	// table, column and any unmodeled kind: callers name it, worst case
 	e := jit.Rename("<old_name>", "<new_name>")
 	return MigrationCheck{
 		Operation: "RENAME", Safety: SafetyDangerous,
@@ -1025,7 +1072,17 @@ func analyzeRename(snap *schema.SchemaSnapshot) MigrationCheck {
 		Recommendation: e.String(),
 		Rationale:      &Rationale{Reason: e.Reason, Note: e.Note},
 		RollbackDDL:    strp("ALTER TABLE/COLUMN ... RENAME TO <old_name>;"),
+		Statement:      statement,
 	}
+}
+
+// A hand-built fallback: an empty Statement would make a safe index rename
+// suppress migration_sql entirely.
+func indexRenameStatement(stmt *pg_query.RenameStmt, deparsed string) string {
+	if deparsed != "" {
+		return deparsed
+	}
+	return fmt.Sprintf("ALTER INDEX %s RENAME TO %s;", relationName(stmt.GetRelation()), quoteIdent(stmt.GetNewname()))
 }
 
 func dropTableCheck() MigrationCheck {
