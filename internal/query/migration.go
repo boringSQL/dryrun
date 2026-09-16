@@ -89,7 +89,7 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 		case *pg_query.Node_IndexStmt:
 			checks = append(checks, analyzeCreateIndex(n.IndexStmt, a, names, cat))
 		case *pg_query.Node_CreateStmt:
-			checks = append(checks, analyzeCreateTable(n.CreateStmt, stmt.Stmt))
+			checks = append(checks, analyzeCreateTable(n.CreateStmt, a, cat, stmt.Stmt))
 			rel := n.CreateStmt.GetRelation()
 			if !n.CreateStmt.IfNotExists {
 				cat.markCreated(rel, isPartitionedParent(n.CreateStmt), false)
@@ -99,6 +99,34 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 		case *pg_query.Node_CreateTableAsStmt:
 			checks = append(checks, analyzeCreateTableAs(n.CreateTableAsStmt, stmt.Stmt))
 			// CTAS is born populated: never tracked as empty
+		case *pg_query.Node_VacuumStmt:
+			if n.VacuumStmt.GetIsVacuumcmd() {
+				// VACUUM (FULL) locks stronger and size-dependent: leave unmodeled.
+				checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+			} else {
+				checks = append(checks, analyzeAnalyze(n.VacuumStmt, a, stmt.Stmt))
+			}
+		case *pg_query.Node_CreateStatsStmt:
+			checks = append(checks, analyzeCreateStats(n.CreateStatsStmt, a, stmt.Stmt))
+		case *pg_query.Node_CreateSchemaStmt:
+			if len(n.CreateSchemaStmt.GetSchemaElts()) > 0 {
+				// embedded DDL inside the schema
+				checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+			} else {
+				checks = append(checks, createSchemaCheck(stmt.Stmt))
+			}
+		case *pg_query.Node_CreateExtensionStmt:
+			// the install script can create objects and write rows
+			cat.invalidateAll()
+			checks = append(checks, createExtensionCheck(stmt.Stmt))
+		case *pg_query.Node_SelectStmt:
+			if isSetvalSelect(n.SelectStmt) {
+				checks = append(checks, setvalCheck(stmt.Stmt))
+			} else {
+				checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+			}
+		case *pg_query.Node_AlterEnumStmt:
+			checks = append(checks, analyzeAlterEnum(n.AlterEnumStmt, stmt.Stmt))
 		case *pg_query.Node_InsertStmt:
 			cat.invalidate(n.InsertStmt.GetRelation())
 			checks = append(checks, analyzeDML("INSERT", n.InsertStmt.GetRelation(), true, a, cat, stmt.Stmt))
@@ -549,8 +577,13 @@ func analyzeEmptyTableAlterCmd(cmd *pg_query.AlterTableCmd, tableName, statement
 	}
 }
 
-func analyzeCreateTable(stmt *pg_query.CreateStmt, stmtNode *pg_query.Node) MigrationCheck {
-	tableName := relationName(stmt.GetRelation())
+func analyzeCreateTable(stmt *pg_query.CreateStmt, a *schema.AnnotatedSchema, cat *fileCatalog, stmtNode *pg_query.Node) MigrationCheck {
+	rel := stmt.GetRelation()
+	// IF NOT EXISTS on an existing table is a no-op: report real facts, not the empty create.
+	if stmt.IfNotExists && (cat.hasCreated(rel) || (a.Schema != nil && lookupTable(a.Schema, rel) != nil)) {
+		return createTableNoOp(rel, a, cat, stmtNode)
+	}
+	tableName := relationName(rel)
 	const rec = "Creates an empty table -- metadata-only, no data movement. Inline PRIMARY KEY/UNIQUE build empty indexes immediately."
 	var inlineFK []string
 	inlineFK = referencedTables(stmt)
@@ -567,6 +600,159 @@ func analyzeCreateTable(stmt *pg_query.CreateStmt, stmtNode *pg_query.Node) Migr
 		Rationale:      &Rationale{Reason: rec, Note: note},
 		Statement:      topLevelStatement(stmtNode),
 	}
+}
+
+func createTableNoOp(rel *pg_query.RangeVar, a *schema.AnnotatedSchema, cat *fileCatalog, stmtNode *pg_query.Node) MigrationCheck {
+	const rec = "No-op: the table already exists, so CREATE TABLE IF NOT EXISTS does nothing -- PostgreSQL emits a NOTICE and skips it."
+	var reason string
+	if cat.hasCreated(rel) {
+		reason = "No-op: this migration created the table earlier in the file, so CREATE TABLE IF NOT EXISTS does nothing -- PostgreSQL emits a NOTICE and skips it."
+	} else {
+		reason = rec + " Assumes the snapshot is current: if the table were absent now, the CREATE would build an empty table."
+	}
+	c := MigrationCheck{
+		Operation: "CREATE TABLE", Table: strp(relationName(rel)), Safety: SafetySafe,
+		LockType: "none", LockDuration: "none (no-op)",
+		Recommendation: reason,
+		Rationale:      &Rationale{Reason: reason},
+		Statement:      topLevelStatement(stmtNode),
+	}
+	// Size from the snapshot only: a table this file created has no captured size.
+	if !cat.hasCreated(rel) {
+		size, rows, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()})
+		c.TableSize = size
+		c.RowEstimate = rows
+		if size == nil {
+			c.Rationale.Note = "No fresh planner capture for this table: table size and row count are unknown, but the CREATE still does nothing."
+		}
+	}
+	return c
+}
+
+// ANALYZE: SHARE UPDATE EXCLUSIVE, blocks neither reads nor writes.
+func analyzeAnalyze(stmt *pg_query.VacuumStmt, a *schema.AnnotatedSchema, stmtNode *pg_query.Node) MigrationCheck {
+	const rec = "ANALYZE takes SHARE UPDATE EXCLUSIVE: it blocks neither reads nor writes and conflicts only with DDL and other VACUUM/ANALYZE runs. The scan duration scales with table size."
+	c := MigrationCheck{
+		Operation: "ANALYZE", Safety: SafetySafe,
+		LockType: "SHARE UPDATE EXCLUSIVE", LockDuration: "brief (scan scales with size)",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      topLevelStatement(stmtNode),
+	}
+	if rels := stmt.GetRels(); len(rels) > 0 {
+		if rv := rels[0].GetVacuumRelation().GetRelation(); rv != nil {
+			c.Table = strp(relationName(rv))
+			size, rows, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rv), Name: rv.GetRelname()})
+			c.TableSize, c.RowEstimate = size, rows
+		}
+	}
+	return c
+}
+
+func analyzeCreateStats(stmt *pg_query.CreateStatsStmt, a *schema.AnnotatedSchema, stmtNode *pg_query.Node) MigrationCheck {
+	const rec = "CREATE STATISTICS takes SHARE UPDATE EXCLUSIVE on the table: it blocks neither reads nor writes. It stores the definition only -- the statistics are collected by the next ANALYZE."
+	c := MigrationCheck{
+		Operation: "CREATE STATISTICS", Safety: SafetySafe,
+		LockType: "SHARE UPDATE EXCLUSIVE", LockDuration: "brief (metadata-only)",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      topLevelStatement(stmtNode),
+	}
+	if rels := stmt.GetRelations(); len(rels) > 0 {
+		if rv := rels[0].GetRangeVar(); rv != nil {
+			c.Table = strp(relationName(rv))
+			size, rows, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rv), Name: rv.GetRelname()})
+			c.TableSize, c.RowEstimate = size, rows
+		}
+	}
+	return c
+}
+
+func createSchemaCheck(stmtNode *pg_query.Node) MigrationCheck {
+	const rec = "CREATE SCHEMA is catalog-only: it creates a namespace and takes no lock on any existing table."
+	return MigrationCheck{
+		Operation: "CREATE SCHEMA", Safety: SafetySafe,
+		LockType: "none", LockDuration: "none",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      topLevelStatement(stmtNode),
+	}
+}
+
+func createExtensionCheck(stmtNode *pg_query.Node) MigrationCheck {
+	const rec = "CREATE EXTENSION runs the extension's install script (skipped when the extension is already installed), which can contain arbitrary DDL, so the objects created and the locks taken depend on the extension: in-catalog extensions (pgcrypto, citext, uuid-ossp) only add functions and types, while others create tables. It also needs the extension available on the server -- on Cloud SQL, only its allowlist."
+	return MigrationCheck{
+		Operation: "CREATE EXTENSION", Safety: SafetyCaution,
+		LockType: "depends on the extension", LockDuration: "depends on the install script",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      topLevelStatement(stmtNode),
+	}
+}
+
+// strict: bare SELECT, one target, no FROM, setval (pg_catalog-qualified ok).
+func isSetvalSelect(stmt *pg_query.SelectStmt) bool {
+	if stmt == nil || len(stmt.GetTargetList()) != 1 || len(stmt.GetFromClause()) != 0 {
+		return false
+	}
+	rt := stmt.GetTargetList()[0].GetResTarget()
+	if rt == nil || rt.GetVal() == nil {
+		return false
+	}
+	call := rt.GetVal().GetFuncCall()
+	if call == nil {
+		return false
+	}
+	names := call.GetFuncname()
+	switch len(names) {
+	case 1:
+		return strings.EqualFold(names[0].GetString_().GetSval(), "setval")
+	case 2:
+		return strings.EqualFold(names[0].GetString_().GetSval(), "pg_catalog") &&
+			strings.EqualFold(names[1].GetString_().GetSval(), "setval")
+	}
+	return false
+}
+
+func setvalCheck(stmtNode *pg_query.Node) MigrationCheck {
+	const rec = "SELECT setval(...) resets a sequence's current value: a catalog-level update with no table lock. If the value is below the column's current maximum, later inserts fail with duplicate-key errors -- verify it against the column's max."
+	return MigrationCheck{
+		Operation: "SELECT setval", Safety: SafetySafe,
+		LockType: "none", LockDuration: "brief (catalog update)",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      topLevelStatement(stmtNode),
+	}
+}
+
+// RENAME VALUE and ADD VALUE share AlterEnumStmt; split on OldVal.
+func analyzeAlterEnum(stmt *pg_query.AlterEnumStmt, stmtNode *pg_query.Node) MigrationCheck {
+	if stmt.GetOldVal() == "" {
+		// ADD VALUE: no existing literal to break
+		return unmodeledCheck(topLevelStatement(stmtNode))
+	}
+	oldVal, newVal := stmt.GetOldVal(), stmt.GetNewVal()
+	rec := fmt.Sprintf("Renames an enum value (metadata-only, brief ACCESS EXCLUSIVE on the type). Rows store the value by OID and follow the rename, so existing data stays consistent; but application code or SQL comparing against the old literal '%s' silently stops matching. Grep for the old value before applying.", oldVal)
+	return MigrationCheck{
+		Operation: "RENAME", Safety: SafetyCaution,
+		LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		RollbackDDL:    strp(fmt.Sprintf("ALTER TYPE %s RENAME VALUE %s TO %s;", enumTypeName(stmt.GetTypeName()), quoteLiteral(newVal), quoteLiteral(oldVal))),
+		Statement:      topLevelStatement(stmtNode),
+	}
+}
+
+func enumTypeName(names []*pg_query.Node) string {
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		parts = append(parts, quoteIdent(n.GetString_().GetSval()))
+	}
+	return strings.Join(parts, ".")
+}
+
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 func analyzeCreateTableAs(stmt *pg_query.CreateTableAsStmt, stmtNode *pg_query.Node) MigrationCheck {

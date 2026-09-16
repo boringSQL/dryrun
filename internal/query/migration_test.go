@@ -175,6 +175,7 @@ func TestCheckMigrationRenameByKind(t *testing.T) {
 		{"ALTER INDEX users_email_idx RENAME TO users_login_idx", SafetySafe, "pg_indexes"},
 		{"ALTER TABLE users RENAME CONSTRAINT users_email_key TO users_login_key", SafetyCaution, "ON CONFLICT"},
 		{"ALTER SEQUENCE users_id_seq RENAME TO customers_id_seq", SafetyCaution, "nextval"},
+		{"ALTER TYPE mood RENAME VALUE 'sad' TO 'blue'", SafetyCaution, "old literal"},
 	}
 	for _, tt := range tests {
 		checks, err := CheckMigration(tt.ddl, migrationTestAnnotated())
