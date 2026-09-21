@@ -336,7 +336,7 @@ dryrun snapshot take --push
 dryrun snapshot pull --remote ghcr
 ```
 
-`pull` fetches only the latest take by default, so cold pulls (fresh CI, empty `history.db`) stay cheap regardless of how much history the registry holds. Use `--full` to backfill the entire history, or `--since 7d` (also `2w`, `24h`, or a UTC date like `2026-01-01`) for a window. `push` always sends your full local history; since it is incremental by content hash, an owner that pushes on a cadence only uploads the new observations each run.
+`push` and `pull` both move only the latest take by default, so cold pulls (fresh CI, empty `history.db`) and shared stores stay cheap regardless of how much history either side holds. Use `--full` to sync the entire history, or `--since 7d` (also `2w`, `24h`, or a UTC date like `2026-01-01`) for a window. Either way the copy is incremental by content hash, so an owner that pushes on a cadence only uploads the new observations each run.
 
 `--ref` is the registry base. Each database gets its own repository under it, `<ref>/<project_id>/<database_id>`, so `myapp`'s `auth` database lands at `ghcr.io/myorg/dryrun/myapp/auth`. Snapshots map to OCI artifacts addressed by content hash, so pushing the same one twice changes nothing and shared blobs deduplicate on the registry. For Google Artifact Registry, run `gcloud auth configure-docker us-docker.pkg.dev` in place of `docker login`; the rest is identical.
 

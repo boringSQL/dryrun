@@ -41,13 +41,22 @@ type SyncOutcome struct {
 func snapshotPushCmd() *cobra.Command {
 	var (
 		toPath, ociRef, remoteName string
-		all                        bool
+		all, full                  bool
+		since                      string
 		historyDB                  string
 	)
 	cmd := &cobra.Command{
 		Use:   "push",
-		Short: "Push snapshots from history.db to a filesystem store or OCI registry",
+		Short: "Push the latest snapshot from history.db to a filesystem store or OCI registry",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			scope := pullScope{latest: !full}
+			if since != "" {
+				from, err := parseSince(since)
+				if err != nil {
+					return err
+				}
+				scope.rng = history.TimeRange{From: &from}
+			}
 			src, err := openHistoryStore(historyDB)
 			if err != nil {
 				return err
@@ -57,13 +66,15 @@ func snapshotPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runSync(cmd.Context(), src, dst, all, fullScope(), os.Stdout)
+			return runSync(cmd.Context(), src, dst, all, scope, os.Stdout)
 		},
 	}
 	cmd.Flags().StringVar(&toPath, "to-path", "", "destination directory")
 	cmd.Flags().StringVar(&ociRef, "oci", "", "OCI registry base ref (e.g. ghcr.io/org/dryrun)")
 	cmd.Flags().StringVar(&remoteName, "remote", "", "configured [[remote]] name")
 	cmd.Flags().BoolVar(&all, "all", false, "sync all keys from the source")
+	cmd.Flags().BoolVar(&full, "full", false, "push the entire history, not just the latest take")
+	cmd.Flags().StringVar(&since, "since", "", "only push snapshots newer than a duration (7d, 2w, 24h) or UTC date (2006-01-02)")
 	cmd.Flags().StringVar(&historyDB, "history-db", "", "history database path")
 	return cmd
 }
