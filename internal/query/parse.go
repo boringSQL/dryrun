@@ -888,7 +888,9 @@ func appendFromTable(node *pg_query.Node, out *[]string) {
 		*out = append(*out, name)
 	case *pg_query.Node_RangeSubselect:
 		rs := n.RangeSubselect
-		if rs != nil && rs.Alias != nil && rs.Alias.Aliasname != "" {
+		// a LATERAL subquery is correlated with the outer FROM by construction;
+		// its link sits in its own WHERE, out of this scope's reach
+		if rs != nil && !rs.Lateral && rs.Alias != nil && rs.Alias.Aliasname != "" {
 			*out = append(*out, rs.Alias.Aliasname)
 		}
 	case *pg_query.Node_JoinExpr:

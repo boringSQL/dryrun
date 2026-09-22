@@ -250,6 +250,8 @@ func TestCartesianJoinNoWarning(t *testing.T) {
 		"wrapped columns":  "SELECT * FROM users u JOIN orders o ON LOWER(u.email) = o.x",
 		"full outer":       "SELECT * FROM users u FULL JOIN orders o ON u.id = o.user_id",
 		"three way linked": "SELECT * FROM users u, orders o, events e WHERE u.id = o.user_id AND o.user_id = e.user_id",
+		"lateral on true":  "SELECT * FROM users u LEFT JOIN LATERAL (SELECT count(*) n FROM orders o WHERE o.user_id = u.id) x ON true",
+		"lateral comma":    "SELECT * FROM users u, LATERAL (SELECT * FROM orders o WHERE o.user_id = u.id LIMIT 3) x",
 	}
 	for name, sql := range cases {
 		result, err := ValidateQuery(sql, snap)
