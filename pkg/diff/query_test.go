@@ -2,7 +2,9 @@ package diff
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +22,17 @@ func qEntry(fp, sql string, calls int64, ms float64, rows int64) snapshot.QueryS
 		Rows:            rows,
 		Members:         []snapshot.QueryStatsMember{{QueryID: 1, Calls: calls}},
 	}
+}
+
+// qEntryBlks is qEntry with raw member buffer counters, the shape a real
+// capture persists.
+func qEntryBlks(fp, sql string, calls int64, ms float64, rows int64, hit, read, dirtied, written, tempRead, tempWritten int64) snapshot.QueryStatsEntry {
+	e := qEntry(fp, sql, calls, ms, rows)
+	m := &e.Members[0]
+	m.SharedBlksHit, m.SharedBlksRead = &hit, &read
+	m.SharedBlksDirtied, m.SharedBlksWritten = &dirtied, &written
+	m.TempBlksRead, m.TempBlksWritten = &tempRead, &tempWritten
+	return e
 }
 
 func qSnap(node string, at time.Time, entries ...snapshot.QueryStatsEntry) *snapshot.QueryStatsSnapshot {
@@ -123,6 +136,179 @@ func TestDiffQueryStats(t *testing.T) {
 		// 500 + 200 (new) + 0 + 0 (gone contributes nothing)
 		if d.CallsDelta != 700 {
 			t.Errorf("calls delta %d, want 700", d.CallsDelta)
+		}
+	})
+}
+
+// The acceptance pair: a shape whose blocks/call doubled from 4.55 to 8.87,
+// the number that had to be computed by hand before this existed.
+func TestDiffQueryStats_AcceptanceWindowMeanBlks(t *testing.T) {
+	t0 := time.Date(2026, 9, 16, 6, 25, 40, 0, time.UTC)
+	bs := 8192
+
+	from := qSnap("primary", t0,
+		qEntryBlks("sha1:442f4ffedbe18c51", "SELECT * FROM orders WHERE id = $1", 100, 200, 100, 400, 55, 1, 2, 0, 0))
+	from.BlockSize = &bs
+	to := qSnap("primary", t0.Add(24*time.Hour),
+		qEntryBlks("sha1:442f4ffedbe18c51", "SELECT * FROM orders WHERE id = $1", 200, 8000, 200, 1200, 142, 3, 4, 0, 0))
+	to.BlockSize = &bs
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "sha1:442f4ffedbe18c51")
+	if e.WindowMeanBlks == nil || math.Abs(*e.WindowMeanBlks-8.87) > 0.001 {
+		t.Fatalf("window_mean_blks = %v, want 8.87", e.WindowMeanBlks)
+	}
+	if e.PriorMeanBlks == nil || math.Abs(*e.PriorMeanBlks-4.55) > 0.001 {
+		t.Fatalf("prior_mean_blks = %v, want 4.55", e.PriorMeanBlks)
+	}
+	if got := blksCell(e); got != "8.87<-4.55" {
+		t.Errorf("blksCell = %q, want 8.87<-4.55", got)
+	}
+	if e.SharedBlksHitDelta != 800 || e.SharedBlksReadDelta != 87 {
+		t.Errorf("deltas hit=%d read=%d, want 800 and 87", e.SharedBlksHitDelta, e.SharedBlksReadDelta)
+	}
+	if d.SharedBlksHitDelta != 800 || d.SharedBlksReadDelta != 87 {
+		t.Errorf("envelope deltas hit=%d read=%d, want 800 and 87", d.SharedBlksHitDelta, d.SharedBlksReadDelta)
+	}
+	if d.BlockSize == nil || *d.BlockSize != bs {
+		t.Errorf("block_size = %v, want %d", d.BlockSize, bs)
+	}
+}
+
+// No calls means undefined, not free: the mean must marshal to null.
+func TestDiffQueryStats_WindowMeanBlksNullOnZeroCalls(t *testing.T) {
+	t0 := time.Date(2026, 9, 22, 6, 45, 36, 0, time.UTC)
+	from := qSnap("primary", t0,
+		qEntryBlks("fp-flat", "SELECT 1", 100, 200, 100, 800, 87, 0, 0, 0, 0))
+	to := qSnap("primary", t0.Add(time.Hour),
+		qEntryBlks("fp-flat", "SELECT 1", 100, 200, 100, 880, 95, 0, 0, 0, 0))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "fp-flat")
+	if e.CallsDelta != 0 {
+		t.Fatalf("calls delta %d, want 0", e.CallsDelta)
+	}
+	if e.WindowMeanBlks != nil {
+		t.Fatalf("window_mean_blks = %v, want nil", *e.WindowMeanBlks)
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"window_mean_blks":null`)) {
+		t.Errorf("window_mean_blks must marshal as null, got %s", b)
+	}
+}
+
+// A buffer counter moving backwards is an eviction or reset; the window delta
+// must not go negative or into the envelope.
+func TestDiffQueryStats_BackwardsBuffersTriggerReset(t *testing.T) {
+	t0 := time.Date(2026, 9, 22, 6, 45, 36, 0, time.UTC)
+	from := qSnap("primary", t0,
+		qEntryBlks("fp", "SELECT 1", 100, 200, 100, 1000, 100, 0, 0, 0, 0))
+	to := qSnap("primary", t0.Add(time.Hour),
+		qEntryBlks("fp", "SELECT 1", 200, 800, 200, 500, 50, 0, 0, 0, 0))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "fp")
+	if e.Status != QueryReset {
+		t.Errorf("status %q, want %q", e.Status, QueryReset)
+	}
+	if e.SharedBlksHitDelta < 0 || e.SharedBlksReadDelta < 0 {
+		t.Errorf("negative buffer delta: hit=%d read=%d", e.SharedBlksHitDelta, e.SharedBlksReadDelta)
+	}
+	if d.SharedBlksHitDelta != 0 || d.SharedBlksReadDelta != 0 {
+		t.Errorf("reset entry leaked into envelope totals: hit=%d read=%d", d.SharedBlksHitDelta, d.SharedBlksReadDelta)
+	}
+	if d.NotSubtractable != 1 {
+		t.Errorf("NotSubtractable=%d, want 1", d.NotSubtractable)
+	}
+}
+
+// A block_size change is said out loud; deltas stay in blocks either way.
+func TestDiffQueryStats_BlockSizeChangeIsCaveated(t *testing.T) {
+	t0 := time.Date(2026, 9, 22, 6, 45, 36, 0, time.UTC)
+	a, b := 8192, 16384
+	from := qSnap("primary", t0, qEntryBlks("fp", "SELECT 1", 10, 20, 10, 1, 2, 0, 0, 0, 0))
+	from.BlockSize = &a
+	to := qSnap("primary", t0.Add(time.Hour), qEntryBlks("fp", "SELECT 1", 20, 40, 20, 3, 4, 0, 0, 0, 0))
+	to.BlockSize = &b
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range d.Caveats {
+		if strings.Contains(c, "block_size changed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("block_size change not caveated: %v", d.Caveats)
+	}
+}
+
+// One side without block counters is unknown, not zero: the mean must be null
+// and the envelope must not take the newer cumulative as a window delta.
+func TestDiffQueryStats_UnknownBaselineBlocksStayNull(t *testing.T) {
+	t0 := time.Date(2026, 9, 22, 6, 45, 36, 0, time.UTC)
+
+	t.Run("baseline lacks blocks", func(t *testing.T) {
+		from := qSnap("primary", t0, qEntry("fp", "SELECT 1", 100, 200, 100))
+		to := qSnap("primary", t0.Add(time.Hour),
+			qEntryBlks("fp", "SELECT 1", 200, 800, 200, 1200, 142, 0, 0, 0, 0))
+
+		d, err := DiffQueryStats(from, to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := findEntry(t, d, "fp")
+		if e.WindowMeanBlks != nil {
+			t.Fatalf("window_mean_blks = %v, want nil", *e.WindowMeanBlks)
+		}
+		if e.SharedBlksHitDelta != 0 || e.SharedBlksReadDelta != 0 {
+			t.Errorf("fabricated delta from an unknown baseline: hit=%d read=%d",
+				e.SharedBlksHitDelta, e.SharedBlksReadDelta)
+		}
+		if d.SharedBlksHitDelta != 0 || d.SharedBlksReadDelta != 0 {
+			t.Errorf("unknown baseline leaked into envelope totals: hit=%d read=%d",
+				d.SharedBlksHitDelta, d.SharedBlksReadDelta)
+		}
+		b, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(b, []byte(`"window_mean_blks":null`)) {
+			t.Errorf("window_mean_blks must marshal as null, got %s", b)
+		}
+	})
+
+	t.Run("newer capture lacks blocks", func(t *testing.T) {
+		from := qSnap("primary", t0,
+			qEntryBlks("fp", "SELECT 1", 100, 200, 100, 400, 55, 0, 0, 0, 0))
+		to := qSnap("primary", t0.Add(time.Hour), qEntry("fp", "SELECT 1", 200, 800, 200))
+
+		d, err := DiffQueryStats(from, to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := findEntry(t, d, "fp")
+		if e.WindowMeanBlks != nil {
+			t.Fatalf("window_mean_blks = %v, want nil", *e.WindowMeanBlks)
+		}
+		if e.SharedBlksHitDelta != 0 || e.SharedBlksReadDelta != 0 {
+			t.Errorf("fabricated delta with unknown newer counters: hit=%d read=%d",
+				e.SharedBlksHitDelta, e.SharedBlksReadDelta)
 		}
 	})
 }
@@ -292,7 +478,7 @@ func TestRenderQueryConsole(t *testing.T) {
 	RenderQueryConsole(&buf, &SnapshotDiff{Kind: "query", Query: d, FromTakenAt: t0, ToTakenAt: t0.Add(time.Hour)})
 	out := buf.String()
 
-	for _, want := range []string{"primary", "1h0m0s", "grew", "+200", "SELECT * FROM orders"} {
+	for _, want := range []string{"primary", "1h0m0s", "grew", "+200", "SELECT * FROM orders", "BLKS/CALL"} {
 		if !bytes.Contains(buf.Bytes(), []byte(want)) {
 			t.Errorf("console output missing %q:\n%s", want, out)
 		}
@@ -300,6 +486,21 @@ func TestRenderQueryConsole(t *testing.T) {
 	// 2800ms over 200 calls = 14ms, up from 2ms
 	if !bytes.Contains(buf.Bytes(), []byte("14.00<-2.00")) {
 		t.Errorf("output does not show the mean moving:\n%s", out)
+	}
+}
+
+func TestRenderQueryConsole_ShowsBlocksPerCall(t *testing.T) {
+	t0 := time.Date(2026, 9, 16, 6, 25, 40, 0, time.UTC)
+	from := qSnap("primary", t0,
+		qEntryBlks("fp", "SELECT * FROM orders WHERE id = $1", 100, 200, 100, 400, 55, 0, 0, 0, 0))
+	to := qSnap("primary", t0.Add(time.Hour),
+		qEntryBlks("fp", "SELECT * FROM orders WHERE id = $1", 200, 8000, 200, 1200, 142, 0, 0, 0, 0))
+	d, _ := DiffQueryStats(from, to)
+
+	var buf bytes.Buffer
+	RenderQueryConsole(&buf, &SnapshotDiff{Kind: "query", Query: d, FromTakenAt: t0, ToTakenAt: t0.Add(time.Hour)})
+	if !bytes.Contains(buf.Bytes(), []byte("8.87<-4.55")) {
+		t.Errorf("BLKS/CALL column missing the moving mean:\n%s", buf.String())
 	}
 }
 

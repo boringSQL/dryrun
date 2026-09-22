@@ -2,10 +2,12 @@ package snapdiff
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/boringsql/dryrun/pkg/diff"
 	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
@@ -394,3 +396,51 @@ func TestBuild_QueryNodeWithoutActivityIsFound(t *testing.T) {
 		t.Errorf("a query-only node was dropped from the diff: %+v", res.QueryDelta)
 	}
 }
+
+// The MCP full view keeps the CLI's nesting: query_delta[0].delta.entries[]
+// carries the buffer counters, and the summary drops them.
+func TestForView_QueryDeltaCarriesBufferCounters(t *testing.T) {
+	hit, read := int64(800), int64(87)
+	mean, prior := 8.87, 4.55
+	res := &Result{
+		QueryDelta: []NodeQueryDelta{{
+			Node: "primary",
+			Delta: &diff.QueryDelta{
+				Node:                "primary",
+				BlockSize:           intPtr(8192),
+				SharedBlksHitDelta:  hit,
+				SharedBlksReadDelta: read,
+				Entries: []diff.QueryEntryDelta{{
+					Fingerprint:         "sha1:442f4ffedbe18c51",
+					Status:              diff.QueryGrew,
+					SharedBlksHitDelta:  hit,
+					SharedBlksReadDelta: read,
+					WindowMeanBlks:      &mean,
+					PriorMeanBlks:       &prior,
+				}},
+			},
+		}},
+	}
+
+	b, err := json.Marshal(res.ForView("full", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"query_delta"`, `"block_size":8192`, `"window_mean_blks":8.87`,
+		`"prior_mean_blks":4.55`, `"shared_blks_hit_delta":800`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("full view missing %s:\n%s", want, b)
+		}
+	}
+	summary, err := json.Marshal(res.ForView("summary", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(summary), "window_mean_blks") || strings.Contains(string(summary), "query_delta") {
+		t.Errorf("summary view should drop raw entries:\n%s", summary)
+	}
+}
+
+func intPtr(v int) *int { return &v }

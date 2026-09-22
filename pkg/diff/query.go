@@ -34,7 +34,14 @@ type (
 		Entries         []QueryEntryDelta `json:"entries"`
 		CallsDelta      int64             `json:"calls_delta"`
 		TimeDelta       float64           `json:"total_exec_time_ms_delta"`
-		Caveats         []string          `json:"caveats,omitempty"`
+		// window buffer traffic; NotSubtractable entries are excluded, as for
+		// CallsDelta
+		SharedBlksHitDelta  int64 `json:"shared_blks_hit_delta"`
+		SharedBlksReadDelta int64 `json:"shared_blks_read_delta"`
+		// one block size for the window, so a consumer can convert to bytes
+		// without assuming 8kB
+		BlockSize *int     `json:"block_size,omitempty"`
+		Caveats   []string `json:"caveats,omitempty"`
 	}
 
 	// One query shape between two captures. Deltas are over the window, which
@@ -54,10 +61,30 @@ type (
 		Rows      int64 `json:"rows"`
 		RowsDelta int64 `json:"rows_delta"`
 
+		// cumulative counters at the newer capture, and the window delta.
+		// reset and truncated rows keep their totals out of the envelope
+		// (NotSubtractable), exactly like calls_delta
+		SharedBlksHit          int64 `json:"shared_blks_hit"`
+		SharedBlksHitDelta     int64 `json:"shared_blks_hit_delta"`
+		SharedBlksRead         int64 `json:"shared_blks_read"`
+		SharedBlksReadDelta    int64 `json:"shared_blks_read_delta"`
+		SharedBlksDirtied      int64 `json:"shared_blks_dirtied"`
+		SharedBlksDirtiedDelta int64 `json:"shared_blks_dirtied_delta"`
+		SharedBlksWritten      int64 `json:"shared_blks_written"`
+		SharedBlksWrittenDelta int64 `json:"shared_blks_written_delta"`
+		TempBlksRead           int64 `json:"temp_blks_read"`
+		TempBlksReadDelta      int64 `json:"temp_blks_read_delta"`
+		TempBlksWritten        int64 `json:"temp_blks_written"`
+		TempBlksWrittenDelta   int64 `json:"temp_blks_written_delta"`
+
 		// mean over the window, and over the previous window when both are
 		// known; nil when the call count did not move
 		WindowMeanMs *float64 `json:"window_mean_ms,omitempty"`
 		PriorMeanMs  *float64 `json:"prior_mean_ms,omitempty"`
+		// blocks per call over the window; null, never 0, when calls_delta is 0
+		// so "no calls" cannot read as "free"
+		WindowMeanBlks *float64 `json:"window_mean_blks"`
+		PriorMeanBlks  *float64 `json:"prior_mean_blks,omitempty"`
 	}
 )
 
@@ -135,7 +162,13 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 	d.StatsReset = statsWasReset(from, to)
 	d.FromTruncated = hitRowCap(from)
 	d.Truncated = hitRowCap(from) || hitRowCap(to)
+	d.BlockSize = blockSizeOf(from, to)
 	d.Caveats = queryCaveats(from, to, d)
+	if from.BlockSize != nil && to.BlockSize != nil && *from.BlockSize != *to.BlockSize {
+		d.Caveats = append(d.Caveats, fmt.Sprintf(
+			"block_size changed between captures (%d to %d); buffer deltas are in blocks, not a common byte unit",
+			*from.BlockSize, *to.BlockSize))
+	}
 
 	prev := make(map[string]snapshot.QueryStatsEntry, len(from.Queries))
 	for _, e := range from.Queries {
@@ -149,13 +182,20 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 	}
 	// left in prev: shapes the newer capture does not carry
 	for _, before := range prev {
+		prevB := sumMemberBlocks(before)
 		d.Entries = append(d.Entries, QueryEntryDelta{
-			Fingerprint:     before.Fingerprint,
-			Canonical:       before.Canonical,
-			Status:          missingStatus(d.Truncated),
-			Calls:           before.Calls,
-			TotalExecTimeMs: before.TotalExecTimeMs,
-			Rows:            before.Rows,
+			Fingerprint:       before.Fingerprint,
+			Canonical:         before.Canonical,
+			Status:            missingStatus(d.Truncated),
+			Calls:             before.Calls,
+			TotalExecTimeMs:   before.TotalExecTimeMs,
+			Rows:              before.Rows,
+			SharedBlksHit:     prevB.hit,
+			SharedBlksRead:    prevB.read,
+			SharedBlksDirtied: prevB.dirtied,
+			SharedBlksWritten: prevB.written,
+			TempBlksRead:      prevB.tempRead,
+			TempBlksWritten:   prevB.tempWritten,
 		})
 	}
 
@@ -168,6 +208,8 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 		}
 		d.CallsDelta += e.CallsDelta
 		d.TimeDelta += e.TimeDelta
+		d.SharedBlksHitDelta += e.SharedBlksHitDelta
+		d.SharedBlksReadDelta += e.SharedBlksReadDelta
 	}
 	sortQueryEntries(d.Entries)
 	return d, nil
@@ -181,6 +223,11 @@ func entryDelta(before, cur snapshot.QueryStatsEntry, seen, reset, fromTruncated
 		TotalExecTimeMs: cur.TotalExecTimeMs,
 		Rows:            cur.Rows,
 	}
+	curB := sumMemberBlocks(cur)
+	e.SharedBlksHit, e.SharedBlksRead = curB.hit, curB.read
+	e.SharedBlksDirtied, e.SharedBlksWritten = curB.dirtied, curB.written
+	e.TempBlksRead, e.TempBlksWritten = curB.tempRead, curB.tempWritten
+	blocksKnown := false
 	switch {
 	case !seen && fromTruncated:
 		// the older capture was capped, so this shape may have been running
@@ -189,15 +236,37 @@ func entryDelta(before, cur snapshot.QueryStatsEntry, seen, reset, fromTruncated
 	case !seen:
 		e.Status = QueryNew
 		e.CallsDelta, e.TimeDelta, e.RowsDelta = cur.Calls, cur.TotalExecTimeMs, cur.Rows
+		if curB.known {
+			blocksKnown = true
+			e.SharedBlksHitDelta, e.SharedBlksReadDelta = curB.hit, curB.read
+			e.SharedBlksDirtiedDelta, e.SharedBlksWrittenDelta = curB.dirtied, curB.written
+			e.TempBlksReadDelta, e.TempBlksWrittenDelta = curB.tempRead, curB.tempWritten
+		}
 	case reset || wentBackwards(before, cur):
 		// after a reset the new value IS the window's work; before a reset we
 		// cannot know how much ran, so report what we can see and say why
 		e.Status = QueryReset
 		e.CallsDelta, e.TimeDelta, e.RowsDelta = cur.Calls, cur.TotalExecTimeMs, cur.Rows
+		if curB.known {
+			blocksKnown = true
+			e.SharedBlksHitDelta, e.SharedBlksReadDelta = curB.hit, curB.read
+			e.SharedBlksDirtiedDelta, e.SharedBlksWrittenDelta = curB.dirtied, curB.written
+			e.TempBlksReadDelta, e.TempBlksWrittenDelta = curB.tempRead, curB.tempWritten
+		}
 	default:
+		prevB := sumMemberBlocks(before)
 		e.CallsDelta = cur.Calls - before.Calls
 		e.TimeDelta = cur.TotalExecTimeMs - before.TotalExecTimeMs
 		e.RowsDelta = cur.Rows - before.Rows
+		if prevB.known && curB.known {
+			blocksKnown = true
+			e.SharedBlksHitDelta = curB.hit - prevB.hit
+			e.SharedBlksReadDelta = curB.read - prevB.read
+			e.SharedBlksDirtiedDelta = curB.dirtied - prevB.dirtied
+			e.SharedBlksWrittenDelta = curB.written - prevB.written
+			e.TempBlksReadDelta = curB.tempRead - prevB.tempRead
+			e.TempBlksWrittenDelta = curB.tempWritten - prevB.tempWritten
+		}
 		switch {
 		case e.CallsDelta > 0:
 			e.Status = QueryGrew
@@ -205,6 +274,10 @@ func entryDelta(before, cur snapshot.QueryStatsEntry, seen, reset, fromTruncated
 			e.Status = QueryFlat
 		default:
 			e.Status = QueryShrank
+		}
+		if before.Calls > 0 && prevB.known {
+			m := float64(prevB.hit+prevB.read) / float64(before.Calls)
+			e.PriorMeanBlks = &m
 		}
 		if before.Calls > 0 {
 			m := before.TotalExecTimeMs / float64(before.Calls)
@@ -214,6 +287,10 @@ func entryDelta(before, cur snapshot.QueryStatsEntry, seen, reset, fromTruncated
 	if e.CallsDelta > 0 {
 		m := e.TimeDelta / float64(e.CallsDelta)
 		e.WindowMeanMs = &m
+		if blocksKnown {
+			b := float64(e.SharedBlksHitDelta+e.SharedBlksReadDelta) / float64(e.CallsDelta)
+			e.WindowMeanBlks = &b
+		}
 	}
 	return e
 }
@@ -267,9 +344,70 @@ func earliestInfo(q *snapshot.QueryStatsSnapshot) *snapshot.QueryStatsInfo {
 // group over several queryids, so one member being evicted can pull time down
 // while calls still rise.
 func wentBackwards(before, cur snapshot.QueryStatsEntry) bool {
-	return cur.Calls < before.Calls ||
+	prevB, curB := sumMemberBlocks(before), sumMemberBlocks(cur)
+	if cur.Calls < before.Calls ||
 		cur.TotalExecTimeMs < before.TotalExecTimeMs ||
-		cur.Rows < before.Rows
+		cur.Rows < before.Rows {
+		return true
+	}
+	// only comparable when both sides carry the counters; a nil side is
+	// unknown, not zero
+	if !prevB.known || !curB.known {
+		return false
+	}
+	return curB.hit < prevB.hit ||
+		curB.read < prevB.read ||
+		curB.dirtied < prevB.dirtied ||
+		curB.written < prevB.written ||
+		curB.tempRead < prevB.tempRead ||
+		curB.tempWritten < prevB.tempWritten
+}
+
+// entryBlockCounts rolls up the raw members; known is false when any member
+// lacks the counters, so a partial sum never becomes a mean.
+type (
+	entryBlockCounts struct {
+		hit, read, dirtied, written int64
+		tempRead, tempWritten       int64
+		known                       bool
+	}
+)
+
+func sumMemberBlocks(e snapshot.QueryStatsEntry) entryBlockCounts {
+	var c entryBlockCounts
+	if len(e.Members) == 0 {
+		if e.TempBlksRead != nil {
+			c.tempRead = *e.TempBlksRead
+		}
+		if e.TempBlksWritten != nil {
+			c.tempWritten = *e.TempBlksWritten
+		}
+		return c
+	}
+	c.known = true
+	for _, m := range e.Members {
+		if m.SharedBlksHit == nil || m.SharedBlksRead == nil ||
+			m.SharedBlksDirtied == nil || m.SharedBlksWritten == nil ||
+			m.TempBlksRead == nil || m.TempBlksWritten == nil {
+			return entryBlockCounts{}
+		}
+		c.hit += *m.SharedBlksHit
+		c.read += *m.SharedBlksRead
+		c.dirtied += *m.SharedBlksDirtied
+		c.written += *m.SharedBlksWritten
+		c.tempRead += *m.TempBlksRead
+		c.tempWritten += *m.TempBlksWritten
+	}
+	return c
+}
+
+// block size is a compile-time GUC; prefer the newer capture, fall back so a
+// one-sided read still converts
+func blockSizeOf(from, to *snapshot.QueryStatsSnapshot) *int {
+	if to.BlockSize != nil {
+		return to.BlockSize
+	}
+	return from.BlockSize
 }
 
 // The fetch is capped, so a saturated capture is a view of the top-N, not of
@@ -402,11 +540,11 @@ func RenderQueryConsole(w io.Writer, env *SnapshotDiff) {
 	if len(shown) > queryConsoleRows {
 		shown = shown[:queryConsoleRows]
 	}
-	fmt.Fprintf(w, "  %-9s %12s %14s %-17s  %s\n", "STATUS", "CALLS", "TIME(ms)", "MEAN(ms)", "QUERY")
+	fmt.Fprintf(w, "  %-9s %12s %14s %-17s %-15s  %s\n", "STATUS", "CALLS", "TIME(ms)", "MEAN(ms)", "BLKS/CALL", "QUERY")
 	for _, e := range shown {
-		fmt.Fprintf(w, "  %-9s %12s %14s %-17s  %s\n",
+		fmt.Fprintf(w, "  %-9s %12s %14s %-17s %-15s  %s\n",
 			e.Status, signedInt(e.CallsDelta), signedFloat(e.TimeDelta),
-			meanCell(e), truncateQuery(e.Canonical, 60))
+			meanCell(e), blksCell(e), truncateQuery(e.Canonical, 50))
 	}
 	if len(movers) > len(shown) {
 		fmt.Fprintf(w, "  ... %d more moved\n", len(movers)-len(shown))
@@ -427,6 +565,17 @@ func meanCell(e QueryEntryDelta) string {
 		return fmt.Sprintf("%.2f", *e.WindowMeanMs)
 	}
 	return fmt.Sprintf("%.2f<-%.2f", *e.WindowMeanMs, *e.PriorMeanMs)
+}
+
+// Blocks per call, same window<-prior shape as meanCell.
+func blksCell(e QueryEntryDelta) string {
+	if e.WindowMeanBlks == nil {
+		return "-"
+	}
+	if e.PriorMeanBlks == nil {
+		return fmt.Sprintf("%.2f", *e.WindowMeanBlks)
+	}
+	return fmt.Sprintf("%.2f<-%.2f", *e.WindowMeanBlks, *e.PriorMeanBlks)
 }
 
 func signedInt(v int64) string {

@@ -40,6 +40,8 @@ Statuses: `grew`, `shrank`, `flat`, `new`, `gone` (absent from an uncapped newer
 
 The mean column is the window mean, Δtime/Δcalls between the two captures, printed as `12.00<-2.00`: 12ms per call this window, 2ms before. This matters because `mean_exec_time` averages over everything since pgss last reset, and a query that got slower this week barely moves that number. A rising `dealloc` between captures means pgss was evicting entries under pressure; the diff reports it instead of letting evictions look like regressions.
 
+Each entry also carries buffer counters — `shared_blks_hit/read/dirtied/written`, `temp_blks_read/written` — at the newer capture and as window deltas. `BLKS/CALL` renders `(hit_delta + read_delta) / calls_delta` as `8.87<-4.55`, the same window<-prior shape as `MEAN(ms)`, so a plan or input-size change is visible without a second pass. The envelope totals `shared_blks_hit_delta` / `shared_blks_read_delta` and one `block_size` sit alongside `calls_delta`; report blocks, not bytes, and convert with `block_size` rather than assuming 8kB. `window_mean_blks` is `null` when `calls_delta` is 0, never 0, so "no calls" cannot read as "free".
+
 Console output shows movers only, 25 rows at most. `--json` has every shape.
 
 The diff also checks which server answered. Two captures whose `inet_server_addr` differ are two machines under one label, and it refuses them. A changed postmaster start time alone is reported but not refused, since pg_stat_statements survives a clean restart. When the address is unknown — a Unix socket, or a tunnel where every member shows 127.0.0.1 — the change is a caveat rather than a refusal.

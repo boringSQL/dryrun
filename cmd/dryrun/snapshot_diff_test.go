@@ -519,4 +519,48 @@ func TestBuildSnapshotDiff(t *testing.T) {
 			t.Fatal("only the query slot should be populated")
 		}
 	})
+
+	t.Run("query carries buffer counters and block size", func(t *testing.T) {
+		bs := 8192
+		member := func(calls, hit, read int64) []schema.QueryStatsMember {
+			d, w, tr, tw := int64(0), int64(0), int64(0), int64(0)
+			return []schema.QueryStatsMember{{
+				QueryID: 42, Calls: calls,
+				SharedBlksHit: &hit, SharedBlksRead: &read,
+				SharedBlksDirtied: &d, SharedBlksWritten: &w,
+				TempBlksRead: &tr, TempBlksWritten: &tw,
+			}}
+		}
+		q := func(hash string, at time.Time, calls, hit, read int64) *schema.QueryStatsSnapshot {
+			return &schema.QueryStatsSnapshot{
+				SchemaRefHash: "sh", ContentHash: hash, QshapeVersion: 3,
+				RowCap: 500, RawRows: 1, BlockSize: &bs,
+				Node: schema.NodeIdentity{Source: "primary", PgVersion: "PostgreSQL 17.0", Timestamp: at},
+				Queries: []schema.QueryStatsEntry{{
+					Fingerprint: "sha1:442f4ffedbe18c51", Canonical: "SELECT 1",
+					Calls: calls, TotalExecTimeMs: float64(calls), Members: member(calls, hit, read),
+				}},
+			}
+		}
+		from := history.WrapQueryStats(q("query-a", now.Add(-time.Hour), 100, 400, 55))
+		to := history.WrapQueryStats(q("query-b", now, 200, 1200, 142))
+
+		env, err := buildSnapshotDiff(ctx, store, key, history.QueryKind("primary"), from, to)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if env.Query.BlockSize == nil || *env.Query.BlockSize != bs {
+			t.Errorf("block_size = %v, want %d", env.Query.BlockSize, bs)
+		}
+		if env.Query.SharedBlksHitDelta != 800 || env.Query.SharedBlksReadDelta != 87 {
+			t.Errorf("envelope buffer deltas hit=%d read=%d, want 800 and 87",
+				env.Query.SharedBlksHitDelta, env.Query.SharedBlksReadDelta)
+		}
+		if len(env.Query.Entries) != 1 || env.Query.Entries[0].WindowMeanBlks == nil {
+			t.Fatalf("entry buffer mean missing: %+v", env.Query.Entries)
+		}
+		if got := *env.Query.Entries[0].WindowMeanBlks; got < 8.87 || got > 8.88 {
+			t.Errorf("window_mean_blks = %v, want 8.87", got)
+		}
+	})
 }
