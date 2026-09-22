@@ -191,3 +191,235 @@ func TestNoFuncWrappedInSelect(t *testing.T) {
 		t.Errorf("expected no FuncWrappedColumns for SELECT-only function, got %d", len(q.Info.FuncWrappedColumns))
 	}
 }
+
+func TestSelectColumnsAreNotFilterColumns(t *testing.T) {
+	q, err := ParseSQL("SELECT LOWER(email) FROM auth.user_account WHERE user_id = ANY($1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Info.FilterColumns) != 1 {
+		t.Fatalf("got %d filter columns, want 1: %+v", len(q.Info.FilterColumns), q.Info.FilterColumns)
+	}
+	if q.Info.FilterColumns[0].Column != "user_id" {
+		t.Errorf("got filter column %q, want user_id", q.Info.FilterColumns[0].Column)
+	}
+	for _, fc := range q.Info.FilterColumns {
+		if fc.Column == "email" {
+			t.Errorf("SELECT-list column reported as a filter column: %+v", fc)
+		}
+	}
+}
+
+func TestNoFilterColumnsWithoutWhere(t *testing.T) {
+	q, err := ParseSQL("SELECT email FROM users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Info.FilterColumns) != 0 {
+		t.Errorf("got %d filter columns, want 0: %+v", len(q.Info.FilterColumns), q.Info.FilterColumns)
+	}
+	found := false
+	for _, rc := range q.Info.ReferencedColumns {
+		if rc.Column == "email" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected email in ReferencedColumns, got %+v", q.Info.ReferencedColumns)
+	}
+}
+
+func TestReferencedColumnsIncludeSelectList(t *testing.T) {
+	q, err := ParseSQL("SELECT u.emial FROM users u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Info.FilterColumns) != 0 {
+		t.Errorf("got filter columns for a query with no predicate: %+v", q.Info.FilterColumns)
+	}
+	found := false
+	for _, rc := range q.Info.ReferencedColumns {
+		if rc.Column == "emial" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected emial in ReferencedColumns, got %+v", q.Info.ReferencedColumns)
+	}
+}
+
+func TestJoinQualsAreFilterColumns(t *testing.T) {
+	q, err := ParseSQL("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, fc := range q.Info.FilterColumns {
+		got[fc.Column] = true
+	}
+	for _, want := range []string{"id", "user_id"} {
+		if !got[want] {
+			t.Errorf("expected %q in filter columns from JOIN quals, got %+v", want, q.Info.FilterColumns)
+		}
+	}
+}
+
+func TestSubqueryTargetNotFilterColumn(t *testing.T) {
+	q, err := ParseSQL("SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Info.FilterColumns) != 1 {
+		t.Fatalf("got %d filter columns, want 1: %+v", len(q.Info.FilterColumns), q.Info.FilterColumns)
+	}
+	if q.Info.FilterColumns[0].Column != "id" {
+		t.Errorf("got filter column %q, want id", q.Info.FilterColumns[0].Column)
+	}
+}
+
+func TestSubqueryPredicateIsFilterColumn(t *testing.T) {
+	q, err := ParseSQL("SELECT id FROM users WHERE id IN (SELECT user_id FROM orders WHERE user_id > 5)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, fc := range q.Info.FilterColumns {
+		got[fc.Column] = true
+	}
+	if !got["id"] || !got["user_id"] {
+		t.Errorf("expected id and user_id from outer and subquery predicates, got %+v", q.Info.FilterColumns)
+	}
+}
+
+func filterColumnSet(t *testing.T, q *ParsedQuery) map[string]bool {
+	t.Helper()
+	got := map[string]bool{}
+	for _, fc := range q.Info.FilterColumns {
+		got[fc.Column] = true
+	}
+	return got
+}
+
+func TestCaseExpressionFilterColumns(t *testing.T) {
+	q, err := ParseSQL("SELECT * FROM t WHERE CASE WHEN x > 1 THEN a ELSE b END = 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := filterColumnSet(t, q)
+	for _, want := range []string{"x", "a", "b"} {
+		if !got[want] {
+			t.Errorf("expected %q from CASE expression, got %+v", want, q.Info.FilterColumns)
+		}
+	}
+}
+
+func TestRowExpressionFilterColumns(t *testing.T) {
+	q, err := ParseSQL("SELECT * FROM t WHERE (a, b) IN (SELECT a, b FROM u WHERE u.c = 1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := filterColumnSet(t, q)
+	for _, want := range []string{"a", "b", "c"} {
+		if !got[want] {
+			t.Errorf("expected %q from row expression, got %+v", want, q.Info.FilterColumns)
+		}
+	}
+}
+
+func TestMinMaxCollateIndirectionFilterColumns(t *testing.T) {
+	cases := []struct {
+		sql  string
+		want string
+	}{
+		{"SELECT * FROM t WHERE GREATEST(a, b) > 5", "a"},
+		{"SELECT * FROM t WHERE LEAST(a, b) > 5", "b"},
+		{"SELECT * FROM t WHERE name COLLATE \"C\" = 'x'", "name"},
+		{"SELECT * FROM t WHERE arr[1] = 5", "arr"},
+	}
+	for _, tc := range cases {
+		q, err := ParseSQL(tc.sql)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.sql, err)
+		}
+		if !filterColumnSet(t, q)[tc.want] {
+			t.Errorf("%s: expected %q in filter columns, got %+v", tc.sql, tc.want, q.Info.FilterColumns)
+		}
+	}
+}
+
+func TestHavingIsNotFilterColumn(t *testing.T) {
+	q, err := ParseSQL("SELECT sum(y) FROM t GROUP BY z HAVING sum(y) > 10 AND q = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Info.FilterColumns) != 0 {
+		t.Errorf("expected no filter columns from HAVING, got %+v", q.Info.FilterColumns)
+	}
+	referenced := map[string]bool{}
+	for _, rc := range q.Info.ReferencedColumns {
+		referenced[rc.Column] = true
+	}
+	for _, want := range []string{"y", "q"} {
+		if !referenced[want] {
+			t.Errorf("expected %q in ReferencedColumns, got %+v", want, q.Info.ReferencedColumns)
+		}
+	}
+}
+
+func TestMergeParsed(t *testing.T) {
+	q, err := ParseSQL("MERGE INTO t USING u ON t.id = u.id WHEN MATCHED AND u.q = 5 THEN UPDATE SET x = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Info.StatementType != "MERGE" {
+		t.Errorf("got statement type %q, want MERGE", q.Info.StatementType)
+	}
+	tables := map[string]bool{}
+	for _, tb := range q.Info.Tables {
+		tables[tb.Name] = true
+	}
+	for _, want := range []string{"t", "u"} {
+		if !tables[want] {
+			t.Errorf("expected table %q, got %+v", want, q.Info.Tables)
+		}
+	}
+	got := filterColumnSet(t, q)
+	for _, want := range []string{"id", "q"} {
+		if !got[want] {
+			t.Errorf("expected %q from MERGE predicates, got %+v", want, q.Info.FilterColumns)
+		}
+	}
+}
+
+func TestOnConflictFilterColumns(t *testing.T) {
+	q, err := ParseSQL("INSERT INTO t (a) SELECT a FROM u WHERE u.q = 5 ON CONFLICT (a) WHERE a > 0 DO UPDATE SET a = 1 WHERE t.a = 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := filterColumnSet(t, q)
+	for _, want := range []string{"q", "a"} {
+		if !got[want] {
+			t.Errorf("expected %q from ON CONFLICT predicates, got %+v", want, q.Info.FilterColumns)
+		}
+	}
+}
+
+func TestFromSubselectTablesCollected(t *testing.T) {
+	q, err := ParseSQL("SELECT * FROM (SELECT user_id FROM orders WHERE total > 5) o WHERE id = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables := map[string]bool{}
+	for _, tb := range q.Info.Tables {
+		tables[tb.Name] = true
+	}
+	if !tables["orders"] {
+		t.Errorf("expected orders from FROM subselect, got %+v", q.Info.Tables)
+	}
+	got := filterColumnSet(t, q)
+	for _, want := range []string{"total", "id"} {
+		if !got[want] {
+			t.Errorf("expected %q in filter columns, got %+v", want, q.Info.FilterColumns)
+		}
+	}
+}

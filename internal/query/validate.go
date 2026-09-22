@@ -131,7 +131,7 @@ func validate(sql string, snap *schema.SchemaSnapshot) (*ValidationResult, fixPl
 		}
 	}
 
-	validateFilterColumns(parsed, snap, &errors, &plan)
+	validateReferencedColumns(parsed, snap, &errors, &plan)
 
 	// resolve SELECT *
 	if parsed.Info.HasSelectStar {
@@ -167,8 +167,8 @@ func validate(sql string, snap *schema.SchemaSnapshot) (*ValidationResult, fixPl
 	}, plan, nil
 }
 
-func validateFilterColumns(parsed *ParsedQuery, snap *schema.SchemaSnapshot, errors *[]string, plan *fixPlan) {
-	for _, fc := range parsed.Info.FilterColumns {
+func validateReferencedColumns(parsed *ParsedQuery, snap *schema.SchemaSnapshot, errors *[]string, plan *fixPlan) {
+	for _, fc := range parsed.Info.ReferencedColumns {
 		if fc.Table == nil {
 			continue
 		}
