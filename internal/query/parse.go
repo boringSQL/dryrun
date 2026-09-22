@@ -184,6 +184,7 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 		if whereClause != nil {
 			collectFuncWrappedColumns(whereClause, &funcWrappedColumns)
 		}
+		collectCteFuncWrapped(node, &funcWrappedColumns)
 
 		// filter columns come from predicates only (WHERE/JOIN/ON CONFLICT);
 		// SELECT list, GROUP BY, HAVING and ORDER BY are not filters
@@ -290,6 +291,15 @@ func withClauseOf(node *pg_query.Node) *pg_query.WithClause {
 	return nil
 }
 
+// names are harvested by the walkNode callback before recursion, so recursive self-references stay guarded
+func walkCtes(node *pg_query.Node, fn func(*pg_query.Node)) {
+	for _, cte := range withClauseOf(node).GetCtes() {
+		if c, ok := cte.Node.(*pg_query.Node_CommonTableExpr); ok && c.CommonTableExpr != nil {
+			walkNode(c.CommonTableExpr.Ctequery, fn)
+		}
+	}
+}
+
 func walkSelect(s *pg_query.SelectStmt, hasWhere, hasLimit, hasSelectStar *bool) {
 	if s == nil {
 		return
@@ -353,6 +363,7 @@ func walkNode(node *pg_query.Node, fn func(*pg_query.Node)) {
 		if s == nil {
 			return
 		}
+		walkCtes(node, fn)
 		for _, t := range s.TargetList {
 			walkNode(t, fn)
 		}
@@ -376,6 +387,7 @@ func walkNode(node *pg_query.Node, fn func(*pg_query.Node)) {
 		if s == nil {
 			return
 		}
+		walkCtes(node, fn)
 		if s.Relation != nil {
 			walkNode(&pg_query.Node{Node: &pg_query.Node_RangeVar{RangeVar: s.Relation}}, fn)
 		}
@@ -390,6 +402,7 @@ func walkNode(node *pg_query.Node, fn func(*pg_query.Node)) {
 		if s == nil {
 			return
 		}
+		walkCtes(node, fn)
 		if s.Relation != nil {
 			walkNode(&pg_query.Node{Node: &pg_query.Node_RangeVar{RangeVar: s.Relation}}, fn)
 		}
@@ -402,6 +415,7 @@ func walkNode(node *pg_query.Node, fn func(*pg_query.Node)) {
 		if s == nil {
 			return
 		}
+		walkCtes(node, fn)
 		if s.Relation != nil {
 			walkNode(&pg_query.Node{Node: &pg_query.Node_RangeVar{RangeVar: s.Relation}}, fn)
 		}
@@ -484,6 +498,7 @@ func walkNode(node *pg_query.Node, fn func(*pg_query.Node)) {
 		if s == nil {
 			return
 		}
+		walkCtes(node, fn)
 		if s.Relation != nil {
 			walkNode(&pg_query.Node{Node: &pg_query.Node_RangeVar{RangeVar: s.Relation}}, fn)
 		}
@@ -588,6 +603,7 @@ func (p *predicateCollector) collect(node *pg_query.Node) {
 		if s == nil {
 			return
 		}
+		p.collectCtes(node)
 		for _, f := range s.FromClause {
 			p.collect(f)
 		}
@@ -602,6 +618,7 @@ func (p *predicateCollector) collect(node *pg_query.Node) {
 		if n.InsertStmt == nil {
 			return
 		}
+		p.collectCtes(node)
 		p.collect(n.InsertStmt.SelectStmt)
 		if n.InsertStmt.OnConflictClause != nil {
 			p.collect(&pg_query.Node{Node: &pg_query.Node_OnConflictClause{OnConflictClause: n.InsertStmt.OnConflictClause}})
@@ -620,6 +637,7 @@ func (p *predicateCollector) collect(node *pg_query.Node) {
 		if s == nil {
 			return
 		}
+		p.collectCtes(node)
 		p.collect(s.SourceRelation)
 		p.collect(s.JoinCondition)
 		for _, w := range s.MergeWhenClauses {
@@ -633,6 +651,7 @@ func (p *predicateCollector) collect(node *pg_query.Node) {
 		if n.UpdateStmt == nil {
 			return
 		}
+		p.collectCtes(node)
 		for _, f := range n.UpdateStmt.FromClause {
 			p.collect(f)
 		}
@@ -641,6 +660,7 @@ func (p *predicateCollector) collect(node *pg_query.Node) {
 		if n.DeleteStmt == nil {
 			return
 		}
+		p.collectCtes(node)
 		for _, u := range n.DeleteStmt.UsingClause {
 			p.collect(u)
 		}
@@ -765,6 +785,15 @@ func (p *predicateCollector) collect(node *pg_query.Node) {
 		if fc := extractFilterColumn(cr); fc != nil {
 			fc.loc = cr.Location
 			p.columns = append(p.columns, *fc)
+		}
+	}
+}
+
+// CTE-body predicates are index candidates too
+func (p *predicateCollector) collectCtes(node *pg_query.Node) {
+	for _, cte := range withClauseOf(node).GetCtes() {
+		if c, ok := cte.Node.(*pg_query.Node_CommonTableExpr); ok && c.CommonTableExpr != nil {
+			p.collect(c.CommonTableExpr.Ctequery)
 		}
 	}
 }
@@ -915,6 +944,36 @@ func collectFuncWrappedColumns(node *pg_query.Node, out *[]FuncWrappedColumn) {
 		if n.SubLink != nil {
 			collectFuncWrappedColumns(n.SubLink.Testexpr, out)
 		}
+	}
+}
+
+// date_trunc(col) inside a CTE body counts like one in the outer WHERE
+func collectCteFuncWrapped(node *pg_query.Node, out *[]FuncWrappedColumn) {
+	for _, cte := range withClauseOf(node).GetCtes() {
+		c, ok := cte.Node.(*pg_query.Node_CommonTableExpr)
+		if !ok || c.CommonTableExpr == nil || c.CommonTableExpr.Ctequery == nil {
+			continue
+		}
+		body := c.CommonTableExpr.Ctequery
+		var where *pg_query.Node
+		switch n := body.Node.(type) {
+		case *pg_query.Node_SelectStmt:
+			if n.SelectStmt != nil {
+				where = n.SelectStmt.WhereClause
+			}
+		case *pg_query.Node_UpdateStmt:
+			if n.UpdateStmt != nil {
+				where = n.UpdateStmt.WhereClause
+			}
+		case *pg_query.Node_DeleteStmt:
+			if n.DeleteStmt != nil {
+				where = n.DeleteStmt.WhereClause
+			}
+		}
+		if where != nil {
+			collectFuncWrappedColumns(where, out)
+		}
+		collectCteFuncWrapped(body, out)
 	}
 }
 

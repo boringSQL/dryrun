@@ -190,6 +190,16 @@ func TestCorrectedSQL(t *testing.T) {
 			sql:  "WITH ordr AS (SELECT 1 AS id) SELECT * FROM ordr",
 			want: "",
 		},
+		{
+			name: "typo inside a cte body",
+			sql:  "WITH x AS (SELECT u.emial FROM users u) SELECT * FROM x",
+			want: "WITH x AS (SELECT u.email FROM users u) SELECT * FROM x",
+		},
+		{
+			name: "table typo inside a cte body",
+			sql:  "WITH x AS (SELECT * FROM userss) SELECT * FROM x",
+			want: "WITH x AS (SELECT * FROM users) SELECT * FROM x",
+		},
 	}
 
 	snap := correctSchema()

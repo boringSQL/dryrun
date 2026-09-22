@@ -548,3 +548,48 @@ func TestPlainSelectNoBodyWarning(t *testing.T) {
 		}
 	}
 }
+
+func TestCteBodyGhostTableReported(t *testing.T) {
+	snap := testSchema()
+	result, err := ValidateQuery("WITH x AS (SELECT * FROM ghost) SELECT * FROM x", snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Valid {
+		t.Fatal("expected invalid: ghost inside CTE body was not checked")
+	}
+	found := false
+	for _, e := range result.Errors {
+		if strings.Contains(e, "ghost") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a ghost error, got %v", result.Errors)
+	}
+}
+
+func TestCteBodyColumnTypoCorrected(t *testing.T) {
+	res, err := ValidateQuery("WITH x AS (SELECT u.emial FROM users u) SELECT * FROM x", correctSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.CorrectedSQL, "u.email") {
+		t.Fatalf("expected CTE body column typo corrected, got %q (errors: %v)", res.CorrectedSQL, res.Errors)
+	}
+	again, err := ValidateQuery(res.CorrectedSQL, correctSchema())
+	if err != nil || !again.Valid {
+		t.Fatalf("corrected CTE query does not validate: %v %v", err, again.Errors)
+	}
+}
+
+func TestRecursiveCteSelfReferenceValid(t *testing.T) {
+	snap := testSchema()
+	res, err := ValidateQuery("WITH RECURSIVE x AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM x WHERE id < 5) SELECT id FROM x", snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Valid {
+		t.Fatalf("recursive CTE self-reference reported missing: %v", res.Errors)
+	}
+}

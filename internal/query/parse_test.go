@@ -423,3 +423,77 @@ func TestFromSubselectTablesCollected(t *testing.T) {
 		}
 	}
 }
+
+func TestCteBodyTablesAndColumnsCollected(t *testing.T) {
+	q, err := ParseSQL("WITH x AS (SELECT id, emial FROM ghost WHERE id > 1) SELECT * FROM x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables := map[string]bool{}
+	for _, tb := range q.Info.Tables {
+		tables[tb.Name] = true
+	}
+	if !tables["ghost"] {
+		t.Errorf("expected ghost from CTE body, got %+v", q.Info.Tables)
+	}
+	var sawEmial bool
+	for _, fc := range q.Info.ReferencedColumns {
+		if fc.Column == "emial" {
+			sawEmial = true
+		}
+	}
+	if !sawEmial {
+		t.Errorf("expected emial from CTE body in referenced columns, got %+v", q.Info.ReferencedColumns)
+	}
+}
+
+func TestCteBodyFilterColumns(t *testing.T) {
+	q, err := ParseSQL("WITH x AS (SELECT id FROM orders WHERE user_id = 5) SELECT id FROM x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := filterColumnSet(t, q); !got["user_id"] {
+		t.Errorf("expected user_id from CTE predicate, got %+v", q.Info.FilterColumns)
+	}
+}
+
+func TestCteBodyFuncWrappedColumns(t *testing.T) {
+	q, err := ParseSQL("WITH x AS (SELECT id FROM events WHERE date_trunc('day', created_at) = now()) SELECT id FROM x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Info.FuncWrappedColumns) != 1 {
+		t.Fatalf("expected 1 FuncWrappedColumn from CTE body, got %d: %+v", len(q.Info.FuncWrappedColumns), q.Info.FuncWrappedColumns)
+	}
+	if got := q.Info.FuncWrappedColumns[0].Column; got != "created_at" {
+		t.Errorf("got column %q, want created_at", got)
+	}
+}
+
+func TestNestedCteBodiesCollected(t *testing.T) {
+	q, err := ParseSQL("WITH a AS (WITH b AS (SELECT id FROM ghost) SELECT id FROM b) SELECT id FROM a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables := map[string]bool{}
+	for _, tb := range q.Info.Tables {
+		tables[tb.Name] = true
+	}
+	if !tables["ghost"] {
+		t.Errorf("expected ghost from nested CTE body, got %+v", q.Info.Tables)
+	}
+}
+
+func TestDmlCteBodyCollected(t *testing.T) {
+	q, err := ParseSQL("WITH x AS (SELECT id FROM ghost) UPDATE orders SET user_id = 1 WHERE id IN (SELECT id FROM x)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables := map[string]bool{}
+	for _, tb := range q.Info.Tables {
+		tables[tb.Name] = true
+	}
+	if !tables["ghost"] {
+		t.Errorf("expected ghost from DML CTE body, got %+v", q.Info.Tables)
+	}
+}
