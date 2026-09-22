@@ -66,6 +66,69 @@ func TestDetectLimit(t *testing.T) {
 	}
 }
 
+func TestSelectStarInFromSubquery(t *testing.T) {
+	q, err := ParseSQL("SELECT id FROM (SELECT * FROM users) t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.Info.HasSelectStar {
+		t.Error("expected HasSelectStar from nested FROM subquery")
+	}
+}
+
+func TestLimitInFromSubquery(t *testing.T) {
+	q, err := ParseSQL("SELECT a FROM (SELECT a FROM big LIMIT 1) t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.Info.HasLimit {
+		t.Error("expected HasLimit from nested FROM subquery")
+	}
+}
+
+func TestCountStarIsNotSelectStar(t *testing.T) {
+	q, err := ParseSQL("SELECT count(*) FROM users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Info.HasSelectStar {
+		t.Error("count(*) must not count as SELECT *")
+	}
+}
+
+func TestSelectStarAndLimitInCteBody(t *testing.T) {
+	q, err := ParseSQL("WITH x AS (SELECT * FROM u LIMIT 1) SELECT id FROM x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.Info.HasSelectStar {
+		t.Error("expected HasSelectStar from CTE body")
+	}
+	if !q.Info.HasLimit {
+		t.Error("expected HasLimit from CTE body")
+	}
+}
+
+func TestSelectStarInSetOpBranch(t *testing.T) {
+	q, err := ParseSQL("SELECT id FROM a UNION SELECT * FROM b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.Info.HasSelectStar {
+		t.Error("expected HasSelectStar from set-op branch")
+	}
+}
+
+func TestNestedWhereDoesNotLeakToHasWhere(t *testing.T) {
+	q, err := ParseSQL("WITH x AS (SELECT id FROM o WHERE q = 1) UPDATE users SET n = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Info.HasWhere {
+		t.Error("nested CTE WHERE must not set HasWhere for an UPDATE without WHERE")
+	}
+}
+
 func TestParseError(t *testing.T) {
 	_, err := ParseSQL("SELEC broken")
 	if err == nil {

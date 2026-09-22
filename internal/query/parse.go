@@ -116,7 +116,9 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 			if stmtType == "" {
 				stmtType = "SELECT"
 			}
-			walkSelect(n.SelectStmt, &hasWhere, &hasLimit, &hasSelectStar)
+			if n.SelectStmt.WhereClause != nil {
+				hasWhere = true
+			}
 		case *pg_query.Node_InsertStmt:
 			if stmtType == "" {
 				stmtType = "INSERT"
@@ -209,6 +211,8 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 				}
 			}
 			switch cn := child.Node.(type) {
+			case *pg_query.Node_SelectStmt:
+				noteSelectFacts(cn.SelectStmt, &hasLimit, &hasSelectStar)
 			case *pg_query.Node_RangeVar:
 				rv := cn.RangeVar
 				if rv == nil {
@@ -300,26 +304,27 @@ func walkCtes(node *pg_query.Node, fn func(*pg_query.Node)) {
 	}
 }
 
-func walkSelect(s *pg_query.SelectStmt, hasWhere, hasLimit, hasSelectStar *bool) {
+// runs per SelectStmt so nested subqueries/CTEs/set-ops count too; count(*)
+// is a FuncCall, not a ResTarget column, so it stays excluded
+func noteSelectFacts(s *pg_query.SelectStmt, hasLimit, hasSelectStar *bool) {
 	if s == nil {
 		return
-	}
-	if s.WhereClause != nil {
-		*hasWhere = true
 	}
 	if s.LimitCount != nil || s.LimitOffset != nil {
 		*hasLimit = true
 	}
 	for _, target := range s.TargetList {
-		if rt, ok := target.Node.(*pg_query.Node_ResTarget); ok {
-			if rt.ResTarget != nil && rt.ResTarget.Val != nil {
-				if cr, ok := rt.ResTarget.Val.Node.(*pg_query.Node_ColumnRef); ok {
-					for _, f := range cr.ColumnRef.Fields {
-						if _, ok := f.Node.(*pg_query.Node_AStar); ok {
-							*hasSelectStar = true
-						}
-					}
-				}
+		rt, ok := target.Node.(*pg_query.Node_ResTarget)
+		if !ok || rt.ResTarget == nil || rt.ResTarget.Val == nil {
+			continue
+		}
+		cr, ok := rt.ResTarget.Val.Node.(*pg_query.Node_ColumnRef)
+		if !ok || cr.ColumnRef == nil {
+			continue
+		}
+		for _, f := range cr.ColumnRef.Fields {
+			if _, ok := f.Node.(*pg_query.Node_AStar); ok {
+				*hasSelectStar = true
 			}
 		}
 	}
