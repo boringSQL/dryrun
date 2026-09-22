@@ -29,6 +29,26 @@ type (
 		// a CTE shadows any real table of the same name, so it must not be
 		// reported missing -- or worse, "corrected" to one
 		cteNames []string
+
+		// per top-level SELECT: its outermost FROM identifiers (alias or
+		// relation name) and the column pairs linking them; used to tell a
+		// real Cartesian product (disconnected FROM) from an implicit join
+		cartesianScopes []cartesianScope
+	}
+
+	cartesianScope struct {
+		tables []string
+		pairs  []colPair
+	}
+
+	colPair struct {
+		a, b string
+	}
+
+	// accumulates predicate columns and the column pairs linking tables
+	predicateCollector struct {
+		columns []FilterColumn
+		pairs   []colPair
 	}
 
 	// body content is opaque to pg_query, so it escapes static validation.
@@ -75,6 +95,7 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 		proceduralBodies   []ProceduralBody
 		updateTargets      []string
 		cteNames           []string
+		cartesianScopes    []cartesianScope
 		hasSelectStar      bool
 		hasJoin            bool
 		hasWhere           bool
@@ -166,7 +187,15 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 
 		// filter columns come from predicates only (WHERE/JOIN/ON CONFLICT);
 		// SELECT list, GROUP BY, HAVING and ORDER BY are not filters
-		collectPredicateColumns(node, &filterColumns)
+		pred := &predicateCollector{}
+		pred.collect(node)
+		filterColumns = append(filterColumns, pred.columns...)
+		if sel, ok := node.Node.(*pg_query.Node_SelectStmt); ok {
+			cartesianScopes = append(cartesianScopes, cartesianScope{
+				tables: topLevelFromTables(sel.SelectStmt),
+				pairs:  pred.pairs,
+			})
+		}
 
 		// walk tree for tables, joins, referenced columns
 		walkNode(node, func(child *pg_query.Node) {
@@ -238,6 +267,7 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 			FuncWrappedColumns: funcWrappedColumns,
 			UpdateTargets:      updateTargets,
 			cteNames:           cteNames,
+			cartesianScopes:    cartesianScopes,
 			ProceduralBodies:   proceduralBodies,
 			StatementType:      stmtType,
 		},
@@ -545,8 +575,9 @@ func walkNode(node *pg_query.Node, fn func(*pg_query.Node)) {
 
 // Predicate-scoped column collection: descends into WHERE/JOIN predicates and
 // nested predicates, never into SELECT lists or HAVING (post-aggregation, so an
-// index on a HAVING column cannot serve it).
-func collectPredicateColumns(node *pg_query.Node, out *[]FilterColumn) {
+// index on a HAVING column cannot serve it). Also records equality pairs between
+// qualified columns, for Cartesian-join connectivity.
+func (p *predicateCollector) collect(node *pg_query.Node) {
 	if node == nil {
 		return
 	}
@@ -558,22 +589,22 @@ func collectPredicateColumns(node *pg_query.Node, out *[]FilterColumn) {
 			return
 		}
 		for _, f := range s.FromClause {
-			collectPredicateColumns(f, out)
+			p.collect(f)
 		}
-		collectPredicateColumns(s.WhereClause, out)
+		p.collect(s.WhereClause)
 		if s.Larg != nil {
-			collectPredicateColumns(&pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: s.Larg}}, out)
+			p.collect(&pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: s.Larg}})
 		}
 		if s.Rarg != nil {
-			collectPredicateColumns(&pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: s.Rarg}}, out)
+			p.collect(&pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: s.Rarg}})
 		}
 	case *pg_query.Node_InsertStmt:
 		if n.InsertStmt == nil {
 			return
 		}
-		collectPredicateColumns(n.InsertStmt.SelectStmt, out)
+		p.collect(n.InsertStmt.SelectStmt)
 		if n.InsertStmt.OnConflictClause != nil {
-			collectPredicateColumns(&pg_query.Node{Node: &pg_query.Node_OnConflictClause{OnConflictClause: n.InsertStmt.OnConflictClause}}, out)
+			p.collect(&pg_query.Node{Node: &pg_query.Node_OnConflictClause{OnConflictClause: n.InsertStmt.OnConflictClause}})
 		}
 	case *pg_query.Node_OnConflictClause:
 		oc := n.OnConflictClause
@@ -581,135 +612,149 @@ func collectPredicateColumns(node *pg_query.Node, out *[]FilterColumn) {
 			return
 		}
 		if oc.Infer != nil {
-			collectPredicateColumns(oc.Infer.WhereClause, out)
+			p.collect(oc.Infer.WhereClause)
 		}
-		collectPredicateColumns(oc.WhereClause, out)
+		p.collect(oc.WhereClause)
 	case *pg_query.Node_MergeStmt:
 		s := n.MergeStmt
 		if s == nil {
 			return
 		}
-		collectPredicateColumns(s.SourceRelation, out)
-		collectPredicateColumns(s.JoinCondition, out)
+		p.collect(s.SourceRelation)
+		p.collect(s.JoinCondition)
 		for _, w := range s.MergeWhenClauses {
-			collectPredicateColumns(w, out)
+			p.collect(w)
 		}
 	case *pg_query.Node_MergeWhenClause:
-		m := n.MergeWhenClause
-		if m != nil {
-			collectPredicateColumns(m.Condition, out)
+		if n.MergeWhenClause != nil {
+			p.collect(n.MergeWhenClause.Condition)
 		}
 	case *pg_query.Node_UpdateStmt:
 		if n.UpdateStmt == nil {
 			return
 		}
 		for _, f := range n.UpdateStmt.FromClause {
-			collectPredicateColumns(f, out)
+			p.collect(f)
 		}
-		collectPredicateColumns(n.UpdateStmt.WhereClause, out)
+		p.collect(n.UpdateStmt.WhereClause)
 	case *pg_query.Node_DeleteStmt:
 		if n.DeleteStmt == nil {
 			return
 		}
 		for _, u := range n.DeleteStmt.UsingClause {
-			collectPredicateColumns(u, out)
+			p.collect(u)
 		}
-		collectPredicateColumns(n.DeleteStmt.WhereClause, out)
+		p.collect(n.DeleteStmt.WhereClause)
 	case *pg_query.Node_JoinExpr:
-		if n.JoinExpr == nil {
+		j := n.JoinExpr
+		if j == nil {
 			return
 		}
-		collectPredicateColumns(n.JoinExpr.Quals, out)
-		collectPredicateColumns(n.JoinExpr.Larg, out)
-		collectPredicateColumns(n.JoinExpr.Rarg, out)
+		p.collect(j.Quals)
+		p.collect(j.Larg)
+		p.collect(j.Rarg)
+		// USING/NATURAL carry no quals but still connect the two sides
+		if j.IsNatural || len(j.UsingClause) > 0 {
+			var left, right []string
+			appendFromTable(j.Larg, &left)
+			appendFromTable(j.Rarg, &right)
+			if len(left) > 0 && len(right) > 0 {
+				p.pairs = append(p.pairs, colPair{left[0], right[0]})
+			}
+		}
 	case *pg_query.Node_RangeSubselect:
 		if n.RangeSubselect != nil {
-			collectPredicateColumns(n.RangeSubselect.Subquery, out)
+			p.collect(n.RangeSubselect.Subquery)
 		}
 	case *pg_query.Node_AExpr:
-		if n.AExpr != nil {
-			collectPredicateColumns(n.AExpr.Lexpr, out)
-			collectPredicateColumns(n.AExpr.Rexpr, out)
+		e := n.AExpr
+		if e == nil {
+			return
 		}
+		if a, b, ok := equalityPair(e); ok {
+			p.pairs = append(p.pairs, colPair{a, b})
+		}
+		p.collect(e.Lexpr)
+		p.collect(e.Rexpr)
 	case *pg_query.Node_BoolExpr:
 		if n.BoolExpr != nil {
 			for _, a := range n.BoolExpr.Args {
-				collectPredicateColumns(a, out)
+				p.collect(a)
 			}
 		}
 	case *pg_query.Node_FuncCall:
 		if n.FuncCall != nil {
 			for _, a := range n.FuncCall.Args {
-				collectPredicateColumns(a, out)
+				p.collect(a)
 			}
 		}
 	case *pg_query.Node_TypeCast:
 		if n.TypeCast != nil {
-			collectPredicateColumns(n.TypeCast.Arg, out)
+			p.collect(n.TypeCast.Arg)
 		}
 	case *pg_query.Node_SubLink:
 		if n.SubLink == nil {
 			return
 		}
-		collectPredicateColumns(n.SubLink.Testexpr, out)
-		collectPredicateColumns(n.SubLink.Subselect, out)
+		p.collect(n.SubLink.Testexpr)
+		p.collect(n.SubLink.Subselect)
 	case *pg_query.Node_List:
 		if n.List != nil {
 			for _, i := range n.List.Items {
-				collectPredicateColumns(i, out)
+				p.collect(i)
 			}
 		}
 	case *pg_query.Node_CaseExpr:
 		if n.CaseExpr != nil {
-			collectPredicateColumns(n.CaseExpr.Arg, out)
+			p.collect(n.CaseExpr.Arg)
 			for _, a := range n.CaseExpr.Args {
-				collectPredicateColumns(a, out)
+				p.collect(a)
 			}
-			collectPredicateColumns(n.CaseExpr.Defresult, out)
+			p.collect(n.CaseExpr.Defresult)
 		}
 	case *pg_query.Node_CaseWhen:
 		if n.CaseWhen != nil {
-			collectPredicateColumns(n.CaseWhen.Expr, out)
-			collectPredicateColumns(n.CaseWhen.Result, out)
+			p.collect(n.CaseWhen.Expr)
+			p.collect(n.CaseWhen.Result)
 		}
 	case *pg_query.Node_CoalesceExpr:
 		if n.CoalesceExpr != nil {
 			for _, a := range n.CoalesceExpr.Args {
-				collectPredicateColumns(a, out)
+				p.collect(a)
 			}
 		}
 	case *pg_query.Node_NullTest:
 		if n.NullTest != nil {
-			collectPredicateColumns(n.NullTest.Arg, out)
+			p.collect(n.NullTest.Arg)
 		}
 	case *pg_query.Node_BooleanTest:
 		if n.BooleanTest != nil {
-			collectPredicateColumns(n.BooleanTest.Arg, out)
+			p.collect(n.BooleanTest.Arg)
 		}
 	case *pg_query.Node_RowExpr:
 		if n.RowExpr != nil {
 			for _, a := range n.RowExpr.Args {
-				collectPredicateColumns(a, out)
+				p.collect(a)
 			}
 		}
 	case *pg_query.Node_MinMaxExpr:
 		if n.MinMaxExpr != nil {
 			for _, a := range n.MinMaxExpr.Args {
-				collectPredicateColumns(a, out)
+				p.collect(a)
 			}
 		}
 	case *pg_query.Node_CollateClause:
 		if n.CollateClause != nil {
-			collectPredicateColumns(n.CollateClause.Arg, out)
+			p.collect(n.CollateClause.Arg)
 		}
 	case *pg_query.Node_AIndirection:
 		if n.AIndirection != nil {
-			collectPredicateColumns(n.AIndirection.Arg, out)
+			p.collect(n.AIndirection.Arg)
 		}
 	case *pg_query.Node_AArrayExpr:
 		if n.AArrayExpr != nil {
 			for _, e := range n.AArrayExpr.Elements {
-				collectPredicateColumns(e, out)
+				p.collect(e)
 			}
 		}
 	case *pg_query.Node_ColumnRef:
@@ -719,8 +764,105 @@ func collectPredicateColumns(node *pg_query.Node, out *[]FilterColumn) {
 		}
 		if fc := extractFilterColumn(cr); fc != nil {
 			fc.loc = cr.Location
-			*out = append(*out, *fc)
+			p.columns = append(p.columns, *fc)
 		}
+	}
+}
+
+// equalityPair returns the two table qualifiers of a qualified column-to-column
+// comparison (a.x = b.y, a.x > b.y, ...), the shape that links two relations.
+// Function-wrapped or cast columns still link: the comparison ranges over both
+// tables either way.
+func equalityPair(e *pg_query.A_Expr) (string, string, bool) {
+	if e.Kind != pg_query.A_Expr_Kind_AEXPR_OP || len(e.Name) == 0 {
+		return "", "", false
+	}
+	lhs, rhs := firstQualifiedColumn(e.Lexpr), firstQualifiedColumn(e.Rexpr)
+	if lhs == nil || rhs == nil {
+		return "", "", false
+	}
+	a, b := columnTable(lhs), columnTable(rhs)
+	if a == "" || b == "" {
+		return "", "", false
+	}
+	return a, b, true
+}
+
+// firstQualifiedColumn digs through casts and function calls for a table-qualified
+// column; unqualified columns are skipped (cannot attribute to a relation).
+func firstQualifiedColumn(node *pg_query.Node) *pg_query.ColumnRef {
+	if node == nil {
+		return nil
+	}
+	switch n := node.Node.(type) {
+	case *pg_query.Node_ColumnRef:
+		cr := n.ColumnRef
+		if cr != nil && len(cr.Fields) == 2 {
+			return cr
+		}
+	case *pg_query.Node_TypeCast:
+		return firstQualifiedColumn(n.TypeCast.GetArg())
+	case *pg_query.Node_CollateClause:
+		return firstQualifiedColumn(n.CollateClause.GetArg())
+	case *pg_query.Node_AIndirection:
+		return firstQualifiedColumn(n.AIndirection.GetArg())
+	case *pg_query.Node_FuncCall:
+		for _, a := range n.FuncCall.GetArgs() {
+			if cr := firstQualifiedColumn(a); cr != nil {
+				return cr
+			}
+		}
+	}
+	return nil
+}
+
+func columnTable(cr *pg_query.ColumnRef) string {
+	fc := extractFilterColumn(cr)
+	if fc == nil || fc.Table == nil {
+		return ""
+	}
+	return *fc.Table
+}
+
+// Identifiers (alias if present, else relation name) in the outermost FROM,
+// stopping at subqueries and set-op branches.
+func topLevelFromTables(s *pg_query.SelectStmt) []string {
+	if s == nil {
+		return nil
+	}
+	var out []string
+	for _, item := range s.FromClause {
+		appendFromTable(item, &out)
+	}
+	return out
+}
+
+func appendFromTable(node *pg_query.Node, out *[]string) {
+	if node == nil {
+		return
+	}
+	switch n := node.Node.(type) {
+	case *pg_query.Node_RangeVar:
+		rv := n.RangeVar
+		if rv == nil {
+			return
+		}
+		name := rv.Relname
+		if rv.Alias != nil && rv.Alias.Aliasname != "" {
+			name = rv.Alias.Aliasname
+		}
+		*out = append(*out, name)
+	case *pg_query.Node_RangeSubselect:
+		rs := n.RangeSubselect
+		if rs != nil && rs.Alias != nil && rs.Alias.Aliasname != "" {
+			*out = append(*out, rs.Alias.Aliasname)
+		}
+	case *pg_query.Node_JoinExpr:
+		if n.JoinExpr == nil {
+			return
+		}
+		appendFromTable(n.JoinExpr.Larg, out)
+		appendFromTable(n.JoinExpr.Rarg, out)
 	}
 }
 

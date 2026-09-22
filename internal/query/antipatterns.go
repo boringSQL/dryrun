@@ -62,23 +62,79 @@ func detectUnboundedQuery(parsed *ParsedQuery, snap *schema.SchemaSnapshot, warn
 }
 
 func detectCartesianJoin(parsed *ParsedQuery, warnings *[]ValidationWarning) {
-	if parsed.Info.StatementType != "SELECT" {
+	for _, scope := range parsed.Info.cartesianScopes {
+		warnDisconnected(scope, warnings)
+	}
+}
+
+func warnDisconnected(scope cartesianScope, warnings *[]ValidationWarning) {
+	tables := uniqueStrings(scope.tables)
+	if len(tables) < 2 {
 		return
 	}
 
-	var selectTables []string
-	for _, t := range parsed.Info.Tables {
-		if t.Context == "select" {
-			selectTables = append(selectTables, t.Name)
+	parent := make(map[string]string, len(tables))
+	for _, t := range tables {
+		parent[t] = t
+	}
+	for _, pr := range scope.pairs {
+		if _, ok := parent[pr.a]; !ok {
+			continue
 		}
+		if _, ok := parent[pr.b]; !ok {
+			continue
+		}
+		union(parent, pr.a, pr.b)
 	}
 
-	if len(selectTables) > 1 && !parsed.Info.HasJoin {
-		*warnings = append(*warnings, ValidationWarning{
-			Severity: SeverityWarning,
-			Message:  fmt.Sprintf("possible Cartesian join between %s - missing JOIN condition", strings.Join(selectTables, ", ")),
-		})
+	var order []string
+	components := map[string][]string{}
+	for _, t := range tables {
+		root := find(parent, t)
+		if _, ok := components[root]; !ok {
+			order = append(order, root)
+		}
+		components[root] = append(components[root], t)
 	}
+	if len(order) < 2 {
+		return
+	}
+
+	parts := make([]string, 0, len(order))
+	for _, root := range order {
+		parts = append(parts, strings.Join(components[root], ", "))
+	}
+	*warnings = append(*warnings, ValidationWarning{
+		Severity: SeverityWarning,
+		Message:  fmt.Sprintf("possible Cartesian join - no join predicate connects %s", strings.Join(parts, " and ")),
+	})
+}
+
+func find(parent map[string]string, x string) string {
+	for parent[x] != x {
+		parent[x] = parent[parent[x]]
+		x = parent[x]
+	}
+	return x
+}
+
+func union(parent map[string]string, a, b string) {
+	ra, rb := find(parent, a), find(parent, b)
+	if ra != rb {
+		parent[rb] = ra
+	}
+}
+
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	var out []string
+	for _, s := range in {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func detectDMLWithoutWhere(parsed *ParsedQuery, warnings *[]ValidationWarning) {

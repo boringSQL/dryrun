@@ -165,6 +165,134 @@ func TestCartesianJoinWarning(t *testing.T) {
 	}
 }
 
+func hasCartesianWarning(result *ValidationResult) bool {
+	for _, w := range result.Warnings {
+		if strings.Contains(w.Message, "artesian") {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCartesianJoinImplicitWhereNoWarning(t *testing.T) {
+	snap := testSchema()
+	result, err := ValidateQuery("SELECT u.id FROM users u, orders o WHERE u.id = o.user_id", snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasCartesianWarning(result) {
+		t.Errorf("implicit join written in WHERE reported as Cartesian: %+v", result.Warnings)
+	}
+}
+
+func TestCartesianJoinSubqueryNoWarning(t *testing.T) {
+	snap := testSchema()
+	result, err := ValidateQuery("SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)", snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasCartesianWarning(result) {
+		t.Errorf("subquery table reported as Cartesian: %+v", result.Warnings)
+	}
+}
+
+func TestCartesianJoinOnClauseNoWarning(t *testing.T) {
+	snap := testSchema()
+	result, err := ValidateQuery("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id", snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasCartesianWarning(result) {
+		t.Errorf("JOIN ... ON reported as Cartesian: %+v", result.Warnings)
+	}
+}
+
+func TestCartesianJoinCteNoWarning(t *testing.T) {
+	snap := testSchema()
+	result, err := ValidateQuery("WITH recent AS (SELECT id FROM orders WHERE user_id = 5) SELECT u.id FROM users u JOIN recent r ON u.id = r.id", snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasCartesianWarning(result) {
+		t.Errorf("CTE query reported as Cartesian: %+v", result.Warnings)
+	}
+}
+
+func TestCartesianJoinPartialConnectivityWarns(t *testing.T) {
+	snap := testSchema()
+	result, err := ValidateQuery("SELECT * FROM users u, orders o, events e WHERE u.id = o.user_id", snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasCartesianWarning(result) {
+		t.Errorf("disconnected events not reported as Cartesian: %+v", result.Warnings)
+	}
+}
+
+func TestCartesianJoinCrossJoinWarns(t *testing.T) {
+	snap := testSchema()
+	result, err := ValidateQuery("SELECT * FROM users u CROSS JOIN orders o", snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasCartesianWarning(result) {
+		t.Errorf("CROSS JOIN not reported as Cartesian: %+v", result.Warnings)
+	}
+}
+
+func TestCartesianJoinNoWarning(t *testing.T) {
+	snap := testSchema()
+	cases := map[string]string{
+		"using":            "SELECT * FROM users u JOIN orders o USING (id)",
+		"natural":          "SELECT * FROM users u NATURAL JOIN orders o",
+		"range predicate":  "SELECT * FROM users u, orders o WHERE u.id > o.user_id",
+		"derived linked":   "SELECT * FROM users u, (SELECT * FROM orders) x WHERE u.id = x.user_id",
+		"wrapped columns":  "SELECT * FROM users u JOIN orders o ON LOWER(u.email) = o.x",
+		"full outer":       "SELECT * FROM users u FULL JOIN orders o ON u.id = o.user_id",
+		"three way linked": "SELECT * FROM users u, orders o, events e WHERE u.id = o.user_id AND o.user_id = e.user_id",
+	}
+	for name, sql := range cases {
+		result, err := ValidateQuery(sql, snap)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if hasCartesianWarning(result) {
+			t.Errorf("%s: %q reported as Cartesian: %+v", name, sql, result.Warnings)
+		}
+	}
+}
+
+func TestCartesianJoinWarns(t *testing.T) {
+	snap := testSchema()
+	cases := map[string]string{
+		"comma separated":  "SELECT * FROM users, orders",
+		"cross join":       "SELECT * FROM users u CROSS JOIN orders o",
+		"derived unlinked": "SELECT * FROM users u, (SELECT * FROM orders) x",
+		"partially linked": "SELECT * FROM a, b JOIN c USING (x)",
+	}
+	for name, sql := range cases {
+		result, err := ValidateQuery(sql, snap)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !hasCartesianWarning(result) {
+			t.Errorf("%s: %q not reported as Cartesian: %+v", name, sql, result.Warnings)
+		}
+	}
+}
+
+func TestCartesianJoinMultiStatement(t *testing.T) {
+	snap := testSchema()
+	// the first statement is a Cartesian product even though the second is joined
+	result, err := ValidateQuery("SELECT * FROM users, orders; SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id", snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasCartesianWarning(result) {
+		t.Errorf("first statement's Cartesian product masked by second statement: %+v", result.Warnings)
+	}
+}
+
 func TestPartitionKeyMissingWarning(t *testing.T) {
 	snap := testSchema()
 	result, err := ValidateQuery("SELECT * FROM events WHERE user_id = 5", snap)
