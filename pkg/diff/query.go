@@ -3,7 +3,6 @@ package diff
 import (
 	"fmt"
 	"io"
-	"math"
 	"sort"
 	"time"
 
@@ -347,29 +346,6 @@ func earliestInfo(q *snapshot.QueryStatsSnapshot) *snapshot.QueryStatsInfo {
 	return q.InfoAfter
 }
 
-// Any counter going backwards makes the pair unsubtractable. An entry is a
-// group over several queryids, so one member being evicted can pull time down
-// while calls still rise.
-func wentBackwards(before, cur snapshot.QueryStatsEntry) bool {
-	prevB, curB := sumMemberBlocks(before), sumMemberBlocks(cur)
-	if cur.Calls < before.Calls ||
-		cur.TotalExecTimeMs < before.TotalExecTimeMs ||
-		cur.Rows < before.Rows {
-		return true
-	}
-	// only comparable when both sides carry the counters; a nil side is
-	// unknown, not zero
-	if !prevB.known || !curB.known {
-		return false
-	}
-	return curB.hit < prevB.hit ||
-		curB.read < prevB.read ||
-		curB.dirtied < prevB.dirtied ||
-		curB.written < prevB.written ||
-		curB.tempRead < prevB.tempRead ||
-		curB.tempWritten < prevB.tempWritten
-}
-
 // entryBlockCounts rolls up the raw members; known is false when any member
 // lacks the counters, so a partial sum never becomes a mean.
 type (
@@ -383,12 +359,6 @@ type (
 func sumMemberBlocks(e snapshot.QueryStatsEntry) entryBlockCounts {
 	var c entryBlockCounts
 	if len(e.Members) == 0 {
-		if e.TempBlksRead != nil {
-			c.tempRead = *e.TempBlksRead
-		}
-		if e.TempBlksWritten != nil {
-			c.tempWritten = *e.TempBlksWritten
-		}
 		return c
 	}
 	for _, m := range e.Members {
@@ -428,14 +398,10 @@ type (
 func subtractMembers(before, cur snapshot.QueryStatsEntry, fromTruncated, truncated bool) memberWindow {
 	prevB, curB := sumMemberBlocks(before), sumMemberBlocks(cur)
 	w := memberWindow{blks: entryBlockCounts{known: prevB.known && curB.known}}
-	if !membersReconcile(before) || !membersReconcile(cur) {
-		w.calls = cur.Calls - before.Calls
-		w.timeMs = cur.TotalExecTimeMs - before.TotalExecTimeMs
-		w.rows = cur.Rows - before.Rows
-		w.backwards = wentBackwards(before, cur)
-		if w.blks.known {
-			w.blks.add(curB, prevB)
-		}
+	// members are the only subtractable unit; without them the window is
+	// unknowable, and summing nothing would read as flat
+	if len(before.Members) == 0 || len(cur.Members) == 0 {
+		w.backwards = true
 		return w
 	}
 	prevIDs, prev := membersByID(before)
@@ -495,23 +461,6 @@ func membersByID(e snapshot.QueryStatsEntry) ([]int64, map[int64]memberTotals) {
 		out[m.QueryID] = t
 	}
 	return ids, out
-}
-
-// members only stand in for the entry when they add up to it; a payload
-// whose members carry calls alone falls back to the entry totals
-func membersReconcile(e snapshot.QueryStatsEntry) bool {
-	if len(e.Members) == 0 {
-		return false
-	}
-	var calls, rows int64
-	var ms float64
-	for _, m := range e.Members {
-		calls += m.Calls
-		rows += m.Rows
-		ms += m.TotalExecTimeMs
-	}
-	return calls == e.Calls && rows == e.Rows &&
-		math.Abs(ms-e.TotalExecTimeMs) <= 1e-6*math.Max(1, math.Abs(e.TotalExecTimeMs))
 }
 
 func memberBlocks(m snapshot.QueryStatsMember) entryBlockCounts {

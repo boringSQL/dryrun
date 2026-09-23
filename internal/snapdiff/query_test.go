@@ -20,7 +20,7 @@ func mkQuery(schemaRef, hash, node string, ts time.Time, calls int64, ms float64
 			Canonical:       "SELECT * FROM users WHERE id = $1",
 			Calls:           calls,
 			TotalExecTimeMs: ms,
-			Members:         []snapshot.QueryStatsMember{{QueryID: 1, Calls: calls}},
+			Members:         []snapshot.QueryStatsMember{{QueryID: 1, Calls: calls, TotalExecTimeMs: ms}},
 		}},
 	}
 }

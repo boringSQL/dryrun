@@ -20,7 +20,7 @@ func qEntry(fp, sql string, calls int64, ms float64, rows int64) snapshot.QueryS
 		Calls:           calls,
 		TotalExecTimeMs: ms,
 		Rows:            rows,
-		Members:         []snapshot.QueryStatsMember{{QueryID: 1, Calls: calls}},
+		Members:         []snapshot.QueryStatsMember{{QueryID: 1, Calls: calls, TotalExecTimeMs: ms, Rows: rows}},
 	}
 }
 
@@ -1138,5 +1138,20 @@ func TestDiffQueryStats_LegacyRolesVsFoldedUncapped(t *testing.T) {
 	e := findEntry(t, d, "fp")
 	if e.Status != QueryGrew || e.CallsDelta != 12 || e.UnmatchedMembers != 0 {
 		t.Errorf("status=%s calls=%d unmatched=%d, want grew 12, 0 unmatched", e.Status, e.CallsDelta, e.UnmatchedMembers)
+	}
+}
+
+// A shape without members cannot be subtracted; it must not read as flat.
+func TestDiffQueryStats_MemberlessNotFlat(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	before := qEntry("fp", "SELECT 1", 100, 100, 100)
+	cur := qEntry("fp", "SELECT 1", 400, 3200, 400)
+	cur.Members = nil
+	d, err := DiffQueryStats(qSnap("primary", t0, before), qSnap("primary", t0.Add(time.Hour), cur))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := findEntry(t, d, "fp"); e.Status != QueryReset || d.NotSubtractable != 1 {
+		t.Errorf("status=%s not_subtractable=%d, want reset/1", e.Status, d.NotSubtractable)
 	}
 }
