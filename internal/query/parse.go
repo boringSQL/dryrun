@@ -202,7 +202,10 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 			})
 		}
 
-		// walk tree for tables, joins, referenced columns
+		// DML only: walking CREATE TABLE would report its own relation as a read
+		if !isDMLRoot(node) {
+			continue
+		}
 		walkNode(node, func(child *pg_query.Node) {
 			if child == nil {
 				return
@@ -303,6 +306,15 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 	}, nil
 }
 
+func isDMLRoot(node *pg_query.Node) bool {
+	switch node.GetNode().(type) {
+	case *pg_query.Node_SelectStmt, *pg_query.Node_InsertStmt, *pg_query.Node_UpdateStmt,
+		*pg_query.Node_DeleteStmt, *pg_query.Node_MergeStmt:
+		return true
+	}
+	return false
+}
+
 func withClauseOf(node *pg_query.Node) *pg_query.WithClause {
 	switch n := node.Node.(type) {
 	case *pg_query.Node_SelectStmt:
@@ -317,15 +329,6 @@ func withClauseOf(node *pg_query.Node) *pg_query.WithClause {
 		return n.MergeStmt.GetWithClause()
 	}
 	return nil
-}
-
-// names are harvested by the walkNode callback before recursion, so recursive self-references stay guarded
-func walkCtes(node *pg_query.Node, fn func(*pg_query.Node)) {
-	for _, cte := range withClauseOf(node).GetCtes() {
-		if c, ok := cte.Node.(*pg_query.Node_CommonTableExpr); ok && c.CommonTableExpr != nil {
-			walkNode(c.CommonTableExpr.Ctequery, fn)
-		}
-	}
 }
 
 // the walk visits a SubLink before its subselect, so marks land in time
@@ -396,243 +399,6 @@ func extractFilterColumn(cr *pg_query.ColumnRef) *FilterColumn {
 		}
 	}
 	return nil
-}
-
-// recursive walk over pg_query nodes; protobuf reflection would be heavier so we handle the cases we need
-func walkNode(node *pg_query.Node, fn func(*pg_query.Node)) {
-	if node == nil {
-		return
-	}
-	fn(node)
-	switch n := node.Node.(type) {
-	case *pg_query.Node_SelectStmt:
-		s := n.SelectStmt
-		if s == nil {
-			return
-		}
-		walkCtes(node, fn)
-		for _, t := range s.TargetList {
-			walkNode(t, fn)
-		}
-		for _, f := range s.FromClause {
-			walkNode(f, fn)
-		}
-		walkNode(s.WhereClause, fn)
-		for _, g := range s.GroupClause {
-			walkNode(g, fn)
-		}
-		walkNode(s.HavingClause, fn)
-		walkNode(s.LimitCount, fn)
-		walkNode(s.LimitOffset, fn)
-		for _, s := range s.SortClause {
-			walkNode(s, fn)
-		}
-		walkNode(&pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: s.Larg}}, fn)
-		walkNode(&pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: s.Rarg}}, fn)
-	case *pg_query.Node_InsertStmt:
-		s := n.InsertStmt
-		if s == nil {
-			return
-		}
-		walkCtes(node, fn)
-		if s.Relation != nil {
-			walkNode(&pg_query.Node{Node: &pg_query.Node_RangeVar{RangeVar: s.Relation}}, fn)
-		}
-		if s.SelectStmt != nil {
-			walkNode(s.SelectStmt, fn)
-		}
-		if s.OnConflictClause != nil {
-			walkNode(&pg_query.Node{Node: &pg_query.Node_OnConflictClause{OnConflictClause: s.OnConflictClause}}, fn)
-		}
-	case *pg_query.Node_UpdateStmt:
-		s := n.UpdateStmt
-		if s == nil {
-			return
-		}
-		walkCtes(node, fn)
-		if s.Relation != nil {
-			walkNode(&pg_query.Node{Node: &pg_query.Node_RangeVar{RangeVar: s.Relation}}, fn)
-		}
-		for _, f := range s.FromClause {
-			walkNode(f, fn)
-		}
-		walkNode(s.WhereClause, fn)
-	case *pg_query.Node_DeleteStmt:
-		s := n.DeleteStmt
-		if s == nil {
-			return
-		}
-		walkCtes(node, fn)
-		if s.Relation != nil {
-			walkNode(&pg_query.Node{Node: &pg_query.Node_RangeVar{RangeVar: s.Relation}}, fn)
-		}
-		walkNode(s.WhereClause, fn)
-	case *pg_query.Node_JoinExpr:
-		j := n.JoinExpr
-		if j == nil {
-			return
-		}
-		walkNode(j.Larg, fn)
-		walkNode(j.Rarg, fn)
-		walkNode(j.Quals, fn)
-	case *pg_query.Node_RangeVar:
-		// leaf node
-	case *pg_query.Node_BoolExpr:
-		b := n.BoolExpr
-		if b == nil {
-			return
-		}
-		for _, a := range b.Args {
-			walkNode(a, fn)
-		}
-	case *pg_query.Node_AExpr:
-		e := n.AExpr
-		if e == nil {
-			return
-		}
-		walkNode(e.Lexpr, fn)
-		walkNode(e.Rexpr, fn)
-	case *pg_query.Node_ResTarget:
-		rt := n.ResTarget
-		if rt == nil {
-			return
-		}
-		walkNode(rt.Val, fn)
-	case *pg_query.Node_ColumnRef:
-		// leaf
-	case *pg_query.Node_SubLink:
-		sl := n.SubLink
-		if sl == nil {
-			return
-		}
-		walkNode(sl.Subselect, fn)
-		walkNode(sl.Testexpr, fn)
-	case *pg_query.Node_FuncCall:
-		fc := n.FuncCall
-		if fc == nil {
-			return
-		}
-		for _, a := range fc.Args {
-			walkNode(a, fn)
-		}
-	case *pg_query.Node_TypeCast:
-		tc := n.TypeCast
-		if tc == nil {
-			return
-		}
-		walkNode(tc.Arg, fn)
-	case *pg_query.Node_RangeSubselect:
-		if n.RangeSubselect != nil {
-			walkNode(n.RangeSubselect.Subquery, fn)
-		}
-	case *pg_query.Node_OnConflictClause:
-		oc := n.OnConflictClause
-		if oc == nil {
-			return
-		}
-		if oc.Infer != nil {
-			for _, ie := range oc.Infer.IndexElems {
-				walkNode(ie, fn)
-			}
-			walkNode(oc.Infer.WhereClause, fn)
-		}
-		for _, tl := range oc.TargetList {
-			walkNode(tl, fn)
-		}
-		walkNode(oc.WhereClause, fn)
-	case *pg_query.Node_MergeStmt:
-		s := n.MergeStmt
-		if s == nil {
-			return
-		}
-		walkCtes(node, fn)
-		if s.Relation != nil {
-			walkNode(&pg_query.Node{Node: &pg_query.Node_RangeVar{RangeVar: s.Relation}}, fn)
-		}
-		walkNode(s.SourceRelation, fn)
-		walkNode(s.JoinCondition, fn)
-		for _, w := range s.MergeWhenClauses {
-			walkNode(w, fn)
-		}
-	case *pg_query.Node_MergeWhenClause:
-		m := n.MergeWhenClause
-		if m == nil {
-			return
-		}
-		walkNode(m.Condition, fn)
-		for _, tl := range m.TargetList {
-			walkNode(tl, fn)
-		}
-		for _, v := range m.Values {
-			walkNode(v, fn)
-		}
-	case *pg_query.Node_CaseExpr:
-		e := n.CaseExpr
-		if e == nil {
-			return
-		}
-		walkNode(e.Arg, fn)
-		for _, a := range e.Args {
-			walkNode(a, fn)
-		}
-		walkNode(e.Defresult, fn)
-	case *pg_query.Node_CaseWhen:
-		w := n.CaseWhen
-		if w == nil {
-			return
-		}
-		walkNode(w.Expr, fn)
-		walkNode(w.Result, fn)
-	case *pg_query.Node_CoalesceExpr:
-		if n.CoalesceExpr != nil {
-			for _, a := range n.CoalesceExpr.Args {
-				walkNode(a, fn)
-			}
-		}
-	case *pg_query.Node_NullTest:
-		if n.NullTest != nil {
-			walkNode(n.NullTest.Arg, fn)
-		}
-	case *pg_query.Node_BooleanTest:
-		if n.BooleanTest != nil {
-			walkNode(n.BooleanTest.Arg, fn)
-		}
-	case *pg_query.Node_List:
-		if n.List != nil {
-			for _, i := range n.List.Items {
-				walkNode(i, fn)
-			}
-		}
-	case *pg_query.Node_RowExpr:
-		if n.RowExpr != nil {
-			for _, a := range n.RowExpr.Args {
-				walkNode(a, fn)
-			}
-		}
-	case *pg_query.Node_MinMaxExpr:
-		if n.MinMaxExpr != nil {
-			for _, a := range n.MinMaxExpr.Args {
-				walkNode(a, fn)
-			}
-		}
-	case *pg_query.Node_CollateClause:
-		if n.CollateClause != nil {
-			walkNode(n.CollateClause.Arg, fn)
-		}
-	case *pg_query.Node_AIndirection:
-		if n.AIndirection != nil {
-			walkNode(n.AIndirection.Arg, fn)
-			for _, i := range n.AIndirection.Indirection {
-				walkNode(i, fn)
-			}
-		}
-	case *pg_query.Node_AArrayExpr:
-		if n.AArrayExpr != nil {
-			for _, e := range n.AArrayExpr.Elements {
-				walkNode(e, fn)
-			}
-		}
-	}
 }
 
 // Predicate-scoped column collection: descends into WHERE/JOIN predicates and

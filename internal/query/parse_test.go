@@ -613,3 +613,90 @@ func TestOuterLimitWithSublinkStillCounts(t *testing.T) {
 		t.Error("expected HasLimit from outer LIMIT")
 	}
 }
+
+// The walk must reach every clause (the old hand-listed switch kept missing
+// some) and must not report targets or DDL relations as reads.
+func TestParseSQL_WalkCoverage(t *testing.T) {
+	cases := []struct {
+		sql       string
+		tables    []string // exactly these tables, when set
+		hasTable  string
+		hasColumn string
+	}{
+		{sql: "DELETE FROM orders USING bogus_table WHERE orders.id = bogus_table.id", hasTable: "bogus_table"},
+		{sql: "INSERT INTO users (id) VALUES ((SELECT max(id) FROM bogus_table))", hasTable: "bogus_table"},
+		{sql: "SELECT * FROM generate_series(1, (SELECT count(*) FROM bogus_table)) g", hasTable: "bogus_table"},
+		{sql: "SELECT id FROM users ORDER BY c", hasColumn: "c"},
+		{sql: "SELECT count(*) FILTER (WHERE c > 1) FROM users", hasColumn: "c"},
+		{sql: "SELECT sum(id) OVER (ORDER BY c) FROM users", hasColumn: "c"},
+		{sql: "UPDATE users SET email = c", hasColumn: "c"},
+		{sql: "UPDATE users SET email = 'x' RETURNING c", hasColumn: "c"},
+		{sql: "SELECT * INTO new_t FROM users", tables: []string{"users"}},
+		{sql: "SELECT * FROM users u FOR UPDATE OF u", tables: []string{"users"}},
+		{sql: "CREATE TABLE new_t (id int)", tables: []string{}},
+	}
+	for _, tc := range cases {
+		q, err := ParseSQL(tc.sql)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.sql, err)
+		}
+		tables := map[string]bool{}
+		for _, tb := range q.Info.Tables {
+			tables[tb.Name] = true
+		}
+		columns := map[string]bool{}
+		for _, c := range q.Info.ReferencedColumns {
+			columns[c.Column] = true
+		}
+		if tc.hasTable != "" && !tables[tc.hasTable] {
+			t.Errorf("%s: table %s missing, got %v", tc.sql, tc.hasTable, tables)
+		}
+		if tc.hasColumn != "" && !columns[tc.hasColumn] {
+			t.Errorf("%s: column %s missing, got %v", tc.sql, tc.hasColumn, columns)
+		}
+		if tc.tables != nil {
+			if len(tables) != len(tc.tables) {
+				t.Errorf("%s: tables %v, want %v", tc.sql, tables, tc.tables)
+			}
+			for _, name := range tc.tables {
+				if !tables[name] {
+					t.Errorf("%s: tables %v, want %v", tc.sql, tables, tc.tables)
+				}
+			}
+		}
+	}
+}
+
+// The SET (a, b) = (SELECT ...) source is shared by every column; one visit,
+// or duplicate locs break the table rewrite and errors double.
+func TestParseSQL_MultiAssignSourceWalkedOnce(t *testing.T) {
+	q, err := ParseSQL("UPDATE users SET (email, id) = (SELECT o.nocol, o.id FROM orders o)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tb := range q.Info.Tables {
+		if tb.Name == "orders" && len(tb.locs) != 1 {
+			t.Errorf("orders locs=%v, want one", tb.locs)
+		}
+	}
+	n := 0
+	for _, c := range q.Info.ReferencedColumns {
+		if c.Column == "nocol" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("nocol referenced %d times, want 1", n)
+	}
+}
+
+// A CTE named like a real table carries its own columns.
+func TestValidate_CteShadowColumns(t *testing.T) {
+	r, err := ValidateQuery("WITH users AS (SELECT 1 AS foo) SELECT users.foo FROM users ORDER BY users.foo", testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Errors) != 0 || r.CorrectedSQL != "" {
+		t.Errorf("errors=%v corrected=%q, want none", r.Errors, r.CorrectedSQL)
+	}
+}

@@ -182,7 +182,8 @@ func validateReferencedColumns(parsed *ParsedQuery, snap *schema.SchemaSnapshot,
 				break
 			}
 		}
-		if ref == nil {
+		// a CTE shadows the real table; its columns are not the table's
+		if ref == nil || (ref.Schema == nil && slices.Contains(parsed.Info.cteNames, ref.Name)) {
 			continue
 		}
 
