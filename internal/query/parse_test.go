@@ -560,3 +560,28 @@ func TestDmlCteBodyCollected(t *testing.T) {
 		t.Errorf("expected ghost from DML CTE body, got %+v", q.Info.Tables)
 	}
 }
+
+func TestSelectStarInExistsIgnored(t *testing.T) {
+	for _, sql := range []string{
+		"SELECT id FROM users u WHERE EXISTS (SELECT * FROM orders o WHERE o.user_id = u.id)",
+		"SELECT id FROM users u WHERE NOT EXISTS (SELECT * FROM a UNION SELECT * FROM b)",
+	} {
+		q, err := ParseSQL(sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Info.HasSelectStar {
+			t.Errorf("SELECT * inside EXISTS must not count: %s", sql)
+		}
+	}
+}
+
+func TestSelectStarInInSubqueryStillCounts(t *testing.T) {
+	q, err := ParseSQL("SELECT id FROM users WHERE (id, email) IN (SELECT * FROM archived_users)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.Info.HasSelectStar {
+		t.Error("expected HasSelectStar from IN subquery")
+	}
+}

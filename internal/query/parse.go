@@ -104,6 +104,7 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 	)
 
 	seenTables := make(map[string]int)
+	existsSelects := make(map[*pg_query.SelectStmt]bool)
 
 	for _, stmt := range result.Stmts {
 		node := stmt.Stmt
@@ -211,8 +212,17 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 				}
 			}
 			switch cn := child.Node.(type) {
+			case *pg_query.Node_SubLink:
+				if cn.SubLink != nil && cn.SubLink.SubLinkType == pg_query.SubLinkType_EXISTS_SUBLINK {
+					markExistsSelect(cn.SubLink.Subselect, existsSelects)
+				}
 			case *pg_query.Node_SelectStmt:
-				noteSelectFacts(cn.SelectStmt, &hasLimit, &hasSelectStar)
+				// EXISTS ignores its target list, so SELECT * there costs nothing
+				star := &hasSelectStar
+				if existsSelects[cn.SelectStmt] {
+					star = new(bool)
+				}
+				noteSelectFacts(cn.SelectStmt, &hasLimit, star)
 			case *pg_query.Node_RangeVar:
 				rv := cn.RangeVar
 				if rv == nil {
@@ -302,6 +312,24 @@ func walkCtes(node *pg_query.Node, fn func(*pg_query.Node)) {
 			walkNode(c.CommonTableExpr.Ctequery, fn)
 		}
 	}
+}
+
+// the walk visits a SubLink before its subselect, so marks land in time
+func markExistsSelect(node *pg_query.Node, marks map[*pg_query.SelectStmt]bool) {
+	sel, ok := node.GetNode().(*pg_query.Node_SelectStmt)
+	if !ok || sel.SelectStmt == nil {
+		return
+	}
+	var mark func(*pg_query.SelectStmt)
+	mark = func(s *pg_query.SelectStmt) {
+		if s == nil {
+			return
+		}
+		marks[s] = true
+		mark(s.Larg)
+		mark(s.Rarg)
+	}
+	mark(sel.SelectStmt)
 }
 
 // runs per SelectStmt so nested subqueries/CTEs/set-ops count too; count(*)
