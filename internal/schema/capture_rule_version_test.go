@@ -16,14 +16,8 @@ import (
 // Only the current version needs an entry — older ones are history, and their
 // files are gone. Add a new entry when you bump.
 var captureRuleFingerprints = map[int]string{
-	// Re-blessed, not bumped, when the PG13 floor was dropped. Two edits, both
-	// to the pgss-installed probe: a server_version_num conjunct removed (it was
-	// true on every supported major) and a total_exec_time column probe added
-	// (pgss 1.7 already failed at capture with 42703; now it is reported absent
-	// during preflight instead). Row selection in fetch-query-stats and
-	// fetch-query-stats-toplevel is byte-identical, so no capture changes shape
-	// and nothing stops being comparable with an earlier one.
-	2: "58055c6746d9b478f8eb87a18e589eb1a3bc22eda256869756d85872fb85c24a",
+	// 3 folds per-role pgss rows per queryid before the cap, so the set differs from v2
+	3: "7b37eea657bbfca96357ef96ac42cc7a844cd84420d785401aff0215b338242d",
 }
 
 // TestCaptureRuleVersionMatchesSQL is the coupling between the constant and the

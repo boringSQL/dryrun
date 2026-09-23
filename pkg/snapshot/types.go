@@ -18,7 +18,8 @@ const FormatVersion = 3
 // Bump on any change that can alter the selected set;
 // TestCaptureRuleVersionMatchesSQL enforces it. 0 means legacy.
 // 1 excluded comment-prefixed statements; 2 strips leading comments first.
-const CaptureRuleVersion = 2
+// 3 folds per-role rows into one per queryid before the cap.
+const CaptureRuleVersion = 3
 
 type (
 
@@ -587,7 +588,7 @@ type (
 		Checkpointer           *CheckpointerActivity     `json:"checkpointer,omitempty"`
 	}
 
-	// One raw pg_stat_statements row, before qshape grouping; hashed from these.
+	// One queryid's counters, before qshape grouping; from v3 the per-role rows are folded. Hashed from these.
 	// Every field here must also appear in ComputeQueryStatsContentHash's comparator:
 	// the sort is unstable, so a field it doesn't order can move the digest.
 	QueryStatsMember struct {

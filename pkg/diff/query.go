@@ -183,7 +183,7 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 	for _, cur := range to.Queries {
 		before, seen := prev[cur.Fingerprint]
 		delete(prev, cur.Fingerprint)
-		d.Entries = append(d.Entries, entryDelta(before, cur, seen, d.StatsReset, d.FromTruncated))
+		d.Entries = append(d.Entries, entryDelta(before, cur, seen, d.StatsReset, d.FromTruncated, d.Truncated))
 	}
 	// left in prev: shapes the newer capture does not carry. They were in the
 	// older capture by definition, so only the newer capture's cap can hide them
@@ -222,7 +222,7 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 	return d, nil
 }
 
-func entryDelta(before, cur snapshot.QueryStatsEntry, seen, reset, fromTruncated bool) QueryEntryDelta {
+func entryDelta(before, cur snapshot.QueryStatsEntry, seen, reset, fromTruncated, truncated bool) QueryEntryDelta {
 	e := QueryEntryDelta{
 		Fingerprint:     cur.Fingerprint,
 		Canonical:       cur.Canonical,
@@ -237,7 +237,7 @@ func entryDelta(before, cur snapshot.QueryStatsEntry, seen, reset, fromTruncated
 	blocksKnown := false
 	var win memberWindow
 	if seen {
-		win = subtractMembers(before, cur, fromTruncated)
+		win = subtractMembers(before, cur, fromTruncated, truncated)
 	}
 	switch {
 	case !seen && fromTruncated:
@@ -403,12 +403,13 @@ func sumMemberBlocks(e snapshot.QueryStatsEntry) entryBlockCounts {
 }
 
 type (
-	// one queryid's counters within a shape; pgss keeps a row per user, so a
-	// queryid can appear more than once and is summed
+	// one queryid's counters within a shape; pre-v3 captures could repeat a
+	// queryid (pgss row per user), summed
 	memberTotals struct {
 		calls, rows int64
 		timeMs      float64
 		blks        entryBlockCounts
+		pgssRows    int
 	}
 
 	memberWindow struct {
@@ -424,7 +425,7 @@ type (
 // a shape carries drifts between captures; subtracting the summed totals would
 // book a member's whole lifetime as window growth when it crosses the cap, or
 // read as a reset when it falls below.
-func subtractMembers(before, cur snapshot.QueryStatsEntry, fromTruncated bool) memberWindow {
+func subtractMembers(before, cur snapshot.QueryStatsEntry, fromTruncated, truncated bool) memberWindow {
 	prevB, curB := sumMemberBlocks(before), sumMemberBlocks(cur)
 	w := memberWindow{blks: entryBlockCounts{known: prevB.known && curB.known}}
 	if !membersReconcile(before) || !membersReconcile(cur) {
@@ -444,6 +445,11 @@ func subtractMembers(before, cur snapshot.QueryStatsEntry, fromTruncated bool) m
 		c := now[id]
 		p, ok := prev[id]
 		switch {
+		case ok && truncated && c.pgssRows != p.pgssRows:
+			// pre-v3 capped per role row, so the two sums cover different
+			// rows; uncapped both sides are complete
+			w.unmatched++
+			continue
 		case ok:
 			if c.calls < p.calls || c.timeMs < p.timeMs || c.rows < p.rows ||
 				(w.blks.known && c.blks.below(p.blks)) {
@@ -485,6 +491,7 @@ func membersByID(e snapshot.QueryStatsEntry) ([]int64, map[int64]memberTotals) {
 		t.timeMs += m.TotalExecTimeMs
 		t.rows += m.Rows
 		t.blks.add(memberBlocks(m), entryBlockCounts{})
+		t.pgssRows++
 		out[m.QueryID] = t
 	}
 	return ids, out

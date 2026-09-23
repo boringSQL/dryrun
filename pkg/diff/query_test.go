@@ -1069,3 +1069,74 @@ func TestDiffQueryStats_DuplicateQueryIDSummed(t *testing.T) {
 		t.Errorf("status=%s calls=%d unmatched=%d, want grew 20 0", e.Status, e.CallsDelta, e.UnmatchedMembers)
 	}
 }
+
+// Pre-v3 captures kept one pgss row per role; one role's row crossing the cap must not book its lifetime as window growth.
+func TestDiffQueryStats_RoleRowCrossesCap(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := capped(qSnap("primary", t0, qShape("fp", qMember(1, 1000, 1000), qMember(2, 100, 100))))
+	to := capped(qSnap("primary", t0.Add(time.Hour),
+		qShape("fp", qMember(1, 1010, 1010), qMember(1, 5_000_000, 900), qMember(2, 105, 105))))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "fp")
+	if e.Status != QueryGrew || e.CallsDelta != 5 || e.UnmatchedMembers != 1 {
+		t.Errorf("status=%s calls=%d unmatched=%d, want grew 5 with 1 unmatched", e.Status, e.CallsDelta, e.UnmatchedMembers)
+	}
+	if d.CallsDelta != 5 {
+		t.Errorf("envelope calls_delta=%d, want 5", d.CallsDelta)
+	}
+}
+
+// The mirror: one role's row falling below the cap pulls the queryid's sum down; that is not a reset.
+func TestDiffQueryStats_RoleRowFallsBelowCap(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := capped(qSnap("primary", t0,
+		qShape("fp", qMember(1, 1000, 1000), qMember(1, 5_000_000, 900), qMember(2, 100, 100))))
+	to := capped(qSnap("primary", t0.Add(time.Hour), qShape("fp", qMember(1, 1010, 1010), qMember(2, 105, 105))))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "fp")
+	if e.Status != QueryGrew || e.CallsDelta != 5 || e.UnmatchedMembers != 1 || d.NotSubtractable != 0 {
+		t.Errorf("status=%s calls=%d unmatched=%d not_subtractable=%d, want grew 5, 1 unmatched, 0",
+			e.Status, e.CallsDelta, e.UnmatchedMembers, d.NotSubtractable)
+	}
+}
+
+// Both role rows on both sides still subtract as one queryid.
+func TestDiffQueryStats_RoleRowsBothSides(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := capped(qSnap("primary", t0, qShape("fp", qMember(1, 1000, 1000), qMember(1, 50, 50))))
+	to := capped(qSnap("primary", t0.Add(time.Hour), qShape("fp", qMember(1, 1010, 1010), qMember(1, 52, 52))))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "fp")
+	if e.Status != QueryGrew || e.CallsDelta != 12 || e.UnmatchedMembers != 0 {
+		t.Errorf("status=%s calls=%d unmatched=%d, want grew 12, 0 unmatched", e.Status, e.CallsDelta, e.UnmatchedMembers)
+	}
+}
+
+// The pair that actually reaches the guard after the v3 bump: a legacy per-role capture against a folded one; uncapped both are complete, so the sums compare exactly.
+func TestDiffQueryStats_LegacyRolesVsFoldedUncapped(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := qSnap("primary", t0, qShape("fp", qMember(1, 1000, 1000), qMember(1, 50, 50)))
+	to := qSnap("primary", t0.Add(time.Hour), qShape("fp", qMember(1, 1062, 1062)))
+	from.CaptureRuleVersion, to.CaptureRuleVersion = 0, 3
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "fp")
+	if e.Status != QueryGrew || e.CallsDelta != 12 || e.UnmatchedMembers != 0 {
+		t.Errorf("status=%s calls=%d unmatched=%d, want grew 12, 0 unmatched", e.Status, e.CallsDelta, e.UnmatchedMembers)
+	}
+}
