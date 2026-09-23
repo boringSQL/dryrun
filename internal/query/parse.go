@@ -105,6 +105,7 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 
 	seenTables := make(map[string]int)
 	existsSelects := make(map[*pg_query.SelectStmt]bool)
+	sublinkSelects := make(map[*pg_query.SelectStmt]bool)
 
 	for _, stmt := range result.Stmts {
 		node := stmt.Stmt
@@ -213,16 +214,29 @@ func ParseSQL(sql string) (*ParsedQuery, error) {
 			}
 			switch cn := child.Node.(type) {
 			case *pg_query.Node_SubLink:
-				if cn.SubLink != nil && cn.SubLink.SubLinkType == pg_query.SubLinkType_EXISTS_SUBLINK {
+				if cn.SubLink == nil {
+					return
+				}
+				if cn.SubLink.SubLinkType == pg_query.SubLinkType_EXISTS_SUBLINK {
 					markExistsSelect(cn.SubLink.Subselect, existsSelects)
 				}
+				walkNode(cn.SubLink.Subselect, func(n *pg_query.Node) {
+					if sel, ok := n.GetNode().(*pg_query.Node_SelectStmt); ok && sel.SelectStmt != nil {
+						sublinkSelects[sel.SelectStmt] = true
+					}
+				})
 			case *pg_query.Node_SelectStmt:
 				// EXISTS ignores its target list, so SELECT * there costs nothing
 				star := &hasSelectStar
 				if existsSelects[cn.SelectStmt] {
 					star = new(bool)
 				}
-				noteSelectFacts(cn.SelectStmt, &hasLimit, star)
+				// a LIMIT inside IN/EXISTS/scalar subqueries does not bound the rows returned
+				limit := &hasLimit
+				if sublinkSelects[cn.SelectStmt] {
+					limit = new(bool)
+				}
+				noteSelectFacts(cn.SelectStmt, limit, star)
 			case *pg_query.Node_RangeVar:
 				rv := cn.RangeVar
 				if rv == nil {
@@ -332,7 +346,7 @@ func markExistsSelect(node *pg_query.Node, marks map[*pg_query.SelectStmt]bool) 
 	mark(sel.SelectStmt)
 }
 
-// runs per SelectStmt so nested subqueries/CTEs/set-ops count too; count(*)
+// runs per SelectStmt so FROM subqueries/CTEs/set-ops count too; count(*)
 // is a FuncCall, not a ResTarget column, so it stays excluded
 func noteSelectFacts(s *pg_query.SelectStmt, hasLimit, hasSelectStar *bool) {
 	if s == nil {

@@ -585,3 +585,31 @@ func TestSelectStarInInSubqueryStillCounts(t *testing.T) {
 		t.Error("expected HasSelectStar from IN subquery")
 	}
 }
+
+func TestLimitInSublinkDoesNotBoundOuter(t *testing.T) {
+	for _, sql := range []string{
+		"SELECT id FROM users WHERE id IN (SELECT user_id FROM orders LIMIT 10)",
+		"SELECT id FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id LIMIT 1)",
+		"SELECT id, (SELECT total FROM orders o WHERE o.user_id = u.id ORDER BY id LIMIT 1) FROM users u",
+		"SELECT id FROM users WHERE id IN (SELECT user_id FROM (SELECT * FROM orders LIMIT 5) s)",
+		"SELECT id FROM users WHERE id IN (WITH x AS (SELECT user_id FROM orders LIMIT 5) SELECT user_id FROM x)",
+	} {
+		q, err := ParseSQL(sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.Info.HasLimit {
+			t.Errorf("LIMIT inside a sublink must not count as bounding the query: %s", sql)
+		}
+	}
+}
+
+func TestOuterLimitWithSublinkStillCounts(t *testing.T) {
+	q, err := ParseSQL("SELECT id FROM users WHERE id IN (SELECT user_id FROM orders) LIMIT 10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.Info.HasLimit {
+		t.Error("expected HasLimit from outer LIMIT")
+	}
+}
