@@ -204,13 +204,21 @@ func (a *AnnotatedSchema) TotalIndexScans(table QualifiedName, index string) int
 }
 
 func (a *AnnotatedSchema) ColumnStats(table QualifiedName, column string) *ColumnStats {
+	if e := a.ColumnStatsEntry(table, column); e != nil {
+		return &e.Stats
+	}
+	return nil
+}
+
+// ColumnStatsEntry is like ColumnStats but also exposes Inherited for injection.
+func (a *AnnotatedSchema) ColumnStatsEntry(table QualifiedName, column string) *ColumnStatsEntry {
 	if a == nil || a.Planner == nil {
 		return nil
 	}
 	for i := range a.Planner.Columns {
 		e := &a.Planner.Columns[i]
 		if e.Table == table && e.Column == column {
-			return &e.Stats
+			return e
 		}
 	}
 	return nil

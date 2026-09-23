@@ -125,7 +125,7 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 		if pgMajor >= 18 {
 			for _, cs := range colsWithStats {
 				if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
-					return injectColumnStatsPG18(ctx, tx, pgMajor, t.Schema, t.Name, cs.col, cs.stats)
+					return injectColumnStatsPG18(ctx, tx, pgMajor, t.Schema, t.Name, cs.col, cs.stats, cs.inherited)
 				}); err != nil {
 					result.warn("column %s.%s.%s: %v", t.Schema, t.Name, cs.col.Name, err)
 				} else {
@@ -153,7 +153,7 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 					continue
 				}
 				if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
-					return injectColumnStatsLegacy(ctx, tx, cm, cs.stats)
+					return injectColumnStatsLegacy(ctx, tx, cm, cs.stats, cs.inherited)
 				}); err != nil {
 					result.warn("column %s.%s.%s: %v", t.Schema, t.Name, cs.col.Name, err)
 				} else {
@@ -212,16 +212,17 @@ func runSavepoint(ctx context.Context, tx pgx.Tx, fn func(pgx.Tx) error) error {
 }
 
 type colWithStats struct {
-	col   Column
-	stats *ColumnStats
+	col       Column
+	stats     *ColumnStats
+	inherited bool
 }
 
 func collectColumnsWithStats(a *AnnotatedSchema, t Table) []colWithStats {
 	qual := t.Qual()
 	var out []colWithStats
 	for _, c := range t.Columns {
-		if s := a.ColumnStats(qual, c.Name); s != nil {
-			out = append(out, colWithStats{col: c, stats: s})
+		if e := a.ColumnStatsEntry(qual, c.Name); e != nil {
+			out = append(out, colWithStats{col: c, stats: &e.Stats, inherited: e.Inherited})
 		}
 	}
 	return out
@@ -280,16 +281,16 @@ func injectRelationStats(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName
 	return nil
 }
 
-func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName, tableName string, col Column, s *ColumnStats) error {
+func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName, tableName string, col Column, s *ColumnStats, inherited bool) error {
 	parts := []string{
 		"'version', $1::int",
 		"'schemaname', $2::text",
 		"'relname', $3::text",
 		"'attname', $4::text",
-		"'inherited', false",
+		"'inherited', $5::boolean",
 	}
-	args := []any{pgMajor, schemaName, tableName, col.Name}
-	idx := 5
+	args := []any{pgMajor, schemaName, tableName, col.Name, inherited}
+	idx := 6
 
 	if s.NullFrac != nil {
 		parts = append(parts, fmt.Sprintf("'null_frac', $%d::real", idx))
@@ -325,8 +326,8 @@ func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaNa
 	return err
 }
 
-func injectColumnStatsLegacy(ctx context.Context, tx pgx.Tx, cm columnMeta, s *ColumnStats) error {
-	_, err := tx.Exec(ctx, q("delete-column-stats-legacy"), cm.relOID, cm.attNum)
+func injectColumnStatsLegacy(ctx context.Context, tx pgx.Tx, cm columnMeta, s *ColumnStats, inherited bool) error {
+	_, err := tx.Exec(ctx, q("delete-column-stats-legacy"), cm.relOID, cm.attNum, inherited)
 	if err != nil {
 		return fmt.Errorf("delete old stats: %w", err)
 	}
@@ -355,14 +356,14 @@ func injectColumnStatsLegacy(ctx context.Context, tx pgx.Tx, cm columnMeta, s *C
 		stakind3, staop3, stacoll3, stanumbers3, stavalues3,
 		stakind4, staop4, stacoll4, stanumbers4, stavalues4,
 		stakind5, staop5, stacoll5, stanumbers5, stavalues5
-	) VALUES ($1, $2, false, $3, 0, $4,
+	) VALUES ($1, $2, $3, $4, 0, $5,
 		0, 0, 0, NULL, NULL,
 		0, 0, 0, NULL, NULL,
-		$5, 0, 0, $6::real[], NULL,
+		$6, 0, 0, $7::real[], NULL,
 		0, 0, 0, NULL, NULL,
 		0, 0, 0, NULL, NULL)`
 
-	if _, err := tx.Exec(ctx, insertSQL, cm.relOID, cm.attNum, nullFrac, nDistinct, kind3, correlation); err != nil {
+	if _, err := tx.Exec(ctx, insertSQL, cm.relOID, cm.attNum, inherited, nullFrac, nDistinct, kind3, correlation); err != nil {
 		return fmt.Errorf("insert pg_statistic: %w", err)
 	}
 	return nil

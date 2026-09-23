@@ -221,6 +221,126 @@ func TestInjectStats_WarnsOnNonPositiveReltuples(t *testing.T) {
 	}
 }
 
+// A partitioned parent has only inherited=true pg_stats rows (see stats_test.go's
+// DedupsInheritedRows), and injection must round-trip that flag rather than always
+// writing stainherit=false — otherwise the injected stats land where the planner
+// never looks for a partitioned parent. Legacy (pre-PG18) path only, since it writes
+// pg_statistic directly; the PG18 path goes through pg_restore_attribute_stats.
+func TestInjectStats_PartitionedParentColumnStatsAreInherited(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+	major := serverMajor(t, ctx, pool)
+	if major >= 18 {
+		t.Skip("legacy pg_statistic path only; PG18 uses pg_restore_attribute_stats")
+	}
+
+	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS a0_part_stats;
+		CREATE TABLE a0_part_stats (id int, v text) PARTITION BY RANGE (id);
+		CREATE TABLE a0_part_stats_p1 PARTITION OF a0_part_stats FOR VALUES FROM (0) TO (1000);
+	`); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, "DROP TABLE IF EXISTS a0_part_stats") })
+
+	nullFrac, nDistinct := 0.0, -1.0
+	a := &AnnotatedSchema{
+		Schema: &SchemaSnapshot{Tables: []Table{
+			{
+				Schema: "public", Name: "a0_part_stats",
+				Columns:       []Column{{Name: "id"}, {Name: "v"}},
+				PartitionInfo: &PartitionInfo{Strategy: PartitionRange, Key: "id"},
+			},
+		}},
+		Planner: &PlannerStatsSnapshot{Columns: []ColumnStatsEntry{
+			{
+				Table: qn("public", "a0_part_stats"), Column: "id", Inherited: true,
+				Stats: ColumnStats{NullFrac: &nullFrac, NDistinct: &nDistinct},
+			},
+		}},
+	}
+
+	res, err := InjectStats(ctx, pool, a, major)
+	if err != nil {
+		t.Fatalf("InjectStats: %v", err)
+	}
+	if res.ColumnsUpdated != 1 {
+		t.Fatalf("ColumnsUpdated = %d, want 1; warnings = %v", res.ColumnsUpdated, res.Warnings)
+	}
+
+	var inherited bool
+	err = pool.QueryRow(ctx, `
+		SELECT stainherit FROM pg_statistic
+		 WHERE starelid = 'public.a0_part_stats'::regclass
+		   AND staattnum = (SELECT attnum FROM pg_attribute
+		                      WHERE attrelid = 'public.a0_part_stats'::regclass AND attname = 'id')
+	`).Scan(&inherited)
+	if err != nil {
+		t.Fatalf("query pg_statistic: %v", err)
+	}
+	if !inherited {
+		t.Errorf("stainherit = false, want true for a partitioned parent's stats")
+	}
+}
+
+// PG18 companion of the above: injectColumnStatsPG18 must pass the Inherited
+// flag through to pg_restore_attribute_stats's 'inherited' argument instead of
+// hard-coding false.
+func TestInjectStats_PartitionedParentColumnStatsAreInherited_PG18(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+	major := serverMajor(t, ctx, pool)
+	if major < 18 {
+		t.Skip("pg_restore_attribute_stats path only; PG < 18 uses direct pg_statistic writes")
+	}
+
+	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS a0_part_stats18;
+		CREATE TABLE a0_part_stats18 (id int, v text) PARTITION BY RANGE (id);
+		CREATE TABLE a0_part_stats18_p1 PARTITION OF a0_part_stats18 FOR VALUES FROM (0) TO (1000);
+	`); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, "DROP TABLE IF EXISTS a0_part_stats18") })
+
+	nullFrac, nDistinct := 0.0, -1.0
+	a := &AnnotatedSchema{
+		Schema: &SchemaSnapshot{Tables: []Table{
+			{
+				Schema: "public", Name: "a0_part_stats18",
+				Columns:       []Column{{Name: "id"}, {Name: "v"}},
+				PartitionInfo: &PartitionInfo{Strategy: PartitionRange, Key: "id"},
+			},
+		}},
+		Planner: &PlannerStatsSnapshot{Columns: []ColumnStatsEntry{
+			{
+				Table: qn("public", "a0_part_stats18"), Column: "id", Inherited: true,
+				Stats: ColumnStats{NullFrac: &nullFrac, NDistinct: &nDistinct},
+			},
+		}},
+	}
+
+	res, err := InjectStats(ctx, pool, a, major)
+	if err != nil {
+		t.Fatalf("InjectStats: %v", err)
+	}
+	if res.ColumnsUpdated != 1 {
+		t.Fatalf("ColumnsUpdated = %d, want 1; warnings = %v", res.ColumnsUpdated, res.Warnings)
+	}
+
+	var inherited bool
+	err = pool.QueryRow(ctx, `
+		SELECT inherited FROM pg_stats
+		 WHERE schemaname = 'public' AND tablename = 'a0_part_stats18' AND attname = 'id'
+	`).Scan(&inherited)
+	if err != nil {
+		t.Fatalf("query pg_statistic: %v", err)
+	}
+	if !inherited {
+		t.Errorf("stainherit = false, want true for a partitioned parent's stats (pg_restore_attribute_stats path)")
+	}
+}
+
 func qn(schema, name string) QualifiedName { return QualifiedName{Schema: schema, Name: name} }
 
 func contains(ss []string, s string) bool {

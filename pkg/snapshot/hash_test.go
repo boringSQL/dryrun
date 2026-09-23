@@ -1411,3 +1411,22 @@ func TestContentHashV3_DetachedPartitionCountsAsAnOrdinaryTable(t *testing.T) {
 		t.Errorf("a detached partition was stripped from the digest; it is an ordinary table now")
 	}
 }
+
+// Compat pin: digest computed on the build before Inherited existed. A plain
+// table's row must still hash to it, or every stored planner blob 422s on re-push.
+func TestPlannerContentHash_InheritedFalseKeepsPreFieldDigest(t *testing.T) {
+	nullFrac := 0.1
+	doc := func(inherited bool) *PlannerStatsSnapshot {
+		return &PlannerStatsSnapshot{SchemaRefHash: "ddl-hash", Columns: []ColumnStatsEntry{{
+			Table: QualifiedName{Schema: "public", Name: "users"}, Column: "id", Inherited: inherited,
+			Stats: ColumnStats{NullFrac: &nullFrac},
+		}}}
+	}
+	const preInheritedField = "3454950d62fea14da6ba8883dd2035f818666c7d89385e8e54fb2e75cd37c69e"
+	if got := ComputePlannerContentHash(doc(false)); got != preInheritedField {
+		t.Fatalf("Inherited=false moved the planner digest:\n  got  %s\n  want %s", got, preInheritedField)
+	}
+	if ComputePlannerContentHash(doc(true)) == preInheritedField {
+		t.Errorf("Inherited=true did not move the planner digest")
+	}
+}

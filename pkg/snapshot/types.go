@@ -522,7 +522,9 @@ type BloatEstimate struct {
 type ColumnStatsEntry struct {
 	Table  QualifiedName `json:"table"`
 	Column string        `json:"column"`
-	Stats  ColumnStats   `json:"stats"`
+	// set when only an inherited pg_stats row exists; omitempty keeps pre-fix hashes stable
+	Inherited bool        `json:"inherited,omitempty"`
+	Stats     ColumnStats `json:"stats"`
 }
 
 type TableActivityEntry struct {

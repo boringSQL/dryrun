@@ -527,3 +527,94 @@ func TestFetchQueryStatsPreflight_BatchErrorSurfaces(t *testing.T) {
 		t.Errorf("connection unusable after a failed batch: n=%d err=%v", n, err)
 	}
 }
+
+// A table with classic-inheritance children (TimescaleDB hypertables, trigger-based
+// partitioning) carries TWO pg_stats rows per column: inherited=f (own heap) and
+// inherited=t (own heap + children). fetchPlannerColumnStats must return exactly one
+// row per column, preferring the own-heap row when it exists.
+func TestFetchPlannerColumnStats_DedupsInheritedRows(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	// (a) classic inheritance, parent has its own rows too
+	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS dr_inh_child_a, dr_inh_parent_a;
+		CREATE TABLE dr_inh_parent_a (id int, v text);
+		CREATE TABLE dr_inh_child_a (id int, v text) INHERITS (dr_inh_parent_a);
+		INSERT INTO dr_inh_parent_a SELECT g, 'p'||g FROM generate_series(1, 200) g;
+		INSERT INTO dr_inh_child_a  SELECT g, 'c'||g FROM generate_series(1, 50) g;
+		ANALYZE dr_inh_parent_a;
+		ANALYZE dr_inh_child_a;
+	`); err != nil {
+		t.Fatalf("setup (a): %v", err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, "DROP TABLE IF EXISTS dr_inh_child_a, dr_inh_parent_a") })
+
+	// (b) inheritance, parent itself empty
+	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS dr_inh_child_b, dr_inh_parent_b;
+		CREATE TABLE dr_inh_parent_b (id int, v text);
+		CREATE TABLE dr_inh_child_b (id int, v text) INHERITS (dr_inh_parent_b);
+		INSERT INTO dr_inh_child_b SELECT g, 'c'||g FROM generate_series(1, 50) g;
+		ANALYZE dr_inh_parent_b;
+		ANALYZE dr_inh_child_b;
+	`); err != nil {
+		t.Fatalf("setup (b): %v", err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, "DROP TABLE IF EXISTS dr_inh_child_b, dr_inh_parent_b") })
+
+	// (c) declarative partitioning: parent has no heap of its own
+	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS dr_inh_parent_c;
+		CREATE TABLE dr_inh_parent_c (id int, v text) PARTITION BY RANGE (id);
+		CREATE TABLE dr_inh_parent_c_p1 PARTITION OF dr_inh_parent_c FOR VALUES FROM (0) TO (1000);
+		INSERT INTO dr_inh_parent_c SELECT g, 'x'||g FROM generate_series(1, 100) g;
+		ANALYZE dr_inh_parent_c;
+	`); err != nil {
+		t.Fatalf("setup (c): %v", err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, "DROP TABLE IF EXISTS dr_inh_parent_c") })
+
+	cols, err := fetchPlannerColumnStats(ctx, pool)
+	if err != nil {
+		t.Fatalf("fetchPlannerColumnStats: %v", err)
+	}
+
+	byTableCol := map[string]map[string][]ColumnStatsEntry{}
+	for _, e := range cols {
+		if e.Table.Schema != "public" {
+			continue
+		}
+		if byTableCol[e.Table.Name] == nil {
+			byTableCol[e.Table.Name] = map[string][]ColumnStatsEntry{}
+		}
+		byTableCol[e.Table.Name][e.Column] = append(byTableCol[e.Table.Name][e.Column], e)
+	}
+
+	requireOneRow := func(t *testing.T, table, column string, wantInherited bool) ColumnStatsEntry {
+		t.Helper()
+		entries := byTableCol[table][column]
+		if len(entries) != 1 {
+			t.Fatalf("%s.%s: got %d pg_stats rows, want exactly 1: %+v", table, column, len(entries), entries)
+		}
+		if entries[0].Inherited != wantInherited {
+			t.Errorf("%s.%s: Inherited=%v, want %v", table, column, entries[0].Inherited, wantInherited)
+		}
+		return entries[0]
+	}
+
+	// (a) own-heap row wins, and its null_frac reflects only the parent's 200 rows,
+	// not the merged 250 — proof the own row (not the inherited one) was kept.
+	e := requireOneRow(t, "dr_inh_parent_a", "id", false)
+	if e.Stats.NDistinct == nil {
+		t.Errorf("dr_inh_parent_a.id: n_distinct is nil")
+	}
+
+	// (b) parent has zero own rows, so ANALYZE writes no inherited=false stats row —
+	// only the merged (inherited=true) row exists.
+	requireOneRow(t, "dr_inh_parent_b", "id", true)
+
+	// (c) partitioned parent has no heap of its own: only inherited=true rows exist.
+	requireOneRow(t, "dr_inh_parent_c", "id", true)
+	requireOneRow(t, "dr_inh_parent_c", "v", true)
+}

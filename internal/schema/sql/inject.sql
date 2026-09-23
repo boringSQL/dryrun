@@ -32,7 +32,7 @@ UPDATE pg_catalog.pg_class
 DELETE FROM pg_statistic
  WHERE starelid = $1
    AND staattnum = $2
-   AND NOT stainherit
+   AND stainherit = $3
 
 -- name: probe-pg-regresql
 SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_regresql')

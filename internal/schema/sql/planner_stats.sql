@@ -35,7 +35,9 @@ SELECT n.nspname                                  AS schema_name,
 
 -- name: fetch-planner-column-stats
 -- mcv/histogram as text to avoid type juggling; jsonb MCV stripped to keep row payloads out of the artifact
-SELECT s.schemaname               AS schema_name,
+-- inheritance parents have two rows per column (f/t); prefer the own-heap row
+SELECT DISTINCT ON (s.schemaname, s.tablename, s.attname)
+       s.schemaname               AS schema_name,
        s.tablename                AS table_name,
        s.attname                  AS column_name,
        s.null_frac::float8        AS null_frac,
@@ -52,11 +54,12 @@ SELECT s.schemaname               AS schema_name,
             ELSE s.most_common_freqs::text END  AS most_common_freqs,
        s.histogram_bounds::text   AS histogram_bounds,
        s.correlation::float8      AS correlation,
-       s.avg_width::int           AS avg_width
+       s.avg_width::int           AS avg_width,
+       s.inherited                AS inherited
   FROM pg_catalog.pg_stats s
   JOIN pg_catalog.pg_class     c ON c.relname = s.tablename
   JOIN pg_catalog.pg_namespace  n ON n.oid = c.relnamespace AND n.nspname = s.schemaname
   JOIN pg_catalog.pg_attribute  a ON a.attrelid = c.oid AND a.attname = s.attname
   JOIN pg_catalog.pg_type       t ON t.oid = a.atttypid
  WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
- ORDER BY s.schemaname, s.tablename, s.attname
+ ORDER BY s.schemaname, s.tablename, s.attname, s.inherited
