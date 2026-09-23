@@ -724,9 +724,7 @@ func (p *predicateCollector) collect(node *pg_query.Node) {
 		if e == nil {
 			return
 		}
-		if a, b, ok := equalityPair(e); ok {
-			p.pairs = append(p.pairs, colPair{a, b})
-		}
+		p.pairs = append(p.pairs, operandPairs(e)...)
 		p.collect(e.Lexpr)
 		p.collect(e.Rexpr)
 	case *pg_query.Node_BoolExpr:
@@ -831,51 +829,60 @@ func (p *predicateCollector) collectCtes(node *pg_query.Node) {
 	}
 }
 
-// equalityPair returns the two table qualifiers of a qualified column-to-column
-// comparison (a.x = b.y, a.x > b.y, ...), the shape that links two relations.
-// Function-wrapped or cast columns still link: the comparison ranges over both
-// tables either way.
-func equalityPair(e *pg_query.A_Expr) (string, string, bool) {
-	if e.Kind != pg_query.A_Expr_Kind_AEXPR_OP || len(e.Name) == 0 {
-		return "", "", false
+// operandPairs links every table qualifier on the left of a comparison to every
+// one on the right. Any A_Expr kind qualifies (=, <, BETWEEN, = ANY, IN, LIKE,
+// IS [NOT] DISTINCT FROM): each ranges over both tables. Casts, function calls
+// and arithmetic around the columns still link.
+func operandPairs(e *pg_query.A_Expr) []colPair {
+	var lhs, rhs []string
+	qualifiedTables(e.Lexpr, &lhs)
+	qualifiedTables(e.Rexpr, &rhs)
+	var out []colPair
+	for _, a := range lhs {
+		for _, b := range rhs {
+			out = append(out, colPair{a, b})
+		}
 	}
-	lhs, rhs := firstQualifiedColumn(e.Lexpr), firstQualifiedColumn(e.Rexpr)
-	if lhs == nil || rhs == nil {
-		return "", "", false
-	}
-	a, b := columnTable(lhs), columnTable(rhs)
-	if a == "" || b == "" {
-		return "", "", false
-	}
-	return a, b, true
+	return out
 }
 
-// firstQualifiedColumn digs through casts and function calls for a table-qualified
-// column; unqualified columns are skipped (cannot attribute to a relation).
-func firstQualifiedColumn(node *pg_query.Node) *pg_query.ColumnRef {
+// unqualified columns are skipped (cannot attribute to a relation)
+func qualifiedTables(node *pg_query.Node, out *[]string) {
 	if node == nil {
-		return nil
+		return
 	}
 	switch n := node.Node.(type) {
 	case *pg_query.Node_ColumnRef:
 		cr := n.ColumnRef
-		if cr != nil && len(cr.Fields) == 2 {
-			return cr
+		if cr == nil || len(cr.Fields) != 2 {
+			return
+		}
+		if t := columnTable(cr); t != "" {
+			*out = append(*out, t)
 		}
 	case *pg_query.Node_TypeCast:
-		return firstQualifiedColumn(n.TypeCast.GetArg())
+		qualifiedTables(n.TypeCast.GetArg(), out)
 	case *pg_query.Node_CollateClause:
-		return firstQualifiedColumn(n.CollateClause.GetArg())
+		qualifiedTables(n.CollateClause.GetArg(), out)
 	case *pg_query.Node_AIndirection:
-		return firstQualifiedColumn(n.AIndirection.GetArg())
+		qualifiedTables(n.AIndirection.GetArg(), out)
 	case *pg_query.Node_FuncCall:
 		for _, a := range n.FuncCall.GetArgs() {
-			if cr := firstQualifiedColumn(a); cr != nil {
-				return cr
-			}
+			qualifiedTables(a, out)
+		}
+	case *pg_query.Node_AExpr:
+		qualifiedTables(n.AExpr.GetLexpr(), out)
+		qualifiedTables(n.AExpr.GetRexpr(), out)
+	case *pg_query.Node_List:
+		// BETWEEN bounds and IN lists
+		for _, i := range n.List.GetItems() {
+			qualifiedTables(i, out)
+		}
+	case *pg_query.Node_CoalesceExpr:
+		for _, a := range n.CoalesceExpr.GetArgs() {
+			qualifiedTables(a, out)
 		}
 	}
-	return nil
 }
 
 func columnTable(cr *pg_query.ColumnRef) string {

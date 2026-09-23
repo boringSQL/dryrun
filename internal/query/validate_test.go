@@ -252,6 +252,13 @@ func TestCartesianJoinNoWarning(t *testing.T) {
 		"three way linked": "SELECT * FROM users u, orders o, events e WHERE u.id = o.user_id AND o.user_id = e.user_id",
 		"lateral on true":  "SELECT * FROM users u LEFT JOIN LATERAL (SELECT count(*) n FROM orders o WHERE o.user_id = u.id) x ON true",
 		"lateral comma":    "SELECT * FROM users u, LATERAL (SELECT * FROM orders o WHERE o.user_id = u.id LIMIT 3) x",
+		"between":          "SELECT * FROM users u, orders o WHERE o.created_at BETWEEN u.created_at AND u.updated_at",
+		"not between":      "SELECT * FROM users u, orders o WHERE o.created_at NOT BETWEEN u.created_at AND u.updated_at",
+		"eq any":           "SELECT * FROM users u, orders o WHERE o.user_id = ANY(u.ids)",
+		"not distinct":     "SELECT * FROM users u, orders o WHERE o.user_id IS NOT DISTINCT FROM u.id",
+		"in list":          "SELECT * FROM users u, orders o WHERE o.user_id IN (u.id, u.alt_id)",
+		"arithmetic":       "SELECT * FROM users u, orders o WHERE o.created_at > u.created_at - interval '1 day'",
+		"arithmetic lhs":   "SELECT * FROM users u, orders o WHERE o.user_id + 0 = u.id",
 	}
 	for name, sql := range cases {
 		result, err := ValidateQuery(sql, snap)
@@ -271,6 +278,8 @@ func TestCartesianJoinWarns(t *testing.T) {
 		"cross join":       "SELECT * FROM users u CROSS JOIN orders o",
 		"derived unlinked": "SELECT * FROM users u, (SELECT * FROM orders) x",
 		"partially linked": "SELECT * FROM a, b JOIN c USING (x)",
+		"self comparison":  "SELECT * FROM users u, orders o WHERE o.created_at BETWEEN o.created_at AND o.updated_at",
+		"constant bounds":  "SELECT * FROM users u, orders o WHERE u.id = ANY('{1,2}') AND o.user_id IN (1, 2)",
 	}
 	for name, sql := range cases {
 		result, err := ValidateQuery(sql, snap)
