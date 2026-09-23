@@ -942,3 +942,130 @@ func TestDiffQueryStats_TwoAddressesWithoutBootTime(t *testing.T) {
 		t.Fatal("subtracted two servers' counters because one boot time was missing")
 	}
 }
+
+// qMember is one pg_stat_statements row with every counter set, blocks scaled
+// off calls so a delta is easy to predict.
+func qMember(id, calls int64, ms float64) snapshot.QueryStatsMember {
+	hit, read, zero := calls*10, calls, int64(0)
+	return snapshot.QueryStatsMember{
+		QueryID: id, Calls: calls, TotalExecTimeMs: ms, Rows: calls,
+		SharedBlksHit: &hit, SharedBlksRead: &read,
+		SharedBlksDirtied: &zero, SharedBlksWritten: &zero,
+		TempBlksRead: &zero, TempBlksWritten: &zero,
+	}
+}
+
+// qShape is an entry whose totals are its members' sums, as a capture writes it.
+func qShape(fp string, members ...snapshot.QueryStatsMember) snapshot.QueryStatsEntry {
+	e := snapshot.QueryStatsEntry{Fingerprint: fp, Canonical: "SELECT ... WHERE id IN (...)", Members: members}
+	for _, m := range members {
+		e.Calls += m.Calls
+		e.TotalExecTimeMs += m.TotalExecTimeMs
+		e.Rows += m.Rows
+	}
+	return e
+}
+
+func capped(q *snapshot.QueryStatsSnapshot) *snapshot.QueryStatsSnapshot {
+	q.RowCap, q.RawRows = 500, 500
+	return q
+}
+
+// A queryid crossing the row cap must not book its lifetime as window growth.
+func TestDiffQueryStats_MemberCrossesCap(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := capped(qSnap("primary", t0, qShape("fp", qMember(1, 1000, 1000))))
+	to := capped(qSnap("primary", t0.Add(time.Hour),
+		qShape("fp", qMember(1, 1010, 1010), qMember(2, 5_000_000, 900))))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "fp")
+	if e.Status != QueryGrew || e.CallsDelta != 10 || e.TimeDelta != 10 || e.RowsDelta != 10 {
+		t.Errorf("status=%s calls=%d time=%v rows=%d, want grew 10/10/10", e.Status, e.CallsDelta, e.TimeDelta, e.RowsDelta)
+	}
+	if e.UnmatchedMembers != 1 {
+		t.Errorf("unmatched_members=%d, want 1", e.UnmatchedMembers)
+	}
+	if d.CallsDelta != 10 {
+		t.Errorf("envelope calls_delta=%d, want 10", d.CallsDelta)
+	}
+	if e.SharedBlksHitDelta != 100 || e.SharedBlksReadDelta != 10 {
+		t.Errorf("blocks hit=%d read=%d, want 100/10", e.SharedBlksHitDelta, e.SharedBlksReadDelta)
+	}
+	if e.WindowMeanMs == nil || *e.WindowMeanMs != 1 {
+		t.Errorf("window mean %v, want 1", e.WindowMeanMs)
+	}
+}
+
+// A queryid dropping below the newer cap pulls the summed totals down; that is
+// not a reset.
+func TestDiffQueryStats_MemberFallsBelowCap(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := capped(qSnap("primary", t0,
+		qShape("fp", qMember(1, 1000, 1000), qMember(2, 5_000_000, 900))))
+	to := capped(qSnap("primary", t0.Add(time.Hour), qShape("fp", qMember(1, 1010, 1010))))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "fp")
+	if e.Status != QueryGrew || e.CallsDelta != 10 {
+		t.Errorf("status=%s calls=%d, want grew 10", e.Status, e.CallsDelta)
+	}
+	if e.UnmatchedMembers != 1 || d.NotSubtractable != 0 {
+		t.Errorf("unmatched=%d not_subtractable=%d, want 1 and 0", e.UnmatchedMembers, d.NotSubtractable)
+	}
+}
+
+// With a complete older capture, a queryid first seen in the newer one is new
+// work for a known shape and counts in full.
+func TestDiffQueryStats_NewMemberUncappedBaseline(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := qSnap("primary", t0, qShape("fp", qMember(1, 1000, 1000)))
+	to := qSnap("primary", t0.Add(time.Hour), qShape("fp", qMember(1, 1010, 1010), qMember(2, 5, 50)))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "fp")
+	if e.CallsDelta != 15 || e.TimeDelta != 60 || e.UnmatchedMembers != 0 {
+		t.Errorf("calls=%d time=%v unmatched=%d, want 15/60/0", e.CallsDelta, e.TimeDelta, e.UnmatchedMembers)
+	}
+}
+
+// A matched queryid going backwards is still a reset, even when another
+// member's growth keeps the shape's totals rising.
+func TestDiffQueryStats_MatchedMemberBackwards(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := qSnap("primary", t0, qShape("fp", qMember(1, 1000, 1000), qMember(2, 100, 100)))
+	to := qSnap("primary", t0.Add(time.Hour), qShape("fp", qMember(1, 5000, 5000), qMember(2, 3, 3)))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := findEntry(t, d, "fp"); e.Status != QueryReset {
+		t.Errorf("status=%s, want %s", e.Status, QueryReset)
+	}
+}
+
+// pgss keeps a row per user, so one queryid can carry several members.
+func TestDiffQueryStats_DuplicateQueryIDSummed(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := qSnap("primary", t0, qShape("fp", qMember(1, 100, 100), qMember(1, 50, 50)))
+	to := qSnap("primary", t0.Add(time.Hour), qShape("fp", qMember(1, 110, 110), qMember(1, 60, 60)))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := findEntry(t, d, "fp")
+	if e.Status != QueryGrew || e.CallsDelta != 20 || e.UnmatchedMembers != 0 {
+		t.Errorf("status=%s calls=%d unmatched=%d, want grew 20 0", e.Status, e.CallsDelta, e.UnmatchedMembers)
+	}
+}

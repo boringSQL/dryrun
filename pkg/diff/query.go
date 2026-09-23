@@ -3,6 +3,7 @@ package diff
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"time"
 
@@ -60,6 +61,10 @@ type (
 
 		Rows      int64 `json:"rows"`
 		RowsDelta int64 `json:"rows_delta"`
+		// queryids present in only one capture whose work cannot be placed in
+		// the window (below an older cap, or gone from the newer one); the
+		// deltas exclude them, so they are a lower bound when this is non-zero
+		UnmatchedMembers int `json:"unmatched_members,omitempty"`
 
 		// cumulative counters at the newer capture, and the window delta.
 		// reset and truncated rows keep their totals out of the envelope
@@ -230,6 +235,10 @@ func entryDelta(before, cur snapshot.QueryStatsEntry, seen, reset, fromTruncated
 	e.SharedBlksDirtied, e.SharedBlksWritten = curB.dirtied, curB.written
 	e.TempBlksRead, e.TempBlksWritten = curB.tempRead, curB.tempWritten
 	blocksKnown := false
+	var win memberWindow
+	if seen {
+		win = subtractMembers(before, cur, fromTruncated)
+	}
 	switch {
 	case !seen && fromTruncated:
 		// the older capture was capped, so this shape may have been running
@@ -244,7 +253,7 @@ func entryDelta(before, cur snapshot.QueryStatsEntry, seen, reset, fromTruncated
 			e.SharedBlksDirtiedDelta, e.SharedBlksWrittenDelta = curB.dirtied, curB.written
 			e.TempBlksReadDelta, e.TempBlksWrittenDelta = curB.tempRead, curB.tempWritten
 		}
-	case reset || wentBackwards(before, cur):
+	case reset || win.backwards:
 		// after a reset the new value IS the window's work; before a reset we
 		// cannot know how much ran, so report what we can see and say why
 		e.Status = QueryReset
@@ -257,17 +266,13 @@ func entryDelta(before, cur snapshot.QueryStatsEntry, seen, reset, fromTruncated
 		}
 	default:
 		prevB := sumMemberBlocks(before)
-		e.CallsDelta = cur.Calls - before.Calls
-		e.TimeDelta = cur.TotalExecTimeMs - before.TotalExecTimeMs
-		e.RowsDelta = cur.Rows - before.Rows
-		if prevB.known && curB.known {
+		e.CallsDelta, e.TimeDelta, e.RowsDelta = win.calls, win.timeMs, win.rows
+		e.UnmatchedMembers = win.unmatched
+		if win.blks.known {
 			blocksKnown = true
-			e.SharedBlksHitDelta = curB.hit - prevB.hit
-			e.SharedBlksReadDelta = curB.read - prevB.read
-			e.SharedBlksDirtiedDelta = curB.dirtied - prevB.dirtied
-			e.SharedBlksWrittenDelta = curB.written - prevB.written
-			e.TempBlksReadDelta = curB.tempRead - prevB.tempRead
-			e.TempBlksWrittenDelta = curB.tempWritten - prevB.tempWritten
+			e.SharedBlksHitDelta, e.SharedBlksReadDelta = win.blks.hit, win.blks.read
+			e.SharedBlksDirtiedDelta, e.SharedBlksWrittenDelta = win.blks.dirtied, win.blks.written
+			e.TempBlksReadDelta, e.TempBlksWrittenDelta = win.blks.tempRead, win.blks.tempWritten
 		}
 		switch {
 		case e.CallsDelta > 0:
@@ -386,21 +391,150 @@ func sumMemberBlocks(e snapshot.QueryStatsEntry) entryBlockCounts {
 		}
 		return c
 	}
-	c.known = true
 	for _, m := range e.Members {
-		if m.SharedBlksHit == nil || m.SharedBlksRead == nil ||
-			m.SharedBlksDirtied == nil || m.SharedBlksWritten == nil ||
-			m.TempBlksRead == nil || m.TempBlksWritten == nil {
+		b := memberBlocks(m)
+		if !b.known {
 			return entryBlockCounts{}
 		}
-		c.hit += *m.SharedBlksHit
-		c.read += *m.SharedBlksRead
-		c.dirtied += *m.SharedBlksDirtied
-		c.written += *m.SharedBlksWritten
-		c.tempRead += *m.TempBlksRead
-		c.tempWritten += *m.TempBlksWritten
+		c.add(b, entryBlockCounts{})
 	}
+	c.known = true
 	return c
+}
+
+type (
+	// one queryid's counters within a shape; pgss keeps a row per user, so a
+	// queryid can appear more than once and is summed
+	memberTotals struct {
+		calls, rows int64
+		timeMs      float64
+		blks        entryBlockCounts
+	}
+
+	memberWindow struct {
+		calls, rows int64
+		timeMs      float64
+		blks        entryBlockCounts
+		backwards   bool
+		unmatched   int
+	}
+)
+
+// Subtracts a shape queryid by queryid. The fetch is capped, so which queryids
+// a shape carries drifts between captures; subtracting the summed totals would
+// book a member's whole lifetime as window growth when it crosses the cap, or
+// read as a reset when it falls below.
+func subtractMembers(before, cur snapshot.QueryStatsEntry, fromTruncated bool) memberWindow {
+	prevB, curB := sumMemberBlocks(before), sumMemberBlocks(cur)
+	w := memberWindow{blks: entryBlockCounts{known: prevB.known && curB.known}}
+	if !membersReconcile(before) || !membersReconcile(cur) {
+		w.calls = cur.Calls - before.Calls
+		w.timeMs = cur.TotalExecTimeMs - before.TotalExecTimeMs
+		w.rows = cur.Rows - before.Rows
+		w.backwards = wentBackwards(before, cur)
+		if w.blks.known {
+			w.blks.add(curB, prevB)
+		}
+		return w
+	}
+	prevIDs, prev := membersByID(before)
+	curIDs, now := membersByID(cur)
+	var zero memberTotals
+	for _, id := range curIDs {
+		c := now[id]
+		p, ok := prev[id]
+		switch {
+		case ok:
+			if c.calls < p.calls || c.timeMs < p.timeMs || c.rows < p.rows ||
+				(w.blks.known && c.blks.below(p.blks)) {
+				w.backwards = true
+			}
+		case fromTruncated:
+			// may have run below the older cap all along
+			w.unmatched++
+			continue
+		default:
+			// a new queryid for a known shape: all of its work is this window's
+			p = zero
+		}
+		w.calls += c.calls - p.calls
+		w.timeMs += c.timeMs - p.timeMs
+		w.rows += c.rows - p.rows
+		if w.blks.known {
+			w.blks.add(c.blks, p.blks)
+		}
+	}
+	for _, id := range prevIDs {
+		if _, ok := now[id]; !ok {
+			w.unmatched++
+		}
+	}
+	return w
+}
+
+// ids come back in first-seen order so float sums are deterministic
+func membersByID(e snapshot.QueryStatsEntry) ([]int64, map[int64]memberTotals) {
+	var ids []int64
+	out := make(map[int64]memberTotals, len(e.Members))
+	for _, m := range e.Members {
+		t, ok := out[m.QueryID]
+		if !ok {
+			ids = append(ids, m.QueryID)
+		}
+		t.calls += m.Calls
+		t.timeMs += m.TotalExecTimeMs
+		t.rows += m.Rows
+		t.blks.add(memberBlocks(m), entryBlockCounts{})
+		out[m.QueryID] = t
+	}
+	return ids, out
+}
+
+// members only stand in for the entry when they add up to it; a payload
+// whose members carry calls alone falls back to the entry totals
+func membersReconcile(e snapshot.QueryStatsEntry) bool {
+	if len(e.Members) == 0 {
+		return false
+	}
+	var calls, rows int64
+	var ms float64
+	for _, m := range e.Members {
+		calls += m.Calls
+		rows += m.Rows
+		ms += m.TotalExecTimeMs
+	}
+	return calls == e.Calls && rows == e.Rows &&
+		math.Abs(ms-e.TotalExecTimeMs) <= 1e-6*math.Max(1, math.Abs(e.TotalExecTimeMs))
+}
+
+func memberBlocks(m snapshot.QueryStatsMember) entryBlockCounts {
+	if m.SharedBlksHit == nil || m.SharedBlksRead == nil ||
+		m.SharedBlksDirtied == nil || m.SharedBlksWritten == nil ||
+		m.TempBlksRead == nil || m.TempBlksWritten == nil {
+		return entryBlockCounts{}
+	}
+	return entryBlockCounts{
+		hit: *m.SharedBlksHit, read: *m.SharedBlksRead,
+		dirtied: *m.SharedBlksDirtied, written: *m.SharedBlksWritten,
+		tempRead: *m.TempBlksRead, tempWritten: *m.TempBlksWritten,
+		known: true,
+	}
+}
+
+// adds cur-prev into c
+func (c *entryBlockCounts) add(cur, prev entryBlockCounts) {
+	c.hit += cur.hit - prev.hit
+	c.read += cur.read - prev.read
+	c.dirtied += cur.dirtied - prev.dirtied
+	c.written += cur.written - prev.written
+	c.tempRead += cur.tempRead - prev.tempRead
+	c.tempWritten += cur.tempWritten - prev.tempWritten
+}
+
+func (c entryBlockCounts) below(prev entryBlockCounts) bool {
+	return c.hit < prev.hit || c.read < prev.read ||
+		c.dirtied < prev.dirtied || c.written < prev.written ||
+		c.tempRead < prev.tempRead || c.tempWritten < prev.tempWritten
 }
 
 // block size is a compile-time GUC; prefer the newer capture, fall back so a

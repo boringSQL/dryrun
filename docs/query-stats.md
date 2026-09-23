@@ -34,9 +34,11 @@ pgss counters are cumulative, so the diff subtracts two captures. Where subtract
 - different labels
 - qshape or capture-rule version changed between the captures
 - pgss was reset inside the window (`stats_reset` moved)
-- a counter went backwards — an entry groups several queryids, and one member being evicted can pull time down while calls rise
+- a counter went backwards for a queryid present in both captures — pgss evicted it and re-added it
 
 Statuses: `grew`, `shrank`, `flat`, `new`, `gone` (absent from an uncapped newer capture), `evicted` (absent from a capped one, so it may still be running), `reset`, `truncated` (the older capture hit its row cap, so "new" shapes may only be newly visible). `reset` and `truncated` rows don't count into the headline totals.
+
+An entry groups several queryids, and the capture keeps only the top rows by time, so which queryids an entry carries drifts between captures. The diff subtracts queryid by queryid: one that crosses the cap does not book its lifetime as growth, and one that drops below it is not a reset. A queryid present in only one capture whose work cannot be placed in the window is left out of the deltas and counted in `unmatched_members`; when that is non-zero the entry's deltas are a lower bound. A queryid first seen in the newer capture counts in full when the older capture was complete.
 
 The mean column is the window mean, Δtime/Δcalls between the two captures, printed as `12.00<-2.00`: 12ms per call this window, 2ms before. This matters because `mean_exec_time` averages over everything since pgss last reset, and a query that got slower this week barely moves that number. A rising `dealloc` between captures means pgss was evicting entries under pressure; the diff reports it instead of letting evictions look like regressions.
 
