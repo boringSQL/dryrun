@@ -450,6 +450,29 @@ func TestDiffQueryStats_TruncatedCapture(t *testing.T) {
 	}
 }
 
+// Only the newer capture's cap can hide a shape; a capped older capture says
+// nothing about why a shape is missing from a complete newer one.
+func TestDiffQueryStats_GoneWhenOnlyOlderCaptureCapped(t *testing.T) {
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	from := qSnap("primary", t0,
+		qEntry("fp-a", "SELECT 1", 10, 10, 10),
+		qEntry("fp-b", "SELECT 2", 10, 10, 10),
+	)
+	from.RowCap, from.RawRows = 2, 2 // saturated
+	to := qSnap("primary", t0.Add(time.Hour), qEntry("fp-a", "SELECT 1", 20, 20, 20))
+
+	d, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Truncated {
+		t.Fatal("a saturated older capture was not flagged")
+	}
+	if e := findEntry(t, d, "fp-b"); e.Status != QueryGone {
+		t.Errorf("status %q, want %q when only the older capture was capped", e.Status, QueryGone)
+	}
+}
+
 func TestDiffQueryStats_ArgumentOrder(t *testing.T) {
 	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
 	older := qSnap("primary", t0, qEntry("fp", "SELECT 1", 100, 100, 100))

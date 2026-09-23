@@ -180,13 +180,15 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 		delete(prev, cur.Fingerprint)
 		d.Entries = append(d.Entries, entryDelta(before, cur, seen, d.StatsReset, d.FromTruncated))
 	}
-	// left in prev: shapes the newer capture does not carry
+	// left in prev: shapes the newer capture does not carry. They were in the
+	// older capture by definition, so only the newer capture's cap can hide them
+	goneStatus := missingStatus(hitRowCap(to))
 	for _, before := range prev {
 		prevB := sumMemberBlocks(before)
 		d.Entries = append(d.Entries, QueryEntryDelta{
 			Fingerprint:       before.Fingerprint,
 			Canonical:         before.Canonical,
-			Status:            missingStatus(d.Truncated),
+			Status:            goneStatus,
 			Calls:             before.Calls,
 			TotalExecTimeMs:   before.TotalExecTimeMs,
 			Rows:              before.Rows,
