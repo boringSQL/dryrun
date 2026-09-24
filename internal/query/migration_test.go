@@ -280,6 +280,15 @@ func TestCheckMigrationProseNeverContradictsVerdict(t *testing.T) {
 		// ADD COLUMN
 		"ALTER TABLE users ADD COLUMN age integer",
 		"ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT now()",
+		// ADD COLUMN, inline constraints
+		"ALTER TABLE users ADD COLUMN active boolean NOT NULL",
+		"ALTER TABLE users ADD COLUMN code text UNIQUE",
+		"ALTER TABLE orders ADD COLUMN code text UNIQUE",
+		"ALTER TABLE orders ADD COLUMN org_id int REFERENCES users(id)",
+		"ALTER TABLE users ADD COLUMN age int CHECK (age >= 0)",
+		"ALTER TABLE orders ADD COLUMN age int CHECK (age >= 0)",
+		"ALTER TABLE users ADD COLUMN x int GENERATED ALWAYS AS (id * 2) STORED",
+		"ALTER TABLE orders ADD COLUMN id2 int PRIMARY KEY",
 		// ALTER COLUMN TYPE (caution on a small table, dangerous on a large one)
 		"ALTER TABLE orders ALTER COLUMN total TYPE bigint",
 		"ALTER TABLE users ALTER COLUMN email TYPE citext",
@@ -345,6 +354,9 @@ func TestCheckMigrationProseNeverContradictsVerdict(t *testing.T) {
 		for _, c := range checks {
 			if c.Safety != SafetyDangerous && strings.Contains(c.Recommendation, "DANGEROUS") {
 				t.Errorf("%s: %s verdict recommends with DANGEROUS prose:\n%s", ddl, c.Safety, c.Recommendation)
+			}
+			if len(c.SaferSQL) > 0 && strings.Contains(c.Recommendation, "FIX:") {
+				t.Errorf("%s: recommendation still carries a fix beside safer_sql:\n%s", ddl, c.Recommendation)
 			}
 		}
 	}

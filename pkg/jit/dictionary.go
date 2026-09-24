@@ -52,6 +52,40 @@ func AddColumnVolatileDefault(table, col, colType, defaultExpr string) Entry {
 	}
 }
 
+// NOT NULL without DEFAULT has no value for existing rows: Postgres rejects it.
+func AddColumnNotNullNoDefault(table, col string) Entry {
+	return Entry{
+		Status: "DANGEROUS: fails on a non-empty table",
+		Reason: fmt.Sprintf("The new column is NULL for every existing row, so adding it NOT NULL without a DEFAULT aborts with \"column %q contains null values\".", col),
+		Fix: fmt.Sprintf(
+			"  1. ALTER TABLE %s ADD COLUMN %s <type>;  -- nullable, metadata-only\n"+
+				"  2. Backfill in batches: UPDATE %s SET %s = ... WHERE %s IS NULL AND id BETWEEN ... AND ...;\n"+
+				"  3. ALTER TABLE %s ADD CONSTRAINT %s_%s_nn CHECK (%s IS NOT NULL) NOT VALID;\n"+
+				"     ALTER TABLE %s VALIDATE CONSTRAINT %s_%s_nn;  -- allows concurrent DML\n"+
+				"     ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;  -- instant, skips the scan\n"+
+				"     ALTER TABLE %s DROP CONSTRAINT %s_%s_nn;",
+			table, col,
+			table, col, col,
+			table, table, col, col,
+			table, table, col,
+			table, col,
+			table, table, col),
+	}
+}
+
+// A STORED generated column computes its expression for every existing row.
+func AddStoredGeneratedColumn(table, col string) Entry {
+	return Entry{
+		Status: "DANGEROUS: full table rewrite under ACCESS EXCLUSIVE",
+		Reason: "A STORED generated column computes its expression for every existing row, rewriting the table with all reads and writes blocked.",
+		Fix: fmt.Sprintf(
+			"  There is no non-blocking form. Either rewrite in a maintenance window, or add a plain column and keep it current with a trigger:\n"+
+				"  1. ALTER TABLE %s ADD COLUMN %s <type>;\n"+
+				"  2. Backfill in batches, then add the GENERATED expression when the rewrite is acceptable.",
+			table, col),
+	}
+}
+
 func AlterColumnType(table, col, newType string) Entry {
 	return Entry{
 		Status: "DANGEROUS: full table rewrite under ACCESS EXCLUSIVE",
@@ -98,6 +132,33 @@ func AddForeignKeyUnsafe(table, col, refTable, refCol string) Entry {
 			table, table, col, col, refTable, refCol,
 			table, table, col),
 	}
+}
+
+// Before PG18 a partitioned table rejects NOT VALID foreign keys, so the fix
+// runs per partition and the parent attaches them.
+func AddForeignKeyPartitioned(table, col, refTable, refCol string) Entry {
+	return Entry{
+		Status: "DANGEROUS: scans every partition under lock",
+		Reason: "Adding a foreign key validates all existing rows of every partition while holding the lock. PostgreSQL before 18 rejects NOT VALID foreign keys on a partitioned table, so the usual two-step fix fails here.",
+		Fix: fmt.Sprintf(
+			"  1. For each partition of %s:\n"+
+				"       ALTER TABLE <partition> ADD CONSTRAINT <partition>_%s_fkey FOREIGN KEY (%s) REFERENCES %s(%s) NOT VALID;\n"+
+				"       ALTER TABLE <partition> VALIDATE CONSTRAINT <partition>_%s_fkey;  -- SHARE UPDATE EXCLUSIVE, allows concurrent DML\n"+
+				"  2. ALTER TABLE %s ADD CONSTRAINT %s_%s_fkey FOREIGN KEY (%s) REFERENCES %s(%s);\n"+
+				"     -- attaches the matching, already validated partition constraints instead of rescanning",
+			table,
+			col, col, refTable, refCol,
+			col,
+			table, stripSchema(table), col, col, refTable, refCol),
+		Note: "On PostgreSQL 18+ NOT VALID works on the partitioned parent directly.",
+	}
+}
+
+func ForeignKeyNotValidPartitioned(table string) Entry {
+	e := AddForeignKeyPartitioned(table, "<col>", "<ref_table>", "<ref_col>")
+	e.Status = "DANGEROUS: fails before PostgreSQL 18"
+	e.Reason = "PostgreSQL before 18 rejects NOT VALID foreign keys on a partitioned table: \"cannot add NOT VALID foreign key on partitioned table\"."
+	return e
 }
 
 func AddCheckConstraintUnsafe(table, constraintExpr string) Entry {

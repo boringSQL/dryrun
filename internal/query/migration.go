@@ -342,10 +342,11 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 	}
 
 	subtype := pg_query.AlterTableType(cmd.Subtype)
+	fkNoNotValid := fkNotValidRejected(names.snap, cat, stmt.GetRelation())
 
 	switch subtype {
 	case pg_query.AlterTableType_AT_AddColumn:
-		return analyzeAddColumn(cmd, tableName, tableSize, rowEstimate, statement)
+		return analyzeAddColumn(cmd, stmt, tableName, tableSize, rowEstimate, small, names, fkNoNotValid, statement)
 	case pg_query.AlterTableType_AT_DropColumn:
 		const rec = "Metadata-only operation. Column space reclaimed by VACUUM."
 		return &MigrationCheck{
@@ -394,7 +395,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			Statement:      statement,
 		}
 	case pg_query.AlterTableType_AT_AddConstraint:
-		return analyzeAddConstraint(cmd, stmt, tableName, tableSize, rowEstimate, small, names, statement)
+		return analyzeAddConstraint(cmd, stmt, tableName, tableSize, rowEstimate, small, names, fkNoNotValid, statement)
 	case pg_query.AlterTableType_AT_ValidateConstraint:
 		const rec = "Safe - validates existing rows with a weaker lock that allows concurrent reads and writes."
 		return &MigrationCheck{
@@ -800,30 +801,150 @@ func referencedTables(stmt *pg_query.CreateStmt) []string {
 	return out
 }
 
-func analyzeAddColumn(cmd *pg_query.AlterTableCmd, tableName string, tableSize *string, rowEstimate *float64, statement string) *MigrationCheck {
-	hasDefault := false
-	colName := cmd.Name
-	colType := "unknown"
-	if cmd.Def != nil {
-		if colDef, ok := cmd.Def.Node.(*pg_query.Node_ColumnDef); ok && colDef.ColumnDef != nil {
-			if colDef.ColumnDef.Colname != "" {
-				colName = colDef.ColumnDef.Colname
+// Inline constraints on ADD COLUMN are the standalone ADD CONSTRAINT form:
+// same scan/lock, not an unconstrained nullable add.
+type (
+	inlineColConstraints struct {
+		hasDefault bool
+		notNull    bool
+		primary    bool
+		generated  bool
+		unique     *pg_query.Constraint
+		fk         *pg_query.Constraint
+		check      *pg_query.Constraint
+	}
+
+	colHazard struct {
+		entry        jit.Entry
+		downgradable bool // small table softens it to caution
+		rewritable   bool // rewriteInlineColumnConstraints covers it
+	}
+)
+
+func collectInlineConstraints(cd *pg_query.ColumnDef) inlineColConstraints {
+	var c inlineColConstraints
+	if cd == nil {
+		return c
+	}
+	if cd.RawDefault != nil {
+		c.hasDefault = true
+	}
+	// DEFERRABLE parses as a separate attr constraint after the one it
+	// modifies; fold it in or a strip orphans it into invalid DDL.
+	var last **pg_query.Constraint
+	for _, n := range cd.GetConstraints() {
+		con, ok := n.GetNode().(*pg_query.Node_Constraint)
+		if !ok || con.Constraint == nil {
+			continue
+		}
+		switch pg_query.ConstrType(con.Constraint.Contype) {
+		case pg_query.ConstrType_CONSTR_DEFAULT:
+			c.hasDefault = true
+		case pg_query.ConstrType_CONSTR_NOTNULL:
+			c.notNull = true
+		case pg_query.ConstrType_CONSTR_UNIQUE:
+			c.unique = con.Constraint
+			last = &c.unique
+		case pg_query.ConstrType_CONSTR_PRIMARY:
+			c.primary = true
+		case pg_query.ConstrType_CONSTR_GENERATED:
+			c.generated = true
+		case pg_query.ConstrType_CONSTR_FOREIGN:
+			c.fk = con.Constraint
+			last = &c.fk
+		case pg_query.ConstrType_CONSTR_CHECK:
+			c.check = con.Constraint
+			last = &c.check
+		case pg_query.ConstrType_CONSTR_ATTR_DEFERRABLE:
+			if last != nil && *last != nil {
+				(*last).Deferrable = true
 			}
-			if colDef.ColumnDef.TypeName != nil {
-				colType = deparse(colDef.ColumnDef.TypeName)
+		case pg_query.ConstrType_CONSTR_ATTR_DEFERRED:
+			if last != nil && *last != nil {
+				(*last).Deferrable = true
+				(*last).Initdeferred = true
 			}
-			if colDef.ColumnDef.RawDefault != nil {
-				hasDefault = true
+		case pg_query.ConstrType_CONSTR_ATTR_NOT_DEFERRABLE:
+			if last != nil && *last != nil {
+				(*last).Deferrable = false
+				(*last).Initdeferred = false
 			}
-			for _, c := range colDef.ColumnDef.Constraints {
-				if con, ok := c.Node.(*pg_query.Node_Constraint); ok && con.Constraint != nil {
-					if pg_query.ConstrType(con.Constraint.Contype) == pg_query.ConstrType_CONSTR_DEFAULT {
-						hasDefault = true
-					}
-				}
+		case pg_query.ConstrType_CONSTR_ATTR_IMMEDIATE:
+			if last != nil && *last != nil {
+				(*last).Initdeferred = false
 			}
 		}
 	}
+	return c
+}
+
+// Worst first: the head sets the verdict, the rest fold into the note.
+func columnHazards(table, col string, cons inlineColConstraints, fkNoNotValid bool) []colHazard {
+	var out []colHazard
+	if (cons.notNull || cons.primary) && !cons.hasDefault {
+		out = append(out, colHazard{entry: jit.AddColumnNotNullNoDefault(table, col)})
+	}
+	if cons.generated {
+		out = append(out, colHazard{entry: jit.AddStoredGeneratedColumn(table, col), downgradable: true})
+	}
+	if cons.primary && cons.hasDefault {
+		out = append(out, colHazard{entry: jit.AddIndexBackedConstraint(table, "PRIMARY KEY", col), downgradable: true})
+	}
+	if cons.fk != nil {
+		refTable, refCol := fkTarget(cons.fk)
+		e := jit.AddForeignKeyUnsafe(table, col, refTable, refCol)
+		if fkNoNotValid {
+			e = jit.AddForeignKeyPartitioned(table, col, refTable, refCol)
+		}
+		out = append(out, colHazard{entry: e, downgradable: true, rewritable: !fkNoNotValid})
+	}
+	if cons.check != nil {
+		out = append(out, colHazard{entry: jit.AddCheckConstraintUnsafe(table, deparseExpr(cons.check.RawExpr)), downgradable: true, rewritable: true})
+	}
+	if cons.unique != nil && !cons.primary {
+		out = append(out, colHazard{entry: jit.AddIndexBackedConstraint(table, "UNIQUE", col), downgradable: true, rewritable: true})
+	}
+	return out
+}
+
+func fkTarget(con *pg_query.Constraint) (string, string) {
+	refTable := "<ref_table>"
+	if con.GetPktable() != nil {
+		refTable = relationName(con.GetPktable())
+	}
+	refCol := "<ref_col>"
+	if attrs := stringList(con.GetPkAttrs()); len(attrs) > 0 {
+		refCol = attrs[0]
+	}
+	return refTable, refCol
+}
+
+func deparseExpr(node *pg_query.Node) string {
+	if node == nil {
+		return "<expr>"
+	}
+	s, err := pg_query.Deparse(&pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: node}}})
+	if err != nil {
+		return "<expr>"
+	}
+	return s
+}
+
+func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, small bool, names *nameAllocator, fkNoNotValid bool, statement string) *MigrationCheck {
+	colName := cmd.Name
+	colType := "unknown"
+	colDef := columnDefOf(cmd)
+	if colDef != nil {
+		if colDef.Colname != "" {
+			colName = colDef.Colname
+		}
+		if colDef.TypeName != nil {
+			colType = deparse(colDef.TypeName)
+		}
+	}
+
+	cons := collectInlineConstraints(colDef)
+	hasDefault := cons.hasDefault
 
 	var safety SafetyRating
 	var recommendation, lockDuration string
@@ -845,6 +966,48 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, tableName string, tableSize *
 		lockDuration = "brief for immutable default, long for volatile"
 	}
 
+	var safer []string
+	if hazards := columnHazards(tableName, colName, cons, fkNoNotValid); len(hazards) > 0 {
+		downgrade := small
+		for _, h := range hazards {
+			if !h.downgradable {
+				downgrade = false
+				break
+			}
+		}
+		if downgrade {
+			safety = SafetyCaution
+		} else {
+			safety = SafetyDangerous
+		}
+
+		head := hazards[0].entry
+		if downgrade {
+			head = head.Caution()
+		}
+		if hazards[0].rewritable {
+			safer = rewriteInlineColumnConstraints(stmt, cmd, colName, cons, names, fkNoNotValid)
+		}
+
+		if len(safer) > 0 {
+			// two differently-named migrations in one response is worse than one
+			recommendation = head.Warning()
+		} else {
+			recommendation = head.String()
+		}
+		note := head.Note
+		for _, h := range hazards[1:] {
+			note = joinNotes(note, h.entry.Reason)
+		}
+		if downgrade {
+			lead := smallTableNote(*rowEstimate, *tableSize)
+			recommendation = lead + "\n\n" + recommendation
+			note = joinNotes(note, lead)
+		}
+		rationale = &Rationale{Reason: head.Reason, Note: note}
+		lockDuration = "proportional to table size"
+	}
+
 	var rollback *string
 	if colName != "" {
 		rollback = strp(fmt.Sprintf("ALTER TABLE ... DROP COLUMN %s;", colName))
@@ -857,8 +1020,19 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, tableName string, tableSize *
 		Recommendation: recommendation,
 		Rationale:      rationale,
 		RollbackDDL:    rollback,
+		SaferSQL:       safer,
 		Statement:      statement,
 	}
+}
+
+func columnDefOf(cmd *pg_query.AlterTableCmd) *pg_query.ColumnDef {
+	if cmd == nil || cmd.Def == nil {
+		return nil
+	}
+	if cd, ok := cmd.Def.Node.(*pg_query.Node_ColumnDef); ok {
+		return cd.ColumnDef
+	}
+	return nil
 }
 
 func deparse(typeName *pg_query.TypeName) string {
@@ -943,7 +1117,7 @@ func addConstraintOperation(cmd *pg_query.AlterTableCmd) string {
 	return "ADD CONSTRAINT"
 }
 
-func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, small bool, names *nameAllocator, statement string) *MigrationCheck {
+func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, small bool, names *nameAllocator, fkNoNotValid bool, statement string) *MigrationCheck {
 	isNotValid := false
 	operation := addConstraintOperation(cmd)
 	if con := constraintOf(cmd); con != nil {
@@ -959,8 +1133,15 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 		rationale = &Rationale{Reason: recommendation}
 		lockDuration = "brief (metadata-only)"
 		lockType = "ACCESS EXCLUSIVE (brief)"
+		if fkNoNotValid && operation == "ADD FOREIGN KEY" {
+			e := jit.ForeignKeyNotValidPartitioned(tableName)
+			safety = SafetyDangerous
+			recommendation = e.String()
+			rationale = &Rationale{Reason: e.Reason, Note: e.Note}
+			lockDuration = "none: the statement is rejected"
+		}
 	}
-	safer := rewriteAddConstraint(stmt, cmd, names)
+	safer := rewriteAddConstraint(stmt, cmd, names, fkNoNotValid)
 	if !isNotValid {
 		safety = SafetyDangerous
 		con := constraintOf(cmd)
@@ -968,6 +1149,9 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 		switch operation {
 		case "ADD FOREIGN KEY":
 			e = jit.AddForeignKeyUnsafe(tableName, "<col>", "<ref_table>", "<ref_col>")
+			if fkNoNotValid {
+				e = jit.AddForeignKeyPartitioned(tableName, "<col>", "<ref_table>", "<ref_col>")
+			}
 		case "ADD CHECK CONSTRAINT":
 			e = jit.AddCheckConstraintUnsafe(tableName, "<expr>")
 		default:

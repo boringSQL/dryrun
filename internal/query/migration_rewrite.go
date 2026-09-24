@@ -9,6 +9,7 @@ import (
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/boringsql/dryrun/internal/dryrun"
 	"github.com/boringsql/dryrun/internal/schema"
 )
 
@@ -91,11 +92,34 @@ func runnable(steps []string) []string {
 	return steps
 }
 
+// fkNotValidRejected: partitioned tables reject NOT VALID FKs before PG18.
+// Unknown version counts as older.
+func fkNotValidRejected(snap *schema.SchemaSnapshot, cat *fileCatalog, rel *pg_query.RangeVar) bool {
+	if rel == nil {
+		return false
+	}
+	partitioned := cat.isPartitioned(rel)
+	if t := lookupTable(snap, rel); t != nil && t.PartitionInfo != nil {
+		partitioned = true
+	}
+	if !partitioned {
+		return false
+	}
+	if snap == nil {
+		return true
+	}
+	v, err := dryrun.ParsePgVersion(snap.PgVersion)
+	return err != nil || v.Major < 18
+}
+
 // rewriteAddConstraint flips SkipValidation on the parsed constraint and lets
 // pg_query render it back, so no DDL is rebuilt by hand and lost on the way.
-func rewriteAddConstraint(stmt *pg_query.AlterTableStmt, cmd *pg_query.AlterTableCmd, names *nameAllocator) []string {
+func rewriteAddConstraint(stmt *pg_query.AlterTableStmt, cmd *pg_query.AlterTableCmd, names *nameAllocator, fkNoNotValid bool) []string {
 	con := constraintOf(cmd)
 	if con == nil || con.SkipValidation || stmt.GetRelation() == nil {
+		return nil
+	}
+	if fkNoNotValid && pg_query.ConstrType(con.Contype) == pg_query.ConstrType_CONSTR_FOREIGN {
 		return nil
 	}
 	one, oneCmd := singleCmdStmt(stmt, cmd)
@@ -123,6 +147,143 @@ func rewriteAddConstraint(stmt *pg_query.AlterTableStmt, cmd *pg_query.AlterTabl
 		return nil
 	}
 	return runnable([]string{add + ";", validate + ";"})
+}
+
+// rewriteInlineColumnConstraints strips an inline FOREIGN KEY, CHECK or UNIQUE
+// off the column and re-adds it as its own statement, so it can use
+// NOT VALID/VALIDATE or a concurrent index. PRIMARY KEY and NOT NULL cannot.
+func rewriteInlineColumnConstraints(stmt *pg_query.AlterTableStmt, cmd *pg_query.AlterTableCmd, colName string, cons inlineColConstraints, names *nameAllocator, fkNoNotValid bool) []string {
+	rel := stmt.GetRelation()
+	if rel == nil || (cons.fk == nil && cons.check == nil && cons.unique == nil) {
+		return nil
+	}
+	// IF NOT EXISTS skips the constraint with the column; a split would not
+	if cmd.GetMissingOk() {
+		return nil
+	}
+	// no partial rewrite: the FK would have to stay inline, still blocking
+	if cons.fk != nil && fkNoNotValid {
+		return nil
+	}
+	// CONCURRENTLY is rejected on a partitioned parent (no partial rewrite)
+	if cons.unique != nil {
+		if t := lookupTable(names.snap, rel); t != nil && t.PartitionInfo != nil {
+			return nil
+		}
+		// USING INDEX cannot be deferrable; the generated index is plain
+		if cons.unique.Deferrable || cons.unique.Initdeferred || cons.unique.NullsNotDistinct {
+			return nil
+		}
+	}
+	one, oneCmd := singleCmdStmt(stmt, cmd)
+	cd := columnDefOf(oneCmd)
+	if cd == nil {
+		return nil
+	}
+	var kept []*pg_query.Node
+	stripAttrs := false
+	for _, n := range cd.Constraints {
+		if con, ok := n.GetNode().(*pg_query.Node_Constraint); ok && con.Constraint != nil {
+			switch pg_query.ConstrType(con.Constraint.Contype) {
+			case pg_query.ConstrType_CONSTR_FOREIGN, pg_query.ConstrType_CONSTR_CHECK, pg_query.ConstrType_CONSTR_UNIQUE:
+				stripAttrs = true
+				continue
+			case pg_query.ConstrType_CONSTR_ATTR_DEFERRABLE, pg_query.ConstrType_CONSTR_ATTR_NOT_DEFERRABLE,
+				pg_query.ConstrType_CONSTR_ATTR_DEFERRED, pg_query.ConstrType_CONSTR_ATTR_IMMEDIATE:
+				// attributes follow their constraint; keep them only if it stays
+				if stripAttrs {
+					continue
+				}
+			default:
+				stripAttrs = false
+			}
+		}
+		kept = append(kept, n)
+	}
+	cd.Constraints = kept
+
+	add, err := deparseStmt(&pg_query.Node{Node: &pg_query.Node_AlterTableStmt{AlterTableStmt: one}})
+	if err != nil {
+		return nil
+	}
+	steps := []string{add + ";"}
+
+	for _, src := range []*pg_query.Constraint{cons.fk, cons.check} {
+		if src == nil {
+			continue
+		}
+		c := proto.Clone(src).(*pg_query.Constraint)
+		// an inline FK carries no explicit attrs; the column is the key
+		if pg_query.ConstrType(c.Contype) == pg_query.ConstrType_CONSTR_FOREIGN && len(c.FkAttrs) == 0 && colName != "" {
+			c.FkAttrs = []*pg_query.Node{{Node: &pg_query.Node_String_{String_: &pg_query.String{Sval: colName}}}}
+		}
+		if c.Conname == "" {
+			c.Conname = names.claim(names.constraintBucket(rel), constraintName(rel, c))
+		}
+		c.SkipValidation = true
+		addSQL, err := deparseAlterCmd(one, &pg_query.AlterTableCmd{
+			Subtype: pg_query.AlterTableType_AT_AddConstraint,
+			Def:     &pg_query.Node{Node: &pg_query.Node_Constraint{Constraint: c}},
+		})
+		if err != nil {
+			return nil
+		}
+		validateSQL, err := deparseAlterCmd(one, &pg_query.AlterTableCmd{
+			Subtype: pg_query.AlterTableType_AT_ValidateConstraint,
+			Name:    c.Conname,
+		})
+		if err != nil {
+			return nil
+		}
+		steps = append(steps, addSQL+";", validateSQL+";")
+	}
+
+	if cons.unique != nil {
+		// a named constraint keeps its name; one base for both, as Postgres does
+		conBase := cons.unique.Conname
+		idxBase := cons.unique.Conname
+		if conBase == "" {
+			conBase = rel.GetRelname() + "_" + colName + "_key"
+			idxBase = rel.GetRelname() + "_" + colName + "_idx"
+		}
+		idxName := names.claim(names.indexBucket(rel), idxBase)
+		conName := names.claim(names.constraintBucket(rel), conBase)
+		idx := &pg_query.IndexStmt{
+			Idxname:      idxName,
+			Relation:     rel,
+			AccessMethod: "btree",
+			Unique:       true,
+			Concurrent:   true,
+			IndexParams: []*pg_query.Node{{Node: &pg_query.Node_IndexElem{
+				IndexElem: &pg_query.IndexElem{Name: colName},
+			}}},
+		}
+		idxSQL, err := deparseStmt(&pg_query.Node{Node: &pg_query.Node_IndexStmt{IndexStmt: idx}})
+		if err != nil {
+			return nil
+		}
+		conSQL, err := deparseAlterCmd(one, &pg_query.AlterTableCmd{
+			Subtype: pg_query.AlterTableType_AT_AddConstraint,
+			Def: &pg_query.Node{Node: &pg_query.Node_Constraint{Constraint: &pg_query.Constraint{
+				Contype:   pg_query.ConstrType_CONSTR_UNIQUE,
+				Conname:   conName,
+				Indexname: idxName,
+			}}},
+		})
+		if err != nil {
+			return nil
+		}
+		steps = append(steps, idxSQL+";", conSQL+";")
+	}
+
+	return runnable(steps)
+}
+
+// deparseAlterCmd reuses one's Relation/Objtype/MissingOk (ONLY, IF EXISTS).
+func deparseAlterCmd(one *pg_query.AlterTableStmt, cmd *pg_query.AlterTableCmd) (string, error) {
+	s := proto.Clone(one).(*pg_query.AlterTableStmt)
+	s.Cmds = []*pg_query.Node{{Node: &pg_query.Node_AlterTableCmd{AlterTableCmd: cmd}}}
+	return deparseStmt(&pg_query.Node{Node: &pg_query.Node_AlterTableStmt{AlterTableStmt: s}})
 }
 
 func rewriteCreateIndex(idx *pg_query.IndexStmt, names *nameAllocator, cat *fileCatalog) (steps []string, name string) {

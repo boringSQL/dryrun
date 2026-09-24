@@ -411,6 +411,11 @@ func TestRationalePresentAcrossConstructionSites(t *testing.T) {
 		"ALTER TABLE orders VALIDATE CONSTRAINT fk",                                                 // VALIDATE CONSTRAINT
 		"ALTER TABLE users ADD COLUMN age integer",                                                  // ADD COLUMN, no default
 		"ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT now()",                           // ADD COLUMN, volatile default
+		"ALTER TABLE users ADD COLUMN active boolean NOT NULL",                                      // ADD COLUMN, inline NOT NULL
+		"ALTER TABLE users ADD COLUMN code text UNIQUE",                                             // ADD COLUMN, inline UNIQUE
+		"ALTER TABLE users ADD COLUMN org_id int REFERENCES users(id)",                              // ADD COLUMN, inline FK
+		"ALTER TABLE users ADD COLUMN age int CHECK (age >= 0)",                                     // ADD COLUMN, inline CHECK
+		"ALTER TABLE users ADD COLUMN x int GENERATED ALWAYS AS (id * 2) STORED",                    // ADD COLUMN, stored generated
 		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL",                                       // SET NOT NULL, rewrite offered
 		"ALTER TABLE ONLY orders ALTER COLUMN status SET NOT NULL",                                  // SET NOT NULL, no rewrite
 		"ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users(id) NOT VALID", // ADD CONSTRAINT, already NOT VALID
