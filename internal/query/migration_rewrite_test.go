@@ -190,7 +190,7 @@ func TestSaferSQL(t *testing.T) {
 		{
 			// the backfill needs a batching predicate nobody here can know
 			name: "add column with a volatile default",
-			ddl:  "ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT now()",
+			ddl:  "ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT clock_timestamp()",
 			want: nil,
 		},
 		{
@@ -410,7 +410,7 @@ func TestRationalePresentAcrossConstructionSites(t *testing.T) {
 		"ALTER TABLE orders ALTER COLUMN total TYPE bigint",                                         // ALTER COLUMN TYPE
 		"ALTER TABLE orders VALIDATE CONSTRAINT fk",                                                 // VALIDATE CONSTRAINT
 		"ALTER TABLE users ADD COLUMN age integer",                                                  // ADD COLUMN, no default
-		"ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT now()",                           // ADD COLUMN, volatile default
+		"ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT clock_timestamp()",               // ADD COLUMN, volatile default
 		"ALTER TABLE users ADD COLUMN active boolean NOT NULL",                                      // ADD COLUMN, inline NOT NULL
 		"ALTER TABLE users ADD COLUMN code text UNIQUE",                                             // ADD COLUMN, inline UNIQUE
 		"ALTER TABLE users ADD COLUMN org_id int REFERENCES users(id)",                              // ADD COLUMN, inline FK
@@ -523,13 +523,13 @@ func TestRationaleSurvivesStringToWarningDowngrade(t *testing.T) {
 }
 
 // ADD COLUMN with a DEFAULT cannot tell from the parse tree whether the
-// default is volatile, so Recommendation hedges ("safe for immutable
+// default is volatile, so Recommendation hedges ("safe for non-volatile
 // defaults... If the default IS volatile"). jit.AddColumnVolatileDefault's
 // Reason asserts an unconditional rewrite, which is only true in the volatile
 // case -- it must land in Note as detail, not as Rationale.Reason, or an
 // agent reading only rationale gets an answer stronger than the evidence.
 func TestRationaleHedgesAddColumnDefault(t *testing.T) {
-	checks, err := CheckMigration("ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT now()", migrationTestAnnotated())
+	checks, err := CheckMigration("ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT clock_timestamp()", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +540,7 @@ func TestRationaleHedgesAddColumnDefault(t *testing.T) {
 	if strings.Contains(rationale.Reason, "rewrites every row") {
 		t.Errorf("rationale.reason asserts an unconditional rewrite the code cannot prove: %q", rationale.Reason)
 	}
-	if !strings.Contains(rationale.Reason, "immutable defaults") {
+	if !strings.Contains(rationale.Reason, "non-volatile defaults") {
 		t.Errorf("rationale.reason lost the hedge: %q", rationale.Reason)
 	}
 	if !strings.Contains(rationale.Note, "rewrites every row") {

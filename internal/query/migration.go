@@ -958,12 +958,12 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt
 	} else {
 		safety = SafetyCaution
 		e := jit.AddColumnVolatileDefault(tableName, colName, colType, "<default>")
-		const hedgedReason = "Column with DEFAULT is safe for immutable defaults (metadata-only). " +
-			"Volatile defaults (now(), random()) still trigger a full table rewrite."
+		const hedgedReason = "Column with DEFAULT is safe for non-volatile defaults (metadata-only), including now() and current_timestamp. " +
+			"Volatile defaults (random(), gen_random_uuid(), clock_timestamp(), nextval()) still trigger a full table rewrite."
 		recommendation = hedgedReason + "\n\n" + "If the default IS volatile:\n" + e.Fix
 		// e.Reason asserts an unconditional rewrite; unprovable here, so it goes to Note
 		rationale = &Rationale{Reason: hedgedReason, Note: joinNotes(e.Reason, e.Note)}
-		lockDuration = "brief for immutable default, long for volatile"
+		lockDuration = "brief for non-volatile default, long for volatile"
 	}
 
 	var safer []string
