@@ -423,6 +423,9 @@ func TestCheckMigration_SurfacesSizingAndScalesSmallTable(t *testing.T) {
 	if check["table_size"] != nil || check["row_estimate"] != nil {
 		t.Errorf("stale small table should report no sizing, got %v/%v", check["table_size"], check["row_estimate"])
 	}
+	if check["sizing_context"] != "stale_planner" {
+		t.Errorf("stale small table should name the reason, got %v", check["sizing_context"])
+	}
 }
 
 // A table created in the same file is recognized as empty: CREATE TABLE itself

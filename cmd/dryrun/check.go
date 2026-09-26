@@ -289,6 +289,9 @@ func printMigrationReport(w io.Writer, r query.MigrationReport) {
 		if c.RowEstimate != nil {
 			details = append(details, fmt.Sprintf("rows: ~%d", int64(*c.RowEstimate)))
 		}
+		if c.SizingContext != "" {
+			details = append(details, "size unknown: "+query.SizingContextAdvice(c.SizingContext))
+		}
 		if len(details) > 0 {
 			fmt.Fprintf(w, "      %s\n", strings.Join(details, ", "))
 		}

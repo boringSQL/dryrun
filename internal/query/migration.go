@@ -32,6 +32,10 @@ type (
 		// IF EXISTS/quoting preserved) -- ComposeMigrationSQL's passthrough.
 		// Off the wire: redundant with the input DDL or SaferSQL.
 		Statement string `json:"-"`
+
+		// SizingContext names why a size-aware verdict fell back to the worst
+		// case. Set only where a known-small table would have softened it.
+		SizingContext string `json:"sizing_context,omitempty"`
 	}
 
 	// Rationale: Recommendation's reason as fields, so agents skip parsing prose.
@@ -47,6 +51,17 @@ const (
 	SafetySafe      SafetyRating = "safe"
 	SafetyCaution   SafetyRating = "caution"
 	SafetyDangerous SafetyRating = "dangerous"
+)
+
+// why lookupTableStats could not produce a trusted small-table reading.
+type sizingContext string
+
+const (
+	sizingOK      sizingContext = ""
+	sizingNoSnap  sizingContext = "no_snapshot"
+	sizingNoPlan  sizingContext = "missing_planner"
+	sizingStale   sizingContext = "stale_planner"
+	sizingMissing sizingContext = "missing_sizing"
 )
 
 // parses DDL and returns safety assessments per statement
@@ -331,7 +346,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 		}
 	}
 	qual := schema.QualifiedName{Schema: schemaOf(stmt.GetRelation()), Name: stmt.GetRelation().GetRelname()}
-	tableSize, rowEstimate, small := lookupTableStats(a, qual)
+	tableSize, rowEstimate, small, sizing := lookupTableStats(a, qual)
 	statement := alterCmdStatement(stmt, cmd)
 
 	// empty table: the size-dependent verdicts below do not apply
@@ -340,13 +355,17 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			return check
 		}
 	}
+	// a file-created table is known empty; a missing snapshot did not force the worst case
+	if cat.hasCreated(stmt.GetRelation()) {
+		sizing = sizingOK
+	}
 
 	subtype := pg_query.AlterTableType(cmd.Subtype)
 	fkNoNotValid := fkNotValidRejected(names.snap, cat, stmt.GetRelation())
 
 	switch subtype {
 	case pg_query.AlterTableType_AT_AddColumn:
-		return analyzeAddColumn(cmd, stmt, tableName, tableSize, rowEstimate, small, names, fkNoNotValid, statement)
+		return analyzeAddColumn(cmd, stmt, tableName, tableSize, rowEstimate, small, sizing, names, fkNoNotValid, statement)
 	case pg_query.AlterTableType_AT_DropColumn:
 		const rec = "Metadata-only operation. Column space reclaimed by VACUUM."
 		return &MigrationCheck{
@@ -380,11 +399,15 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 		safety := SafetyDangerous
 		recommendation := e.String()
 		rationale := &Rationale{Reason: e.Reason, Note: e.Note}
+		sizingCtx := ""
 		if small {
 			safety = SafetyCaution
 			note := smallTableNote(*rowEstimate, *tableSize)
 			recommendation = note + "\n\n" + e.Caution().String()
 			rationale.Note = joinNotes(rationale.Note, note)
+		} else if ctx, caveat := sizingCaveat(sizing); ctx != "" {
+			sizingCtx = ctx
+			rationale.Note = joinNotes(rationale.Note, caveat)
 		}
 		return &MigrationCheck{
 			Operation: "ALTER COLUMN TYPE", Table: strp(tableName), Safety: safety,
@@ -393,9 +416,10 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			Recommendation: recommendation,
 			Rationale:      rationale,
 			Statement:      statement,
+			SizingContext:  sizingCtx,
 		}
 	case pg_query.AlterTableType_AT_AddConstraint:
-		return analyzeAddConstraint(cmd, stmt, tableName, tableSize, rowEstimate, small, names, fkNoNotValid, statement)
+		return analyzeAddConstraint(cmd, stmt, tableName, tableSize, rowEstimate, small, sizing, names, fkNoNotValid, statement)
 	case pg_query.AlterTableType_AT_ValidateConstraint:
 		const rec = "Safe - validates existing rows with a weaker lock that allows concurrent reads and writes."
 		return &MigrationCheck{
@@ -456,13 +480,13 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 	case pg_query.AlterTableType_AT_AttachPartition:
 		return analyzeAttachPartition(tableName, tableSize, rowEstimate, statement)
 	case pg_query.AlterTableType_AT_SetLogged, pg_query.AlterTableType_AT_SetUnLogged:
-		return analyzeRewriteAlterCmd("SET LOGGED/UNLOGGED", tableName, tableSize, rowEstimate, small, statement,
+		return analyzeRewriteAlterCmd("SET LOGGED/UNLOGGED", tableName, tableSize, rowEstimate, small, sizing, statement,
 			"Rewrites the whole table to change its persistence and WAL-logging: proportional to table size, and doubles the WAL during the rewrite.")
 	case pg_query.AlterTableType_AT_SetTableSpace:
-		return analyzeRewriteAlterCmd("SET TABLESPACE", tableName, tableSize, rowEstimate, small, statement,
+		return analyzeRewriteAlterCmd("SET TABLESPACE", tableName, tableSize, rowEstimate, small, sizing, statement,
 			"Copies every data file to the new tablespace under ACCESS EXCLUSIVE: proportional to table size and needs free space in the destination.")
 	case pg_query.AlterTableType_AT_SetAccessMethod:
-		return analyzeRewriteAlterCmd("SET ACCESS METHOD", tableName, tableSize, rowEstimate, small, statement,
+		return analyzeRewriteAlterCmd("SET ACCESS METHOD", tableName, tableSize, rowEstimate, small, sizing, statement,
 			"Rewrites the whole table into the new storage engine: proportional to table size.")
 	}
 	return nil
@@ -514,14 +538,18 @@ func analyzeAttachPartition(tableName string, tableSize *string, rowEstimate *fl
 
 // analyzeRewriteAlterCmd: full table rewrite; dangerous at size, caution on a
 // known-small table.
-func analyzeRewriteAlterCmd(operation, tableName string, tableSize *string, rowEstimate *float64, small bool, statement, reason string) *MigrationCheck {
+func analyzeRewriteAlterCmd(operation, tableName string, tableSize *string, rowEstimate *float64, small bool, sizing sizingContext, statement, reason string) *MigrationCheck {
 	safety := SafetyDangerous
 	recommendation := reason
-	var note string
+	note := ""
+	sizingCtx := ""
 	if small {
 		safety = SafetyCaution
 		note = smallTableNote(*rowEstimate, *tableSize)
 		recommendation = note + "\n\n" + reason
+	} else if ctx, caveat := sizingCaveat(sizing); ctx != "" {
+		sizingCtx = ctx
+		note = caveat
 	}
 	return &MigrationCheck{
 		Operation: operation, Table: strp(tableName), Safety: safety,
@@ -530,6 +558,7 @@ func analyzeRewriteAlterCmd(operation, tableName string, tableSize *string, rowE
 		Recommendation: recommendation,
 		Rationale:      &Rationale{Reason: reason, Note: note},
 		Statement:      statement,
+		SizingContext:  sizingCtx,
 	}
 }
 
@@ -620,7 +649,7 @@ func createTableNoOp(rel *pg_query.RangeVar, a *schema.AnnotatedSchema, cat *fil
 	}
 	// Size from the snapshot only: a table this file created has no captured size.
 	if !cat.hasCreated(rel) {
-		size, rows, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()})
+		size, rows, _, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()})
 		c.TableSize = size
 		c.RowEstimate = rows
 		if size == nil {
@@ -643,7 +672,7 @@ func analyzeAnalyze(stmt *pg_query.VacuumStmt, a *schema.AnnotatedSchema, stmtNo
 	if rels := stmt.GetRels(); len(rels) > 0 {
 		if rv := rels[0].GetVacuumRelation().GetRelation(); rv != nil {
 			c.Table = strp(relationName(rv))
-			size, rows, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rv), Name: rv.GetRelname()})
+			size, rows, _, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rv), Name: rv.GetRelname()})
 			c.TableSize, c.RowEstimate = size, rows
 		}
 	}
@@ -662,7 +691,7 @@ func analyzeCreateStats(stmt *pg_query.CreateStatsStmt, a *schema.AnnotatedSchem
 	if rels := stmt.GetRelations(); len(rels) > 0 {
 		if rv := rels[0].GetRangeVar(); rv != nil {
 			c.Table = strp(relationName(rv))
-			size, rows, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rv), Name: rv.GetRelname()})
+			size, rows, _, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rv), Name: rv.GetRelname()})
 			c.TableSize, c.RowEstimate = size, rows
 		}
 	}
@@ -930,7 +959,7 @@ func deparseExpr(node *pg_query.Node) string {
 	return s
 }
 
-func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, small bool, names *nameAllocator, fkNoNotValid bool, statement string) *MigrationCheck {
+func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, small bool, sizing sizingContext, names *nameAllocator, fkNoNotValid bool, statement string) *MigrationCheck {
 	colName := cmd.Name
 	colType := "unknown"
 	colDef := columnDefOf(cmd)
@@ -949,6 +978,7 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt
 	var safety SafetyRating
 	var recommendation, lockDuration string
 	var rationale *Rationale
+	sizingCtx := ""
 
 	if !hasDefault {
 		safety = SafetySafe
@@ -968,13 +998,14 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt
 
 	var safer []string
 	if hazards := columnHazards(tableName, colName, cons, fkNoNotValid); len(hazards) > 0 {
-		downgrade := small
+		allDowngradable := true
 		for _, h := range hazards {
 			if !h.downgradable {
-				downgrade = false
+				allDowngradable = false
 				break
 			}
 		}
+		downgrade := small && allDowngradable
 		if downgrade {
 			safety = SafetyCaution
 		} else {
@@ -1003,6 +1034,11 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt
 			lead := smallTableNote(*rowEstimate, *tableSize)
 			recommendation = lead + "\n\n" + recommendation
 			note = joinNotes(note, lead)
+		} else if allDowngradable {
+			if ctx, caveat := sizingCaveat(sizing); ctx != "" {
+				sizingCtx = ctx
+				note = joinNotes(note, caveat)
+			}
 		}
 		rationale = &Rationale{Reason: head.Reason, Note: note}
 		lockDuration = "proportional to table size"
@@ -1022,6 +1058,7 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt
 		RollbackDDL:    rollback,
 		SaferSQL:       safer,
 		Statement:      statement,
+		SizingContext:  sizingCtx,
 	}
 }
 
@@ -1117,7 +1154,7 @@ func addConstraintOperation(cmd *pg_query.AlterTableCmd) string {
 	return "ADD CONSTRAINT"
 }
 
-func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, small bool, names *nameAllocator, fkNoNotValid bool, statement string) *MigrationCheck {
+func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, small bool, sizing sizingContext, names *nameAllocator, fkNoNotValid bool, statement string) *MigrationCheck {
 	isNotValid := false
 	operation := addConstraintOperation(cmd)
 	if con := constraintOf(cmd); con != nil {
@@ -1127,6 +1164,7 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 	var safety SafetyRating
 	var recommendation, lockDuration, lockType string
 	var rationale *Rationale
+	sizingCtx := ""
 	if isNotValid {
 		safety = SafetySafe
 		recommendation = fmt.Sprintf("%s NOT VALID - metadata-only. Follow up with VALIDATE CONSTRAINT.", operation)
@@ -1160,10 +1198,14 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 				strings.Join(constraintColumns(con), ", "))
 		}
 		lead := ""
+		unknownNote := ""
 		if small {
 			safety = SafetyCaution
 			lead = smallTableNote(*rowEstimate, *tableSize)
 			e = e.Caution()
+		} else if ctx, caveat := sizingCaveat(sizing); ctx != "" {
+			sizingCtx = ctx
+			unknownNote = caveat
 		}
 		if len(safer) > 0 {
 			// two differently-named migrations in one response is worse than one
@@ -1178,6 +1220,9 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 		if lead != "" {
 			rationale.Note = joinNotes(rationale.Note, lead)
 		}
+		if unknownNote != "" {
+			rationale.Note = joinNotes(rationale.Note, unknownNote)
+		}
 		lockDuration = "proportional to table size"
 		lockType = "ACCESS EXCLUSIVE"
 	}
@@ -1191,6 +1236,7 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 		RollbackDDL:    strp(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT <name>;", tableName)),
 		SaferSQL:       safer,
 		Statement:      statement,
+		SizingContext:  sizingCtx,
 	}
 }
 
@@ -1225,7 +1271,7 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, name
 		}
 	}
 	qual := schema.QualifiedName{Schema: schemaOf(idx.GetRelation()), Name: idx.GetRelation().GetRelname()}
-	tableSize, rowEstimate, small := lookupTableStats(a, qual)
+	tableSize, rowEstimate, small, sizing := lookupTableStats(a, qual)
 	// index method and columns for jit
 	idxMethod := "btree"
 	if idx.AccessMethod != "" {
@@ -1265,6 +1311,7 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, name
 	var safety SafetyRating
 	var recommendation, lockType string
 	var rationale *Rationale
+	sizingCtx := ""
 	if idx.Concurrent {
 		safety = SafetySafe
 		recommendation = "CREATE INDEX CONCURRENTLY - does not block reads or writes. Takes ~2-3x longer. " +
@@ -1287,10 +1334,14 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, name
 	if !idx.Concurrent {
 		e := jit.CreateIndexBlocking(tableName, idxName, idxMethod, colStr)
 		lead := ""
+		unknownNote := ""
 		if small {
 			safety = SafetyCaution
 			lead = smallTableNote(*rowEstimate, *tableSize)
 			e = e.Caution()
+		} else if ctx, caveat := sizingCaveat(sizing); ctx != "" {
+			sizingCtx = ctx
+			unknownNote = caveat
 		}
 		if len(safer) > 0 {
 			recommendation = e.Warning()
@@ -1308,6 +1359,9 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, name
 		rationale = &Rationale{Reason: e.Reason, Note: e.Note}
 		if lead != "" {
 			rationale.Note = joinNotes(rationale.Note, lead)
+		}
+		if unknownNote != "" {
+			rationale.Note = joinNotes(rationale.Note, unknownNote)
 		}
 	}
 
@@ -1331,6 +1385,7 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, name
 		RollbackDDL:    strp(fmt.Sprintf("DROP INDEX CONCURRENTLY %s;", idxName)),
 		SaferSQL:       safer,
 		Statement:      statement,
+		SizingContext:  sizingCtx,
 	}
 }
 
@@ -1564,7 +1619,7 @@ func dropIndexCheck(drop *pg_query.DropStmt, stmtNode *pg_query.Node) MigrationC
 func analyzeDML(operation string, rel *pg_query.RangeVar, bounded bool, a *schema.AnnotatedSchema, cat *fileCatalog, stmtNode *pg_query.Node) MigrationCheck {
 	tableName := relationName(rel)
 	qual := schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()}
-	tableSize, rowEstimate, small := lookupTableStats(a, qual)
+	tableSize, rowEstimate, small, sizing := lookupTableStats(a, qual)
 	statement := topLevelStatement(stmtNode)
 
 	base := MigrationCheck{
@@ -1603,9 +1658,13 @@ func analyzeDML(operation string, rel *pg_query.RangeVar, bounded bool, a *schem
 	}
 
 	const rec = "No WHERE clause on a table that is not known small: the statement rewrites or removes every row, holding row locks and generating WAL for the whole table. Batch it (keyset pagination, ~10k rows per transaction) so locks, WAL and replication lag stay bounded, or add a WHERE clause."
-	var note string
+	note := ""
 	if tableSize != nil && rowEstimate != nil {
 		note = smallTableNote(*rowEstimate, *tableSize)
+	}
+	if ctx, caveat := sizingCaveat(sizing); ctx != "" {
+		base.SizingContext = ctx
+		note = joinNotes(note, caveat)
 	}
 	base.Safety = SafetyCaution
 	base.LockDuration = "proportional to row count"
@@ -1626,7 +1685,7 @@ func analyzeComment(stmt *pg_query.CommentStmt, a *schema.AnnotatedSchema, stmtN
 	}
 	if rel := commentRelation(stmt); rel != nil {
 		c.Table = strp(relationName(rel))
-		size, rows, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()})
+		size, rows, _, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()})
 		c.TableSize = size
 		c.RowEstimate = rows
 	}
@@ -1684,7 +1743,7 @@ func dropTriggerCheck(drop *pg_query.DropStmt, a *schema.AnnotatedSchema, stmtNo
 	}
 	if rel := dropTriggerRelation(drop); rel != nil {
 		c.Table = strp(relationName(rel))
-		size, rows, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()})
+		size, rows, _, _ := lookupTableStats(a, schema.QualifiedName{Schema: schemaOf(rel), Name: rel.GetRelname()})
 		c.TableSize = size
 		c.RowEstimate = rows
 	}
@@ -1806,7 +1865,7 @@ func analyzeReindex(stmt *pg_query.ReindexStmt, a *schema.AnnotatedSchema, cat *
 		} else {
 			base.Table = strp(relationName(stmt.GetRelation()))
 		}
-		size, rows, small := lookupTableStats(a, qual)
+		size, rows, small, sizing := lookupTableStats(a, qual)
 		base.TableSize = size
 		base.RowEstimate = rows
 		if small {
@@ -1814,6 +1873,10 @@ func analyzeReindex(stmt *pg_query.ReindexStmt, a *schema.AnnotatedSchema, cat *
 			base.Rationale = &Rationale{Reason: "REINDEX blocks writes while it rebuilds; on a small table that is brief, but the lock still queues behind any in-flight transaction.", Note: smallTableNote(*rows, *size)}
 		} else {
 			base.Rationale = &Rationale{Reason: "Blocks writes for the whole rebuild and takes ACCESS EXCLUSIVE on the index, blocking reads that would use it."}
+			if ctx, caveat := sizingCaveat(sizing); ctx != "" {
+				base.SizingContext = ctx
+				base.Rationale.Note = caveat
+			}
 		}
 	} else {
 		base.Rationale = &Rationale{Reason: "Rebuilds every index in scope, blocking writes throughout. Scope the reindex to a single index or table to make it measurable."}
@@ -1942,17 +2005,69 @@ const (
 	plannerStaleAfter = 7 * 24 * time.Hour
 )
 
-func lookupTableStats(a *schema.AnnotatedSchema, q schema.QualifiedName) (sizeText *string, rows *float64, small bool) {
-	if a == nil || a.Planner == nil || a.Planner.Timestamp.IsZero() || time.Since(a.Planner.Timestamp) > plannerStaleAfter {
-		return nil, nil, false
+func lookupTableStats(a *schema.AnnotatedSchema, q schema.QualifiedName) (sizeText *string, rows *float64, small bool, sc sizingContext) {
+	switch {
+	case a == nil || a.Schema == nil:
+		return nil, nil, false, sizingNoSnap
+	case a.Planner == nil:
+		return nil, nil, false, sizingNoPlan
+	case a.Planner.Timestamp.IsZero() || time.Since(a.Planner.Timestamp) > plannerStaleAfter:
+		return nil, nil, false, sizingStale
 	}
 	sz := a.SizingFor(q)
 	if sz == nil {
-		return nil, nil, false
+		return nil, nil, false, sizingMissing
 	}
 	size := formatBytes(sz.TableSize)
+	// reltuples = -1: pg_table_size is exact, but there is no row count to call small
+	if sz.Reltuples < 0 {
+		return &size, nil, false, sizingMissing
+	}
 	r := sz.Reltuples
-	return &size, &r, r >= 0 && r <= smallTableMaxRows
+	return &size, &r, r <= smallTableMaxRows, sizingOK
+}
+
+// sizingCaveat returns the SizingContext value and note, or empty when usable.
+func sizingCaveat(sc sizingContext) (ctx, note string) {
+	if sc == sizingOK {
+		return "", ""
+	}
+	return string(sc), sizingNote(sc)
+}
+
+// staleWindow is plannerStaleAfter in whole days, for the note and CLI prose.
+func staleWindow() string {
+	return fmt.Sprintf("%d days", int(plannerStaleAfter.Hours()/24))
+}
+
+// SizingContextAdvice is the remedy half of a sizing caveat, for CLI output.
+func SizingContextAdvice(sc string) string {
+	switch sizingContext(sc) {
+	case sizingNoSnap:
+		return "no schema snapshot -- run `dryrun init --db <DATABASE_URL>`"
+	case sizingNoPlan:
+		return "snapshot has no planner statistics -- run `dryrun snapshot capture`"
+	case sizingStale:
+		return fmt.Sprintf("planner stats older than %s -- run `dryrun snapshot pull`", staleWindow())
+	case sizingMissing:
+		return "table not in the planner capture -- run `dryrun snapshot capture`"
+	}
+	return ""
+}
+
+// sizingNote is the Rationale.Note caveat for a worst-case size assumption.
+func sizingNote(sc sizingContext) string {
+	switch sc {
+	case sizingNoSnap:
+		return "No schema snapshot - verdict assumes a large table. Run `dryrun init --db <DATABASE_URL>` (or `dryrun snapshot pull`) for a size-aware verdict."
+	case sizingNoPlan:
+		return "The snapshot has no planner statistics - verdict assumes a large table. Re-capture with `dryrun snapshot capture` for a size-aware verdict."
+	case sizingStale:
+		return fmt.Sprintf("Planner statistics are stale (older than %s) - verdict assumes a large table. Re-capture with `dryrun snapshot pull` for a size-aware verdict.", staleWindow())
+	case sizingMissing:
+		return "Table size is unknown (not in the planner capture, or never analyzed) - verdict assumes a large table. Re-capture with `dryrun snapshot capture` to size it."
+	}
+	return ""
 }
 
 func smallTableNote(rows float64, sizeText string) string {

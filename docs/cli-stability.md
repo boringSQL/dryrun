@@ -30,7 +30,7 @@ See [dryrun-toml.md](dryrun-toml.md) for the `[[remote]]` block and the per-prof
 
 Both read the newest schema + planner snapshot from `.dryrun/history.db` (or `--history-db <path>`); they never connect to a live database. Capture one first with `dryrun init` or `dryrun snapshot pull`.
 
-With `--json`, one file argument emits the report object, and several emit an array of them — even when some of those files failed to check (they land on stderr, exit 2). The fields match the MCP tools (`framework`, `direction`, `checks`, `migration_sql`; `valid`, `errors`, `warnings`), so output can be piped to `jq`.
+With `--json`, one file argument emits the report object, and several emit an array of them — even when some of those files failed to check (they land on stderr, exit 2). The fields match the MCP tools (`framework`, `direction`, `checks`, `migration_sql`; `valid`, `errors`, `warnings`), so output can be piped to `jq`. A check carries `sizing_context` (`no_snapshot`, `missing_planner`, `stale_planner` or `missing_sizing`) only when the verdict assumed the worst-case table size because a trusted size reading was unavailable; it is absent when a known-small table softened the verdict or the operation does not depend on size.
 
 Exit codes:
 
