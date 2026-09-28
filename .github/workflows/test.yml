@@ -1,0 +1,58 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  # Every supported major (14-18): the engine verdict harness checks check_migration against each.
+  # docker run, not a service container: the pgss tests need shared_preload_libraries.
+  live:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14", "15", "16", "17", "18"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: start postgres ${{ matrix.pg }}
+        run: |
+          docker run -d --name pg \
+            -e POSTGRES_PASSWORD=test -e POSTGRES_DB=verify \
+            -p 5432:5432 postgres:${{ matrix.pg }} \
+            -c shared_preload_libraries=pg_stat_statements
+          # Poll over TCP: `docker exec pg_isready` goes green during initdb's
+          # temporary socket-only server, before 5432 accepts connections.
+          ready=
+          for _ in $(seq 1 60); do
+            if pg_isready -h 127.0.0.1 -p 5432 -U postgres >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then
+            echo "postgres did not become ready"; docker logs pg; exit 1
+          fi
+          docker exec pg psql -U postgres -d verify -c 'CREATE EXTENSION pg_stat_statements'
+      - name: go test against live postgres
+        env:
+          TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/verify
+        # -p 1: the pgss-extension test DROPs/re-CREATEs pg_stat_statements,
+        # resetting counters cluster-wide; parallel packages would see them vanish mid-test.
+        run: go test -p 1 ./...
