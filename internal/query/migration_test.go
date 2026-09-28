@@ -274,7 +274,7 @@ func TestCheckMigrationSmallTableDowngrades(t *testing.T) {
 // A2/D3: prose must agree with the verdict. Every analyzer that can soften a
 // verdict to caution/safe must not ship a recommendation that still opens
 // DANGEROUS -- a small table (ALTER TYPE, ADD CONSTRAINT, CREATE INDEX) or SET
-// NOT NULL, which is caution at any size.
+// NOT NULL, which is caution unless a validated CHECK already proves it.
 func TestCheckMigrationProseNeverContradictsVerdict(t *testing.T) {
 	for _, ddl := range []string{
 		// ADD COLUMN
@@ -292,7 +292,7 @@ func TestCheckMigrationProseNeverContradictsVerdict(t *testing.T) {
 		// ALTER COLUMN TYPE (caution on a small table, dangerous on a large one)
 		"ALTER TABLE orders ALTER COLUMN total TYPE bigint",
 		"ALTER TABLE users ALTER COLUMN email TYPE citext",
-		// SET NOT NULL -- caution at any size
+		// SET NOT NULL -- caution without a validated CHECK
 		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
 		"ALTER TABLE ONLY users ALTER COLUMN email SET NOT NULL",
 		// ADD CONSTRAINT, all forms

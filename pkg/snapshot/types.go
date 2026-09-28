@@ -4,6 +4,7 @@ package snapshot
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -87,6 +88,20 @@ type Constraint struct {
 	FKColumns    []string       `json:"fk_columns"`
 	BackingIndex *string        `json:"backing_index,omitempty"`
 	Comment      *string        `json:"comment,omitempty"`
+}
+
+// rides on pg_get_constraintdef's trailing clause: no new field, hash unchanged
+func (c Constraint) IsNotValid() bool {
+	return c.definitionEndsWith(" NOT VALID")
+}
+
+// PG18: convalidated is false here too, but VALIDATE is not the way out.
+func (c Constraint) IsNotEnforced() bool {
+	return c.definitionEndsWith(" NOT ENFORCED")
+}
+
+func (c Constraint) definitionEndsWith(suffix string) bool {
+	return c.Definition != nil && strings.HasSuffix(strings.TrimSpace(*c.Definition), suffix)
 }
 
 type ConstraintKind string

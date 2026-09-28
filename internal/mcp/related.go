@@ -115,7 +115,7 @@ func edgeFrom(c schema.Constraint, other edgeTarget, cols, refCols []string, loc
 		RefColumns:  nonNil(refCols),
 		OnDelete:    fkAction(c.Definition, "ON DELETE"),
 		OnUpdate:    fkAction(c.Definition, "ON UPDATE"),
-		NotValid:    hasClause(c.Definition, "NOT VALID"),
+		NotValid:    c.IsNotValid(),
 		Join:        joinClause(other.qualified(), local, selfAlias, refCols, cols),
 		target:      other,
 		deferred:    hasClause(c.Definition, "DEFERRABLE") && hasClause(c.Definition, "INITIALLY DEFERRED"),

@@ -36,6 +36,9 @@ type (
 		// SizingContext names why a size-aware verdict fell back to the worst
 		// case. Set only where a known-small table would have softened it.
 		SizingContext string `json:"sizing_context,omitempty"`
+
+		// UnvalidatedConstraints lists NOT VALID constraints already on the table.
+		UnvalidatedConstraints []string `json:"unvalidated_constraints,omitempty"`
 	}
 
 	// Rationale: Recommendation's reason as fields, so agents skip parsing prose.
@@ -95,6 +98,8 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 					continue
 				}
 				if check := analyzeAlterTableCmd(cmd.AlterTableCmd, n.AlterTableStmt, a, names, cat); check != nil {
+					attachUnvalidated(check, a.Schema, cat, n.AlterTableStmt, cmd.AlterTableCmd)
+					cat.observeAlter(a.Schema, n.AlterTableStmt, cmd.AlterTableCmd)
 					checks = append(checks, *check)
 				} else {
 					// this command's text alone -- siblings have their own checks
@@ -174,6 +179,9 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 			if n.RenameStmt.GetRenameType() == pg_query.ObjectType_OBJECT_TABLE {
 				cat.rekey(n.RenameStmt.GetRelation(), n.RenameStmt.GetNewname())
 			}
+			if n.RenameStmt.GetRenameType() == pg_query.ObjectType_OBJECT_TABCONSTRAINT {
+				cat.renameConstraint(a.Schema, n.RenameStmt.GetRelation(), n.RenameStmt.GetSubname(), n.RenameStmt.GetNewname())
+			}
 			checks = append(checks, analyzeRename(n.RenameStmt, stmt.Stmt))
 		case *pg_query.Node_DropStmt:
 			switch n.DropStmt.RemoveType {
@@ -183,6 +191,8 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 					delete(cat.empty, key)
 					delete(cat.partitioned, key)
 					delete(cat.conditional, key)
+					delete(cat.cons, key)
+					delete(cat.reported, key)
 				}
 				checks = append(checks, dropTableCheck())
 			case pg_query.ObjectType_OBJECT_INDEX:
@@ -212,10 +222,12 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 // sized against a pre-existing table.
 type (
 	fileCatalog struct {
-		created     map[string]bool // relKey of tables created in this file
-		empty       map[string]bool // relKey of tables created empty in this file
-		partitioned map[string]bool // relKey of partitioned parents created in this file
-		conditional map[string]bool // relKey of entries created via IF NOT EXISTS
+		created     map[string]bool                        // relKey of tables created in this file
+		empty       map[string]bool                        // relKey of tables created empty in this file
+		partitioned map[string]bool                        // relKey of partitioned parents created in this file
+		conditional map[string]bool                        // relKey of entries created via IF NOT EXISTS
+		cons        map[string]map[string]*constraintEntry // relKey -> constraints changed in this file
+		reported    map[string]bool                        // relKey of tables already noted
 	}
 )
 
@@ -225,6 +237,8 @@ func newFileCatalog() *fileCatalog {
 		empty:       map[string]bool{},
 		partitioned: map[string]bool{},
 		conditional: map[string]bool{},
+		cons:        map[string]map[string]*constraintEntry{},
+		reported:    map[string]bool{},
 	}
 }
 
@@ -294,6 +308,14 @@ func (c *fileCatalog) rekey(oldRel *pg_query.RangeVar, newName string) {
 	if c.conditional[oldKey] {
 		delete(c.conditional, oldKey)
 		c.conditional[newKey] = true
+	}
+	if c.cons[oldKey] != nil {
+		c.cons[newKey] = c.cons[oldKey]
+		delete(c.cons, oldKey)
+	}
+	if c.reported[oldKey] {
+		delete(c.reported, oldKey)
+		c.reported[newKey] = true
 	}
 }
 
@@ -392,7 +414,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			Statement:      statement,
 		}
 	case pg_query.AlterTableType_AT_SetNotNull:
-		return analyzeSetNotNull(cmd.Name, tableName, qual, tableSize, rowEstimate, a, stmt, names, statement)
+		return analyzeSetNotNull(cmd.Name, tableName, qual, tableSize, rowEstimate, a, stmt, names, cat, statement)
 	case pg_query.AlterTableType_AT_AlterColumnType:
 		colName := cmd.Name
 		e := jit.AlterColumnType(tableName, colName, "<new_type>")
@@ -421,16 +443,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 	case pg_query.AlterTableType_AT_AddConstraint:
 		return analyzeAddConstraint(cmd, stmt, tableName, tableSize, rowEstimate, small, sizing, names, fkNoNotValid, statement)
 	case pg_query.AlterTableType_AT_ValidateConstraint:
-		const rec = "Safe - validates existing rows with a weaker lock that allows concurrent reads and writes."
-		return &MigrationCheck{
-			Operation: "VALIDATE CONSTRAINT", Table: strp(tableName), Safety: SafetySafe,
-			LockType:     "SHARE UPDATE EXCLUSIVE",
-			LockDuration: "proportional to table size (but allows concurrent DML)",
-			TableSize:    tableSize, RowEstimate: rowEstimate,
-			Recommendation: rec,
-			Rationale:      &Rationale{Reason: rec},
-			Statement:      statement,
-		}
+		return analyzeValidateConstraint(cmd, stmt, tableName, tableSize, rowEstimate, names.snap, cat, statement)
 	case pg_query.AlterTableType_AT_ColumnDefault:
 		return metadataAlterCmd("SET/DROP DEFAULT", "ACCESS EXCLUSIVE", tableName, tableSize, rowEstimate, statement,
 			"Metadata-only: the default is stored in the catalog and applies to future inserts only. Existing rows are unchanged.")
@@ -1406,7 +1419,10 @@ func deparse(typeName *pg_query.TypeName) string {
 	return strings.Join(parts, ".")
 }
 
-func analyzeSetNotNull(colName, tableName string, qual schema.QualifiedName, tableSize *string, rowEstimate *float64, a *schema.AnnotatedSchema, stmt *pg_query.AlterTableStmt, names *nameAllocator, statement string) *MigrationCheck {
+func analyzeSetNotNull(colName, tableName string, qual schema.QualifiedName, tableSize *string, rowEstimate *float64, a *schema.AnnotatedSchema, stmt *pg_query.AlterTableStmt, names *nameAllocator, cat *fileCatalog, statement string) *MigrationCheck {
+	if proof := findNotNullProof(names.snap, cat, stmt.GetRelation(), colName); proof.state != proofNone {
+		return setNotNullWithProof(proof, colName, tableName, tableSize, rowEstimate, stmt, statement)
+	}
 	displayCol := colName
 	if displayCol == "" {
 		displayCol = "<col>"
