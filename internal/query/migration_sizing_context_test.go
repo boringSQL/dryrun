@@ -190,7 +190,6 @@ func TestCheckMigrationSizingContextAbsentWhenSizeIrrelevant(t *testing.T) {
 	for _, ddl := range []string{
 		"ALTER TABLE orders ADD COLUMN active boolean NOT NULL",
 		"ALTER TABLE orders ADD COLUMN note text",
-		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL",
 		"CREATE INDEX CONCURRENTLY idx_o ON orders (status)",
 		"ALTER TABLE orders ADD CONSTRAINT ck CHECK (total >= 0) NOT VALID",
 		"COMMENT ON TABLE orders IS 'x'",

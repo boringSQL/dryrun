@@ -40,6 +40,9 @@ func CheckMigrationFile(content, direction string, a *schema.AnnotatedSchema) (*
 		return nil, err
 	}
 	MarkConcurrentInTransaction(env, section, checks)
+	if !section.NoTransaction && env.Framework != FrameworkPlain {
+		flagLockHeldAcrossDML(checks)
+	}
 	if len(checks) == 0 {
 		report.Checks = []MigrationCheck{}
 		report.Hint = "Could not identify a specific DDL operation to check."

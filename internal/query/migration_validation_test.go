@@ -50,11 +50,11 @@ func TestSetNotNullUsesExistingCheck(t *testing.T) {
 		{"validated check", "ALTER TABLE accounts ALTER COLUMN ok SET NOT NULL", SafetySafe, 0, "accounts_ok_nn"},
 		{"not valid check", "ALTER TABLE accounts ALTER COLUMN pending SET NOT NULL", SafetyCaution, 2, "NOT VALID"},
 		{"multi column and", "ALTER TABLE accounts ALTER COLUMN b SET NOT NULL", SafetySafe, 0, "accounts_ab"},
-		{"or proves nothing", "ALTER TABLE accounts ALTER COLUMN either SET NOT NULL", SafetyCaution, 4, ""},
-		{"composite column", "ALTER TABLE accounts ALTER COLUMN home SET NOT NULL", SafetyCaution, 4, ""},
-		{"not enforced", "ALTER TABLE accounts ALTER COLUMN enf SET NOT NULL", SafetyCaution, 4, ""},
+		{"or proves nothing", "ALTER TABLE accounts ALTER COLUMN either SET NOT NULL", SafetyDangerous, 4, ""},
+		{"composite column", "ALTER TABLE accounts ALTER COLUMN home SET NOT NULL", SafetyDangerous, 4, ""},
+		{"not enforced", "ALTER TABLE accounts ALTER COLUMN enf SET NOT NULL", SafetyDangerous, 4, ""},
 		{"mixed case", `ALTER TABLE accounts ALTER COLUMN "MixedCase" SET NOT NULL`, SafetySafe, 0, "accounts_mixed_nn"},
-		{"no check", "ALTER TABLE accounts ALTER COLUMN id SET NOT NULL", SafetyCaution, 4, ""},
+		{"no check", "ALTER TABLE accounts ALTER COLUMN id SET NOT NULL", SafetyDangerous, 4, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			checks, err := CheckMigration(tc.ddl, validationTestAnnotated())
@@ -119,8 +119,8 @@ ALTER TABLE accounts ALTER COLUMN ok SET NOT NULL;`
 	if err != nil {
 		t.Fatal(err)
 	}
-	if checks[1].Safety != SafetyCaution {
-		t.Errorf("safety = %s, want caution once the proof is dropped", checks[1].Safety)
+	if checks[1].Safety != SafetyDangerous {
+		t.Errorf("safety = %s, want dangerous (unsized scan) once the proof is dropped", checks[1].Safety)
 	}
 }
 

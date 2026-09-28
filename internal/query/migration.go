@@ -2,6 +2,7 @@ package query
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,9 @@ type (
 		// SizingContext names why a size-aware verdict fell back to the worst
 		// case. Set only where a known-small table would have softened it.
 		SizingContext string `json:"sizing_context,omitempty"`
+
+		// LockNote: file-level lock_timeout advice, set once on the first ACCESS EXCLUSIVE check.
+		LockNote string `json:"lock_note,omitempty"`
 
 		// UnvalidatedConstraints lists NOT VALID constraints already on the table.
 		UnvalidatedConstraints []string `json:"unvalidated_constraints,omitempty"`
@@ -81,10 +85,21 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 	names := newNameAllocator(a.Schema)
 	cat := newFileCatalog()
 
+	// checks[from:] are the previous statement's, which ran with stmtTx
+	inTx, stmtTx, from, txFrom := false, false, 0, 0
+	closeStmt := func() {
+		if stmtTx {
+			markConcurrentInExplicitTx(checks[from:])
+		}
+		from = len(checks)
+	}
+
 	for _, stmt := range result.Stmts {
 		if stmt.Stmt == nil {
 			continue
 		}
+		closeStmt()
+		stmtTx = inTx
 		switch n := stmt.Stmt.Node.(type) {
 		case *pg_query.Node_AlterTableStmt:
 			// ATTACH PARTITION can bring rows into a table this file created empty
@@ -121,11 +136,18 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 			// CTAS is born populated: never tracked as empty
 		case *pg_query.Node_VacuumStmt:
 			if n.VacuumStmt.GetIsVacuumcmd() {
-				// VACUUM (FULL) locks stronger and size-dependent: leave unmodeled.
-				checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
+				checks = append(checks, analyzeVacuum(n.VacuumStmt, a, stmt.Stmt))
 			} else {
 				checks = append(checks, analyzeAnalyze(n.VacuumStmt, a, stmt.Stmt))
 			}
+		case *pg_query.Node_ClusterStmt:
+			checks = append(checks, analyzeCluster(n.ClusterStmt, a, stmt.Stmt))
+		case *pg_query.Node_TruncateStmt:
+			checks = append(checks, analyzeTruncate(n.TruncateStmt, stmt.Stmt))
+		case *pg_query.Node_CreateTrigStmt:
+			checks = append(checks, analyzeCreateTrigger(n.CreateTrigStmt, stmt.Stmt))
+		case *pg_query.Node_RefreshMatViewStmt:
+			checks = append(checks, analyzeRefreshMatView(n.RefreshMatViewStmt, stmt.Stmt))
 		case *pg_query.Node_CreateStatsStmt:
 			checks = append(checks, analyzeCreateStats(n.CreateStatsStmt, a, stmt.Stmt))
 		case *pg_query.Node_CreateSchemaStmt:
@@ -205,6 +227,16 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 				checks = append(checks, unmodeledCheck(topLevelStatement(stmt.Stmt)))
 			}
 		case *pg_query.Node_TransactionStmt:
+			switch n.TransactionStmt.GetKind() {
+			case pg_query.TransactionStmtKind_TRANS_STMT_BEGIN, pg_query.TransactionStmtKind_TRANS_STMT_START:
+				inTx = true
+				txFrom = len(checks) + 1
+			case pg_query.TransactionStmtKind_TRANS_STMT_COMMIT, pg_query.TransactionStmtKind_TRANS_STMT_ROLLBACK:
+				if inTx {
+					flagLockHeldAcrossDML(checks[txFrom:])
+				}
+				inTx = false
+			}
 			checks = append(checks, transactionControlCheck())
 		case *pg_query.Node_VariableSetStmt:
 			checks = append(checks, passthroughCheck("SET", stmt.Stmt))
@@ -215,6 +247,11 @@ func CheckMigration(ddl string, a *schema.AnnotatedSchema) ([]MigrationCheck, er
 		}
 	}
 
+	closeStmt()
+	if inTx {
+		flagLockHeldAcrossDML(checks[txFrom:])
+	}
+	flagMissingLockTimeout(checks)
 	return checks, nil
 }
 
@@ -389,7 +426,7 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 	case pg_query.AlterTableType_AT_AddColumn:
 		return analyzeAddColumn(cmd, stmt, tableName, tableSize, rowEstimate, small, sizing, names, fkNoNotValid, statement)
 	case pg_query.AlterTableType_AT_DropColumn:
-		const rec = "Metadata-only operation. Column space reclaimed by VACUUM."
+		const rec = "Metadata-only operation: the column is hidden, not removed. Its space stays in existing rows and comes back only when rows are rewritten (UPDATE plus VACUUM, VACUUM FULL, or a table rewrite)."
 		return &MigrationCheck{
 			Operation: "DROP COLUMN", Table: strp(tableName), Safety: SafetySafe,
 			LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
@@ -414,9 +451,12 @@ func analyzeAlterTableCmd(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			Statement:      statement,
 		}
 	case pg_query.AlterTableType_AT_SetNotNull:
-		return analyzeSetNotNull(cmd.Name, tableName, qual, tableSize, rowEstimate, a, stmt, names, cat, statement)
+		return analyzeSetNotNull(cmd.Name, tableName, qual, tableSize, rowEstimate, small, sizing, a, stmt, names, cat, statement)
 	case pg_query.AlterTableType_AT_AlterColumnType:
 		colName := cmd.Name
+		if check := metadataOnlyTypeChange(cmd, tableName, tableSize, rowEstimate, names.snap, stmt.GetRelation(), statement); check != nil {
+			return check
+		}
 		e := jit.AlterColumnType(tableName, colName, "<new_type>")
 		safety := SafetyDangerous
 		recommendation := e.String()
@@ -852,9 +892,12 @@ type (
 		notNull     bool
 		primary     bool
 		generated   bool
-		unique      *pg_query.Constraint
-		fk          *pg_query.Constraint
-		check       *pg_query.Constraint
+		// serial/IDENTITY carry an implicit nextval() default the parse tree hides
+		implicit   string
+		serialType string
+		unique     *pg_query.Constraint
+		fk         *pg_query.Constraint
+		check      *pg_query.Constraint
 	}
 
 	colHazard struct {
@@ -872,6 +915,16 @@ func collectInlineConstraints(cd *pg_query.ColumnDef) inlineColConstraints {
 	if cd.RawDefault != nil {
 		c.hasDefault = true
 		c.defaultExpr = cd.RawDefault
+	}
+	switch {
+	case cd.GetIdentity() != "":
+		c.implicit = "identity"
+	case isSerialType(cd.GetTypeName()):
+		c.implicit = "serial"
+		c.serialType = typeBaseName(cd.GetTypeName())
+	}
+	if c.implicit != "" {
+		c.hasDefault = true
 	}
 	// DEFERRABLE parses as a separate attr constraint after the one it
 	// modifies; fold it in or a strip orphans it into invalid DDL.
@@ -894,6 +947,10 @@ func collectInlineConstraints(cd *pg_query.ColumnDef) inlineColConstraints {
 			c.primary = true
 		case pg_query.ConstrType_CONSTR_GENERATED:
 			c.generated = true
+		case pg_query.ConstrType_CONSTR_IDENTITY:
+			// IDENTITY arrives as a constraint pre-transform; ColumnDef.Identity is unset
+			c.implicit = "identity"
+			c.hasDefault = true
 		case pg_query.ConstrType_CONSTR_FOREIGN:
 			c.fk = con.Constraint
 			last = &c.fk
@@ -921,6 +978,36 @@ func collectInlineConstraints(cd *pg_query.ColumnDef) inlineColConstraints {
 		}
 	}
 	return c
+}
+
+// typeBaseName: the last, lowercased name part (serial, varchar).
+func typeBaseName(tn *pg_query.TypeName) string {
+	names := tn.GetNames()
+	if len(names) == 0 {
+		return ""
+	}
+	if s, ok := names[len(names)-1].GetNode().(*pg_query.Node_String_); ok {
+		return strings.ToLower(s.String_.GetSval())
+	}
+	return ""
+}
+
+func isSerialType(tn *pg_query.TypeName) bool {
+	switch typeBaseName(tn) {
+	case "serial", "serial2", "serial4", "serial8", "smallserial", "bigserial":
+		return true
+	}
+	return false
+}
+
+func serialSeqType(base string) string {
+	switch base {
+	case "smallserial", "serial2":
+		return "smallint"
+	case "bigserial", "serial8":
+		return "bigint"
+	}
+	return "integer"
 }
 
 // defaultVolatility is the verdict for an ADD COLUMN DEFAULT expression.
@@ -1183,6 +1270,12 @@ func funcCallName(fc *pg_query.FuncCall) (schema, name string) {
 // Worst first: the head sets the verdict, the rest fold into the note.
 func columnHazards(table, col string, cons inlineColConstraints, fkNoNotValid bool) []colHazard {
 	var out []colHazard
+	switch cons.implicit {
+	case "serial":
+		out = append(out, colHazard{entry: jit.AddColumnSerial(table, col, serialSeqType(cons.serialType)), downgradable: true})
+	case "identity":
+		out = append(out, colHazard{entry: jit.AddColumnIdentity(table, col), downgradable: true})
+	}
 	if (cons.notNull || cons.primary) && !cons.hasDefault {
 		out = append(out, colHazard{entry: jit.AddColumnNotNullNoDefault(table, col)})
 	}
@@ -1221,15 +1314,21 @@ func fkTarget(con *pg_query.Constraint) (string, string) {
 	return refTable, refCol
 }
 
+// deparse a bare expression as a SELECT target
 func deparseExpr(node *pg_query.Node) string {
 	if node == nil {
 		return "<expr>"
 	}
-	s, err := pg_query.Deparse(&pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: node}}})
+	sel := &pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: &pg_query.SelectStmt{
+		TargetList:  []*pg_query.Node{{Node: &pg_query.Node_ResTarget{ResTarget: &pg_query.ResTarget{Val: node}}}},
+		LimitOption: pg_query.LimitOption_LIMIT_OPTION_DEFAULT,
+		Op:          pg_query.SetOperation_SETOP_NONE,
+	}}}
+	s, err := pg_query.Deparse(&pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: sel}}})
 	if err != nil {
 		return "<expr>"
 	}
-	return s
+	return strings.TrimSpace(strings.TrimPrefix(s, "SELECT"))
 }
 
 func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, tableName string, tableSize *string, rowEstimate *float64, small bool, sizing sizingContext, names *nameAllocator, fkNoNotValid bool, statement string) *MigrationCheck {
@@ -1258,6 +1357,10 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt
 		recommendation = "Nullable column without DEFAULT - metadata-only change."
 		rationale = &Rationale{Reason: recommendation}
 		lockDuration = "brief (milliseconds)"
+	} else if cons.implicit != "" {
+		// columnHazards below sets the verdict text
+		safety = SafetyDangerous
+		lockDuration = "proportional to table size (full rewrite)"
 	} else {
 		vol := classifyDefault(cons.defaultExpr)
 		typeRisk := typePlain
@@ -1391,6 +1494,120 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt
 	}
 }
 
+// varchar(N)->text or widening varchar skips the rewrite; char(n), text->varchar,
+// narrowing and USING stay full rewrites: unknown is not safe.
+func metadataOnlyTypeChange(cmd *pg_query.AlterTableCmd, tableName string, tableSize *string, rowEstimate *float64, snap *schema.SchemaSnapshot, rel *pg_query.RangeVar, statement string) *MigrationCheck {
+	cd := columnDefOf(cmd)
+	if cd == nil || cd.RawDefault != nil || snap == nil {
+		return nil
+	}
+	tbl := lookupTable(snap, rel)
+	if tbl == nil {
+		return nil
+	}
+	var oldType string
+	for _, c := range tbl.Columns {
+		if c.Name == cmd.Name {
+			oldType = c.TypeName
+			break
+		}
+	}
+	oldBase, oldLen, ok := parseVarcharLike(oldType)
+	if !ok {
+		return nil
+	}
+	newBase, newLen, ok := varcharLikeOf(cd.GetTypeName())
+	if !ok {
+		return nil
+	}
+	fast := false
+	switch newBase {
+	case "text":
+		fast = true
+	case "varchar":
+		fast = oldBase == "varchar" && (newLen == 0 || (oldLen != 0 && newLen >= oldLen))
+	}
+	if !fast {
+		return nil
+	}
+	const rec = "Metadata-only: widening varchar or moving to text needs no table rewrite and no index rebuild. The ACCESS EXCLUSIVE lock is brief; set lock_timeout so it cannot queue behind a long transaction."
+	return &MigrationCheck{
+		Operation: "ALTER COLUMN TYPE", Table: strp(tableName), Safety: SafetySafe,
+		LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
+		TableSize: tableSize, RowEstimate: rowEstimate,
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		Statement:      statement,
+	}
+}
+
+// parse format_type output: "character varying(20)", "text".
+func parseVarcharLike(t string) (base string, length int, ok bool) {
+	t = strings.ToLower(strings.TrimSpace(t))
+	switch {
+	case t == "text":
+		return "text", 0, true
+	case t == "character varying" || t == "varchar":
+		return "varchar", 0, true
+	case strings.HasPrefix(t, "character varying(") || strings.HasPrefix(t, "varchar("):
+		open := strings.IndexByte(t, '(')
+		n, err := strconv.Atoi(strings.TrimSuffix(t[open+1:], ")"))
+		if err != nil {
+			return "", 0, false
+		}
+		return "varchar", n, true
+	}
+	return "", 0, false
+}
+
+func varcharLikeOf(tn *pg_query.TypeName) (base string, length int, ok bool) {
+	if tn == nil || len(tn.GetArrayBounds()) > 0 {
+		return "", 0, false
+	}
+	switch typeBaseName(tn) {
+	case "text":
+		return "text", 0, true
+	case "varchar":
+		mods := tn.GetTypmods()
+		if len(mods) == 0 {
+			return "varchar", 0, true
+		}
+		if len(mods) == 1 {
+			if c := mods[0].GetAConst(); c != nil && c.GetIval() != nil {
+				return "varchar", int(c.GetIval().GetIval()), true
+			}
+		}
+	}
+	return "", 0, false
+}
+
+func isPartitionedRel(snap *schema.SchemaSnapshot, cat *fileCatalog, rel *pg_query.RangeVar) bool {
+	if cat != nil && cat.isPartitioned(rel) {
+		return true
+	}
+	t := lookupTable(snap, rel)
+	return t != nil && t.PartitionInfo != nil
+}
+
+// An explicit BEGIN ends the statement at apply time.
+func markConcurrentInExplicitTx(checks []MigrationCheck) {
+	for i := range checks {
+		c := &checks[i]
+		if c.Safety == SafetyDangerous || !concurrentWordRe.MatchString(c.Operation) {
+			continue
+		}
+		reason := c.Operation + " cannot run inside a transaction block: it fails with \"cannot run inside a transaction block\" when this BEGIN ... COMMIT is applied."
+		c.Safety = SafetyDangerous
+		note := ""
+		if c.Rationale != nil {
+			note = c.Rationale.Note
+		}
+		c.Rationale = &Rationale{Reason: reason, Note: note}
+		c.Recommendation = reason + " Move the statement out of the transaction block."
+		c.SaferSQL = nil
+	}
+}
+
 func columnDefOf(cmd *pg_query.AlterTableCmd) *pg_query.ColumnDef {
 	if cmd == nil || cmd.Def == nil {
 		return nil
@@ -1419,7 +1636,7 @@ func deparse(typeName *pg_query.TypeName) string {
 	return strings.Join(parts, ".")
 }
 
-func analyzeSetNotNull(colName, tableName string, qual schema.QualifiedName, tableSize *string, rowEstimate *float64, a *schema.AnnotatedSchema, stmt *pg_query.AlterTableStmt, names *nameAllocator, cat *fileCatalog, statement string) *MigrationCheck {
+func analyzeSetNotNull(colName, tableName string, qual schema.QualifiedName, tableSize *string, rowEstimate *float64, small bool, sizing sizingContext, a *schema.AnnotatedSchema, stmt *pg_query.AlterTableStmt, names *nameAllocator, cat *fileCatalog, statement string) *MigrationCheck {
 	if proof := findNotNullProof(names.snap, cat, stmt.GetRelation(), colName); proof.state != proofNone {
 		return setNotNullWithProof(proof, colName, tableName, tableSize, rowEstimate, stmt, statement)
 	}
@@ -1427,15 +1644,31 @@ func analyzeSetNotNull(colName, tableName string, qual schema.QualifiedName, tab
 	if displayCol == "" {
 		displayCol = "<col>"
 	}
-	e := jit.SetNotNull(tableName, displayCol).Caution()
+	e := jit.SetNotNull(tableName, displayCol)
 
-	safety := SafetyCaution
+	// scan holds ACCESS EXCLUSIVE for the read time: rate by size like CREATE INDEX
+	safety := SafetyDangerous
+	sizingCtx := ""
+	lead := ""
+	note := e.Note
+	if small {
+		safety = SafetyCaution
+		lead = smallTableNote(*rowEstimate, *tableSize)
+		e = e.Caution()
+		note = joinNotes(note, lead)
+	} else if ctx, caveat := sizingCaveat(sizing); ctx != "" {
+		sizingCtx = ctx
+		note = joinNotes(note, caveat)
+	}
 
 	safer := rewriteSetNotNull(stmt, colName, names)
 	rec := e.String()
 	if len(safer) > 0 {
 		// two differently-named migrations in one response is worse than one
 		rec = e.Warning()
+	}
+	if lead != "" {
+		rec = lead + "\n\n" + rec
 	}
 
 	if colName != "" {
@@ -1458,12 +1691,70 @@ func analyzeSetNotNull(colName, tableName string, qual schema.QualifiedName, tab
 		LockDuration: "scan duration (skipped when a valid CHECK proves no NULLs)",
 		TableSize:    tableSize, RowEstimate: rowEstimate,
 		Recommendation:  rec,
-		Rationale:       &Rationale{Reason: e.Reason, Note: e.Note},
+		Rationale:       &Rationale{Reason: e.Reason, Note: note},
 		VersionBehavior: strp("Scan is skipped if a valid CHECK (col IS NOT NULL) exists."),
 		RollbackDDL:     strp("ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL;"),
 		SaferSQL:        safer,
 		Statement:       statement,
+		SizingContext:   sizingCtx,
 	}
+}
+
+// ADD ... USING INDEX adopts a prebuilt index: no build, only the brief lock.
+// A PRIMARY KEY also sets NOT NULL, which scans unless the key columns already are.
+func addConstraintUsingIndex(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt, operation, tableName string, tableSize *string, rowEstimate *float64, snap *schema.SchemaSnapshot, statement string) *MigrationCheck {
+	con := constraintOf(cmd)
+	if con == nil || con.GetIndexname() == "" {
+		return nil
+	}
+	ct := pg_query.ConstrType(con.Contype)
+	if ct != pg_query.ConstrType_CONSTR_PRIMARY && ct != pg_query.ConstrType_CONSTR_UNIQUE {
+		return nil
+	}
+	safety := SafetySafe
+	rec := fmt.Sprintf("%s USING INDEX %s adopts the existing index: no index build, only a brief ACCESS EXCLUSIVE lock. Set lock_timeout so it cannot queue behind a long transaction.", operation, con.GetIndexname())
+	if ct == pg_query.ConstrType_CONSTR_PRIMARY && !usingIndexKeysNotNull(snap, stmt.GetRelation(), con.GetIndexname()) {
+		safety = SafetyCaution
+		rec = fmt.Sprintf("%s USING INDEX %s builds no index, but a PRIMARY KEY makes its columns NOT NULL and scans the table under ACCESS EXCLUSIVE unless they already are (or a validated CHECK proves it). "+
+			"The snapshot cannot confirm that here: add and validate CHECK (col IS NOT NULL) first, or SET NOT NULL beforehand.", operation, con.GetIndexname())
+	}
+	return &MigrationCheck{
+		Operation: operation, Table: strp(tableName), Safety: safety,
+		LockType: "ACCESS EXCLUSIVE", LockDuration: "brief (metadata-only)",
+		TableSize: tableSize, RowEstimate: rowEstimate,
+		Recommendation: rec,
+		Rationale:      &Rationale{Reason: rec},
+		RollbackDDL:    strp(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT <name>;", tableName)),
+		Statement:      statement,
+	}
+}
+
+func usingIndexKeysNotNull(snap *schema.SchemaSnapshot, rel *pg_query.RangeVar, indexName string) bool {
+	tbl := lookupTable(snap, rel)
+	if tbl == nil {
+		return false
+	}
+	for _, ix := range tbl.Indexes {
+		if ix.Name != indexName {
+			continue
+		}
+		if len(ix.Columns) == 0 {
+			return false
+		}
+		for _, col := range ix.Columns {
+			notNull := false
+			for _, c := range tbl.Columns {
+				if c.Name == col {
+					notNull = !c.Nullable
+				}
+			}
+			if !notNull {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func addConstraintOperation(cmd *pg_query.AlterTableCmd) string {
@@ -1510,6 +1801,9 @@ func analyzeAddConstraint(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTable
 			rationale = &Rationale{Reason: e.Reason, Note: e.Note}
 			lockDuration = "none: the statement is rejected"
 		}
+	}
+	if check := addConstraintUsingIndex(cmd, stmt, operation, tableName, tableSize, rowEstimate, names.snap, statement); check != nil {
+		return check
 	}
 	safer := rewriteAddConstraint(stmt, cmd, names, fkNoNotValid)
 	if !isNotValid {
@@ -1644,7 +1938,13 @@ func analyzeCreateIndex(idx *pg_query.IndexStmt, a *schema.AnnotatedSchema, name
 	var recommendation, lockType string
 	var rationale *Rationale
 	sizingCtx := ""
-	if idx.Concurrent {
+	if idx.Concurrent && isPartitionedRel(a.Schema, cat, idx.GetRelation()) {
+		safety = SafetyDangerous
+		recommendation = "CREATE INDEX CONCURRENTLY is rejected on a partitioned table (\"cannot create index on partitioned table concurrently\"). " +
+			"Build the index on each partition with CONCURRENTLY, then CREATE INDEX ON ONLY the parent and ATTACH the partition indexes to it."
+		rationale = &Rationale{Reason: recommendation}
+		lockType = "n/a (statement fails)"
+	} else if idx.Concurrent {
 		safety = SafetySafe
 		recommendation = "CREATE INDEX CONCURRENTLY - does not block reads or writes. Takes ~2-3x longer. " +
 			"Cannot run inside a transaction. If it fails, drop the INVALID index."
@@ -1999,7 +2299,7 @@ func analyzeDML(operation string, rel *pg_query.RangeVar, bounded bool, a *schem
 		note = joinNotes(note, caveat)
 	}
 	base.Safety = SafetyCaution
-	base.LockDuration = "proportional to row count"
+	base.LockDuration = dmlFullTableDuration
 	base.Recommendation = rec
 	base.Rationale = &Rationale{Reason: rec, Note: note}
 	return base

@@ -128,10 +128,10 @@ func TestA11AnalyzeBareDatabaseForm(t *testing.T) {
 	}
 }
 
-// VACUUM (FULL) takes stronger locks: it must not be swept into the safe path.
-func TestA11VacuumStaysUnrecognized(t *testing.T) {
-	for _, ddl := range []string{"VACUUM users;", "VACUUM FULL users;"} {
-		c := checkByOp(t, mustCheck(t, ddl), "UNRECOGNIZED")
+// VACUUM is never safe in a migration: plain fails inside a transaction, FULL rewrites the table.
+func TestA11VacuumIsNotRatedSafe(t *testing.T) {
+	for ddl, op := range map[string]string{"VACUUM users;": "VACUUM", "VACUUM FULL users;": "VACUUM FULL"} {
+		c := checkByOp(t, mustCheck(t, ddl), op)
 		if c.Safety == SafetySafe {
 			t.Errorf("%s must not be rated safe", ddl)
 		}
