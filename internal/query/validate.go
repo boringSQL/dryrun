@@ -132,6 +132,7 @@ func validate(sql string, snap *schema.SchemaSnapshot) (*ValidationResult, fixPl
 	}
 
 	validateReferencedColumns(parsed, snap, &errors, &plan)
+	validateComparisonTypes(sql, parsed, snap, &errors)
 
 	// resolve SELECT *
 	if parsed.Info.HasSelectStar {

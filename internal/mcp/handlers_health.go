@@ -98,7 +98,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	anomaliesKept, anomaliesOmitted := capItems(anomalies, max)
 	wrapper := map[string]any{
 		"stale_stats":     cappedBlock(staleKept, staleOmitted, len(staleEntries)),
-		"unused_indexes":  entryBlock(unusedEntries, max),
+		"unused_indexes":  unusedBlock(a, unusedEntries, max),
 		"anomalies":       cappedBlock(anomaliesKept, anomaliesOmitted, len(anomalies)),
 		"bloated_indexes": entryBlock(bloatEntries, max),
 		"bloated_tables":  entryBlock(bloatTableEntries, max),
@@ -211,7 +211,10 @@ func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRe
 	schemaF, tableF, filterNote := resolveTableFilter(a.Schema, schemaF, tableF)
 	entries := filterByQual(schema.DetectUnusedIndexes(a), schemaF, tableF, unusedKey)
 	if len(entries) == 0 {
-		return s.emptyKindResult("unused_indexes", "No unused indexes detected. All indexes have at least one scan recorded.", filterNote), nil
+		if !a.HasIndexActivity() {
+			return s.emptyKindResult("unused_indexes", notMeasuredIndexNote, filterNote), nil
+		}
+		return s.emptyKindResult("unused_indexes", "No unused indexes detected among indexes with recorded activity. Unique and primary key indexes are never listed.", filterNote), nil
 	}
 	return cappedKindResult(s, "unused_indexes", entries, limitArg(req), schemaF, tableF), nil
 }
@@ -324,4 +327,15 @@ func (s *Server) handleDetectVacuumHealth(_ context.Context, req mcp.CallToolReq
 		return s.emptyKindResult("vacuum_health", "No vacuum health concerns found.", filterNote), nil
 	}
 	return cappedKindResult(s, "vacuum_health", entries, limitArg(req), schemaF, tableF), nil
+}
+
+const notMeasuredIndexNote = "not_measured: this snapshot has no per-index activity (idx_scan), so no index can be called unused. Take a snapshot from a live database to record it."
+
+func unusedBlock(a *schema.AnnotatedSchema, entries []schema.UnusedIndexEntry, max int) map[string]any {
+	block := entryBlock(entries, max)
+	if !a.HasIndexActivity() {
+		block["not_measured"] = true
+		block["note"] = notMeasuredIndexNote
+	}
+	return block
 }

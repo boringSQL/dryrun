@@ -203,6 +203,35 @@ func (a *AnnotatedSchema) TotalIndexScans(table QualifiedName, index string) int
 	return n
 }
 
+// IndexScansMeasured: a zero from TotalIndexScans means "never scanned" only when this holds.
+func (a *AnnotatedSchema) IndexScansMeasured(table QualifiedName, index string) bool {
+	if a == nil || a.Merged == nil {
+		return false
+	}
+	for i := range a.Merged.Nodes {
+		for j := range a.Merged.Nodes[i].Indexes {
+			e := &a.Merged.Nodes[i].Indexes[j]
+			if e.Table == table && e.Index == index {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasIndexActivity: any node captured per-index activity.
+func (a *AnnotatedSchema) HasIndexActivity() bool {
+	if a == nil || a.Merged == nil {
+		return false
+	}
+	for i := range a.Merged.Nodes {
+		if len(a.Merged.Nodes[i].Indexes) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *AnnotatedSchema) ColumnStats(table QualifiedName, column string) *ColumnStats {
 	if e := a.ColumnStatsEntry(table, column); e != nil {
 		return &e.Stats

@@ -265,11 +265,12 @@ func DetectUnusedIndexes(a *AnnotatedSchema) []UnusedIndexEntry {
 		t := &a.Schema.Tables[i]
 		qual := t.Qual()
 		for _, idx := range t.Indexes {
-			if idx.IsPrimary {
+			// dropping a constraint's index drops the constraint
+			if idx.IsPrimary || idx.BacksConstraint {
 				continue
 			}
-			total := a.TotalIndexScans(qual, idx.Name)
-			if total != 0 {
+			// no activity recorded is not zero scans
+			if !a.IndexScansMeasured(qual, idx.Name) || a.TotalIndexScans(qual, idx.Name) != 0 {
 				continue
 			}
 			var size int64

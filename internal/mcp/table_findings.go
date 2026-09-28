@@ -45,7 +45,10 @@ func tableFindings(a *schema.AnnotatedSchema, t *schema.Table) []string {
 func hasUnusedIndex(a *schema.AnnotatedSchema, t *schema.Table) bool {
 	qual := t.Qual()
 	for _, idx := range t.Indexes {
-		if !idx.IsPrimary && a.TotalIndexScans(qual, idx.Name) == 0 {
+		if idx.IsPrimary || idx.BacksConstraint || !a.IndexScansMeasured(qual, idx.Name) {
+			continue
+		}
+		if a.TotalIndexScans(qual, idx.Name) == 0 {
 			return true
 		}
 	}
