@@ -522,14 +522,26 @@ func TestRationaleSurvivesStringToWarningDowngrade(t *testing.T) {
 	}
 }
 
-// ADD COLUMN with a DEFAULT cannot tell from the parse tree whether the
-// default is volatile, so Recommendation hedges ("safe for non-volatile
-// defaults... If the default IS volatile"). jit.AddColumnVolatileDefault's
-// Reason asserts an unconditional rewrite, which is only true in the volatile
-// case -- it must land in Note as detail, not as Rationale.Reason, or an
-// agent reading only rationale gets an answer stronger than the evidence.
-func TestRationaleHedgesAddColumnDefault(t *testing.T) {
+// A volatile default is provable from the parse tree: the reason may assert the
+// rewrite, since the function's volatility is known.
+func TestVolatileDefaultAssertsRewrite(t *testing.T) {
 	checks, err := CheckMigration("ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT clock_timestamp()", migrationTestAnnotated())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rationale := checks[0].Rationale
+	if rationale == nil {
+		t.Fatal("expected rationale")
+	}
+	if !strings.Contains(rationale.Reason, "rewrites every row") {
+		t.Errorf("a known-volatile default must assert the rewrite: %q", rationale.Reason)
+	}
+}
+
+// An unprovable default keeps the hedge: Reason must not assert a rewrite the
+// code cannot prove, and jit.AddColumnVolatileDefault's Reason belongs in Note.
+func TestRationaleHedgesUnknownDefault(t *testing.T) {
+	checks, err := CheckMigration("ALTER TABLE orders ADD COLUMN seen_at timestamptz DEFAULT app.custom_now()", migrationTestAnnotated())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +552,7 @@ func TestRationaleHedgesAddColumnDefault(t *testing.T) {
 	if strings.Contains(rationale.Reason, "rewrites every row") {
 		t.Errorf("rationale.reason asserts an unconditional rewrite the code cannot prove: %q", rationale.Reason)
 	}
-	if !strings.Contains(rationale.Reason, "non-volatile defaults") {
+	if !strings.Contains(rationale.Reason, "not provable") {
 		t.Errorf("rationale.reason lost the hedge: %q", rationale.Reason)
 	}
 	if !strings.Contains(rationale.Note, "rewrites every row") {

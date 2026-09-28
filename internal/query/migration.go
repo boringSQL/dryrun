@@ -834,13 +834,14 @@ func referencedTables(stmt *pg_query.CreateStmt) []string {
 // same scan/lock, not an unconstrained nullable add.
 type (
 	inlineColConstraints struct {
-		hasDefault bool
-		notNull    bool
-		primary    bool
-		generated  bool
-		unique     *pg_query.Constraint
-		fk         *pg_query.Constraint
-		check      *pg_query.Constraint
+		hasDefault  bool
+		defaultExpr *pg_query.Node
+		notNull     bool
+		primary     bool
+		generated   bool
+		unique      *pg_query.Constraint
+		fk          *pg_query.Constraint
+		check       *pg_query.Constraint
 	}
 
 	colHazard struct {
@@ -857,6 +858,7 @@ func collectInlineConstraints(cd *pg_query.ColumnDef) inlineColConstraints {
 	}
 	if cd.RawDefault != nil {
 		c.hasDefault = true
+		c.defaultExpr = cd.RawDefault
 	}
 	// DEFERRABLE parses as a separate attr constraint after the one it
 	// modifies; fold it in or a strip orphans it into invalid DDL.
@@ -869,6 +871,7 @@ func collectInlineConstraints(cd *pg_query.ColumnDef) inlineColConstraints {
 		switch pg_query.ConstrType(con.Constraint.Contype) {
 		case pg_query.ConstrType_CONSTR_DEFAULT:
 			c.hasDefault = true
+			c.defaultExpr = con.Constraint.GetRawExpr()
 		case pg_query.ConstrType_CONSTR_NOTNULL:
 			c.notNull = true
 		case pg_query.ConstrType_CONSTR_UNIQUE:
@@ -905,6 +908,263 @@ func collectInlineConstraints(cd *pg_query.ColumnDef) inlineColConstraints {
 		}
 	}
 	return c
+}
+
+// defaultVolatility is the verdict for an ADD COLUMN DEFAULT expression.
+type defaultVolatility int
+
+const (
+	defaultUnknown  defaultVolatility = iota // not provable from the parse tree: keep the hedge
+	defaultSafe                              // constant / IMMUTABLE / STABLE: metadata-only
+	defaultVolatile                          // VOLATILE: full table rewrite
+)
+
+var (
+	// VOLATILE built-ins: a default calling one rewrites every row.
+	volatileDefaultFuncs = map[string]bool{
+		"random": true, "random_normal": true,
+		"gen_random_uuid": true, "gen_random_bytes": true,
+		"uuid_generate_v1": true, "uuid_generate_v1mc": true, "uuid_generate_v4": true,
+		"nextval": true, "currval": true, "lastval": true, "setval": true,
+		"clock_timestamp": true, "timeofday": true,
+		"pg_export_snapshot": true, "pg_notify": true,
+		"pg_sleep": true, "pg_sleep_for": true, "pg_sleep_until": true,
+		"pg_advisory_lock": true, "pg_advisory_lock_shared": true,
+		"pg_advisory_unlock": true, "pg_advisory_unlock_all": true,
+		"pg_try_advisory_lock": true, "pg_try_advisory_lock_shared": true,
+		"pg_advisory_xact_lock": true, "pg_advisory_xact_lock_shared": true,
+		"pg_try_advisory_xact_lock": true, "pg_try_advisory_xact_lock_shared": true,
+	}
+
+	// IMMUTABLE/STABLE built-ins safe as a default: no rewrite. Anything not
+	// listed is unknown, not assumed safe -- a user function could be VOLATILE.
+	safeDefaultFuncs = map[string]bool{
+		"now": true, "transaction_timestamp": true, "statement_timestamp": true,
+		"current_setting": true,
+		"date_trunc":      true, "to_char": true, "to_date": true, "to_timestamp": true,
+		"lower": true, "upper": true, "initcap": true,
+		"length": true, "char_length": true, "octet_length": true, "bit_length": true,
+		"trim": true, "btrim": true, "ltrim": true, "rtrim": true,
+		"concat": true, "concat_ws": true, "format": true, "md5": true,
+		"abs": true, "ceil": true, "ceiling": true, "floor": true, "round": true,
+		"trunc": true, "mod": true, "power": true, "sqrt": true, "sign": true,
+		"encode": true, "decode": true, "array_to_string": true, "string_to_array": true,
+		// STABLE transaction/backend functions: fast default, no rewrite.
+		"pg_backend_pid": true,
+		"txid_current":   true, "txid_current_if_assigned": true, "txid_current_snapshot": true,
+		"pg_current_xact_id": true, "pg_current_xact_id_if_assigned": true, "pg_current_snapshot": true,
+	}
+)
+
+// classifyDefault reads the volatility of an ADD COLUMN default: only the
+// volatile case rewrites the table.
+func classifyDefault(expr *pg_query.Node) defaultVolatility {
+	if expr == nil {
+		return defaultUnknown
+	}
+	switch n := expr.GetNode().(type) {
+	case *pg_query.Node_AConst, *pg_query.Node_SqlvalueFunction:
+		return defaultSafe
+	case *pg_query.Node_TypeCast:
+		return classifyDefault(n.TypeCast.GetArg())
+	case *pg_query.Node_FuncCall:
+		v := classifyDefaultFunc(n.FuncCall)
+		for _, a := range n.FuncCall.GetArgs() {
+			v = combineDefaults(v, classifyDefault(a))
+		}
+		return v
+	case *pg_query.Node_AExpr:
+		// operands only: a user-defined VOLATILE operator is not detected
+		return combineDefaults(classifyDefault(n.AExpr.GetLexpr()), classifyDefault(n.AExpr.GetRexpr()))
+	case *pg_query.Node_AArrayExpr:
+		v := defaultSafe
+		for _, e := range n.AArrayExpr.GetElements() {
+			v = combineDefaults(v, classifyDefault(e))
+		}
+		return v
+	case *pg_query.Node_BoolExpr:
+		v := defaultSafe
+		for _, e := range n.BoolExpr.GetArgs() {
+			v = combineDefaults(v, classifyDefault(e))
+		}
+		return v
+	case *pg_query.Node_List:
+		v := defaultSafe
+		for _, e := range n.List.GetItems() {
+			v = combineDefaults(v, classifyDefault(e))
+		}
+		return v
+	}
+	return defaultUnknown
+}
+
+// A volatile operand anywhere makes the whole expression volatile; unknown
+// otherwise wins over safe.
+func combineDefaults(a, b defaultVolatility) defaultVolatility {
+	if a == defaultVolatile || b == defaultVolatile {
+		return defaultVolatile
+	}
+	if a == defaultUnknown || b == defaultUnknown {
+		return defaultUnknown
+	}
+	return defaultSafe
+}
+
+func classifyDefaultFunc(fc *pg_query.FuncCall) defaultVolatility {
+	schema, name := funcCallName(fc)
+	if name == "" {
+		return defaultUnknown
+	}
+	// volatile first and unqualified-agnostic: extension functions such as
+	// uuid_generate_v4 often live outside pg_catalog but are still volatile
+	if volatileDefaultFuncs[name] {
+		return defaultVolatile
+	}
+	// an aggregate or window function is rejected in a default; do not guess
+	if fc.GetAggStar() || len(fc.GetAggOrder()) > 0 || fc.GetOver() != nil {
+		return defaultUnknown
+	}
+	// timezone(text, timetz) is VOLATILE through PG14; the timestamptz forms are safe
+	if name == "timezone" && (schema == "" || schema == "pg_catalog") {
+		return classifyTimezone(fc)
+	}
+	// for the safe list, a name outside pg_catalog could shadow a built-in
+	if schema != "" && schema != "pg_catalog" {
+		return defaultUnknown
+	}
+	if safeDefaultFuncs[name] {
+		return defaultSafe
+	}
+	return defaultUnknown
+}
+
+func classifyTimezone(fc *pg_query.FuncCall) defaultVolatility {
+	args := fc.GetArgs()
+	if len(args) != 2 {
+		return defaultUnknown
+	}
+	if isTimetzExpr(args[1]) {
+		return defaultVolatile
+	}
+	if isTimestamptzExpr(args[1]) {
+		return defaultSafe
+	}
+	return defaultUnknown
+}
+
+func isTimetzExpr(n *pg_query.Node) bool {
+	if n == nil {
+		return false
+	}
+	switch x := n.GetNode().(type) {
+	case *pg_query.Node_SqlvalueFunction:
+		return x.SqlvalueFunction.GetOp() == pg_query.SQLValueFunctionOp_SVFOP_CURRENT_TIME
+	case *pg_query.Node_TypeCast:
+		return typeNameMatches(x.TypeCast.GetTypeName(), "timetz")
+	}
+	return false
+}
+
+func isTimestamptzExpr(n *pg_query.Node) bool {
+	if n == nil {
+		return false
+	}
+	switch x := n.GetNode().(type) {
+	case *pg_query.Node_SqlvalueFunction:
+		op := x.SqlvalueFunction.GetOp()
+		return op == pg_query.SQLValueFunctionOp_SVFOP_CURRENT_TIMESTAMP ||
+			op == pg_query.SQLValueFunctionOp_SVFOP_LOCALTIMESTAMP
+	case *pg_query.Node_TypeCast:
+		return typeNameMatches(x.TypeCast.GetTypeName(), "timestamptz")
+	case *pg_query.Node_FuncCall:
+		_, name := funcCallName(x.FuncCall)
+		return name == "now" || name == "transaction_timestamp" || name == "statement_timestamp"
+	}
+	return false
+}
+
+func typeNameMatches(tn *pg_query.TypeName, want string) bool {
+	if tn == nil {
+		return false
+	}
+	names := tn.GetNames()
+	if len(names) == 0 {
+		return false
+	}
+	return strings.EqualFold(names[len(names)-1].GetString_().GetSval(), want)
+}
+
+// defaultTypeRisk is how the column's type affects a constant default.
+type defaultTypeRisk int
+
+const (
+	typePlain         defaultTypeRisk = iota // not a constrained domain
+	typeDomainRewrite                        // domain with CHECK: rewrites the table
+	typeUnverified                           // no snapshot to rule out a domain
+)
+
+// defaultTypeRiskFor reads the column type against the snapshot's domains: a
+// domain with CHECK constraints rewrites the whole table even for a constant
+// default.
+func defaultTypeRiskFor(tn *pg_query.TypeName, snap *schema.SchemaSnapshot) defaultTypeRisk {
+	schemaName, typeName := typeNameParts(tn)
+	if typeName == "" {
+		return typeUnverified
+	}
+	if strings.EqualFold(schemaName, "pg_catalog") {
+		return typePlain
+	}
+	if snap == nil {
+		return typeUnverified
+	}
+	for _, d := range snap.Domains {
+		if !strings.EqualFold(d.Name, typeName) {
+			continue
+		}
+		if schemaName != "" && !strings.EqualFold(d.Schema, schemaName) {
+			continue
+		}
+		if len(d.CheckConstraints) > 0 {
+			return typeDomainRewrite
+		}
+		return typePlain
+	}
+	return typePlain
+}
+
+func typeNameParts(tn *pg_query.TypeName) (schemaName, name string) {
+	if tn == nil {
+		return "", ""
+	}
+	var parts []string
+	for _, n := range tn.GetNames() {
+		if s, ok := n.GetNode().(*pg_query.Node_String_); ok {
+			parts = append(parts, s.String_.GetSval())
+		}
+	}
+	switch {
+	case len(parts) == 1:
+		return "", parts[0]
+	case len(parts) >= 2:
+		return parts[len(parts)-2], parts[len(parts)-1]
+	}
+	return "", ""
+}
+
+func funcCallName(fc *pg_query.FuncCall) (schema, name string) {
+	var parts []string
+	for _, n := range fc.GetFuncname() {
+		if s, ok := n.GetNode().(*pg_query.Node_String_); ok {
+			parts = append(parts, strings.ToLower(s.String_.GetSval()))
+		}
+	}
+	switch len(parts) {
+	case 1:
+		return "", parts[0]
+	case 2:
+		return parts[0], parts[1]
+	}
+	return "", ""
 }
 
 // Worst first: the head sets the verdict, the rest fold into the note.
@@ -986,14 +1246,70 @@ func analyzeAddColumn(cmd *pg_query.AlterTableCmd, stmt *pg_query.AlterTableStmt
 		rationale = &Rationale{Reason: recommendation}
 		lockDuration = "brief (milliseconds)"
 	} else {
-		safety = SafetyCaution
-		e := jit.AddColumnVolatileDefault(tableName, colName, colType, "<default>")
-		const hedgedReason = "Column with DEFAULT is safe for non-volatile defaults (metadata-only), including now() and current_timestamp. " +
-			"Volatile defaults (random(), gen_random_uuid(), clock_timestamp(), nextval()) still trigger a full table rewrite."
-		recommendation = hedgedReason + "\n\n" + "If the default IS volatile:\n" + e.Fix
-		// e.Reason asserts an unconditional rewrite; unprovable here, so it goes to Note
-		rationale = &Rationale{Reason: hedgedReason, Note: joinNotes(e.Reason, e.Note)}
-		lockDuration = "brief for non-volatile default, long for volatile"
+		vol := classifyDefault(cons.defaultExpr)
+		typeRisk := typePlain
+		if vol == defaultSafe {
+			typeRisk = defaultTypeRiskFor(colDef.GetTypeName(), names.snap)
+			switch typeRisk {
+			case typeDomainRewrite:
+				vol = defaultVolatile
+			case typeUnverified:
+				vol = defaultUnknown
+			}
+		}
+		switch vol {
+		case defaultSafe:
+			safety = SafetySafe
+			recommendation = "Column with a constant or non-volatile DEFAULT - metadata-only change, no table rewrite."
+			rationale = &Rationale{Reason: recommendation}
+			lockDuration = "brief (metadata-only)"
+		case defaultVolatile:
+			safety = SafetyDangerous
+			lockDuration = "proportional to table size (full rewrite)"
+			if typeRisk == typeDomainRewrite {
+				reason := fmt.Sprintf("Column type %s is a domain with CHECK constraints: PostgreSQL rewrites the whole table under ACCESS EXCLUSIVE to validate the default, even a constant one.", colType)
+				note := "A constrained domain cannot take a fast default."
+				rec := reason
+				if small {
+					safety = SafetyCaution
+					lead := smallTableNote(*rowEstimate, *tableSize)
+					rec = lead + "\n\n" + reason
+					note = joinNotes(note, lead)
+				} else if ctx, caveat := sizingCaveat(sizing); ctx != "" {
+					sizingCtx = ctx
+					note = joinNotes(note, caveat)
+				}
+				recommendation = rec
+				rationale = &Rationale{Reason: reason, Note: note}
+			} else {
+				e := jit.AddColumnVolatileDefault(tableName, colName, colType, deparseExpr(cons.defaultExpr))
+				rec := e.String()
+				note := e.Note
+				if small {
+					safety = SafetyCaution
+					lead := smallTableNote(*rowEstimate, *tableSize)
+					rec = lead + "\n\n" + e.Caution().String()
+					note = joinNotes(note, lead)
+				} else if ctx, caveat := sizingCaveat(sizing); ctx != "" {
+					sizingCtx = ctx
+					note = joinNotes(note, caveat)
+				}
+				recommendation = rec
+				rationale = &Rationale{Reason: e.Reason, Note: note}
+			}
+		default:
+			safety = SafetyCaution
+			e := jit.AddColumnVolatileDefault(tableName, colName, colType, deparseExpr(cons.defaultExpr))
+			const hedgedReason = "Column with DEFAULT: metadata-only when the default is non-volatile, but this expression's volatility is not provable from the parse tree. " +
+				"Volatile defaults (random(), gen_random_uuid(), clock_timestamp(), nextval()) trigger a full table rewrite."
+			recommendation = hedgedReason + "\n\n" + "If the default IS volatile:\n" + e.Fix
+			note := joinNotes(e.Reason, e.Note)
+			if typeRisk == typeUnverified {
+				note = joinNotes(note, "No snapshot to confirm the column type is not a constrained domain.")
+			}
+			rationale = &Rationale{Reason: hedgedReason, Note: note}
+			lockDuration = "brief for non-volatile default, long for volatile"
+		}
 	}
 
 	var safer []string

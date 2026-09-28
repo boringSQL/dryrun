@@ -24,7 +24,7 @@ func TestAddColumnInlineConstraintVerdicts(t *testing.T) {
 		{"stored generated rewrites the table", "ALTER TABLE users ADD COLUMN x int GENERATED ALWAYS AS (id * 2) STORED", SafetyDangerous},
 		{"primary key without default fails on populated table", "ALTER TABLE orders ADD COLUMN id2 int PRIMARY KEY", SafetyDangerous},
 		{"primary key with default is index-backed", "ALTER TABLE orders ADD COLUMN id2 int PRIMARY KEY DEFAULT 0", SafetyCaution},
-		{"not null with default is metadata-only", "ALTER TABLE orders ADD COLUMN n int NOT NULL DEFAULT 0", SafetyCaution},
+		{"not null with a constant default is metadata-only", "ALTER TABLE orders ADD COLUMN n int NOT NULL DEFAULT 0", SafetySafe},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

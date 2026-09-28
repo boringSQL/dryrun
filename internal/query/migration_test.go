@@ -98,8 +98,8 @@ func TestCheckMigrationAddColumnWithDefault(t *testing.T) {
 	if len(checks) == 0 {
 		t.Fatal("expected at least one check")
 	}
-	if checks[0].Safety != SafetyCaution {
-		t.Errorf("column with default on PG17 should be caution, got %q", checks[0].Safety)
+	if checks[0].Safety != SafetySafe {
+		t.Errorf("constant default is metadata-only, should be safe, got %q", checks[0].Safety)
 	}
 }
 
