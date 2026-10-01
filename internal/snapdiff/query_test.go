@@ -444,3 +444,71 @@ func TestForView_QueryDeltaCarriesBufferCounters(t *testing.T) {
 }
 
 func intPtr(v int) *int { return &v }
+
+// Sunday, 26 minutes: the summary view, which has no query deltas, still
+// carries the codes both structured and as a note.
+func TestForView_SummaryCarriesQueryCaveatCodes(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	k := key()
+	t0 := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
+
+	if _, err := store.PutQueryStats(ctx, k, mkQuery("", "q-1", "primary", t0, 100, 200)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutQueryStats(ctx, k, mkQuery("", "q-2", "primary", t0.Add(26*time.Minute), 400, 3200)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Build(ctx, store, k, Options{From: "latest~1", To: "latest", Kind: "query"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sum := res.ForView("summary", 50)
+	want := []string{diff.CaveatShortWindow, diff.CaveatWeekend}
+	if got := sum.Summary.QueryCaveatCodes; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("summary codes %v, want %v", got, want)
+	}
+	if notes := strings.Join(sum.Correlation.Notes, "\n"); !strings.Contains(notes, "weekend") {
+		t.Errorf("no weekend note in %q", notes)
+	}
+	if got := res.ForView("full", 50).QueryDelta[0].Delta.CaveatCodes; len(got) != 2 {
+		t.Errorf("full view codes %v", got)
+	}
+}
+
+// Codes qualify a window; they must not turn a quiet pair into a reported one.
+func TestBuild_CaveatCodesAloneDoNotMakeAPairReportable(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	k := key()
+	t0 := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
+
+	if _, err := store.PutQueryStats(ctx, k, mkQuery("", "q-1", "primary", t0, 10, 20)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutQueryStats(ctx, k, mkQuery("", "q-2", "primary", t0.Add(10*time.Minute), 10, 20)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Build(ctx, store, k, Options{From: "latest~1", To: "latest", Kind: "query"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.QueryDelta) != 0 || !res.IsEmpty() {
+		t.Errorf("quiet short weekend pair was reported: %+v", res.QueryDelta)
+	}
+}
+
+func TestQueryNotes_DedupeCodesAcrossNodes(t *testing.T) {
+	mk := func(node string) NodeQueryDelta {
+		return NodeQueryDelta{Node: node, Delta: &diff.QueryDelta{CaveatCodes: []string{diff.CaveatShortWindow}}}
+	}
+	nds := []NodeQueryDelta{mk("a"), mk("b")}
+	if got := queryNotes(nds); len(got) != 1 {
+		t.Errorf("notes %v, want one", got)
+	}
+	s := buildSummary(&Result{QueryDelta: nds})
+	if len(s.QueryCaveatCodes) != 1 {
+		t.Errorf("summary codes %v, want one", s.QueryCaveatCodes)
+	}
+}

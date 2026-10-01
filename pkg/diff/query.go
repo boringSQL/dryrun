@@ -3,6 +3,7 @@ package diff
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"time"
 
@@ -42,6 +43,8 @@ type (
 		// without assuming 8kB
 		BlockSize *int     `json:"block_size,omitempty"`
 		Caveats   []string `json:"caveats,omitempty"`
+		// qualifiers on how far the window's numbers can be read (prose: CaveatNote)
+		CaveatCodes []string `json:"caveat_codes,omitempty"`
 	}
 
 	// One query shape between two captures. Deltas are over the window, which
@@ -89,7 +92,26 @@ type (
 		// so "no calls" cannot read as "free"
 		WindowMeanBlks *float64 `json:"window_mean_blks"`
 		PriorMeanBlks  *float64 `json:"prior_mean_blks,omitempty"`
+		CaveatCodes    []string `json:"caveat_codes,omitempty"`
 	}
+)
+
+const (
+	// window too short to stand in for steady-state load
+	CaveatShortWindow = "short_window"
+	// most of the window on a Saturday or Sunday (UTC)
+	CaveatWeekend = "weekend"
+	// a handful of calls account for a large share of the window's time
+	CaveatOneOffHeavy = "one_off_heavy"
+)
+
+const (
+	shortWindow  = 30 * time.Minute
+	weekendShare = 0.5
+	// the floor keeps an idle window from tripping the share
+	oneOffMaxCalls  = 3
+	oneOffShare     = 0.3
+	oneOffMinTimeMs = 1000.0
 )
 
 // Statuses a shape can carry between two captures.
@@ -216,6 +238,10 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 		d.TimeDelta += e.TimeDelta
 		d.SharedBlksHitDelta += e.SharedBlksHitDelta
 		d.SharedBlksReadDelta += e.SharedBlksReadDelta
+	}
+	d.CaveatCodes = windowCaveatCodes(from.Node.Timestamp, to.Node.Timestamp)
+	if markOneOffHeavy(d) {
+		d.CaveatCodes = append(d.CaveatCodes, CaveatOneOffHeavy)
 	}
 	sortQueryEntries(d.Entries)
 	return d, nil
@@ -553,6 +579,75 @@ func queryCaveats(from, to *snapshot.QueryStatsSnapshot, d *QueryDelta) []string
 	return out
 }
 
+func windowCaveatCodes(start, end time.Time) []string {
+	var out []string
+	window := end.Sub(start)
+	if window > 0 && window < shortWindow {
+		out = append(out, CaveatShortWindow)
+	}
+	// past a week the share cannot exceed 2/7, so skip the day loop
+	if window <= 7*24*time.Hour && weekendFraction(start, end) > weekendShare {
+		out = append(out, CaveatWeekend)
+	}
+	return out
+}
+
+// fraction of [start, end) that falls on Saturday or Sunday, UTC
+func weekendFraction(start, end time.Time) float64 {
+	start, end = start.UTC(), end.UTC()
+	if !end.After(start) {
+		return 0
+	}
+	var weekend time.Duration
+	for t := start; t.Before(end); {
+		next := time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, time.UTC)
+		if next.After(end) {
+			next = end
+		}
+		if wd := t.Weekday(); wd == time.Saturday || wd == time.Sunday {
+			weekend += next.Sub(t)
+		}
+		t = next
+	}
+	return float64(weekend) / float64(end.Sub(start))
+}
+
+// Runs after the totals: reset and truncated rows carry cumulative counters,
+// not window work, and are outside d.TimeDelta.
+func markOneOffHeavy(d *QueryDelta) bool {
+	if d.TimeDelta < oneOffMinTimeMs {
+		return false
+	}
+	found := false
+	for i := range d.Entries {
+		e := &d.Entries[i]
+		if e.Status == QueryReset || e.Status == QueryTruncated {
+			continue
+		}
+		// unmatched members make the delta a lower bound
+		if e.CallsDelta < 1 || e.CallsDelta > oneOffMaxCalls || e.UnmatchedMembers > 0 {
+			continue
+		}
+		if e.TimeDelta/d.TimeDelta >= oneOffShare {
+			e.CaveatCodes = append(e.CaveatCodes, CaveatOneOffHeavy)
+			found = true
+		}
+	}
+	return found
+}
+
+func CaveatNote(code string) string {
+	switch code {
+	case CaveatShortWindow:
+		return fmt.Sprintf("the window is under %d minutes: too short to stand in for steady-state load, and means over it rest on few calls", int(shortWindow.Minutes()))
+	case CaveatWeekend:
+		return "most of the window fell on a weekend (UTC): weekday load is likely higher, so do not compare it with a weekday window"
+	case CaveatOneOffHeavy:
+		return fmt.Sprintf("a shape with at most %d calls carries a large share of the window's time (entries are tagged in view=full): possibly a one-off such as a migration or backfill rather than steady load", oneOffMaxCalls)
+	}
+	return code
+}
+
 // Only meaningful without a reset in between: a reset zeroes dealloc too.
 func deallocGrowth(from, to *snapshot.QueryStatsSnapshot) int64 {
 	a, b := latestInfo(from), latestInfo(to)
@@ -634,9 +729,13 @@ func RenderQueryConsole(w io.Writer, env *SnapshotDiff) {
 	}
 	fmt.Fprintf(w, "  %-9s %12s %14s %-17s %-15s  %s\n", "STATUS", "CALLS", "TIME(ms)", "MEAN(ms)", "BLKS/CALL", "QUERY")
 	for _, e := range shown {
+		q := truncateQuery(e.Canonical, 50)
+		if slices.Contains(e.CaveatCodes, CaveatOneOffHeavy) {
+			q = "[" + CaveatOneOffHeavy + "] " + q
+		}
 		fmt.Fprintf(w, "  %-9s %12s %14s %-17s %-15s  %s\n",
 			e.Status, signedInt(e.CallsDelta), signedFloat(e.TimeDelta),
-			meanCell(e), blksCell(e), truncateQuery(e.Canonical, 50))
+			meanCell(e), blksCell(e), q)
 	}
 	if len(movers) > len(shown) {
 		fmt.Fprintf(w, "  ... %d more moved\n", len(movers)-len(shown))
@@ -644,7 +743,11 @@ func RenderQueryConsole(w io.Writer, env *SnapshotDiff) {
 	if unchanged > 0 {
 		fmt.Fprintf(w, "  (%d unchanged)\n", unchanged)
 	}
-	renderNotes(w, d.Caveats)
+	notes := append([]string(nil), d.Caveats...)
+	for _, c := range d.CaveatCodes {
+		notes = append(notes, "["+c+"] "+CaveatNote(c))
+	}
+	renderNotes(w, notes)
 }
 
 // Shows the window mean and, when the shape ran before too, where it moved

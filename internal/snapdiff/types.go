@@ -72,6 +72,8 @@ type (
 		QueryUnknown int `json:"query_unknown,omitempty"`
 		// nodes whose query pair could not be diffed at all
 		QueryRefused int `json:"query_refused,omitempty"`
+		// distinct caveat codes across nodes (see diff.CaveatNote)
+		QueryCaveatCodes []string `json:"query_caveat_codes,omitempty"`
 		// nodes whose activity pair spanned two servers under one label
 		ActivityRefused int      `json:"activity_refused,omitempty"`
 		ObjectsChanged  int      `json:"objects_changed"`

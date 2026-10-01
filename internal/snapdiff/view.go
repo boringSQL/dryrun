@@ -3,6 +3,7 @@ package snapdiff
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -128,6 +129,7 @@ func buildSummary(r *Result) Summary {
 			}
 		}
 	}
+	s.QueryCaveatCodes = queryCaveatCodes(r.QueryDelta)
 	s.ObjectsChanged = len(r.Objects)
 	for i, o := range r.Objects {
 		if i >= 5 {
@@ -231,11 +233,30 @@ func activityNotes(nds []NodeActivityDelta) []string {
 	return notes
 }
 
+func queryCaveatCodes(nds []NodeQueryDelta) []string {
+	var out []string
+	for _, nd := range nds {
+		if nd.Delta == nil {
+			continue
+		}
+		for _, c := range nd.Delta.CaveatCodes {
+			if !slices.Contains(out, c) {
+				out = append(out, c)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // Only what changes how the numbers read: a refusal, a changed server, a
-// pairing. Row-cap and eviction caveats fire on most busy servers and stay in
-// the full view.
+// pairing, a caveat code. Row-cap and eviction caveats fire on most busy
+// servers and stay in the full view.
 func queryNotes(nds []NodeQueryDelta) []string {
 	var notes []string
+	for _, c := range queryCaveatCodes(nds) {
+		notes = append(notes, "query: "+diff.CaveatNote(c))
+	}
 	for _, nd := range nds {
 		if nd.Delta == nil {
 			continue
