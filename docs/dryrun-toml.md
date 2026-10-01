@@ -229,6 +229,18 @@ row_cap = 1000
 
 `row_cap` limits how many `pg_stat_statements` rows one capture stores (default 500), and `--query-stats-limit` overrides it per run. [query-stats.md](query-stats.md) explains what the cap means at diff time.
 
+## Calendar
+
+```toml
+[calendar]
+weekend  = ["fri", "sat"]   # default ["sat", "sun"]; [] means no weekend
+timezone = "Asia/Riyadh"    # IANA name, default UTC
+```
+
+`snapshot_diff` tags a query window with the `weekend` caveat code when most of it falls on these days, because weekend load says little about a weekday. `timezone` decides where a day starts and ends. Use an IANA name; `Local` is rejected so the same captures flag the same way on every host.
+
+The block is project-wide, not per profile or node. It is read when `snapshot diff` or `mcp-serve` starts (restart the server after editing), and applies at diff time, so older snapshots are judged by the current calendar. A bad day or zone fails the command, including `mcp-serve`, which then does not start at all. A `dryrun.toml` that does not parse is skipped by discovery (a parent directory's file may be used instead), so pass `--config` when in doubt.
+
 ## Conventions
 
 These control what `dryrun lint` checks. Skip the whole section to use the defaults.

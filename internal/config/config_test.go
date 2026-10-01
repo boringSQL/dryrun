@@ -722,3 +722,29 @@ rules = ["pk/exists"]
 		t.Error("expected disabled rule pk/exists")
 	}
 }
+
+func TestParse_CalendarBlock(t *testing.T) {
+	cfg, err := Parse("[calendar]\nweekend = [\"fri\", \"sat\"]\ntimezone = \"Asia/Riyadh\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Calendar.Weekend; len(got) != 2 || got[0] != "fri" || cfg.Calendar.Timezone != "Asia/Riyadh" {
+		t.Errorf("calendar = %+v", cfg.Calendar)
+	}
+
+	// the difference between "use the default" and "no weekend" rides on this
+	none, err := Parse("[calendar]\nweekend = []\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none.Calendar.Weekend == nil || len(none.Calendar.Weekend) != 0 {
+		t.Errorf("weekend = [] decoded to %#v, want empty non-nil", none.Calendar.Weekend)
+	}
+	unset, err := Parse("[calendar]\ntimezone = \"UTC\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unset.Calendar.Weekend != nil {
+		t.Errorf("absent weekend decoded to %#v, want nil", unset.Calendar.Weekend)
+	}
+}

@@ -42,6 +42,9 @@ stores an identical snapshot, so latest~1 can hold the same content as latest
 and the diff is legitimately empty.`,
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := applyCalendar(); err != nil {
+				return err
+			}
 			store, err := openHistoryStore(*historyDB)
 			if err != nil {
 				return err

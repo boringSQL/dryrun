@@ -23,6 +23,7 @@ type (
 		Remotes      []RemoteConfig           `toml:"remote"`
 		History      *HistoryConfig           `toml:"history"`
 		QueryStats   *QueryStatsConfig        `toml:"query_stats"`
+		Calendar     *CalendarConfig          `toml:"calendar"`
 		Nodes        []NodeConfig             `toml:"node"`
 	}
 
@@ -46,6 +47,12 @@ type (
 	// [query_stats] block; capture-time tuning for pg_stat_statements snapshots
 	QueryStatsConfig struct {
 		RowCap *int `toml:"row_cap"`
+	}
+
+	// [calendar] block; nil Weekend means sat/sun, an empty list means none
+	CalendarConfig struct {
+		Weekend  []string `toml:"weekend"`
+		Timezone string   `toml:"timezone"`
 	}
 
 	// [history] block; retention for captured series

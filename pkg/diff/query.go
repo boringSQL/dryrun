@@ -99,7 +99,7 @@ type (
 const (
 	// window too short to stand in for steady-state load
 	CaveatShortWindow = "short_window"
-	// most of the window on a Saturday or Sunday (UTC)
+	// most of the window on the calendar's weekend days
 	CaveatWeekend = "weekend"
 	// a handful of calls account for a large share of the window's time
 	CaveatOneOffHeavy = "one_off_heavy"
@@ -239,7 +239,7 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 		d.SharedBlksHitDelta += e.SharedBlksHitDelta
 		d.SharedBlksReadDelta += e.SharedBlksReadDelta
 	}
-	d.CaveatCodes = windowCaveatCodes(from.Node.Timestamp, to.Node.Timestamp)
+	d.CaveatCodes = windowCaveatCodes(active, from.Node.Timestamp, to.Node.Timestamp)
 	if markOneOffHeavy(d) {
 		d.CaveatCodes = append(d.CaveatCodes, CaveatOneOffHeavy)
 	}
@@ -579,37 +579,16 @@ func queryCaveats(from, to *snapshot.QueryStatsSnapshot, d *QueryDelta) []string
 	return out
 }
 
-func windowCaveatCodes(start, end time.Time) []string {
+func windowCaveatCodes(cal Calendar, start, end time.Time) []string {
 	var out []string
 	window := end.Sub(start)
 	if window > 0 && window < shortWindow {
 		out = append(out, CaveatShortWindow)
 	}
-	// past a week the share cannot exceed 2/7, so skip the day loop
-	if window <= 7*24*time.Hour && weekendFraction(start, end) > weekendShare {
+	if cal.weekendFraction(start, end) > weekendShare {
 		out = append(out, CaveatWeekend)
 	}
 	return out
-}
-
-// fraction of [start, end) that falls on Saturday or Sunday, UTC
-func weekendFraction(start, end time.Time) float64 {
-	start, end = start.UTC(), end.UTC()
-	if !end.After(start) {
-		return 0
-	}
-	var weekend time.Duration
-	for t := start; t.Before(end); {
-		next := time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, time.UTC)
-		if next.After(end) {
-			next = end
-		}
-		if wd := t.Weekday(); wd == time.Saturday || wd == time.Sunday {
-			weekend += next.Sub(t)
-		}
-		t = next
-	}
-	return float64(weekend) / float64(end.Sub(start))
 }
 
 // Runs after the totals: reset and truncated rows carry cumulative counters,
@@ -641,7 +620,7 @@ func CaveatNote(code string) string {
 	case CaveatShortWindow:
 		return fmt.Sprintf("the window is under %d minutes: too short to stand in for steady-state load, and means over it rest on few calls", int(shortWindow.Minutes()))
 	case CaveatWeekend:
-		return "most of the window fell on a weekend (UTC): weekday load is likely higher, so do not compare it with a weekday window"
+		return fmt.Sprintf("most of the window fell on a weekend (%s): weekday load is likely higher, so do not compare it with a weekday window", active)
 	case CaveatOneOffHeavy:
 		return fmt.Sprintf("a shape with at most %d calls carries a large share of the window's time (entries are tagged in view=full): possibly a one-off such as a migration or backfill rather than steady load", oneOffMaxCalls)
 	}

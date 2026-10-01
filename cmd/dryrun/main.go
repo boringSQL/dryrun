@@ -21,6 +21,9 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/diff"
 	"github.com/boringsql/dryrun/pkg/lint"
+
+	// IANA zones for [calendar].timezone on hosts without zone files
+	_ "time/tzdata"
 )
 
 var (
@@ -666,6 +669,25 @@ func resolveQueryStatsRowCap() (int, error) {
 	return 0, nil
 }
 
+// a missing dryrun.toml keeps the defaults; one named with --config must load
+func applyCalendar() error {
+	_, cfg, err := loadProjectConfig()
+	if err != nil {
+		if flagConfig != "" {
+			return err
+		}
+		return nil
+	}
+	cal := diff.DefaultCalendar()
+	if cfg.Calendar != nil {
+		if cal, err = diff.ParseCalendar(cfg.Calendar.Weekend, cfg.Calendar.Timezone); err != nil {
+			return err
+		}
+	}
+	diff.SetCalendar(cal)
+	return nil
+}
+
 func loadProjectConfig() (string, *config.ProjectConfig, error) {
 	if flagConfig != "" {
 		cfg, err := config.Load(flagConfig)
@@ -803,6 +825,9 @@ func mcpServeCmd() *cobra.Command {
 		Aliases: []string{"mcp"},
 		Short:   "Start MCP server",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := applyCalendar(); err != nil {
+				return err
+			}
 			lintCfg := loadLintConfig()
 
 			var pgMustardAPIKey string
