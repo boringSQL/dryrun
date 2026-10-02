@@ -29,7 +29,7 @@ func TestBuildOfflineMCPServer_ListsSchemaSubset(t *testing.T) {
 	}
 	a := snapshot.AssembleAnnotated(sch, nil, nil)
 
-	mcpSrv := drmcp.BuildOfflineMCPServer("hindsight-test", "0.1.0", a, lint.DefaultConfig())
+	mcpSrv := drmcp.BuildOfflineMCPServer("offline-test", "0.1.0", a, lint.DefaultConfig())
 
 	c := inProcessClient(t, mcpSrv)
 	list, err := c.ListTools(context.Background(), mcpproto.ListToolsRequest{})

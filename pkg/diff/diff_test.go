@@ -362,7 +362,7 @@ func TestDiffSchema_FuncSecurityDefiner(t *testing.T) {
 }
 
 // Determinism is load-bearing, not cosmetic: the differ walks Go maps internally
-// (whose iteration order is randomized), and the cloud dedups change hindsights by
+// (whose iteration order is randomized), and consumers dedup changes by
 // hashing the serialized delta. If two diffs of the same inputs serialized to
 // different byte streams, the cloud would treat re-analysis of an unchanged push
 // as a brand-new finding and double-insert. We feed deliberately out-of-order

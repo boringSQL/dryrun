@@ -1,5 +1,5 @@
 // Package diff turns two snapshots into a typed delta. Imports stay limited to
-// stdlib + pkg/snapshot so predictd can vendor it. No severity/risk scoring here.
+// stdlib + pkg/snapshot so external consumers can vendor it. No severity/risk scoring here.
 package diff
 
 import (
@@ -33,7 +33,7 @@ type (
 
 func (d *SchemaDelta) IsEmpty() bool { return d == nil || len(d.Changes) == 0 }
 
-// Type says which detail pointer is set. predictd keys off Type + that detail,
+// Type says which detail pointer is set. consumers key off Type + that detail,
 // not the Note text.
 type (
 	Change struct {
@@ -48,7 +48,7 @@ type (
 		Rename       *RenameChange        `json:"rename,omitempty"`
 		StorageParam []StorageParamChange `json:"storage_param,omitempty"`
 
-		Note string `json:"note,omitempty"` // free-text, predictd ignores it
+		Note string `json:"note,omitempty"` // free-text, consumers ignore it
 	}
 
 	ChangeType string

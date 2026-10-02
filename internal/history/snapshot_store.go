@@ -42,8 +42,8 @@ func NewRefHash(h string) SnapshotRef { return SnapshotRef{Kind: RefHash, Hash: 
 // nth-newest (0 == latest). Positional, so content twins stay addressable where
 // a hash prefix would be ambiguous. "nth" is over the backend's own List
 // ordering and is NOT portable across backends: history.db counts rows (twins
-// take a slot each), while the bundle stores and the HTTP store count
-// distinct captures. Only *Store mints these today.
+// take a slot each), while the bundle stores count distinct
+// captures. Only *Store mints these today.
 func NewRefIndex(n int) SnapshotRef { return SnapshotRef{Kind: RefIndex, Index: n} }
 
 // Index is an offset into a newest-first list, so a negative one addresses

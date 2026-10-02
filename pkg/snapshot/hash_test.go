@@ -611,7 +611,7 @@ func TestPlannerContentHash_OmitsEmptyGUCs(t *testing.T) {
 //
 // The reason is that this digest is an identity, not a checksum: it is the
 // dedup key in query_stats, the have-set key in sync, and the blob digest
-// predict stores. If it moved every time qshape improved its normalizer, an
+// remotes store. If it moved every time qshape improved its normalizer, an
 // unchanged workload would re-push in full and the old digests would strand on
 // every remote that already held them.
 //
@@ -837,9 +837,8 @@ func TestQueryStatsContentHash_EmptyCaptureIsStable(t *testing.T) {
 	}
 }
 
-// The wire contract. HTTPStore.Put does not push the stored ContentHash — it
-// recomputes the digest from the blob it is about to serialize, because predict
-// re-derives the hash from the posted body and 422s on a mismatch. That only
+// The wire contract. A receiving store re-derives the hash from the serialized
+// blob and rejects a mismatch. That only
 // works if every input to the digest survives a JSON round trip: the moment the
 // raw rows are dropped from the payload (json:"-", or computed capture-side and
 // discarded) the remote sees a different capture than the one we hashed.
@@ -1330,7 +1329,7 @@ func TestDigestFor_V3DispatchesToV3(t *testing.T) {
 }
 
 // What a fresh capture stamps must be what DigestFor hashes it with; a mismatch is
-// exactly the case predict answers 422 on (internal/history/http_store.go:107).
+// exactly the mismatch a receiving store rejects.
 func TestFormatVersionConstant_MatchesNewestDigest(t *testing.T) {
 	snap := partitionedSnap(child("users_2026_01", "a"))
 	snap.FormatVersion = FormatVersion

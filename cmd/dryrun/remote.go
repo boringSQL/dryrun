@@ -65,6 +65,9 @@ func remoteAddCmd() *cobra.Command {
 					return fmt.Errorf("remote %q already exists", name)
 				}
 			}
+			if typ != "oci" {
+				return fmt.Errorf("--type must be \"oci\"")
+			}
 			if authMode != "" && authMode != "gcp" {
 				return fmt.Errorf("--auth must be empty or \"gcp\"")
 			}

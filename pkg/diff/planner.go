@@ -307,7 +307,7 @@ var sizingMetricOrder = map[string]int{
 	MetricNDistinct: 8, MetricNullFrac: 9, MetricCorrelation: 10, MetricMCVChurn: 11,
 }
 
-// keep this deterministic; predictd dedups on the serialized delta.
+// keep this deterministic; consumers dedup on the serialized delta.
 func sortSizing(rows []SizingDelta) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]

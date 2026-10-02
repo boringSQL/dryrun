@@ -10,8 +10,7 @@ import (
 
 // 0 means legacy. not hashed. 2 = digest covers reloptions.
 // 3 = partition children left out of the digest, so a rotation is not DDL.
-// Bumping re-hashes every partitioned schema once; predict must know the new
-// generation first, or it 422s the blob.
+// Bumping re-hashes every partitioned schema once.
 const FormatVersion = 3
 
 // CaptureRuleVersion: which pg_stat_statements rows a capture kept, per the
@@ -23,7 +22,6 @@ const FormatVersion = 3
 const CaptureRuleVersion = 3
 
 type (
-
 	// DDL-only schema snapshot; sizing/activity live in AnnotatedSchema
 	SchemaSnapshot struct {
 		FormatVersion    int             `json:"format_version"`

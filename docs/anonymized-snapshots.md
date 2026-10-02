@@ -131,12 +131,11 @@ dryrun snapshot push --oci ghcr.io/org/dryrun   # or straight to an OCI registry
 
 The receiver runs `dryrun snapshot pull --from-path ./handover` (or `--oci`) and the snapshot lands in their own `.dryrun/history.db`. This is why the checks above run before pushing, not after.
 
-If the snapshot is going to a shared workspace rather than one recipient, push it to [Hindsight](https://boringsql.com/products/hindsight/), the boringSQL registry. It never connects to your database; the CLI captures locally and pushes. A workspace toggle refuses any push carrying unmasked planner statistics, so a policy mistake gets rejected instead of stored:
+For a team rather than one recipient, push to an OCI registry you control:
 
 ```sh
-export DRYRUN_TOKEN=<workspace token>
-dryrun remote add hindsight --type http --ref <workspace-url>
-dryrun snapshot push --all --remote hindsight
+dryrun remote add shared --ref ghcr.io/org/dryrun
+dryrun snapshot push --all --remote shared
 ```
 
 Send `data-masking-policy.yml` alongside: it documents what was masked and is what you rerun on the next capture.

@@ -41,9 +41,6 @@ var (
 	// putting planner or activity without a matching schema bundle is rejected;
 	// the bundle is keyed by schema_ref_hash and must exist first.
 	ErrOrphanSnapshot = errors.New("no schema bundle matches schema_ref_hash")
-
-	// a store rejects a kind it doesn't (yet) know how to persist
-	ErrKindUnsupported = errors.New("kind not supported by this store")
 )
 
 func (f *FilesystemStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (PutOutcome, error) {

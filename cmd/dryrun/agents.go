@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,24 +20,16 @@ const (
 	directiveEnd   = "<!-- dryrun:end -->"
 )
 
-func directiveBody(hosted bool) string {
-	lines := []string{
+func directiveBody() string {
+	return strings.Join([]string{
 		directiveStart,
 		"## Database schema",
 		"",
 		"This repo uses Postgres; the schema is captured in `.dryrun/`. Do not guess",
 		"columns, indexes, or types — call the `dryrun` MCP server to inspect the",
 		"schema, validate queries, and check migrations before writing SQL.",
-	}
-	// naming only the first server steers agents away from the one just added
-	if hosted {
-		lines = append(lines,
-			"",
-			"The `hindsight` server answers the same questions from the history of every",
-			"node's pushes, and answers ones this repo's snapshot cannot: start with",
-			"`worklist` for what to fix first.")
-	}
-	return strings.Join(append(lines, directiveEnd), "\n")
+		directiveEnd,
+	}, "\n")
 }
 
 func mcpServerEntry() map[string]any {
@@ -46,37 +37,6 @@ func mcpServerEntry() map[string]any {
 		"command": "npx",
 		"args":    []any{"-y", npmPackage, "mcp-serve"},
 	}
-}
-
-// Per-client token syntax: a ${VAR} in a config that does not expand it
-// authenticates nothing, so the form is encoded here, not left to the caller.
-type tokenRef int
-
-const (
-	tokenBraceVar    tokenRef = iota // Claude Code: ${VAR}
-	tokenEnvVar                      // Cursor: ${env:VAR}
-	tokenBearerEnv                   // Codex: bearer_token_env_var, no header
-	tokenNoExpansion                 // Zed: expands nothing; the value is pasted
-)
-
-// A reference wherever the client resolves one; never the token itself.
-func hindsightServerEntry(url, tokenEnv string, ref tokenRef) map[string]any {
-	entry := map[string]any{"type": "http", "url": url}
-	if h := authHeaderValue(tokenEnv, ref); h != "" {
-		entry["headers"] = map[string]any{"Authorization": h}
-	}
-	return entry
-}
-
-// Empty when the client cannot resolve a reference (Codex, Zed).
-func authHeaderValue(tokenEnv string, ref tokenRef) string {
-	switch ref {
-	case tokenBraceVar:
-		return "Bearer ${" + tokenEnv + "}"
-	case tokenEnvVar:
-		return "Bearer ${env:" + tokenEnv + "}"
-	}
-	return ""
 }
 
 type agentKind int
@@ -92,7 +52,6 @@ type agentDef struct {
 	configPath string
 	jsonKey    string
 	kind       agentKind
-	tokenRef   tokenRef
 	detect     func(cwd, home string) bool
 }
 
@@ -105,7 +64,7 @@ func agentRegistry() []agentDef {
 	return []agentDef{
 		{
 			name: "claude", label: "Claude Code", configPath: ".mcp.json",
-			jsonKey: "mcpServers", kind: agentJSON, tokenRef: tokenBraceVar,
+			jsonKey: "mcpServers", kind: agentJSON,
 			detect: func(cwd, home string) bool {
 				return pathExists(filepath.Join(cwd, ".claude")) ||
 					pathExists(filepath.Join(cwd, ".mcp.json"))
@@ -113,19 +72,19 @@ func agentRegistry() []agentDef {
 		},
 		{
 			name: "cursor", label: "Cursor", configPath: ".cursor/mcp.json",
-			jsonKey: "mcpServers", kind: agentJSON, tokenRef: tokenEnvVar,
+			jsonKey: "mcpServers", kind: agentJSON,
 			detect: func(cwd, home string) bool { return pathExists(filepath.Join(cwd, ".cursor")) },
 		},
 		{
 			name: "codex", label: "Codex", configPath: "~/.codex/config.toml",
-			kind: agentSnippet, tokenRef: tokenBearerEnv,
+			kind: agentSnippet,
 			detect: func(cwd, home string) bool {
 				return home != "" && pathExists(filepath.Join(home, ".codex"))
 			},
 		},
 		{
 			name: "zed", label: "Zed", configPath: ".zed/settings.json",
-			jsonKey: "context_servers", kind: agentSnippet, tokenRef: tokenNoExpansion,
+			jsonKey: "context_servers", kind: agentSnippet,
 			detect: func(cwd, home string) bool { return pathExists(filepath.Join(cwd, ".zed")) },
 		},
 	}
@@ -201,7 +160,7 @@ func promptSelect(detected []agentDef) []agentDef {
 
 func isTTY() bool { return isatty.IsTerminal(os.Stdin.Fd()) }
 
-func writeAgentConfigs(cwd string, selected []agentDef, hosted *hindsightTarget) error {
+func writeAgentConfigs(cwd string, selected []agentDef) error {
 	var (
 		wrote    []string
 		snippets []agentDef
@@ -211,13 +170,9 @@ func writeAgentConfigs(cwd string, selected []agentDef, hosted *hindsightTarget)
 			snippets = append(snippets, a)
 			continue
 		}
-		// per agent: the auth syntax is the client's, not ours
 		entries := map[string]any{mcpServerName: mcpServerEntry()}
-		if hosted != nil {
-			entries[hindsightServerName] = hosted.entryFor(a)
-		}
 		abs := filepath.Join(cwd, filepath.FromSlash(a.configPath))
-		changed, err := mergeMCPJSON(abs, a.jsonKey, entries, hosted != nil)
+		changed, err := mergeMCPJSON(abs, a.jsonKey, entries)
 		if err != nil {
 			return err
 		}
@@ -226,16 +181,7 @@ func writeAgentConfigs(cwd string, selected []agentDef, hosted *hindsightTarget)
 		}
 	}
 
-	// repo state, not this invocation: a plain `dryrun setup` in a repo that
-	// already registered the endpoint must not rewrite the directive back to
-	// one server while the agent config still holds both
-	peer := hosted != nil
-	if !peer {
-		if _, cfg, err := loadProjectConfig(); err == nil {
-			peer = hasHTTPRemote(cfg)
-		}
-	}
-	directives, err := writeDirective(cwd, peer)
+	directives, err := writeDirective(cwd)
 	if err != nil {
 		return err
 	}
@@ -247,13 +193,13 @@ func writeAgentConfigs(cwd string, selected []agentDef, hosted *hindsightTarget)
 		fmt.Fprintf(os.Stderr, "Updated agent directive: %s\n", strings.Join(directives, ", "))
 	}
 	for _, a := range snippets {
-		printSnippet(os.Stderr, a, hosted)
+		printSnippet(os.Stderr, a)
 	}
-	printCommitGuidance(wrote, directives, hosted != nil)
+	printCommitGuidance(wrote, directives)
 	return nil
 }
 
-func mergeMCPJSON(absPath, key string, entries map[string]any, hosted bool) (bool, error) {
+func mergeMCPJSON(absPath, key string, entries map[string]any) (bool, error) {
 	existing, err := os.ReadFile(absPath)
 	if err != nil && !os.IsNotExist(err) {
 		return false, err
@@ -287,28 +233,17 @@ func mergeMCPJSON(absPath, key string, entries map[string]any, hosted bool) (boo
 	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
 		return false, err
 	}
-	perm := os.FileMode(0o644)
-	if hosted {
-		perm = 0o600
-	}
-	if err := os.WriteFile(absPath, out, perm); err != nil {
+	if err := os.WriteFile(absPath, out, 0o644); err != nil {
 		return false, err
-	}
-	// WriteFile's perm applies only on create; chmod so an existing config
-	// does not hold the auth header world-readable.
-	if hosted {
-		if err := os.Chmod(absPath, perm); err != nil {
-			return false, err
-		}
 	}
 	return true, nil
 }
 
-func writeDirective(cwd string, hosted bool) ([]string, error) {
+func writeDirective(cwd string) ([]string, error) {
 	var written []string
 
 	agents := filepath.Join(cwd, "AGENTS.md")
-	changed, err := upsertDirective(agents, hosted)
+	changed, err := upsertDirective(agents)
 	if err != nil {
 		return written, err
 	}
@@ -318,7 +253,7 @@ func writeDirective(cwd string, hosted bool) ([]string, error) {
 
 	claude := filepath.Join(cwd, "CLAUDE.md")
 	if pathExists(claude) {
-		changed, err := upsertDirective(claude, hosted)
+		changed, err := upsertDirective(claude)
 		if err != nil {
 			return written, err
 		}
@@ -329,7 +264,7 @@ func writeDirective(cwd string, hosted bool) ([]string, error) {
 	return written, nil
 }
 
-func upsertDirective(path string, hosted bool) (bool, error) {
+func upsertDirective(path string) (bool, error) {
 	existing := ""
 	if b, err := os.ReadFile(path); err == nil {
 		existing = string(b)
@@ -341,9 +276,9 @@ func upsertDirective(path string, hosted bool) (bool, error) {
 	start := strings.Index(existing, directiveStart)
 	end := strings.Index(existing, directiveEnd)
 	if start >= 0 && end > start {
-		next = existing[:start] + directiveBody(hosted) + existing[end+len(directiveEnd):]
+		next = existing[:start] + directiveBody() + existing[end+len(directiveEnd):]
 	} else if existing == "" {
-		next = directiveBody(hosted) + "\n"
+		next = directiveBody() + "\n"
 	} else {
 		sep := "\n\n"
 		if strings.HasSuffix(existing, "\n\n") {
@@ -351,7 +286,7 @@ func upsertDirective(path string, hosted bool) (bool, error) {
 		} else if strings.HasSuffix(existing, "\n") {
 			sep = "\n"
 		}
-		next = existing + sep + directiveBody(hosted) + "\n"
+		next = existing + sep + directiveBody() + "\n"
 	}
 
 	if next == existing {
@@ -360,43 +295,23 @@ func upsertDirective(path string, hosted bool) (bool, error) {
 	return true, os.WriteFile(path, []byte(next), 0o644)
 }
 
-func printSnippet(w io.Writer, a agentDef, hosted *hindsightTarget) {
+func printSnippet(w io.Writer, a agentDef) {
 	fmt.Fprintf(w, "\n%s uses %s — add this entry yourself:\n", a.label, a.configPath)
 	switch a.name {
 	case "codex":
 		fmt.Fprintln(w, "  [mcp_servers.dryrun]")
 		fmt.Fprintln(w, "  command = \"npx\"")
 		fmt.Fprintf(w, "  args = [\"-y\", %q, \"mcp-serve\"]\n", npmPackage)
-		if hosted != nil {
-			// Codex sources the token itself, so no header is formatted here
-			fmt.Fprintf(w, "\n  [mcp_servers.%s]\n", hindsightServerName)
-			fmt.Fprintf(w, "  url = %q\n", hosted.URL)
-			fmt.Fprintf(w, "  bearer_token_env_var = %q\n", hosted.TokenEnv)
-		}
 	default:
 		fmt.Fprintln(w, "  {")
 		fmt.Fprintf(w, "    %q: {\n", a.jsonKey)
-		fmt.Fprintf(w, "      \"dryrun\": { \"command\": \"npx\", \"args\": [\"-y\", %q, \"mcp-serve\"] }", npmPackage)
-		if hosted != nil {
-			// no HTML escaping: Marshal would mangle the placeholder's < >
-			var buf bytes.Buffer
-			enc := json.NewEncoder(&buf)
-			enc.SetEscapeHTML(false)
-			if err := enc.Encode(hosted.entryFor(a)); err == nil {
-				fmt.Fprintf(w, ",\n      %q: %s", hindsightServerName, strings.TrimSpace(buf.String()))
-			}
-		}
-		fmt.Fprintln(w, "")
+		fmt.Fprintf(w, "      \"dryrun\": { \"command\": \"npx\", \"args\": [\"-y\", %q, \"mcp-serve\"] }\n", npmPackage)
 		fmt.Fprintln(w, "    }")
 		fmt.Fprintln(w, "  }")
 	}
-	if hosted != nil && a.tokenRef == tokenNoExpansion {
-		fmt.Fprintf(w, "  %s expands no variables, so paste the value of %s in place of the placeholder — and keep that file out of version control.\n",
-			a.label, hosted.TokenEnv)
-	}
 }
 
-func printCommitGuidance(wrote, directives []string, hosted bool) {
+func printCommitGuidance(wrote, directives []string) {
 	if len(wrote) == 0 && len(directives) == 0 {
 		return
 	}
@@ -404,9 +319,5 @@ func printCommitGuidance(wrote, directives []string, hosted bool) {
 	files = append(files, directives...)
 	fmt.Fprintf(os.Stderr, "\nCommit so teammates' agents pick this up automatically:\n  git add %s\n",
 		strings.Join(files, " "))
-	// safe only while the header is a ${VAR} reference, not an inlined token
-	if hosted {
-		fmt.Fprintln(os.Stderr, "  (safe as written: the auth header is an environment-variable reference. If you inlined the token instead, do not commit that file — and note the next run replaces it with the reference.)")
-	}
 	fmt.Fprintln(os.Stderr, "Share the schema (.dryrun/) per your team's workflow: commit it, or use `dryrun snapshot push`/`pull`.")
 }

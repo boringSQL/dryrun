@@ -296,9 +296,9 @@ func TestCaptureQueryStats_PopulatesRawMembers(t *testing.T) {
 }
 
 // The stored ContentHash must be reproducible from the captured payload alone.
-// PutQueryStats trusts it for dedup and HTTPStore recomputes it at push time,
-// so a digest that depended on anything not in the snapshot would 422 on the
-// first push.
+// PutQueryStats trusts it for dedup and a receiving store may recompute it, so
+// a digest that depended on anything not in the snapshot would be rejected as
+// a mismatch.
 func TestCaptureQueryStats_ContentHashRecomputes(t *testing.T) {
 	pool := livePool(t)
 	ctx := context.Background()
