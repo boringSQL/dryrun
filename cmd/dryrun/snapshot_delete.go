@@ -54,7 +54,11 @@ Targets the local store only, never a remote.
 				}
 				target = *got
 			} else {
-				target, err = store.ResolveSnapshot(cmd.Context(), key, args[0])
+				prefix, err := history.NormalizeHashPrefix(args[0])
+				if err != nil {
+					return err
+				}
+				target, err = store.ResolveSnapshot(cmd.Context(), key, prefix)
 				if err != nil {
 					return err
 				}

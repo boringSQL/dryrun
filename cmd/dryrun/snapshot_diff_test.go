@@ -221,8 +221,8 @@ func TestResolveDiffToken(t *testing.T) {
 	if _, err := store.PutSchema(ctx, key, syncTestSchema("schemahash", "appdb", now.Add(-2*time.Hour))); err != nil {
 		t.Fatal(err)
 	}
-	older := syncTestPlanner("schemahash", "planner-older", "appdb", now.Add(-time.Hour))
-	newer := syncTestPlanner("schemahash", "planner-newer", "appdb", now)
+	older := syncTestPlanner("schemahash", "aaaa0001", "appdb", now.Add(-time.Hour))
+	newer := syncTestPlanner("schemahash", "aaaa0002", "appdb", now)
 	if _, err := store.PutPlanner(ctx, key, older); err != nil {
 		t.Fatal(err)
 	}
@@ -257,8 +257,8 @@ func TestResolveDiffToken(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got.ContentHash() != "planner-older" {
-			t.Fatalf("latest~1 resolved to %q, want planner-older", got.ContentHash())
+		if got.ContentHash() != "aaaa0001" {
+			t.Fatalf("latest~1 resolved to %q, want aaaa0001", got.ContentHash())
 		}
 	})
 
@@ -271,14 +271,14 @@ func TestResolveDiffToken(t *testing.T) {
 
 	t.Run("a hash prefix recovers its own kind without --kind", func(t *testing.T) {
 		// --kind is left at schema on purpose; the planner prefix should win
-		kind, ref, err := store.ResolveToken(ctx, key, "planner-ne", "schema", "")
+		kind, ref, err := store.ResolveToken(ctx, key, "aaaa0002", "schema", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if kind.Tag != history.KindPlanner {
 			t.Fatalf("a planner hash should resolve to planner kind, got %v", kind)
 		}
-		if ref.Kind != history.RefHash || ref.Hash != "planner-ne" {
+		if ref.Kind != history.RefHash || ref.Hash != "aaaa0002" {
 			t.Fatalf("got ref kind=%v hash=%q", ref.Kind, ref.Hash)
 		}
 	})

@@ -531,8 +531,8 @@ func (s *Store) GetSchema(ctx context.Context, key SnapshotKey, at SnapshotRef) 
 		var hash string
 		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
 			`SELECT DISTINCT content_hash FROM snapshots
-			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? LIMIT 2`,
-			pid, did, at.Hash+"%"); err == nil {
+			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ESCAPE '\' LIMIT 2`,
+			pid, did, likePrefix(at.Hash)); err == nil {
 			err = s.db.QueryRowContext(ctx,
 				`SELECT snapshot_json FROM snapshots
 				  WHERE project_id = ? AND database_id = ? AND content_hash = ?
@@ -678,9 +678,9 @@ func (s *Store) ResolveSchemaSnapshot(ctx context.Context, key SnapshotKey, hash
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, db_url_hash, timestamp, content_hash, database_name, project_id, database_id
 		   FROM snapshots
-		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ESCAPE '\'
 		  ORDER BY timestamp DESC, id DESC`,
-		string(key.ProjectID), string(key.DatabaseID), hashPrefix+"%")
+		string(key.ProjectID), string(key.DatabaseID), likePrefix(hashPrefix))
 	if err != nil {
 		return SnapshotSummary{}, err
 	}
@@ -712,7 +712,7 @@ func (s *Store) ResolveSchemaSnapshot(ctx context.Context, key SnapshotKey, hash
 func (s *Store) nodeStatsHashMatches(ctx context.Context, pid, did, like, table string, mk func(string) SnapshotKind) ([]SnapshotSummary, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT id, schema_ref_hash, content_hash, node_source, timestamp FROM "+table+
-			" WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ORDER BY timestamp DESC, id DESC",
+			" WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ESCAPE '\\' ORDER BY timestamp DESC, id DESC",
 		pid, did, like)
 	if err != nil {
 		return nil, err
@@ -744,14 +744,14 @@ func (s *Store) nodeStatsHashMatches(ctx context.Context, pid, did, like, table 
 func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix string) (SnapshotSummary, error) {
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
-	like := hashPrefix + "%"
+	like := likePrefix(hashPrefix)
 
 	var matches []SnapshotSummary
 
 	srows, err := s.db.QueryContext(ctx,
 		`SELECT id, db_url_hash, timestamp, content_hash, database_name, project_id, database_id
 		   FROM snapshots
-		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ESCAPE '\'
 		  ORDER BY timestamp DESC, id DESC`,
 		pid, did, like)
 	if err != nil {
@@ -774,7 +774,7 @@ func (s *Store) ResolveSnapshot(ctx context.Context, key SnapshotKey, hashPrefix
 	prows, err := s.db.QueryContext(ctx,
 		`SELECT id, schema_ref_hash, content_hash, timestamp
 		   FROM planner_stats
-		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ESCAPE '\'
 		  ORDER BY timestamp DESC, id DESC`,
 		pid, did, like)
 	if err != nil {
@@ -1237,8 +1237,8 @@ func (s *Store) ResolveKind(ctx context.Context, key SnapshotKey, hashPrefix str
 	count := func(table string) (int, error) {
 		var n int
 		err := s.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM "+table+" WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?",
-			pid, did, hashPrefix+"%").Scan(&n)
+			"SELECT COUNT(*) FROM "+table+" WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ESCAPE '\\'",
+			pid, did, likePrefix(hashPrefix)).Scan(&n)
 		return n, err
 	}
 
@@ -1254,8 +1254,8 @@ func (s *Store) ResolveKind(ctx context.Context, key SnapshotKey, hashPrefix str
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT node_source FROM activity_stats
-		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?`,
-		pid, did, hashPrefix+"%")
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ESCAPE '\'`,
+		pid, did, likePrefix(hashPrefix))
 	if err != nil {
 		return SnapshotKind{}, err
 	}
@@ -1272,8 +1272,8 @@ func (s *Store) ResolveKind(ctx context.Context, key SnapshotKey, hashPrefix str
 	}
 	qrows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT node_source FROM query_stats
-		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ?`,
-		pid, did, hashPrefix+"%")
+		  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ESCAPE '\'`,
+		pid, did, likePrefix(hashPrefix))
 	if err != nil {
 		return SnapshotKind{}, err
 	}

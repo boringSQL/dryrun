@@ -8,7 +8,20 @@ import (
 	"strings"
 )
 
-var latestRefRe = regexp.MustCompile(`^latest(?:~(\d+))?$`)
+var (
+	latestRefRe  = regexp.MustCompile(`^latest(?:~(\d+))?$`)
+	hashPrefixRe = regexp.MustCompile(`^[0-9a-f]+$`)
+)
+
+// NormalizeHashPrefix normalizes a user hash prefix and rejects non-hex, so a
+// typo gets a clear message at the CLI/MCP edge.
+func NormalizeHashPrefix(s string) (string, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if !hashPrefixRe.MatchString(s) {
+		return "", fmt.Errorf("invalid snapshot hash prefix %q (expected hex digits)", s)
+	}
+	return s, nil
+}
 
 // schema|planner|activity|query; activity/query default to the sole node, else errors listing them
 // One place that knows the kind names, so `--kind` means the same thing to
@@ -73,6 +86,7 @@ func (s *Store) resolveNodeKind(ctx context.Context, key SnapshotKey, nodeFlag s
 
 // latest/latest~N take kind from kindFlag; a hash prefix carries its own. Shared by CLI and MCP.
 func (s *Store) ResolveToken(ctx context.Context, key SnapshotKey, token, kindFlag, nodeFlag string) (SnapshotKind, SnapshotRef, error) {
+	token = strings.ToLower(strings.TrimSpace(token))
 	if m := latestRefRe.FindStringSubmatch(token); m != nil {
 		kind, err := s.ResolveKindFlag(ctx, key, kindFlag, nodeFlag)
 		if err != nil {
@@ -98,9 +112,13 @@ func (s *Store) ResolveToken(ctx context.Context, key SnapshotKey, token, kindFl
 		}
 		return kind, NewRefIndex(n), nil
 	}
-	kind, err := s.ResolveKind(ctx, key, token)
+	prefix, err := NormalizeHashPrefix(token)
 	if err != nil {
 		return SnapshotKind{}, SnapshotRef{}, err
 	}
-	return kind, NewRefHash(token), nil
+	kind, err := s.ResolveKind(ctx, key, prefix)
+	if err != nil {
+		return SnapshotKind{}, SnapshotRef{}, err
+	}
+	return kind, NewRefHash(prefix), nil
 }

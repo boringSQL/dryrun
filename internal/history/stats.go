@@ -375,6 +375,11 @@ func (s *Store) GetAnnotated(ctx context.Context, key SnapshotKey, at SnapshotRe
 	return out, nil
 }
 
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// likePrefix makes s match literally as a prefix; pair with ESCAPE '\' in SQL.
+func likePrefix(s string) string { return likeEscaper.Replace(s) + "%" }
+
 // resolveHashPrefix maps a git-style hash prefix to exactly one content hash.
 // Only a prefix spanning two *different* hashes is ambiguous: content twins —
 // an idle node captured twice writes byte-identical rows — collapse to one
@@ -444,8 +449,8 @@ func (s *Store) getPlannerRef(ctx context.Context, key SnapshotKey, at SnapshotR
 		var hash string
 		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
 			`SELECT DISTINCT content_hash FROM planner_stats
-			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? LIMIT 2`,
-			pid, did, at.Hash+"%"); err == nil {
+			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ESCAPE '\' LIMIT 2`,
+			pid, did, likePrefix(at.Hash)); err == nil {
 			err = s.db.QueryRowContext(ctx,
 				`SELECT payload_json FROM planner_stats
 				  WHERE project_id = ? AND database_id = ? AND content_hash = ?
@@ -512,8 +517,8 @@ func (s *Store) getActivityRef(ctx context.Context, key SnapshotKey, nodeLabel s
 		// git-style prefix match; content twins resolve newest-wins
 		var hash string
 		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
-			"SELECT DISTINCT content_hash"+where+" AND content_hash LIKE ? LIMIT 2",
-			append(append([]any{}, args...), at.Hash+"%")...); err == nil {
+			"SELECT DISTINCT content_hash"+where+" AND content_hash LIKE ? ESCAPE '\\' LIMIT 2",
+			append(append([]any{}, args...), likePrefix(at.Hash))...); err == nil {
 			err = s.db.QueryRowContext(ctx,
 				base+" AND content_hash = ? ORDER BY timestamp DESC, id DESC LIMIT 1",
 				append(args, hash)...).Scan(&jsonStr)
@@ -682,8 +687,8 @@ func (s *Store) getQueryStatsRef(ctx context.Context, key SnapshotKey, nodeLabel
 		// git-style prefix match; content twins resolve newest-wins
 		var hash string
 		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
-			"SELECT DISTINCT content_hash"+where+" AND content_hash LIKE ? LIMIT 2",
-			append(append([]any{}, args...), at.Hash+"%")...); err == nil {
+			"SELECT DISTINCT content_hash"+where+" AND content_hash LIKE ? ESCAPE '\\' LIMIT 2",
+			append(append([]any{}, args...), likePrefix(at.Hash))...); err == nil {
 			err = s.db.QueryRowContext(ctx,
 				base+" AND content_hash = ? ORDER BY timestamp DESC, id DESC LIMIT 1",
 				append(args, hash)...).Scan(&jsonStr)
