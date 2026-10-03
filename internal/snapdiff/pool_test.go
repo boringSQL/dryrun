@@ -475,7 +475,8 @@ func TestDiffNodePair_PoolLookupFailure(t *testing.T) {
 // row-cap caveats fire on most busy servers; they must not flood summary notes
 func TestBuild_QueryNotesSkipRoutineCaveats(t *testing.T) {
 	store := openStore(t)
-	t0 := time.Now().Truncate(time.Second).Add(-3 * time.Hour)
+	// Friday: a weekday window, so no weekend caveat code fires
+	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
 	for i, calls := range []int64{10, 40} {
 		q := mkQuery("sh", fmt.Sprintf("capped-%d", i), "primary", t0.Add(time.Duration(i)*time.Hour), calls, float64(calls))
 		q.RawRows = q.RowCap
