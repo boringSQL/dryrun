@@ -198,7 +198,11 @@ func TestAPrunedStreamRendersAsCapturedNotAbsent(t *testing.T) {
 	if err := hist.MarkCaptureAttempt(ctx, testKey, "primary", "activity", attempted); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := hist.DeleteBefore(ctx, testKey, history.ActivityKind(""), at.Add(time.Hour)); err != nil {
+	target, err := hist.Latest(ctx, testKey, history.ActivityKind(""))
+	if err != nil || target == nil {
+		t.Fatalf("resolve activity to prune: %v", err)
+	}
+	if _, err := hist.DeleteSnapshot(ctx, testKey, *target); err != nil {
 		t.Fatal(err)
 	}
 

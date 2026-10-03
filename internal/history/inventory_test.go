@@ -286,7 +286,11 @@ func TestInventoryKeepsAPrunedStreamWithAnAttemptClock(t *testing.T) {
 	if err := store.MarkCaptureAttempt(ctx, k, "primary", "activity", recent); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DeleteBefore(ctx, k, ActivityKind(""), old.Add(time.Hour)); err != nil {
+	target, err := store.Latest(ctx, k, ActivityKind(""))
+	if err != nil || target == nil {
+		t.Fatalf("resolve activity to prune: %v", err)
+	}
+	if _, err := store.DeleteSnapshot(ctx, k, *target); err != nil {
 		t.Fatal(err)
 	}
 

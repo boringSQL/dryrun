@@ -433,26 +433,6 @@ func (o *OCIStore) Latest(ctx context.Context, key SnapshotKey, kind SnapshotKin
 	return &first, nil
 }
 
-func (o *OCIStore) DeleteBefore(ctx context.Context, key SnapshotKey, kind SnapshotKind, cutoff time.Time) (int64, error) {
-	if kind.Tag != KindSchema {
-		return 0, fmt.Errorf("oci store: DeleteBefore supports schema only, got %s", kind)
-	}
-	repo, items, err := o.load(ctx, key)
-	if err != nil {
-		return 0, err
-	}
-	var n int64
-	for _, it := range items {
-		if it.bundle.Schema != nil && it.bundle.Schema.Timestamp.Before(cutoff) {
-			if err := repo.Delete(ctx, it.manifest); err != nil {
-				return n, err
-			}
-			n++
-		}
-	}
-	return n, nil
-}
-
 func (o *OCIStore) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error) {
 	bundles, err := o.loadBundles(ctx, key)
 	if err != nil {

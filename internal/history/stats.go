@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/boringsql/dryrun/internal/schema"
 )
@@ -73,8 +72,9 @@ func (s *Store) putActivity(ctx context.Context, key SnapshotKey, a *schema.Acti
 	return PutInserted, nil
 }
 
-// idempotent on (project_id, database_id, content_hash); an idle node
-// re-captured byte-identically collapses to a no-op
+// Query-only invariant: pre-Members query payloads all digest alike, so we
+// reject them here. No other kind needs this guard — planner and activity
+// hashes are derived from the full payload.
 func hasQueryMembers(q *schema.QueryStatsSnapshot) bool {
 	for _, e := range q.Queries {
 		if len(e.Members) > 0 {
@@ -303,25 +303,7 @@ func (s *Store) PreviousQueryStats(ctx context.Context, key SnapshotKey) ([]sche
 }
 
 func (s *Store) LatestPlanner(ctx context.Context, key SnapshotKey) (*schema.PlannerStatsSnapshot, error) {
-	var jsonStr string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT payload_json FROM planner_stats
-		  WHERE project_id = ? AND database_id = ?
-		  ORDER BY timestamp DESC, id DESC LIMIT 1`,
-		string(key.ProjectID), string(key.DatabaseID),
-	).Scan(&jsonStr)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w (latest planner)", ErrSnapshotNotFound)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	var p schema.PlannerStatsSnapshot
-	if err := json.Unmarshal([]byte(jsonStr), &p); err != nil {
-		return nil, fmt.Errorf("corrupt planner stats JSON: %w", err)
-	}
-	return &p, nil
+	return s.getPlannerRef(ctx, key, NewRefLatest())
 }
 
 // ErrSnapshotNotFound only when schema is missing; planner/activity can be absent
@@ -418,60 +400,7 @@ func resolveHashPrefix(ctx context.Context, db *sql.DB, prefix, query string, ar
 
 // getPlannerRef resolves a SnapshotRef against the planner_stats table.
 func (s *Store) getPlannerRef(ctx context.Context, key SnapshotKey, at SnapshotRef) (*schema.PlannerStatsSnapshot, error) {
-	pid := string(key.ProjectID)
-	did := string(key.DatabaseID)
-
-	var (
-		jsonStr string
-		err     error
-		detail  string
-	)
-	switch at.Kind {
-	case RefLatest:
-		detail = "latest planner"
-		err = s.db.QueryRowContext(ctx,
-			`SELECT payload_json FROM planner_stats
-			  WHERE project_id = ? AND database_id = ?
-			  ORDER BY timestamp DESC, id DESC LIMIT 1`,
-			pid, did,
-		).Scan(&jsonStr)
-	case RefAt:
-		detail = fmt.Sprintf("planner at-or-before %s", at.At.Format(time.RFC3339))
-		err = s.db.QueryRowContext(ctx,
-			`SELECT payload_json FROM planner_stats
-			  WHERE project_id = ? AND database_id = ? AND timestamp <= ?
-			  ORDER BY timestamp DESC, id DESC LIMIT 1`,
-			pid, did, formatHistoryTS(at.At),
-		).Scan(&jsonStr)
-	case RefHash:
-		detail = "planner hash " + at.Hash
-		// git-style prefix match; content twins resolve newest-wins
-		var hash string
-		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
-			`SELECT DISTINCT content_hash FROM planner_stats
-			  WHERE project_id = ? AND database_id = ? AND content_hash LIKE ? ESCAPE '\' LIMIT 2`,
-			pid, did, likePrefix(at.Hash)); err == nil {
-			err = s.db.QueryRowContext(ctx,
-				`SELECT payload_json FROM planner_stats
-				  WHERE project_id = ? AND database_id = ? AND content_hash = ?
-				  ORDER BY timestamp DESC, id DESC LIMIT 1`,
-				pid, did, hash).Scan(&jsonStr)
-		}
-	case RefIndex:
-		detail = fmt.Sprintf("planner latest~%d", at.Index)
-		err = s.db.QueryRowContext(ctx,
-			`SELECT payload_json FROM planner_stats
-			  WHERE project_id = ? AND database_id = ?
-			  ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?`,
-			pid, did, at.Index,
-		).Scan(&jsonStr)
-	default:
-		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
-	}
-
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w (%s)", ErrSnapshotNotFound, detail)
-	}
+	jsonStr, err := s.refPayload(ctx, key, mustDesc(KindPlanner), "", at)
 	if err != nil {
 		return nil, err
 	}
@@ -485,56 +414,7 @@ func (s *Store) getPlannerRef(ctx context.Context, key SnapshotKey, at SnapshotR
 // getActivityRef resolves a SnapshotRef against activity_stats, optionally
 // filtered to a single node_source.
 func (s *Store) getActivityRef(ctx context.Context, key SnapshotKey, nodeLabel string, at SnapshotRef) (*schema.ActivityStatsSnapshot, error) {
-	pid := string(key.ProjectID)
-	did := string(key.DatabaseID)
-
-	where := ` FROM activity_stats
-	           WHERE project_id = ? AND database_id = ?`
-	args := []any{pid, did}
-	if nodeLabel != "" {
-		where += " AND node_source = ?"
-		args = append(args, nodeLabel)
-	}
-	base := "SELECT payload_json" + where
-
-	var (
-		jsonStr string
-		err     error
-		detail  string
-	)
-	switch at.Kind {
-	case RefLatest:
-		detail = "latest activity"
-		err = s.db.QueryRowContext(ctx, base+" ORDER BY timestamp DESC, id DESC LIMIT 1", args...).Scan(&jsonStr)
-	case RefAt:
-		detail = fmt.Sprintf("activity at-or-before %s", at.At.Format(time.RFC3339))
-		args = append(args, formatHistoryTS(at.At))
-		err = s.db.QueryRowContext(ctx,
-			base+" AND timestamp <= ? ORDER BY timestamp DESC, id DESC LIMIT 1",
-			args...).Scan(&jsonStr)
-	case RefHash:
-		detail = "activity hash " + at.Hash
-		// git-style prefix match; content twins resolve newest-wins
-		var hash string
-		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
-			"SELECT DISTINCT content_hash"+where+" AND content_hash LIKE ? ESCAPE '\\' LIMIT 2",
-			append(append([]any{}, args...), likePrefix(at.Hash))...); err == nil {
-			err = s.db.QueryRowContext(ctx,
-				base+" AND content_hash = ? ORDER BY timestamp DESC, id DESC LIMIT 1",
-				append(args, hash)...).Scan(&jsonStr)
-		}
-	case RefIndex:
-		detail = fmt.Sprintf("activity latest~%d", at.Index)
-		args = append(args, at.Index)
-		err = s.db.QueryRowContext(ctx,
-			base+" ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?", args...).Scan(&jsonStr)
-	default:
-		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
-	}
-
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w (%s)", ErrSnapshotNotFound, detail)
-	}
+	jsonStr, err := s.refPayload(ctx, key, mustDesc(KindActivity), nodeLabel, at)
 	if err != nil {
 		return nil, err
 	}
@@ -546,165 +426,17 @@ func (s *Store) getActivityRef(ctx context.Context, key SnapshotKey, nodeLabel s
 }
 
 func (s *Store) listPlanner(ctx context.Context, key SnapshotKey, rng TimeRange) ([]SnapshotSummary, error) {
-	var (
-		sb   strings.Builder
-		args []any
-	)
-	sb.WriteString(`SELECT id, schema_ref_hash, content_hash, timestamp, project_id, database_id
-	                  FROM planner_stats WHERE project_id = ? AND database_id = ?`)
-	args = append(args, string(key.ProjectID), string(key.DatabaseID))
-	if rng.From != nil {
-		sb.WriteString(" AND timestamp >= ?")
-		args = append(args, formatHistoryTS(*rng.From))
-	}
-	if rng.To != nil {
-		sb.WriteString(" AND timestamp < ?")
-		args = append(args, formatHistoryTS(*rng.To))
-	}
-	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
-
-	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []SnapshotSummary
-	for rows.Next() {
-		var (
-			ss    SnapshotSummary
-			tsStr string
-			pid   sql.NullString
-			did   sql.NullString
-		)
-		if err := rows.Scan(&ss.ID, &ss.SchemaRefHash, &ss.ContentHash, &tsStr, &pid, &did); err != nil {
-			return nil, err
-		}
-		ss.Kind = PlannerKind()
-		ss.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
-		if pid.Valid {
-			v := pid.String
-			ss.ProjectID = &v
-		}
-		if did.Valid {
-			v := did.String
-			ss.DatabaseID = &v
-		}
-		out = append(out, ss)
-	}
-	return out, rows.Err()
+	return s.listKind(ctx, key, mustDesc(KindPlanner), "", rng)
 }
 
 func (s *Store) listActivity(ctx context.Context, key SnapshotKey, nodeLabel string, rng TimeRange) ([]SnapshotSummary, error) {
-	var (
-		sb   strings.Builder
-		args []any
-	)
-	sb.WriteString(`SELECT id, schema_ref_hash, content_hash, node_source, timestamp, project_id, database_id
-	                  FROM activity_stats WHERE project_id = ? AND database_id = ?`)
-	args = append(args, string(key.ProjectID), string(key.DatabaseID))
-	if nodeLabel != "" {
-		sb.WriteString(" AND node_source = ?")
-		args = append(args, nodeLabel)
-	}
-	if rng.From != nil {
-		sb.WriteString(" AND timestamp >= ?")
-		args = append(args, formatHistoryTS(*rng.From))
-	}
-	if rng.To != nil {
-		sb.WriteString(" AND timestamp < ?")
-		args = append(args, formatHistoryTS(*rng.To))
-	}
-	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
-
-	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []SnapshotSummary
-	for rows.Next() {
-		var (
-			ss    SnapshotSummary
-			tsStr string
-			label string
-			pid   sql.NullString
-			did   sql.NullString
-		)
-		if err := rows.Scan(&ss.ID, &ss.SchemaRefHash, &ss.ContentHash, &label, &tsStr, &pid, &did); err != nil {
-			return nil, err
-		}
-		ss.Kind = ActivityKind(label)
-		ss.NodeLabel = label
-		ss.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
-		if pid.Valid {
-			v := pid.String
-			ss.ProjectID = &v
-		}
-		if did.Valid {
-			v := did.String
-			ss.DatabaseID = &v
-		}
-		out = append(out, ss)
-	}
-	return out, rows.Err()
+	return s.listKind(ctx, key, mustDesc(KindActivity), nodeLabel, rng)
 }
 
 // getQueryStatsRef resolves a SnapshotRef against query_stats, optionally
 // filtered to a single node_source.
 func (s *Store) getQueryStatsRef(ctx context.Context, key SnapshotKey, nodeLabel string, at SnapshotRef) (*schema.QueryStatsSnapshot, error) {
-	pid := string(key.ProjectID)
-	did := string(key.DatabaseID)
-
-	where := ` FROM query_stats
-	           WHERE project_id = ? AND database_id = ?`
-	args := []any{pid, did}
-	if nodeLabel != "" {
-		where += " AND node_source = ?"
-		args = append(args, nodeLabel)
-	}
-	base := "SELECT payload_json" + where
-
-	var (
-		jsonStr string
-		err     error
-		detail  string
-	)
-	switch at.Kind {
-	case RefLatest:
-		detail = "latest query stats"
-		// id tiebreak: same-second captures collide at RFC3339 granularity
-		err = s.db.QueryRowContext(ctx, base+" ORDER BY timestamp DESC, id DESC LIMIT 1", args...).Scan(&jsonStr)
-	case RefAt:
-		detail = fmt.Sprintf("query stats at-or-before %s", at.At.Format(time.RFC3339))
-		args = append(args, formatHistoryTS(at.At))
-		err = s.db.QueryRowContext(ctx,
-			base+" AND timestamp <= ? ORDER BY timestamp DESC, id DESC LIMIT 1",
-			args...).Scan(&jsonStr)
-	case RefHash:
-		detail = "query stats hash " + at.Hash
-		// git-style prefix match; content twins resolve newest-wins
-		var hash string
-		if hash, err = resolveHashPrefix(ctx, s.db, at.Hash,
-			"SELECT DISTINCT content_hash"+where+" AND content_hash LIKE ? ESCAPE '\\' LIMIT 2",
-			append(append([]any{}, args...), likePrefix(at.Hash))...); err == nil {
-			err = s.db.QueryRowContext(ctx,
-				base+" AND content_hash = ? ORDER BY timestamp DESC, id DESC LIMIT 1",
-				append(args, hash)...).Scan(&jsonStr)
-		}
-	case RefIndex:
-		detail = fmt.Sprintf("query stats latest~%d", at.Index)
-		args = append(args, at.Index)
-		err = s.db.QueryRowContext(ctx,
-			base+" ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?", args...).Scan(&jsonStr)
-	default:
-		return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
-	}
-
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w (%s)", ErrSnapshotNotFound, detail)
-	}
+	jsonStr, err := s.refPayload(ctx, key, mustDesc(KindQuery), nodeLabel, at)
 	if err != nil {
 		return nil, err
 	}
@@ -716,59 +448,7 @@ func (s *Store) getQueryStatsRef(ctx context.Context, key SnapshotKey, nodeLabel
 }
 
 func (s *Store) listQueryStats(ctx context.Context, key SnapshotKey, nodeLabel string, rng TimeRange) ([]SnapshotSummary, error) {
-	var (
-		sb   strings.Builder
-		args []any
-	)
-	sb.WriteString(`SELECT id, schema_ref_hash, content_hash, node_source, timestamp, project_id, database_id
-	                  FROM query_stats WHERE project_id = ? AND database_id = ?`)
-	args = append(args, string(key.ProjectID), string(key.DatabaseID))
-	if nodeLabel != "" {
-		sb.WriteString(" AND node_source = ?")
-		args = append(args, nodeLabel)
-	}
-	if rng.From != nil {
-		sb.WriteString(" AND timestamp >= ?")
-		args = append(args, formatHistoryTS(*rng.From))
-	}
-	if rng.To != nil {
-		sb.WriteString(" AND timestamp < ?")
-		args = append(args, formatHistoryTS(*rng.To))
-	}
-	sb.WriteString(" ORDER BY timestamp DESC, id DESC")
-
-	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []SnapshotSummary
-	for rows.Next() {
-		var (
-			ss    SnapshotSummary
-			tsStr string
-			label string
-			pid   sql.NullString
-			did   sql.NullString
-		)
-		if err := rows.Scan(&ss.ID, &ss.SchemaRefHash, &ss.ContentHash, &label, &tsStr, &pid, &did); err != nil {
-			return nil, err
-		}
-		ss.Kind = QueryKind(label)
-		ss.NodeLabel = label
-		ss.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
-		if pid.Valid {
-			v := pid.String
-			ss.ProjectID = &v
-		}
-		if did.Valid {
-			v := did.String
-			ss.DatabaseID = &v
-		}
-		out = append(out, ss)
-	}
-	return out, rows.Err()
+	return s.listKind(ctx, key, mustDesc(KindQuery), nodeLabel, rng)
 }
 
 const (

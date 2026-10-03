@@ -220,7 +220,6 @@ type SnapshotStore interface {
 	Get(ctx context.Context, key SnapshotKey, kind SnapshotKind, at SnapshotRef) (StoredSnapshot, error)
 	List(ctx context.Context, key SnapshotKey, kind SnapshotKind, rng TimeRange) ([]SnapshotSummary, error)
 	Latest(ctx context.Context, key SnapshotKey, kind SnapshotKind) (*SnapshotSummary, error)
-	DeleteBefore(ctx context.Context, key SnapshotKey, kind SnapshotKind, cutoff time.Time) (int64, error)
 	ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error)
 	ListKeys(ctx context.Context) ([]SnapshotKey, error)
 }

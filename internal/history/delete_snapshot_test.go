@@ -179,10 +179,9 @@ func TestDeleteSchemaSnapshotMissing(t *testing.T) {
 // user hit: a planner/activity content hash copied from the listing was
 // rejected because delete only searched the schema table. Query stats are
 // the newest of the four kinds and went through the exact same class of
-// bug risk when they were added: ResolveSnapshot's query_stats scan was
-// written as a fifth near-copy of the activity_stats block (later collapsed
-// into the shared nodeStatsHashMatches helper), so a prefix that only exists
-// in query_stats needing to resolve correctly is the direct test of that.
+// bug risk when they were added: ResolveSnapshot's per-kind scans were
+// near-copies of each other, so a prefix that only exists in query_stats
+// needing to resolve correctly is the direct test of the shared resolver.
 func TestResolveSnapshotAcrossKinds(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()

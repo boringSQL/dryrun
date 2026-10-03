@@ -174,36 +174,6 @@ func TestOCIStoreConformance(t *testing.T) {
 		}
 	})
 
-	t.Run("DeleteBeforeCutoff", func(t *testing.T) {
-		k := uniqueKey(stamp, "retention", "primary")
-		now := time.Now().UTC().Truncate(time.Second)
-		old := testSnapshot("h-old", "appdb")
-		old.Timestamp = now.Add(-24 * time.Hour)
-		fresh := testSnapshot("h-new", "appdb")
-		fresh.Timestamp = now
-		if _, err := store.Put(ctx, k, WrapSchema(old)); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.Put(ctx, k, WrapSchema(fresh)); err != nil {
-			t.Fatal(err)
-		}
-
-		deleted, err := store.DeleteBefore(ctx, k, SchemaKind(), now.Add(-time.Hour))
-		if err != nil {
-			t.Fatalf("delete before: %v", err)
-		}
-		if deleted != 1 {
-			t.Errorf("deleted: got %d, want 1", deleted)
-		}
-		list, err := store.List(ctx, k, SchemaKind(), TimeRange{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(list) != 1 || list[0].ContentHash != "h-new" {
-			t.Errorf("survivors: got %+v, want [h-new]", list)
-		}
-	})
-
 	t.Run("KeyIsolation", func(t *testing.T) {
 		// Identical content under two different streams must not dedup against
 		// each other — each stream is its own repository.

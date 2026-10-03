@@ -316,15 +316,12 @@ func TestLatestPicksPerKind(t *testing.T) {
 	}
 }
 
-// TestDeleteBeforePerKindIsolated: DeleteBefore on planner must not affect
-// schema, activity, or query rows. The retention path in V3 will iterate per
-// kind, so cross-kind cascade would silently prune unrelated streams. Query
-// stats are included here specifically because DeleteBefore's KindActivity
-// and KindQuery cases were both refactored to share a single
-// deleteNodeStatsBefore(table string, ...) helper — the exact kind of change
+// TestDeleteSnapshotPerKindIsolated: deleting a planner row must not affect
+// schema, activity, or query rows. DeleteSnapshot dispatches planner/activity/
+// query through one deleteStatsRow(table) helper — the exact kind of change
 // where a copy-paste of the table name argument could quietly make one kind's
-// DeleteBefore call delete from the other kind's table instead.
-func TestDeleteBeforePerKindIsolated(t *testing.T) {
+// delete hit the other kind's table instead.
+func TestDeleteSnapshotPerKindIsolated(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
 	k := key("acme", "primary")
@@ -353,9 +350,9 @@ func TestDeleteBeforePerKindIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := store.DeleteBefore(ctx, k, PlannerKind(), now)
-	if err != nil || n != 1 {
-		t.Fatalf("delete planner: n=%d err=%v", n, err)
+	pl0, _ := store.List(ctx, k, PlannerKind(), TimeRange{})
+	if _, err := store.DeleteSnapshot(ctx, k, pl0[0]); err != nil {
+		t.Fatalf("delete planner: %v", err)
 	}
 
 	sl, _ := store.List(ctx, k, SchemaKind(), TimeRange{})
@@ -368,14 +365,25 @@ func TestDeleteBeforePerKindIsolated(t *testing.T) {
 	}
 
 	// Now the mirror case: delete the old query row and confirm activity — the
-	// other tenant of deleteNodeStatsBefore — survives untouched.
-	qn, err := store.DeleteBefore(ctx, k, QueryKind(""), now)
-	if err != nil || qn != 1 {
-		t.Fatalf("delete query stats: n=%d err=%v", qn, err)
+	// other per-node tenant of deleteStatsRow — survives untouched.
+	ql0, _ := store.List(ctx, k, QueryKind(""), TimeRange{})
+	if _, err := store.DeleteSnapshot(ctx, k, ql0[0]); err != nil {
+		t.Fatalf("delete query stats: %v", err)
 	}
 	al2, _ := store.List(ctx, k, ActivityKind(""), TimeRange{})
 	ql2, _ := store.List(ctx, k, QueryKind(""), TimeRange{})
 	if len(al2) != 1 || len(ql2) != 0 {
 		t.Errorf("after delete query: activity=%d query=%d, want 1/0", len(al2), len(ql2))
+	}
+
+	// And the activity deletion confirms schema still survives untouched.
+	al0, _ := store.List(ctx, k, ActivityKind(""), TimeRange{})
+	if _, err := store.DeleteSnapshot(ctx, k, al0[0]); err != nil {
+		t.Fatalf("delete activity: %v", err)
+	}
+	sl3, _ := store.List(ctx, k, SchemaKind(), TimeRange{})
+	al3, _ := store.List(ctx, k, ActivityKind(""), TimeRange{})
+	if len(sl3) != 1 || len(al3) != 0 {
+		t.Errorf("after delete activity: schema=%d activity=%d, want 1/0", len(sl3), len(al3))
 	}
 }

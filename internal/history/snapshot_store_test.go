@@ -201,44 +201,6 @@ func TestListWithTimeRange(t *testing.T) {
 	}
 }
 
-// TestDeleteBeforeCutoff verifies the cutoff is exclusive: a row whose
-// timestamp lies before the cutoff is removed, and a row whose timestamp
-// equals or exceeds the cutoff is retained — which is how the v0.6 retention
-// path keeps the latest snapshot alive while pruning history.
-func TestDeleteBeforeCutoff(t *testing.T) {
-	store := testStore(t)
-	ctx := context.Background()
-	k := key("acme", "primary")
-
-	now := time.Now().UTC().Truncate(time.Second)
-	oldSnap := testSnapshot("h-old", "acme")
-	oldSnap.Timestamp = now.Add(-24 * time.Hour)
-	newSnap := testSnapshot("h-new", "acme")
-	newSnap.Timestamp = now
-	if _, err := store.PutSchema(ctx, k, oldSnap); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.PutSchema(ctx, k, newSnap); err != nil {
-		t.Fatal(err)
-	}
-
-	deleted, err := store.DeleteSchemaBefore(ctx, k, now.Add(-time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if deleted != 1 {
-		t.Errorf("got %d deleted, want 1", deleted)
-	}
-
-	list, err := store.ListSchema(ctx, k, TimeRange{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(list) != 1 || list[0].ContentHash != "h-new" {
-		t.Errorf("survivors: got %+v, want [h-new]", list)
-	}
-}
-
 // TestLatestEmpty: Latest on a key with no rows must return (nil, nil)
 // rather than ErrSnapshotNotFound — it's a survey method, not a lookup.
 func TestLatestEmpty(t *testing.T) {
