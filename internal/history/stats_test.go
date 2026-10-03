@@ -133,6 +133,40 @@ func TestLatestPlanner_ReturnsMostRecent(t *testing.T) {
 	}
 }
 
+// Identical planner stats under two databases must each keep a row; the old
+// inline UNIQUE(schema_ref_hash, content_hash) deduped the second away.
+func TestPutPlanner_ScopedPerDatabase(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	k1 := key("acme", "d1")
+	k2 := key("acme", "d2")
+
+	p := plannerFixture("sref-A", "ch-P", "appdb")
+	if out, err := store.PutPlanner(ctx, k1, p); err != nil || out != PutInserted {
+		t.Fatalf("put d1: got (%v, %v), want (PutInserted, nil)", out, err)
+	}
+	q := *p
+	if out, err := store.PutPlanner(ctx, k2, &q); err != nil || out != PutInserted {
+		t.Fatalf("put d2 (same stats): got (%v, %v), want (PutInserted, nil)", out, err)
+	}
+
+	if _, err := store.LatestPlanner(ctx, k2); err != nil {
+		t.Fatalf("LatestPlanner d2: %v", err)
+	}
+
+	// d2 must join planner under its schema content hash
+	if _, err := store.PutSchema(ctx, k2, testSnapshot("sref-A", "appdb")); err != nil {
+		t.Fatalf("put schema d2: %v", err)
+	}
+	a, err := store.GetAnnotated(ctx, k2, NewRefLatest())
+	if err != nil {
+		t.Fatalf("GetAnnotated d2: %v", err)
+	}
+	if a.Planner == nil {
+		t.Error("GetAnnotated d2 has no planner data")
+	}
+}
+
 // PutActivity is append-only — every call inserts a row in the underlying
 // table, even when content_hash repeats. We verify with a direct row count
 // rather than via LatestActivity, which collapses per node_source.

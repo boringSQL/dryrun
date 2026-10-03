@@ -236,6 +236,74 @@ func TestOpenBackfillsCapturedLocally(t *testing.T) {
 	}
 }
 
+// TestOpenMigratesV5PlannerStats: a v5 DB's inline
+// UNIQUE(schema_ref_hash, content_hash) can't be dropped, so Open rebuilds the
+// table scoped to (project_id, database_id, content_hash). The seed also holds
+// two rows the old global key allowed to collide, so this covers dedupe too.
+func TestOpenMigratesV5PlannerStats(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v5.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("create raw db: %v", err)
+	}
+	_, err = raw.Exec(`
+		CREATE TABLE planner_stats (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT, database_id TEXT,
+			schema_ref_hash TEXT NOT NULL, content_hash TEXT NOT NULL,
+			timestamp TEXT NOT NULL, payload_json TEXT NOT NULL,
+			captured_locally INTEGER NOT NULL DEFAULT 1,
+			UNIQUE(schema_ref_hash, content_hash));
+		CREATE INDEX planner_stats_by_key_taken_at
+			ON planner_stats(project_id, database_id, timestamp DESC);
+		CREATE INDEX planner_stats_by_schema_ref ON planner_stats(schema_ref_hash);
+		INSERT INTO planner_stats
+			(project_id, database_id, schema_ref_hash, content_hash, timestamp, payload_json)
+			VALUES ('p', 'd1', 'srA', 'h', '2026-01-01T00:00:00Z', '{"keep":"first"}'),
+			       ('p', 'd1', 'srB', 'h', '2026-01-02T00:00:00Z', '{"dropped":"second"}');
+		PRAGMA user_version = 5;
+	`)
+	if err != nil {
+		t.Fatalf("seed v5 schema: %v", err)
+	}
+	raw.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	if s.Compat() != CompatOK {
+		t.Errorf("migrated store: got Compat %v, want ok", s.Compat())
+	}
+	if got := userVersion(t, s); got != HistorySchemaVersion {
+		t.Errorf("user_version: got %d, want %d", got, HistorySchemaVersion)
+	}
+	if tableExists(t, path, "planner_stats_old") {
+		t.Error("planner_stats_old survived the rebuild")
+	}
+
+	// colliding rows collapse to the earliest observation, id preserved
+	var (
+		id      int64
+		payload string
+	)
+	if err := s.db.QueryRow(`SELECT id, payload_json FROM planner_stats
+		WHERE project_id = 'p' AND database_id = 'd1' AND content_hash = 'h'`).Scan(&id, &payload); err != nil {
+		t.Fatalf("read preserved row: %v", err)
+	}
+	if id != 1 || !strings.Contains(payload, "first") {
+		t.Errorf("preserved row = (id %d, %s), want (1, earliest)", id, payload)
+	}
+
+	// same stats under a second database now insert
+	if _, err := s.db.Exec(`INSERT INTO planner_stats
+		(project_id, database_id, schema_ref_hash, content_hash, timestamp, payload_json)
+		VALUES ('p', 'd2', 'srA', 'h', '2026-01-01T00:00:00Z', '{}')`); err != nil {
+		t.Errorf("same stats under a second database rejected: %v", err)
+	}
+}
+
 // The pragma rides the DSN; set via db.Exec it would land on one pooled connection only.
 func TestOpenSetsBusyTimeoutOnEveryConnection(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "history.db"))

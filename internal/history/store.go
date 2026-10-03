@@ -22,7 +22,8 @@ import (
 // Purely additive tables (CREATE TABLE IF NOT EXISTS, no rename/drop) don't bump this.
 // 4: UNIQUE(project_id, database_id, content_hash) on query_stats
 // 5: captured_locally on every row table, so --due ignores pulled rows
-const HistorySchemaVersion = 5
+// 6: planner_stats rebuilt, UNIQUE scoped to (project_id, database_id, content_hash)
+const HistorySchemaVersion = 6
 
 type (
 	Compat int
@@ -236,8 +237,7 @@ func (s *Store) migrate() error {
 			content_hash    TEXT NOT NULL,
 			timestamp       TEXT NOT NULL,
 			payload_json    TEXT NOT NULL,
-			captured_locally INTEGER NOT NULL DEFAULT 1,
-			UNIQUE(schema_ref_hash, content_hash)
+			captured_locally INTEGER NOT NULL DEFAULT 1
 		);
 		CREATE INDEX IF NOT EXISTS planner_stats_by_key_taken_at
 			ON planner_stats(project_id, database_id, timestamp DESC);
@@ -319,6 +319,14 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// v5 -> v6: inline UNIQUE(schema_ref_hash, content_hash) ignored the
+	// database; SQLite can't drop it, so rebuild the table scoped per database.
+	if userVersion < HistorySchemaVersion {
+		if err := s.rebuildPlannerStats(); err != nil {
+			return err
+		}
+	}
+
 	// v3 -> v4: pre-constraint DBs can hold duplicate query_stats hashes (an idle
 	// node captured twice). Keep the first observation, matching what
 	// INSERT OR IGNORE does from here on. NULL-keyed rows are skipped: a unique
@@ -357,6 +365,10 @@ func (s *Store) migrate() error {
 		ON query_stats(project_id, database_id, content_hash)`); err != nil {
 		return fmt.Errorf("migration failed (query_stats_by_content_key): %w", err)
 	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS planner_stats_by_content_key
+		ON planner_stats(project_id, database_id, content_hash)`); err != nil {
+		return fmt.Errorf("migration failed (planner_stats_by_content_key): %w", err)
+	}
 
 	// Best-effort read-only index: a read-only or busy history.db must still open.
 	// Ascending timestamp + rowid tail yields "timestamp DESC, id DESC" without a sort.
@@ -365,6 +377,63 @@ func (s *Store) migrate() error {
 			"(project_id, database_id, node_source, timestamp)"); err != nil {
 			slog.Debug("label index not created", "table", table, "err", err)
 		}
+	}
+	return nil
+}
+
+// rebuildPlannerStats rebuilds planner_stats scoped per database, deduping rows
+// that would violate the new key (first observation wins, like INSERT OR IGNORE).
+func (s *Store) rebuildPlannerStats() error {
+	// origin 'u' is an inline constraint's autoindex; our explicit index is 'c'.
+	var inlineUnique int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_index_list('planner_stats') WHERE origin = 'u'`).Scan(&inlineUnique); err != nil {
+		return fmt.Errorf("migration failed (inspect planner_stats): %w", err)
+	}
+	if inlineUnique == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("migration failed (planner_stats rebuild): %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, stmt := range []string{
+		`ALTER TABLE planner_stats RENAME TO planner_stats_old`,
+		`CREATE TABLE planner_stats (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id      TEXT,
+			database_id     TEXT,
+			schema_ref_hash TEXT NOT NULL,
+			content_hash    TEXT NOT NULL,
+			timestamp       TEXT NOT NULL,
+			payload_json    TEXT NOT NULL,
+			captured_locally INTEGER NOT NULL DEFAULT 1
+		)`,
+		`CREATE UNIQUE INDEX planner_stats_by_content_key
+		   ON planner_stats(project_id, database_id, content_hash)`,
+		// OR IGNORE drops rows the old global key allowed to collide; earliest
+		// (timestamp, id) wins, and NULL keys stay distinct like the index.
+		`INSERT OR IGNORE INTO planner_stats
+		   (id, project_id, database_id, schema_ref_hash, content_hash, timestamp, payload_json, captured_locally)
+		 SELECT id, project_id, database_id, schema_ref_hash, content_hash, timestamp, payload_json, captured_locally
+		   FROM planner_stats_old
+		  ORDER BY timestamp ASC, id ASC`,
+		`DROP TABLE planner_stats_old`,
+		`CREATE INDEX planner_stats_by_key_taken_at
+		   ON planner_stats(project_id, database_id, timestamp DESC)`,
+		`CREATE INDEX planner_stats_by_schema_ref
+		   ON planner_stats(schema_ref_hash)`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migration failed (planner_stats rebuild): %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migration failed (planner_stats rebuild): %w", err)
 	}
 	return nil
 }
