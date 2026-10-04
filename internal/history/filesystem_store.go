@@ -8,334 +8,70 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"sync"
 	"time"
-
-	"github.com/boringsql/dryrun/internal/schema"
 )
 
-// FilesystemStore persists each (key, schema) as a zstd-compressed bundle
-// file. Planner/activity/query rows live inside the matching bundle keyed by
-// schema_ref_hash; cross-store sync uses this wire format end-to-end.
-type FilesystemStore struct {
+// fsBackend persists each (key, schema) as a zstd-compressed bundle file.
+// Planner/activity/query rows live inside the matching bundle keyed by
+// schema_ref_hash.
+type fsBackend struct {
 	root string
-	mu   sync.Mutex
 }
 
-func NewFilesystemStore(root string) (*FilesystemStore, error) {
+var _ bundleBackend = (*fsBackend)(nil)
+
+func NewFilesystemStore(root string) (SnapshotStore, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("cannot create filesystem store root: %w", err)
 	}
-	return &FilesystemStore{root: root}, nil
+	return &bundleStore{backend: &fsBackend{root: root}}, nil
 }
 
-// Bundle is the on-disk JSON shape.
-type Bundle struct {
-	Schema   *schema.SchemaSnapshot                   `json:"schema"`
-	Planner  *schema.PlannerStatsSnapshot             `json:"planner"`
-	Activity map[string]*schema.ActivityStatsSnapshot `json:"activity"`
-	Query    map[string]*schema.QueryStatsSnapshot    `json:"query,omitempty"`
-}
-
-var (
-	// putting planner or activity without a matching schema bundle is rejected;
-	// the bundle is keyed by schema_ref_hash and must exist first.
-	ErrOrphanSnapshot = errors.New("no schema bundle matches schema_ref_hash")
-)
-
-func (f *FilesystemStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (PutOutcome, error) {
-	switch {
-	case snap.AsSchema() != nil:
-		return f.putSchema(ctx, key, snap.AsSchema())
-	case snap.AsPlanner() != nil:
-		return f.putPlanner(ctx, key, snap.AsPlanner())
-	case snap.AsActivity() != nil:
-		return f.putActivity(ctx, key, snap.AsActivity())
-	case snap.AsQueryStats() != nil:
-		return f.putQueryStats(ctx, key, snap.AsQueryStats())
-	}
-	return PutInserted, fmt.Errorf("empty StoredSnapshot")
-}
-
-func (f *FilesystemStore) putSchema(_ context.Context, key SnapshotKey, snap *schema.SchemaSnapshot) (PutOutcome, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
+func (f *fsBackend) list(_ context.Context, key SnapshotKey) ([]*Bundle, error) {
 	dir := BundleDir(f.root, key)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return PutInserted, err
-	}
-
-	// dedup: a bundle whose filename already carries this content_hash is the
-	// same schema (filename embeds the hash, so we can short-circuit without
-	// decompressing).
 	entries, err := readBundleEntries(dir)
-	if err != nil {
-		return PutInserted, err
-	}
-	for _, e := range entries {
-		if e.contentHash == snap.ContentHash {
-			return PutDeduped, nil
-		}
-	}
-
-	b := Bundle{Schema: snap, Activity: map[string]*schema.ActivityStatsSnapshot{}}
-	if err := writeBundleAtomic(filepath.Join(dir, BundleFilename(snap.Timestamp, snap.ContentHash)), &b); err != nil {
-		return PutInserted, err
-	}
-	return PutInserted, nil
-}
-
-func (f *FilesystemStore) putPlanner(_ context.Context, key SnapshotKey, p *schema.PlannerStatsSnapshot) (PutOutcome, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	path, b, err := f.findBundleBySchemaRef(key, p.SchemaRefHash)
-	if err != nil {
-		return PutInserted, err
-	}
-	if b.Planner != nil && b.Planner.ContentHash == p.ContentHash {
-		return PutDeduped, nil
-	}
-	b.Planner = p
-	if err := writeBundleAtomic(path, b); err != nil {
-		return PutInserted, err
-	}
-	return PutInserted, nil
-}
-
-func (f *FilesystemStore) putActivity(_ context.Context, key SnapshotKey, a *schema.ActivityStatsSnapshot) (PutOutcome, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	path, b, err := f.findBundleBySchemaRef(key, a.SchemaRefHash)
-	if err != nil {
-		return PutInserted, err
-	}
-	if b.Activity == nil {
-		b.Activity = map[string]*schema.ActivityStatsSnapshot{}
-	}
-	if existing, ok := b.Activity[a.Node.Source]; ok && existing.ContentHash == a.ContentHash {
-		return PutDeduped, nil
-	}
-	b.Activity[a.Node.Source] = a
-	if err := writeBundleAtomic(path, b); err != nil {
-		return PutInserted, err
-	}
-	return PutInserted, nil
-}
-
-func (f *FilesystemStore) putQueryStats(_ context.Context, key SnapshotKey, q *schema.QueryStatsSnapshot) (PutOutcome, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	path, b, err := f.findBundleBySchemaRef(key, q.SchemaRefHash)
-	if err != nil {
-		return PutInserted, err
-	}
-	if b.Query == nil {
-		b.Query = map[string]*schema.QueryStatsSnapshot{}
-	}
-	if existing, ok := b.Query[q.Node.Source]; ok && existing.ContentHash == q.ContentHash {
-		return PutDeduped, nil
-	}
-	b.Query[q.Node.Source] = q
-	if err := writeBundleAtomic(path, b); err != nil {
-		return PutInserted, err
-	}
-	return PutInserted, nil
-}
-
-func (f *FilesystemStore) Get(ctx context.Context, key SnapshotKey, kind SnapshotKind, at SnapshotRef) (StoredSnapshot, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	bundles, err := f.loadBundles(key)
-	if err != nil {
-		return StoredSnapshot{}, err
-	}
-
-	switch kind.Tag {
-	case KindSchema:
-		b, err := pickSchemaBundle(bundles, at)
-		if err != nil {
-			return StoredSnapshot{}, err
-		}
-		return WrapSchema(b.Schema), nil
-	case KindPlanner:
-		b, err := pickPlannerBundle(bundles, at)
-		if err != nil {
-			return StoredSnapshot{}, err
-		}
-		return WrapPlanner(b.Planner), nil
-	case KindActivity:
-		a, err := pickActivity(bundles, kind.NodeLabel, at)
-		if err != nil {
-			return StoredSnapshot{}, err
-		}
-		return WrapActivity(a), nil
-	case KindQuery:
-		q, err := pickQueryStats(bundles, kind.NodeLabel, at)
-		if err != nil {
-			return StoredSnapshot{}, err
-		}
-		return WrapQueryStats(q), nil
-	}
-	return StoredSnapshot{}, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
-}
-
-func (f *FilesystemStore) List(ctx context.Context, key SnapshotKey, kind SnapshotKind, rng TimeRange) ([]SnapshotSummary, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	bundles, err := f.loadBundles(key)
 	if err != nil {
 		return nil, err
 	}
-
-	var out []SnapshotSummary
-	for _, b := range bundles {
-		ss, err := bundleSummaries(b, kind, rng)
+	out := make([]*Bundle, 0, len(entries))
+	for _, e := range entries {
+		b, err := readBundle(filepath.Join(dir, e.name))
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, ss...)
-	}
-	// hash tiebreak: equal timestamps would otherwise make latest~N nondeterministic
-	sort.SliceStable(out, func(i, j int) bool {
-		if !out[i].Timestamp.Equal(out[j].Timestamp) {
-			return out[i].Timestamp.After(out[j].Timestamp)
-		}
-		return out[i].ContentHash < out[j].ContentHash
-	})
-	return out, nil
-}
-
-// per-bundle summaries for one kind; shared by FilesystemStore and OCIStore so
-// the two backends report identically
-func bundleSummaries(b *Bundle, kind SnapshotKind, rng TimeRange) ([]SnapshotSummary, error) {
-	var out []SnapshotSummary
-	switch kind.Tag {
-	case KindSchema:
-		s := b.Schema
-		if inRange(s.Timestamp, rng) {
-			out = append(out, SnapshotSummary{
-				Kind: SchemaKind(), Timestamp: s.Timestamp,
-				ContentHash: s.ContentHash, SchemaRefHash: s.ContentHash,
-				Database: s.Database,
-			})
-		}
-	case KindPlanner:
-		if b.Planner != nil && inRange(b.Planner.Timestamp, rng) {
-			out = append(out, SnapshotSummary{
-				Kind: PlannerKind(), Timestamp: b.Planner.Timestamp,
-				ContentHash: b.Planner.ContentHash, SchemaRefHash: b.Planner.SchemaRefHash,
-				Database: b.Planner.Database,
-			})
-		}
-	case KindActivity:
-		for label, a := range b.Activity {
-			if kind.NodeLabel != "" && kind.NodeLabel != label {
-				continue
-			}
-			if !inRange(a.Node.Timestamp, rng) {
-				continue
-			}
-			out = append(out, SnapshotSummary{
-				Kind: ActivityKind(label), Timestamp: a.Node.Timestamp,
-				ContentHash: a.ContentHash, SchemaRefHash: a.SchemaRefHash,
-				NodeLabel: label,
-			})
-		}
-	case KindQuery:
-		for label, q := range b.Query {
-			if kind.NodeLabel != "" && kind.NodeLabel != label {
-				continue
-			}
-			if !inRange(q.Node.Timestamp, rng) {
-				continue
-			}
-			out = append(out, SnapshotSummary{
-				Kind: QueryKind(label), Timestamp: q.Node.Timestamp,
-				ContentHash: q.ContentHash, SchemaRefHash: q.SchemaRefHash,
-				NodeLabel: label,
-			})
-		}
-	default:
-		return nil, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
+		out = append(out, b)
 	}
 	return out, nil
 }
 
-func (f *FilesystemStore) Latest(ctx context.Context, key SnapshotKey, kind SnapshotKind) (*SnapshotSummary, error) {
-	list, err := f.List(ctx, key, kind, TimeRange{})
-	if err != nil || len(list) == 0 {
-		return nil, err
-	}
-	first := list[0]
-	return &first, nil
-}
-
-func (f *FilesystemStore) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	bundles, err := f.loadBundles(key)
+func (f *fsBackend) load(_ context.Context, key SnapshotKey, schemaRefHash string) (*Bundle, bool, error) {
+	dir := BundleDir(f.root, key)
+	entries, err := readBundleEntries(dir)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return bundleKinds(bundles), nil
+	for _, e := range entries {
+		if e.contentHash != schemaRefHash {
+			continue
+		}
+		b, err := readBundle(filepath.Join(dir, e.name))
+		if err != nil {
+			return nil, false, err
+		}
+		return b, true, nil
+	}
+	return nil, false, nil
 }
 
-func bundleKinds(bundles []*Bundle) []SnapshotKind {
-	var hasSchema, hasPlanner bool
-	labels := map[string]struct{}{}
-	queryLabels := map[string]struct{}{}
-	for _, b := range bundles {
-		if b.Schema != nil {
-			hasSchema = true
-		}
-		if b.Planner != nil {
-			hasPlanner = true
-		}
-		for label := range b.Activity {
-			labels[label] = struct{}{}
-		}
-		for label := range b.Query {
-			queryLabels[label] = struct{}{}
-		}
+func (f *fsBackend) save(_ context.Context, key SnapshotKey, b *Bundle) error {
+	dir := BundleDir(f.root, key)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
 	}
-
-	var out []SnapshotKind
-	if hasSchema {
-		out = append(out, SchemaKind())
-	}
-	if hasPlanner {
-		out = append(out, PlannerKind())
-	}
-	sortedLabels := make([]string, 0, len(labels))
-	for label := range labels {
-		sortedLabels = append(sortedLabels, label)
-	}
-	sort.Strings(sortedLabels)
-	for _, label := range sortedLabels {
-		out = append(out, ActivityKind(label))
-	}
-	sortedQueryLabels := make([]string, 0, len(queryLabels))
-	for label := range queryLabels {
-		sortedQueryLabels = append(sortedQueryLabels, label)
-	}
-	sort.Strings(sortedQueryLabels)
-	for _, label := range sortedQueryLabels {
-		out = append(out, QueryKind(label))
-	}
-	return out
+	return writeBundleAtomic(filepath.Join(dir, BundleFilename(b.Schema.Timestamp, b.Schema.ContentHash)), b)
 }
 
-func (f *FilesystemStore) ListKeys(_ context.Context) ([]SnapshotKey, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
+func (f *fsBackend) listKeys(_ context.Context) ([]SnapshotKey, error) {
 	projects, err := os.ReadDir(f.root)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -379,8 +115,6 @@ func (f *FilesystemStore) ListKeys(_ context.Context) ([]SnapshotKey, error) {
 	return out, nil
 }
 
-var _ SnapshotStore = (*FilesystemStore)(nil)
-
 // internal helpers
 
 type bundleEntry struct {
@@ -417,235 +151,6 @@ func readBundleEntries(dir string) ([]bundleEntry, error) {
 		return out[i].contentHash < out[j].contentHash
 	})
 	return out, nil
-}
-
-func (f *FilesystemStore) loadBundles(key SnapshotKey) ([]*Bundle, error) {
-	dir := BundleDir(f.root, key)
-	entries, err := readBundleEntries(dir)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*Bundle, 0, len(entries))
-	for _, e := range entries {
-		b, err := readBundle(filepath.Join(dir, e.name))
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, b)
-	}
-	return out, nil
-}
-
-func (f *FilesystemStore) findBundleBySchemaRef(key SnapshotKey, schemaRefHash string) (string, *Bundle, error) {
-	dir := BundleDir(f.root, key)
-	entries, err := readBundleEntries(dir)
-	if err != nil {
-		return "", nil, err
-	}
-	for _, e := range entries {
-		if e.contentHash != schemaRefHash {
-			continue
-		}
-		path := filepath.Join(dir, e.name)
-		b, err := readBundle(path)
-		if err != nil {
-			return "", nil, err
-		}
-		return path, b, nil
-	}
-	return "", nil, fmt.Errorf("%w: schema_ref=%s", ErrOrphanSnapshot, schemaRefHash)
-}
-
-func pickSchemaBundle(bundles []*Bundle, at SnapshotRef) (*Bundle, error) {
-	switch at.Kind {
-	case RefLatest:
-		if len(bundles) == 0 {
-			return nil, fmt.Errorf("%w (latest)", ErrSnapshotNotFound)
-		}
-		return bundles[0], nil
-	case RefAt:
-		for _, b := range bundles {
-			if !b.Schema.Timestamp.After(at.At) {
-				return b, nil
-			}
-		}
-		return nil, fmt.Errorf("%w (at-or-before %s)", ErrSnapshotNotFound, at.At.Format(time.RFC3339))
-	case RefHash:
-		for _, b := range bundles {
-			if b.Schema.ContentHash == at.Hash {
-				return b, nil
-			}
-		}
-		return nil, fmt.Errorf("%w (hash %s)", ErrSnapshotNotFound, at.Hash)
-	case RefIndex:
-		if at.Index >= 0 && at.Index < len(bundles) {
-			return bundles[at.Index], nil
-		}
-		return nil, fmt.Errorf("%w (latest~%d)", ErrSnapshotNotFound, at.Index)
-	}
-	return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
-}
-
-func pickPlannerBundle(bundles []*Bundle, at SnapshotRef) (*Bundle, error) {
-	switch at.Kind {
-	case RefLatest:
-		for _, b := range bundles {
-			if b.Planner != nil {
-				return b, nil
-			}
-		}
-		return nil, fmt.Errorf("%w (latest planner)", ErrSnapshotNotFound)
-	case RefAt:
-		for _, b := range bundles {
-			if b.Planner != nil && !b.Planner.Timestamp.After(at.At) {
-				return b, nil
-			}
-		}
-		return nil, fmt.Errorf("%w (planner at-or-before %s)", ErrSnapshotNotFound, at.At.Format(time.RFC3339))
-	case RefHash:
-		for _, b := range bundles {
-			if b.Planner != nil && b.Planner.ContentHash == at.Hash {
-				return b, nil
-			}
-		}
-		return nil, fmt.Errorf("%w (planner hash %s)", ErrSnapshotNotFound, at.Hash)
-	case RefIndex:
-		skip := at.Index
-		for _, b := range bundles {
-			if b.Planner == nil {
-				continue
-			}
-			if skip == 0 {
-				return b, nil
-			}
-			skip--
-		}
-		return nil, fmt.Errorf("%w (planner latest~%d)", ErrSnapshotNotFound, at.Index)
-	}
-	return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
-}
-
-func pickActivity(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schema.ActivityStatsSnapshot, error) {
-	switch at.Kind {
-	case RefLatest:
-		for _, b := range bundles {
-			if a := selectActivity(b, nodeLabel); a != nil {
-				return a, nil
-			}
-		}
-		return nil, fmt.Errorf("%w (latest activity)", ErrSnapshotNotFound)
-	case RefAt:
-		for _, b := range bundles {
-			a := selectActivity(b, nodeLabel)
-			if a != nil && !a.Node.Timestamp.After(at.At) {
-				return a, nil
-			}
-		}
-		return nil, fmt.Errorf("%w (activity at-or-before %s)", ErrSnapshotNotFound, at.At.Format(time.RFC3339))
-	case RefHash:
-		for _, b := range bundles {
-			for label, a := range b.Activity {
-				if nodeLabel != "" && nodeLabel != label {
-					continue
-				}
-				if a.ContentHash == at.Hash {
-					return a, nil
-				}
-			}
-		}
-		return nil, fmt.Errorf("%w (activity hash %s)", ErrSnapshotNotFound, at.Hash)
-	case RefIndex:
-		skip := at.Index
-		for _, b := range bundles {
-			a := selectActivity(b, nodeLabel)
-			if a == nil {
-				continue
-			}
-			if skip == 0 {
-				return a, nil
-			}
-			skip--
-		}
-		return nil, fmt.Errorf("%w (activity latest~%d)", ErrSnapshotNotFound, at.Index)
-	}
-	return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
-}
-
-func selectActivity(b *Bundle, nodeLabel string) *schema.ActivityStatsSnapshot {
-	if nodeLabel != "" {
-		return b.Activity[nodeLabel]
-	}
-	// any node (used when caller didn't pin a label)
-	for _, a := range b.Activity {
-		return a
-	}
-	return nil
-}
-
-func pickQueryStats(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schema.QueryStatsSnapshot, error) {
-	switch at.Kind {
-	case RefLatest:
-		for _, b := range bundles {
-			if q := selectQueryStats(b, nodeLabel); q != nil {
-				return q, nil
-			}
-		}
-		return nil, fmt.Errorf("%w (latest query stats)", ErrSnapshotNotFound)
-	case RefAt:
-		for _, b := range bundles {
-			q := selectQueryStats(b, nodeLabel)
-			if q != nil && !q.Node.Timestamp.After(at.At) {
-				return q, nil
-			}
-		}
-		return nil, fmt.Errorf("%w (query stats at-or-before %s)", ErrSnapshotNotFound, at.At.Format(time.RFC3339))
-	case RefHash:
-		for _, b := range bundles {
-			for label, q := range b.Query {
-				if nodeLabel != "" && nodeLabel != label {
-					continue
-				}
-				if q.ContentHash == at.Hash {
-					return q, nil
-				}
-			}
-		}
-		return nil, fmt.Errorf("%w (query stats hash %s)", ErrSnapshotNotFound, at.Hash)
-	case RefIndex:
-		skip := at.Index
-		for _, b := range bundles {
-			q := selectQueryStats(b, nodeLabel)
-			if q == nil {
-				continue
-			}
-			if skip == 0 {
-				return q, nil
-			}
-			skip--
-		}
-		return nil, fmt.Errorf("%w (query stats latest~%d)", ErrSnapshotNotFound, at.Index)
-	}
-	return nil, fmt.Errorf("unknown SnapshotRef kind: %d", at.Kind)
-}
-
-func selectQueryStats(b *Bundle, nodeLabel string) *schema.QueryStatsSnapshot {
-	if nodeLabel != "" {
-		return b.Query[nodeLabel]
-	}
-	for _, q := range b.Query {
-		return q
-	}
-	return nil
-}
-
-func inRange(ts time.Time, rng TimeRange) bool {
-	if rng.From != nil && ts.Before(*rng.From) {
-		return false
-	}
-	if rng.To != nil && !ts.Before(*rng.To) {
-		return false
-	}
-	return true
 }
 
 func readBundle(path string) (*Bundle, error) {

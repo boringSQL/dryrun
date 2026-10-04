@@ -77,9 +77,9 @@ func TestNewOCIStore_DefaultsAndValidation(t *testing.T) {
 	}
 
 	// A base with a trailing slash should be normalized, not passed through.
-	store, err := NewOCIStore(OCIConfig{Base: "reg.example.com/proj/dryrun/"})
+	store, err := newOCIBackend(OCIConfig{Base: "reg.example.com/proj/dryrun/"})
 	if err != nil {
-		t.Fatalf("NewOCIStore: %v", err)
+		t.Fatalf("newOCIBackend: %v", err)
 	}
 	if store.base != "reg.example.com/proj/dryrun" {
 		t.Errorf("base not trimmed: got %q", store.base)
@@ -99,12 +99,12 @@ func TestNewOCIStore_DefaultsAndValidation(t *testing.T) {
 // custom StreamFor flows through instead of the default — that override is what
 // makes the shared-stream feature (two projects -> one repo) work.
 func TestOCIStore_RepoReference(t *testing.T) {
-	store, err := NewOCIStore(OCIConfig{
+	store, err := newOCIBackend(OCIConfig{
 		Base:      "reg.example.com/proj/dryrun",
 		StreamFor: func(SnapshotKey) string { return "shared/auth" },
 	})
 	if err != nil {
-		t.Fatalf("NewOCIStore: %v", err)
+		t.Fatalf("newOCIBackend: %v", err)
 	}
 
 	repo, err := store.repo(key("ignored", "ignored"))

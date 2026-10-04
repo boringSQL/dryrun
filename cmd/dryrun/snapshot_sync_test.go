@@ -83,7 +83,7 @@ func openSQLite(t *testing.T) *history.Store {
 	return store
 }
 
-func openFS(t *testing.T) *history.FilesystemStore {
+func openFS(t *testing.T) history.SnapshotStore {
 	t.Helper()
 	store, err := history.NewFilesystemStore(t.TempDir())
 	if err != nil {

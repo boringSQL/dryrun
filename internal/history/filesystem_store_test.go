@@ -8,12 +8,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
 
-func testFsStore(t *testing.T) (*FilesystemStore, string) {
+func testFsStore(t *testing.T) (SnapshotStore, string) {
 	t.Helper()
 	root := t.TempDir()
 	store, err := NewFilesystemStore(root)
@@ -158,21 +157,37 @@ func TestFilesystemStoreBundleJSONShape(t *testing.T) {
 	}
 }
 
-// TestFilesystemStoreSchemaDedup: putting the byte-identical schema twice
-// returns PutDeduped on the second call and the destination directory
-// holds exactly one bundle file. This is the cross-store contract that
-// keeps `push --all` from doubling history on every run.
-func TestFilesystemStoreSchemaDedup(t *testing.T) {
+// TestFilesystemStoreDedup: re-putting a byte-identical snapshot returns
+// PutDeduped on the second call for every kind, and the destination directory
+// holds exactly one bundle file. This is the cross-store contract that keeps
+// `push --all` from doubling history on every run.
+func TestFilesystemStoreDedup(t *testing.T) {
 	store, root := testFsStore(t)
 	ctx := context.Background()
 	k := key("acme", "primary")
-	snap := testSnapshot("dup-hash", "appdb")
 
+	snap := testSnapshot("dup-hash", "appdb")
 	if o, err := store.Put(ctx, k, WrapSchema(snap)); err != nil || o != PutInserted {
-		t.Fatalf("first put: %v %v", o, err)
+		t.Fatalf("first schema put: %v %v", o, err)
 	}
 	if o, err := store.Put(ctx, k, WrapSchema(snap)); err != nil || o != PutDeduped {
-		t.Fatalf("second put: %v %v, want PutDeduped", o, err)
+		t.Fatalf("second schema put: %v %v, want PutDeduped", o, err)
+	}
+
+	p := plannerFixture("dup-hash", "pl-1", "appdb")
+	if _, err := store.Put(ctx, k, WrapPlanner(p)); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := store.Put(ctx, k, WrapPlanner(p)); err != nil || o != PutDeduped {
+		t.Fatalf("planner re-put: %v %v, want PutDeduped", o, err)
+	}
+
+	a := activityFixture("dup-hash", "ac-1", "primary", false)
+	if _, err := store.Put(ctx, k, WrapActivity(a)); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := store.Put(ctx, k, WrapActivity(a)); err != nil || o != PutDeduped {
+		t.Fatalf("activity re-put: %v %v, want PutDeduped", o, err)
 	}
 
 	files, _ := os.ReadDir(BundleDir(root, k))
@@ -300,60 +315,6 @@ func TestFilesystemStoreConcurrentPutIdempotency(t *testing.T) {
 	}
 	if tmps != 0 {
 		t.Errorf("leftover tmp files: got %d, want 0", tmps)
-	}
-}
-
-// TestFilesystemStorePlannerActivityDedup: re-putting a planner / activity
-// snapshot whose content_hash matches the existing slot returns PutDeduped
-// without rewriting the bundle. We confirm via file mtime that the bundle
-// is left alone, which matters for storage backends where every rewrite
-// is an additional cost.
-func TestFilesystemStorePlannerActivityDedup(t *testing.T) {
-	store, root := testFsStore(t)
-	ctx := context.Background()
-	k := key("acme", "primary")
-
-	s := testSnapshot("sh-1", "appdb")
-	if _, err := store.Put(ctx, k, WrapSchema(s)); err != nil {
-		t.Fatal(err)
-	}
-	p := plannerFixture("sh-1", "pl-1", "appdb")
-	if _, err := store.Put(ctx, k, WrapPlanner(p)); err != nil {
-		t.Fatal(err)
-	}
-
-	path := filepath.Join(BundleDir(root, k), BundleFilename(s.Timestamp, s.ContentHash))
-	info1, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// FS mtime granularity is OS-dependent; sleep just over a second so we
-	// can detect a write if it happens.
-	time.Sleep(1100 * time.Millisecond)
-
-	if o, err := store.Put(ctx, k, WrapPlanner(p)); err != nil || o != PutDeduped {
-		t.Fatalf("planner re-put: %v %v, want PutDeduped", o, err)
-	}
-	info2, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !info1.ModTime().Equal(info2.ModTime()) {
-		t.Errorf("planner dedup rewrote the bundle: %v -> %v", info1.ModTime(), info2.ModTime())
-	}
-
-	a := activityFixture("sh-1", "ac-1", "primary", false)
-	if _, err := store.Put(ctx, k, WrapActivity(a)); err != nil {
-		t.Fatal(err)
-	}
-	info3, _ := os.Stat(path)
-	if o, err := store.Put(ctx, k, WrapActivity(a)); err != nil || o != PutDeduped {
-		t.Fatalf("activity re-put: %v %v, want PutDeduped", o, err)
-	}
-	info4, _ := os.Stat(path)
-	if !info3.ModTime().Equal(info4.ModTime()) {
-		t.Errorf("activity dedup rewrote the bundle: %v -> %v", info3.ModTime(), info4.ModTime())
 	}
 }
 

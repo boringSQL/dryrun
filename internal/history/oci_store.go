@@ -18,8 +18,6 @@ import (
 	"oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/errcode"
-
-	"github.com/boringsql/dryrun/internal/schema"
 )
 
 const (
@@ -27,11 +25,11 @@ const (
 	artifactTypeSnapshot = "application/vnd.dryrun.snapshot.v1+json"
 )
 
-// OCIStore persists each schema bundle as one OCI artifact (manifest + a single
-// zstd layer). Planner/activity merge into the matching bundle by
-// schema_ref_hash, mirroring FilesystemStore.
+// ociBackend persists each schema bundle as one OCI artifact (manifest + a
+// single zstd layer). Planner/activity merge into the matching bundle by
+// schema_ref_hash, mirroring the filesystem backend.
 type (
-	OCIStore struct {
+	ociBackend struct {
 		base      string
 		client    remote.Client
 		plainHTTP bool
@@ -44,16 +42,11 @@ type (
 		PlainHTTP bool
 		StreamFor func(SnapshotKey) string // default StreamSuffix
 	}
-
-	ociBundle struct {
-		manifest ocispec.Descriptor
-		bundle   *Bundle
-	}
 )
 
-var _ SnapshotStore = (*OCIStore)(nil)
+var _ bundleBackend = (*ociBackend)(nil)
 
-func NewOCIStore(cfg OCIConfig) (*OCIStore, error) {
+func newOCIBackend(cfg OCIConfig) (*ociBackend, error) {
 	if cfg.Base == "" {
 		return nil, fmt.Errorf("oci store: empty base reference")
 	}
@@ -61,7 +54,7 @@ func NewOCIStore(cfg OCIConfig) (*OCIStore, error) {
 	if streamFor == nil {
 		streamFor = StreamSuffix
 	}
-	return &OCIStore{
+	return &ociBackend{
 		base:      strings.TrimRight(cfg.Base, "/"),
 		client:    cfg.Client,
 		plainHTTP: cfg.PlainHTTP,
@@ -69,7 +62,15 @@ func NewOCIStore(cfg OCIConfig) (*OCIStore, error) {
 	}, nil
 }
 
-func (o *OCIStore) repo(key SnapshotKey) (*remote.Repository, error) {
+func NewOCIStore(cfg OCIConfig) (SnapshotStore, error) {
+	backend, err := newOCIBackend(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &bundleStore{backend: backend}, nil
+}
+
+func (o *ociBackend) repo(key SnapshotKey) (*remote.Repository, error) {
 	ref := o.base + "/" + o.streamFor(key)
 	r, err := remote.NewRepository(ref)
 	if err != nil {
@@ -83,116 +84,126 @@ func (o *OCIStore) repo(key SnapshotKey) (*remote.Repository, error) {
 // version tag embeds ts+hash like the filesystem filename; ref tag is hash-only
 // so planner/activity locate their schema bundle by schema_ref_hash alone
 func versionTag(ts time.Time, contentHash string) string {
-	return fmt.Sprintf("%s-%s", ts.UTC().Format(bundleTimeLayout), contentHash)
+	return formatVersionedName(ts, contentHash)
 }
 
 func refTag(schemaHash string) string {
 	return "ref-" + schemaHash
 }
 
-func (o *OCIStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnapshot) (PutOutcome, error) {
-	switch {
-	case snap.AsSchema() != nil:
-		return o.putSchema(ctx, key, snap.AsSchema())
-	case snap.AsPlanner() != nil:
-		return o.putPlanner(ctx, key, snap.AsPlanner())
-	case snap.AsActivity() != nil:
-		return o.putActivity(ctx, key, snap.AsActivity())
-	case snap.AsQueryStats() != nil:
-		return o.putQueryStats(ctx, key, snap.AsQueryStats())
-	}
-	return PutInserted, fmt.Errorf("empty StoredSnapshot")
-}
-
-func (o *OCIStore) putSchema(ctx context.Context, key SnapshotKey, s *schema.SchemaSnapshot) (PutOutcome, error) {
+func (o *ociBackend) list(ctx context.Context, key SnapshotKey) ([]*Bundle, error) {
 	repo, err := o.repo(key)
 	if err != nil {
-		return PutInserted, err
+		return nil, err
 	}
-	vtag := versionTag(s.Timestamp, s.ContentHash)
-	if _, ok, err := resolveTag(ctx, repo, vtag); err != nil {
-		return PutInserted, err
-	} else if ok {
-		return PutDeduped, nil
+	var items []*Bundle
+	err = repo.Tags(ctx, "", func(tags []string) error {
+		for _, t := range tags {
+			if _, _, ok := parseVersionTag(t); !ok {
+				continue
+			}
+			desc, ok, err := resolveTag(ctx, repo, t)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			b, err := fetchBundle(ctx, repo, desc)
+			if err != nil {
+				return err
+			}
+			items = append(items, b)
+		}
+		return nil
+	})
+	if err != nil {
+		// an absent repo (never pushed to) reads as empty, not an error
+		if isRepoAbsent(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	b := &Bundle{Schema: s, Activity: map[string]*schema.ActivityStatsSnapshot{}}
-	return o.pushTagged(ctx, repo, b)
+	sort.SliceStable(items, func(i, j int) bool {
+		if !items[i].Schema.Timestamp.Equal(items[j].Schema.Timestamp) {
+			return items[i].Schema.Timestamp.After(items[j].Schema.Timestamp)
+		}
+		return items[i].Schema.ContentHash < items[j].Schema.ContentHash
+	})
+	return items, nil
 }
 
-func (o *OCIStore) putPlanner(ctx context.Context, key SnapshotKey, p *schema.PlannerStatsSnapshot) (PutOutcome, error) {
+func (o *ociBackend) load(ctx context.Context, key SnapshotKey, schemaHash string) (*Bundle, bool, error) {
 	repo, err := o.repo(key)
 	if err != nil {
-		return PutInserted, err
+		return nil, false, err
 	}
-	b, ok, err := o.findBySchemaRef(ctx, repo, p.SchemaRefHash)
+	desc, ok, err := resolveTag(ctx, repo, refTag(schemaHash))
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	b, err := fetchBundle(ctx, repo, desc)
 	if err != nil {
-		return PutInserted, err
+		return nil, false, err
 	}
-	if !ok {
-		return PutInserted, ErrOrphanSnapshot
-	}
-	if b.Planner != nil && b.Planner.ContentHash == p.ContentHash {
-		return PutDeduped, nil
-	}
-	b.Planner = p
-	return o.pushTagged(ctx, repo, b)
+	return b, true, nil
 }
 
-func (o *OCIStore) putActivity(ctx context.Context, key SnapshotKey, a *schema.ActivityStatsSnapshot) (PutOutcome, error) {
-	repo, err := o.repo(key)
-	if err != nil {
-		return PutInserted, err
-	}
-	b, ok, err := o.findBySchemaRef(ctx, repo, a.SchemaRefHash)
-	if err != nil {
-		return PutInserted, err
-	}
-	if !ok {
-		return PutInserted, ErrOrphanSnapshot
-	}
-	if b.Activity == nil {
-		b.Activity = map[string]*schema.ActivityStatsSnapshot{}
-	}
-	if existing, ok := b.Activity[a.Node.Source]; ok && existing.ContentHash == a.ContentHash {
-		return PutDeduped, nil
-	}
-	b.Activity[a.Node.Source] = a
-	return o.pushTagged(ctx, repo, b)
-}
-
-func (o *OCIStore) putQueryStats(ctx context.Context, key SnapshotKey, q *schema.QueryStatsSnapshot) (PutOutcome, error) {
-	repo, err := o.repo(key)
-	if err != nil {
-		return PutInserted, err
-	}
-	b, ok, err := o.findBySchemaRef(ctx, repo, q.SchemaRefHash)
-	if err != nil {
-		return PutInserted, err
-	}
-	if !ok {
-		return PutInserted, ErrOrphanSnapshot
-	}
-	if b.Query == nil {
-		b.Query = map[string]*schema.QueryStatsSnapshot{}
-	}
-	if existing, ok := b.Query[q.Node.Source]; ok && existing.ContentHash == q.ContentHash {
-		return PutDeduped, nil
-	}
-	b.Query[q.Node.Source] = q
-	return o.pushTagged(ctx, repo, b)
-}
-
-// merge re-pushes under the same (schema-keyed) tags; old manifest is left for
+// save re-pushes under the same (schema-keyed) tags; old manifest is left for
 // registry cleanup
-func (o *OCIStore) pushTagged(ctx context.Context, repo *remote.Repository, b *Bundle) (PutOutcome, error) {
+func (o *ociBackend) save(ctx context.Context, key SnapshotKey, b *Bundle) error {
+	repo, err := o.repo(key)
+	if err != nil {
+		return err
+	}
 	man, err := o.pushBundle(ctx, repo, b)
 	if err != nil {
-		return PutInserted, err
+		return err
 	}
-	if err := tagBundle(ctx, repo, man, b); err != nil {
-		return PutInserted, err
+	return tagBundle(ctx, repo, man, b)
+}
+
+func (o *ociBackend) listKeys(ctx context.Context) ([]SnapshotKey, error) {
+	host, prefix, ok := strings.Cut(o.base, "/")
+	if !ok {
+		return nil, fmt.Errorf("oci store: base %q has no repo path", o.base)
 	}
-	return PutInserted, nil
+	reg, err := remote.NewRegistry(host)
+	if err != nil {
+		return nil, err
+	}
+	reg.Client = o.client
+	reg.PlainHTTP = o.plainHTTP
+
+	prefix += "/"
+	var out []SnapshotKey
+	err = reg.Repositories(ctx, "", func(repos []string) error {
+		for _, r := range repos {
+			suffix, ok := strings.CutPrefix(r, prefix)
+			if !ok {
+				continue
+			}
+			proj, db, ok := strings.Cut(suffix, "/")
+			if !ok || strings.Contains(db, "/") {
+				continue
+			}
+			out = append(out, SnapshotKey{ProjectID: ProjectId(proj), DatabaseID: DatabaseId(db)})
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errdef.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ProjectID != out[j].ProjectID {
+			return out[i].ProjectID < out[j].ProjectID
+		}
+		return out[i].DatabaseID < out[j].DatabaseID
+	})
+	return out, nil
 }
 
 func tagBundle(ctx context.Context, repo *remote.Repository, man ocispec.Descriptor, b *Bundle) error {
@@ -207,7 +218,7 @@ func tagBundle(ctx context.Context, repo *remote.Repository, man ocispec.Descrip
 	return nil
 }
 
-func (o *OCIStore) pushBundle(ctx context.Context, repo *remote.Repository, b *Bundle) (ocispec.Descriptor, error) {
+func (o *ociBackend) pushBundle(ctx context.Context, repo *remote.Repository, b *Bundle) (ocispec.Descriptor, error) {
 	raw, err := EncodeBundle(b)
 	if err != nil {
 		return ocispec.Descriptor{}, err
@@ -225,18 +236,6 @@ func (o *OCIStore) pushBundle(ctx context.Context, repo *remote.Repository, b *B
 		// pin created to the snapshot ts so identical bundles pack to identical manifests
 		ManifestAnnotations: map[string]string{ocispec.AnnotationCreated: b.Schema.Timestamp.UTC().Format(time.RFC3339)},
 	})
-}
-
-func (o *OCIStore) findBySchemaRef(ctx context.Context, repo *remote.Repository, schemaHash string) (*Bundle, bool, error) {
-	desc, ok, err := resolveTag(ctx, repo, refTag(schemaHash))
-	if err != nil || !ok {
-		return nil, false, err
-	}
-	b, err := fetchBundle(ctx, repo, desc)
-	if err != nil {
-		return nil, false, err
-	}
-	return b, true, nil
 }
 
 func pushIfAbsent(ctx context.Context, repo *remote.Repository, desc ocispec.Descriptor, data []byte) error {
@@ -292,59 +291,7 @@ func fetchBundle(ctx context.Context, repo *remote.Repository, manifest ocispec.
 
 // inverse of versionTag; ref-* and other tags fail the time parse and are skipped
 func parseVersionTag(tag string) (time.Time, string, bool) {
-	i := strings.IndexByte(tag, '-')
-	if i < 0 || i+1 >= len(tag) {
-		return time.Time{}, "", false
-	}
-	ts, err := time.Parse(bundleTimeLayout, tag[:i])
-	if err != nil {
-		return time.Time{}, "", false
-	}
-	return ts, tag[i+1:], true
-}
-
-// load fetches every version-tagged bundle newest-first, mirroring
-// FilesystemStore.loadBundles so the pick*/summary helpers behave identically
-func (o *OCIStore) load(ctx context.Context, key SnapshotKey) (*remote.Repository, []ociBundle, error) {
-	repo, err := o.repo(key)
-	if err != nil {
-		return nil, nil, err
-	}
-	var items []ociBundle
-	err = repo.Tags(ctx, "", func(tags []string) error {
-		for _, t := range tags {
-			if _, _, ok := parseVersionTag(t); !ok {
-				continue
-			}
-			desc, ok, err := resolveTag(ctx, repo, t)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				continue
-			}
-			b, err := fetchBundle(ctx, repo, desc)
-			if err != nil {
-				return err
-			}
-			items = append(items, ociBundle{manifest: desc, bundle: b})
-		}
-		return nil
-	})
-	if err != nil {
-		// an absent repo (never pushed to) reads as empty, not an error
-		if isRepoAbsent(err) {
-			return repo, nil, nil
-		}
-		return nil, nil, err
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		if !items[i].bundle.Schema.Timestamp.Equal(items[j].bundle.Schema.Timestamp) {
-			return items[i].bundle.Schema.Timestamp.After(items[j].bundle.Schema.Timestamp)
-		}
-		return items[i].bundle.Schema.ContentHash < items[j].bundle.Schema.ContentHash
-	})
-	return repo, items, nil
+	return parseVersionedName(tag)
 }
 
 // a never-pushed repo answers tags/list with 404 NAME_UNKNOWN, not ErrNotFound
@@ -354,132 +301,4 @@ func isRepoAbsent(err error) bool {
 	}
 	var resp *errcode.ErrorResponse
 	return errors.As(err, &resp) && resp.StatusCode == http.StatusNotFound
-}
-
-func (o *OCIStore) loadBundles(ctx context.Context, key SnapshotKey) ([]*Bundle, error) {
-	_, items, err := o.load(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*Bundle, len(items))
-	for i, it := range items {
-		out[i] = it.bundle
-	}
-	return out, nil
-}
-
-func (o *OCIStore) Get(ctx context.Context, key SnapshotKey, kind SnapshotKind, at SnapshotRef) (StoredSnapshot, error) {
-	bundles, err := o.loadBundles(ctx, key)
-	if err != nil {
-		return StoredSnapshot{}, err
-	}
-	switch kind.Tag {
-	case KindSchema:
-		b, err := pickSchemaBundle(bundles, at)
-		if err != nil {
-			return StoredSnapshot{}, err
-		}
-		return WrapSchema(b.Schema), nil
-	case KindPlanner:
-		b, err := pickPlannerBundle(bundles, at)
-		if err != nil {
-			return StoredSnapshot{}, err
-		}
-		return WrapPlanner(b.Planner), nil
-	case KindActivity:
-		a, err := pickActivity(bundles, kind.NodeLabel, at)
-		if err != nil {
-			return StoredSnapshot{}, err
-		}
-		return WrapActivity(a), nil
-	case KindQuery:
-		q, err := pickQueryStats(bundles, kind.NodeLabel, at)
-		if err != nil {
-			return StoredSnapshot{}, err
-		}
-		return WrapQueryStats(q), nil
-	}
-	return StoredSnapshot{}, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
-}
-
-func (o *OCIStore) List(ctx context.Context, key SnapshotKey, kind SnapshotKind, rng TimeRange) ([]SnapshotSummary, error) {
-	bundles, err := o.loadBundles(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	var out []SnapshotSummary
-	for _, b := range bundles {
-		ss, err := bundleSummaries(b, kind, rng)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, ss...)
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if !out[i].Timestamp.Equal(out[j].Timestamp) {
-			return out[i].Timestamp.After(out[j].Timestamp)
-		}
-		return out[i].ContentHash < out[j].ContentHash
-	})
-	return out, nil
-}
-
-func (o *OCIStore) Latest(ctx context.Context, key SnapshotKey, kind SnapshotKind) (*SnapshotSummary, error) {
-	list, err := o.List(ctx, key, kind, TimeRange{})
-	if err != nil || len(list) == 0 {
-		return nil, err
-	}
-	first := list[0]
-	return &first, nil
-}
-
-func (o *OCIStore) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error) {
-	bundles, err := o.loadBundles(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	return bundleKinds(bundles), nil
-}
-
-func (o *OCIStore) ListKeys(ctx context.Context) ([]SnapshotKey, error) {
-	host, prefix, ok := strings.Cut(o.base, "/")
-	if !ok {
-		return nil, fmt.Errorf("oci store: base %q has no repo path", o.base)
-	}
-	reg, err := remote.NewRegistry(host)
-	if err != nil {
-		return nil, err
-	}
-	reg.Client = o.client
-	reg.PlainHTTP = o.plainHTTP
-
-	prefix += "/"
-	var out []SnapshotKey
-	err = reg.Repositories(ctx, "", func(repos []string) error {
-		for _, r := range repos {
-			suffix, ok := strings.CutPrefix(r, prefix)
-			if !ok {
-				continue
-			}
-			proj, db, ok := strings.Cut(suffix, "/")
-			if !ok || strings.Contains(db, "/") {
-				continue
-			}
-			out = append(out, SnapshotKey{ProjectID: ProjectId(proj), DatabaseID: DatabaseId(db)})
-		}
-		return nil
-	})
-	if err != nil {
-		if errors.Is(err, errdef.ErrNotFound) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].ProjectID != out[j].ProjectID {
-			return out[i].ProjectID < out[j].ProjectID
-		}
-		return out[i].DatabaseID < out[j].DatabaseID
-	})
-	return out, nil
 }

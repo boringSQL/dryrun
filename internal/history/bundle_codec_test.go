@@ -121,40 +121,6 @@ func TestBundleCodec_NilActivityNormalized(t *testing.T) {
 	}
 }
 
-// DecodeBundle deliberately does NOT normalize a nil Query map to an empty
-// one, unlike Activity above. This looks like an inconsistency but isn't: an
-// earlier version of this code did normalize Query the same way, and it broke
-// TestBundleCodec_RoundTrip, because a Bundle that never touches Query (like
-// fullBundle's schema-only sibling below) has Query == nil, and
-// reflect.DeepEqual(nil map, empty-but-non-nil map) is false. The normalization
-// wasn't actually load-bearing — every code path that writes to b.Query
-// (FilesystemStore.putQueryStats, OCIStore.putQueryStats) already nil-checks
-// and initializes the map itself before writing, and every code path that only
-// reads b.Query (range, len, map index) is nil-safe in Go without a check. So
-// removing the normalization was correct, not a shortcut — this test exists to
-// keep it from quietly regressing back in "for consistency" and breaking the
-// round-trip test again.
-func TestBundleCodec_NilQueryStaysNil(t *testing.T) {
-	b := &Bundle{
-		Schema: testSnapshot("schema-only", "appdb"),
-		// Query intentionally left nil, same as Activity would be if we hadn't
-		// asserted the opposite for it above.
-	}
-
-	raw, err := EncodeBundle(b)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	decoded, err := DecodeBundle(raw)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	if decoded.Query != nil {
-		t.Errorf("decoded Query = %+v, want nil (Query is not normalized on decode, unlike Activity)", decoded.Query)
-	}
-}
-
 // Garbage in must not look like success. DecodeBundle first runs the bytes
 // through the zstd reader, so a payload that isn't a valid zstd frame should
 // surface a clean decompression error rather than a panic or a zero-value

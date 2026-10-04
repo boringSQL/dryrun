@@ -27,7 +27,7 @@ import (
 // per-run-unique repo prefix so repeated runs (and parallel packages) never
 // collide on tags. The uniqueness comes from a nanosecond stamp baked into the
 // project segment of every key's stream — see uniqueKey below.
-func newIntegrationStore(t *testing.T) *OCIStore {
+func newIntegrationStore(t *testing.T) SnapshotStore {
 	t.Helper()
 	addr := os.Getenv("DRYRUN_TEST_REGISTRY")
 	if addr == "" {
