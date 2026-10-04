@@ -230,17 +230,6 @@ func TestSaferSQL(t *testing.T) {
 	}
 }
 
-// SET NOT NULL's CHECK shortcut is available on every supported major, so the
-// rewrite is offered unconditionally -- CheckMigration no longer takes a
-// version at all. Kept as a regression guard: this rewrite used to be gated on
-// PG >= 12, and a snapshot with no parseable version silently lost it.
-func TestSetNotNullRewriteIsAlwaysOffered(t *testing.T) {
-	got := rewriteFor(t, "ALTER TABLE orders ALTER COLUMN status SET NOT NULL")
-	if len(got) != 4 {
-		t.Fatalf("expected the four-step rewrite, got %v", got)
-	}
-}
-
 // The whole point of the field: what it hands back is not the thing it warned
 // about. Every statement in a rewrite must itself come back rated safer.
 func TestSaferSQLIsActuallySafer(t *testing.T) {

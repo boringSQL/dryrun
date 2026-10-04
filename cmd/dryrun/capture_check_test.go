@@ -386,9 +386,10 @@ func TestPrintSchemaLine(t *testing.T) {
 		t.Errorf("line %q, want the missing attempt clock called out", out.String())
 	}
 
-	// A pulled row, or one written by `snapshot take` (which does not stamp
-	// the attempt clock), is newer than anything captured locally. Calling
-	// that "last confirmed 40d ago" would read as a stalled capture.
+	// A pulled row, or one written by a peer's `snapshot capture` (which does
+	// not stamp the local attempt clock), is newer than anything captured
+	// locally. Calling that "last confirmed 40d ago" would read as a stalled
+	// capture.
 	out.Reset()
 	fresh := &schema.SchemaSnapshot{ContentHash: "abc", Timestamp: now.Add(-5 * time.Minute)}
 	printSchemaLine(&out, schemaState{prior: fresh, verified: now.Add(-40 * 24 * time.Hour), hasAttempt: true})

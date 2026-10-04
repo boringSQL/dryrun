@@ -8,54 +8,6 @@ import (
 	"github.com/boringsql/dryrun/internal/history"
 )
 
-// `--since` has to mean the same thing on `list` as it does on `pull`, which
-// is why this goes through parseSince rather than a second parser.
-func TestParseSince_ForList(t *testing.T) {
-	t.Run("durations, days and weeks", func(t *testing.T) {
-		for in, want := range map[string]time.Duration{
-			"24h": 24 * time.Hour,
-			"7d":  7 * 24 * time.Hour,
-			"2w":  14 * 24 * time.Hour,
-			"90m": 90 * time.Minute,
-		} {
-			from, err := parseSince(in)
-			if err != nil {
-				t.Fatalf("parseSince(%q): %v", in, err)
-			}
-			if got := time.Since(from).Round(time.Minute); got != want {
-				t.Errorf("parseSince(%q) is %s ago, want %s", in, got, want)
-			}
-		}
-	})
-
-	// stored timestamps are UTC and compared as strings, so a local-zone bound
-	// silently drops rows by the offset
-	t.Run("bound is UTC", func(t *testing.T) {
-		from, err := parseSince("24h")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if from.Location() != time.UTC {
-			t.Errorf("parseSince returned %s, want UTC", from.Location())
-		}
-		abs, err := parseSince("2026-08-01")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if abs.Location() != time.UTC {
-			t.Errorf("absolute date is %s, want UTC", abs.Location())
-		}
-	})
-
-	t.Run("negative and nonsense are refused", func(t *testing.T) {
-		for _, in := range []string{"-3d", "yesterday", "7dd", ""} {
-			if _, err := parseSince(in); err == nil {
-				t.Errorf("parseSince(%q) was accepted", in)
-			}
-		}
-	})
-}
-
 func TestKindMatches(t *testing.T) {
 	activity := history.ActivityKind("replica-1")
 	query := history.QueryKind("replica-1")

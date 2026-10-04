@@ -145,20 +145,6 @@ func TestCheckMigrationDropTable(t *testing.T) {
 	}
 }
 
-func TestCheckMigrationRename(t *testing.T) {
-	snap := migrationTestAnnotated()
-	checks, err := CheckMigration("ALTER TABLE users RENAME TO customers", snap)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(checks) == 0 {
-		t.Fatal("expected at least one check")
-	}
-	if checks[0].Safety != SafetyDangerous {
-		t.Errorf("rename should be dangerous, got %q", checks[0].Safety)
-	}
-}
-
 // A10: the verdict follows the object kind. Table, column and view renames
 // break every caller that names them; an index is never named by a query; a
 // constraint or sequence only breaks callers that spell the old name out.

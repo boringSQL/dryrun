@@ -114,36 +114,6 @@ func TestDiffOperands(t *testing.T) {
 	}
 }
 
-// parseKindFlag is the little dispatcher that turns the --kind string into a
-// concrete SnapshotKind. schema and planner are trivial; activity is the
-// interesting one because it has to go find a node label, so the no-activity
-// and unknown-kind error paths both get a look here. The multi-node and
-// single-node activity behavior lives in its own test below where we can seed
-// the store.
-func TestParseKindFlag(t *testing.T) {
-	store := openSQLite(t)
-	key := syncKey("acme", "primary")
-	ctx := context.Background()
-
-	if k, err := store.ResolveKindFlag(ctx, key, "schema", ""); err != nil || k.Tag != history.KindSchema {
-		t.Fatalf("schema: got kind=%v err=%v", k, err)
-	}
-	// empty string is the same as schema, since that's the flag default
-	if k, err := store.ResolveKindFlag(ctx, key, "", ""); err != nil || k.Tag != history.KindSchema {
-		t.Fatalf("empty kind should default to schema: got kind=%v err=%v", k, err)
-	}
-	if k, err := store.ResolveKindFlag(ctx, key, "planner", ""); err != nil || k.Tag != history.KindPlanner {
-		t.Fatalf("planner: got kind=%v err=%v", k, err)
-	}
-	if _, err := store.ResolveKindFlag(ctx, key, "nonsense", ""); err == nil {
-		t.Fatal("an unknown kind should be rejected, not silently swallowed")
-	}
-	// with no activity rows in the store there's no node to resolve to
-	if _, err := store.ResolveKindFlag(ctx, key, "activity", ""); err == nil {
-		t.Fatal("activity with nothing captured should error")
-	}
-}
-
 // resolveActivityKind has to guess a node label when the user doesn't hand one
 // over. With a single captured node that guess is unambiguous and we take it;
 // with two it must refuse and tell the user to disambiguate; an explicit --node

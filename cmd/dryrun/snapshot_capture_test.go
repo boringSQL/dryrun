@@ -405,9 +405,9 @@ func putQueryAt(t *testing.T, s *history.Store, key history.SnapshotKey, hash, l
 }
 
 // `capture` writes planner rows that `push` ships to a registry, so it must
-// mask exactly as `snapshot take` does. Before this test the planner stream
-// bypassed masking, bloat annotation and Masking entirely.
-func TestCaptureStreams_PlannerMasksLikeTake(t *testing.T) {
+// mask exactly as the old `snapshot take` did. Before this test the planner
+// stream bypassed masking, bloat annotation and Masking entirely.
+func TestCaptureStreams_PlannerMasks(t *testing.T) {
 	ctx := context.Background()
 	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "testdb"}
 	target := captureTarget{Label: "primary"}

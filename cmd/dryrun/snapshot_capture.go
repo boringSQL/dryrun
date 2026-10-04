@@ -146,7 +146,7 @@ fail.`,
 			}
 			defer unlock()
 
-			// same policy resolution `snapshot take` uses, including
+			// same policy resolution `snapshot capture` uses, including
 			// require_masks; planner rows are pushed, so this is not optional
 			policy, err := buildMasker(key)
 			if err != nil {
@@ -221,7 +221,7 @@ type captureRunOptions struct {
 	Due             bool
 	// base schema for planner annotation, pre-read before opening capture tx
 	AnnotateBase *schema.SchemaSnapshot
-	// collects documents for `snapshot take`'s per-stream stdout summary
+	// collects documents for the per-stream stdout summary
 	docs *captureDocs
 }
 
@@ -232,36 +232,11 @@ type captureDocs struct {
 	Activity *schema.ActivityStatsSnapshot
 }
 
-// initWriter plus the local-only attempt clock, shared by `snapshot take`
+// initWriter plus the local-only attempt clock, shared by `snapshot capture`
 type captureStore interface {
 	initWriter
 	MarkCaptureAttempt(ctx context.Context, key history.SnapshotKey, label, stream string, at time.Time) error
 }
-
-// not cobra's Deprecated field: that hides the command from --help for the whole grace period
-func markCaptureSuperseded(cmd *cobra.Command, replacement string) {
-	if strings.HasSuffix(cmd.Short, deprecatedSuffix) {
-		return
-	}
-	cmd.Short += deprecatedSuffix
-	cmd.Long += "\n\nSuperseded by `dryrun snapshot capture`:\n  " + replacement +
-		"\n\nDeprecated: this command will be removed in v0.18."
-
-	prevE, prev := cmd.PreRunE, cmd.PreRun
-	cmd.PreRunE = func(c *cobra.Command, args []string) error {
-		fmt.Fprintf(c.ErrOrStderr(), "notice: `%s` is deprecated; use `%s`\n", c.CommandPath(), replacement)
-		// cobra runs PreRunE *or* PreRun; chain both
-		if prevE != nil {
-			return prevE(c, args)
-		}
-		if prev != nil {
-			prev(c, args)
-		}
-		return nil
-	}
-}
-
-const deprecatedSuffix = " (deprecated)"
 
 // --all reads the fleet from config; otherwise one node, named or ad hoc.
 func captureTargets(nodeName, from, label string, streams []string, all bool) ([]captureTarget, error) {
@@ -619,7 +594,7 @@ func persistStream(ctx context.Context, store captureStore, key history.Snapshot
 	case "planner":
 		p := r.planner
 		// planner rows carry pg_statistic MCVs and histogram bounds, so they
-		// go through the same masking `snapshot take` applies -- push ships
+		// go through the same masking capture applies -- push ships
 		// whatever lands in history.db
 		bloat.Annotate(p, base)
 		masked := datamask.MaskPlanner(opts.MaskPolicy, p)

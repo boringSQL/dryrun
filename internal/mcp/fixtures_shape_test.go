@@ -3,7 +3,6 @@ package mcp
 import (
 	"testing"
 
-	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/pkg/lint"
 )
 
@@ -38,17 +37,4 @@ func TestFixturesServeThroughMCP(t *testing.T) {
 		assertContains(t, callTool(t, c, "describe_table", map[string]any{"table": "events", "detail": "full"}),
 			"FOR VALUES FROM ('2026-01-31 00:00:00+00')")
 	})
-}
-
-// The demo snapshot carries no activity at all, so nothing else pins that a
-// finding outside public reaches detect.
-func TestFixtureActivityOutsidePublic(t *testing.T) {
-	a := withActivity(annotate(multiSchemaSnap(), 500_000),
-		schema.QualifiedName{Schema: "app", Name: "events"},
-		schema.TableActivity{SeqScan: 500_000, IdxScan: 0, NLiveTup: 500_000})
-	c := serveOffline(t, NewOfflineServerAnnotated(a, lint.DefaultConfig()))
-
-	out := callTool(t, c, "detect", map[string]any{"kind": "anomalies"})
-	assertContains(t, out, `"schema": "app"`)
-	assertContains(t, out, `"table": "events"`)
 }

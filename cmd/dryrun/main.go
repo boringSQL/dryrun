@@ -327,91 +327,6 @@ func snapshotCmd() *cobra.Command {
 		c.Flags().StringVar(&historyDB, "history-db", "", "history database path")
 	}
 
-	var (
-		pushAfter           bool
-		pushRemote          string
-		takeForce           bool
-		takeAllowRoleChange bool
-	)
-	takeCmd := &cobra.Command{
-		Use:   "take",
-		Short: "Take a new snapshot (schema + planner + activity; primary only)",
-		Long: `Take a new snapshot: schema, planner and activity stats, plus query stats
-when pg_stat_statements is available. Primary only.
-
-take is that command with the label "primary".`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			rowCap, err := resolveQueryStatsRowCap()
-			if err != nil {
-				return err
-			}
-
-			_, conn, err := connectDBProd()
-			if err != nil {
-				return err
-			}
-			defer conn.Close()
-
-			cap := newPgxCapturer(cmd.Context(), conn.Pool())
-			defer cap.Close(cmd.Context())
-
-			store, err := openHistoryStore(historyDB)
-			if err != nil {
-				return err
-			}
-			defer store.Close()
-
-			key := resolveSnapshotKey()
-			policy, err := buildMasker(key)
-			if err != nil {
-				return err
-			}
-			if flagNoMasks {
-				slog.Warn("masking disabled by --no-masks; raw planner stats will be written to history.db")
-			}
-
-			snap, planner, activity, masked, err := runSnapshotTake(cmd.Context(), cap, store, key, policy, takeForce, takeAllowRoleChange)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("Snapshot saved: %s\n", snap.ContentHash)
-			fmt.Printf("  %d tables, %d views, %d functions\n", len(snap.Tables), len(snap.Views), len(snap.Functions))
-			fmt.Printf("Planner stats saved: %s (%d tables, %d columns, %d indexes)\n",
-				planner.ContentHash, len(planner.Tables), len(planner.Columns), len(planner.Indexes))
-			if masked > 0 {
-				fmt.Printf("  Masked: %d planner-stats columns\n", masked)
-			}
-			fmt.Printf("Activity stats saved: %s (label=primary, %d tables, %d indexes)\n",
-				activity.ContentHash, len(activity.Tables), len(activity.Indexes))
-			// best-effort helper, so take doesn't stamp query's attempt clock
-			if err := captureQueryStatsBestEffort(cmd.Context(), cap, store, key, snap.ContentHash, takeLabel, rowCap); err != nil {
-				return err
-			}
-
-			if pushAfter {
-				dst, err := resolveSyncStore("", "", pushRemote)
-				if err != nil {
-					return err
-				}
-				if err := runSync(cmd.Context(), store, dst, false, fullScope(), os.Stdout); err != nil {
-					return err
-				}
-			}
-			maybeAutoPrune(cmd.Context(), store, key)
-			return nil
-		},
-	}
-	// keep the "primary" label so take's replacement continues the same series
-	markCaptureSuperseded(takeCmd, "dryrun snapshot capture --label "+takeLabel+" --streams schema,planner,activity,query")
-	addHistFlag(takeCmd)
-	takeCmd.Flags().StringVar(&flagMasksFile, "masks-file", "", "path to data-masking-policy.yml")
-	takeCmd.Flags().StringSliceVar(&flagMaskPolicy, "mask-policy", nil, "masking policy name (repeatable, comma-separated)")
-	takeCmd.Flags().BoolVar(&flagNoMasks, "no-masks", false, "disable planner-stats masking (raw stats land in history.db)")
-	takeCmd.Flags().BoolVar(&pushAfter, "push", false, "push the snapshot to a remote after capture")
-	takeCmd.Flags().StringVar(&pushRemote, "remote", "", "configured [[remote]] name (with --push)")
-	takeCmd.Flags().BoolVar(&takeForce, "force", false, "record even if the cluster/database identity differs from this project's history")
-	takeCmd.Flags().BoolVar(&takeAllowRoleChange, "allow-role-change", false, "accept a label whose role flipped (promotion/failover)")
-
 	listCmd := snapshotListCmd(&historyDB)
 	addHistFlag(listCmd)
 
@@ -427,8 +342,8 @@ take is that command with the label "primary".`,
 	captureCmd := snapshotCaptureCmd(&historyDB)
 	addHistFlag(captureCmd)
 
-	cmd.AddCommand(takeCmd, listCmd, nodesCmd, captureCmd, diffCmd, deleteCmd, snapshotActivityCmd(),
-		snapshotQueryStatsCmd(), snapshotPushCmd(), snapshotPullCmd())
+	cmd.AddCommand(listCmd, nodesCmd, captureCmd, diffCmd, deleteCmd,
+		snapshotPushCmd(), snapshotPullCmd())
 	return cmd
 }
 

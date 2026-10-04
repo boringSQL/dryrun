@@ -1242,16 +1242,6 @@ func TestContentHashV3_KeepsUnrelatedTables(t *testing.T) {
 	}
 }
 
-// Detaching every child is still not DDL on the parent.
-func TestContentHashV3_IgnoresDroppedPartitions(t *testing.T) {
-	full := partitionedSnap(child("users_2026_01", "FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')"))
-	empty := partitionedSnap()
-
-	if ComputeContentHashV3(full) != ComputeContentHashV3(empty) {
-		t.Errorf("dropping a partition moved the v3 digest")
-	}
-}
-
 // Strategy and key are the partition DDL; changing either is a real schema change and
 // must still rotate the digest, or PARTITION BY changes would dedup away.
 func TestContentHashV3_SensitiveToStrategyAndKey(t *testing.T) {

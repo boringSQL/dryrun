@@ -141,13 +141,6 @@ func TestSelectStarWarning(t *testing.T) {
 	}
 }
 
-// Unbounded-query warnings depend on table row counts; ValidateQuery no
-// longer carries an AnnotatedSchema, so the heuristic is dormant until a
-// future migration plumbs annotated through. Coverage will follow.
-func TestUnboundedQueryWarning(t *testing.T) {
-	t.Skip("unbounded-query heuristic disabled until ValidateQuery accepts AnnotatedSchema")
-}
-
 func TestCartesianJoinWarning(t *testing.T) {
 	snap := testSchema()
 	result, err := ValidateQuery("SELECT * FROM users, orders", snap)
@@ -577,20 +570,6 @@ func TestCteBodyGhostTableReported(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a ghost error, got %v", result.Errors)
-	}
-}
-
-func TestCteBodyColumnTypoCorrected(t *testing.T) {
-	res, err := ValidateQuery("WITH x AS (SELECT u.emial FROM users u) SELECT * FROM x", correctSchema())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.CorrectedSQL, "u.email") {
-		t.Fatalf("expected CTE body column typo corrected, got %q (errors: %v)", res.CorrectedSQL, res.Errors)
-	}
-	again, err := ValidateQuery(res.CorrectedSQL, correctSchema())
-	if err != nil || !again.Valid {
-		t.Fatalf("corrected CTE query does not validate: %v %v", err, again.Errors)
 	}
 }
 

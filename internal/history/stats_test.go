@@ -355,7 +355,7 @@ func TestGetPlanner_FiltersBySchemaRefHash(t *testing.T) {
 	}
 }
 
-// LatestNodeRole backs the v0.16 role-flip guard on `snapshot activity`. It
+// LatestNodeRole backs the v0.16 role-flip guard on activity capture. It
 // answers "what role did this label last capture as" WITHOUT a node_role column
 // -- the column, its backfill and the migration machinery are v0.17 -- by
 // reading $.node.is_standby back out of the stored payload with SQLite's

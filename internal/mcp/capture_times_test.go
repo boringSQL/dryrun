@@ -142,7 +142,7 @@ func TestCaptureTimesIgnoresUndatedNodes(t *testing.T) {
 	}
 }
 
-// Planner rows are written by every snapshot take and joined by schema_ref_hash,
+// Planner rows are written by every capture and joined by schema_ref_hash,
 // so they can be far newer than DDL that has not changed in weeks.
 func TestCaptureTimesDatesPlannerSeparately(t *testing.T) {
 	a := annotate(multiSchemaSnap(), 1000)

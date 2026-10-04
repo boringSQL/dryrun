@@ -67,7 +67,7 @@ func findNode(t *testing.T, nodes []NodeSummary, label string) NodeSummary {
 //     no recorded role -- has to degrade that one node and still print the
 //     others, because the healthy nodes are what the operator came to see.
 //   - it must not contradict the capture guard. The role it prints comes from
-//     LatestNodeRole, the same function `snapshot activity` enforces with, so
+//     LatestNodeRole, the same function activity capture enforces with, so
 //     "nodes says primary" and "capture refuses because it thinks standby" can
 //     never both be true. TestListNodes_AgreesWithCaptureGuard pins that.
 func TestListNodes(t *testing.T) {

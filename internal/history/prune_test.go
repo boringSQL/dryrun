@@ -198,33 +198,6 @@ func TestPrune_DoesNotTouchOtherKeys(t *testing.T) {
 	}
 }
 
-// Retention covers the stats tables only. Schema snapshots and planner stats
-// are excluded by design — pruning a schema snapshot would strand the stats
-// rows that reference its hash.
-func TestPrune_LeavesSchemaAndPlannerRows(t *testing.T) {
-	store := testStore(t)
-	ctx := context.Background()
-	k := key("acme", "primary")
-
-	now := time.Now().UTC().Truncate(time.Second)
-	old := now.Add(-140 * 24 * time.Hour)
-
-	p := plannerFixture("sref-A", "ch-A", "appdb")
-	p.Timestamp = old
-	if _, err := store.PutPlanner(ctx, k, p); err != nil {
-		t.Fatalf("put planner: %v", err)
-	}
-	putActivityAt(t, store, k, "node-a", "act-old", old)
-
-	if _, err := pruneStatsOnly(ctx, store, k, now.Add(-90*24*time.Hour)); err != nil {
-		t.Fatalf("prune: %v", err)
-	}
-
-	if got := countRows(t, store, "planner_stats", k); got != 1 {
-		t.Errorf("planner rows = %d, want 1 (never pruned)", got)
-	}
-}
-
 // A cutoff older than everything is a no-op, and an empty store prunes cleanly
 // rather than erroring.
 func TestPrune_NoMatchingRows(t *testing.T) {

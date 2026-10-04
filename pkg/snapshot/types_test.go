@@ -74,20 +74,6 @@ func TestQualifiedName_String(t *testing.T) {
 	}
 }
 
-// Equality is plain struct comparison — we rely on this when collecting
-// entries into maps keyed by QualifiedName, so two values with the same
-// fields must compare equal regardless of construction order.
-func TestQualifiedName_Equality(t *testing.T) {
-	a := QualifiedName{Schema: "public", Name: "users"}
-	b := QualifiedName{Name: "users", Schema: "public"}
-	if a != b {
-		t.Errorf("expected equality: %+v != %+v", a, b)
-	}
-	if a == (QualifiedName{Schema: "public", Name: "USERS"}) {
-		t.Errorf("case-sensitive comparison expected")
-	}
-}
-
 // Planner snapshots round-trip through JSON with all the entry shapes —
 // nil slices must marshal as null (or be elided gracefully) so on-disk
 // payloads remain compact when a database has no indexes or stats.

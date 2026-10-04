@@ -663,6 +663,11 @@ func TestParseSince(t *testing.T) {
 		if d := ago - c.approxAgo; d < -2*time.Second || d > 2*time.Second {
 			t.Errorf("parseSince(%q): age %v, want ~%v", c.in, ago, c.approxAgo)
 		}
+		// stored timestamps are UTC and compared as strings, so a
+		// local-zone bound silently drops rows by the offset
+		if got.Location() != time.UTC {
+			t.Errorf("parseSince(%q) returned %s, want UTC", c.in, got.Location())
+		}
 	}
 
 	// absolute date parses to that calendar day at UTC midnight.
@@ -672,5 +677,8 @@ func TestParseSince(t *testing.T) {
 	}
 	if got.Year() != 2026 || got.Month() != 1 || got.Day() != 2 {
 		t.Errorf("parseSince(date) = %v, want 2026-01-02", got)
+	}
+	if got.Location() != time.UTC {
+		t.Errorf("parseSince(date) is %s, want UTC", got.Location())
 	}
 }

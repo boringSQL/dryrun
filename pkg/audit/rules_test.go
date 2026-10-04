@@ -268,17 +268,6 @@ func TestDuplicateIndexes_Branching(t *testing.T) {
 	})
 }
 
-func TestRunRulesAnnotated(t *testing.T) {
-	snap := testSnap()
-	snap.Tables = []schema.Table{{
-		Schema: "public", Name: "orders",
-		Columns: []schema.Column{{Name: "id", TypeName: "bigint"}},
-	}}
-	config := DefaultConfig()
-	findings := RunRulesAnnotated(&schema.AnnotatedSchema{Schema: snap}, &config)
-	_ = findings
-}
-
 // Distinct expression indexes used to arrive with Columns=[] (the introspection
 // query dropped expression entries), so sliceEqual matched them and lint told
 // users to DROP INDEX one of two indexes serving different queries. Expressions

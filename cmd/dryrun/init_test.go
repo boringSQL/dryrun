@@ -302,7 +302,7 @@ func TestRunInitCapture_ForwardsRowCap(t *testing.T) {
 // captureQueryStatsBestEffort has an unusual contract for a capture helper in
 // this file: it swallows almost everything, but not quite everything. This
 // test drives it directly (rather than through the higher-level
-// runInitCapture/runSnapshotTake plumbing) so each branch of that contract is
+// runInitCapture plumbing) so each branch of that contract is
 // pinned in isolation, independent of whatever the surrounding capture flow
 // happens to be doing at the time:
 //

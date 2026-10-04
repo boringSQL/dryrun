@@ -14,7 +14,7 @@ import (
 // The whole point of snapdiff is that a user asks "what changed between these two
 // moments" and gets one answer that braids the three capture streams together,
 // not three disconnected per-kind diffs. These tests seed a store the way a real
-// `dryrun snapshot take` would — schema, planner, and activity rows written
+// `dryrun snapshot capture` would — schema, planner, and activity rows written
 // separately with their own slightly-skewed timestamps — and then assert that
 // Build re-joins them by capture time and tells the truth about how it did so.
 
