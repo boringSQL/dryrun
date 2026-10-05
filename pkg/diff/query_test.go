@@ -693,8 +693,7 @@ func TestDiffQueryStats_ZeroStatsResetIsNotAReset(t *testing.T) {
 	}
 }
 
-// The rule deciding which statements get captured defines the population;
-// across a change the two sets are not the same thing.
+// capture-rule change: caveat, not refusal
 func TestDiffQueryStats_CaptureRuleVersion(t *testing.T) {
 	t0 := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
 
@@ -707,11 +706,20 @@ func TestDiffQueryStats_CaptureRuleVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Incomparable == "" {
-		t.Error("differenced two different statement populations")
+	if d.Incomparable != "" {
+		t.Errorf("refused a comparable rule change: %s", d.Incomparable)
+	}
+	if !strings.Contains(strings.Join(d.CaveatCodes, ","), CaveatCaptureRule) {
+		t.Errorf("rule change not flagged: codes %v", d.CaveatCodes)
+	}
+	if note := CaveatNote(CaveatCaptureRule); note == CaveatCaptureRule {
+		t.Errorf("no note for %s", CaveatCaptureRule)
+	}
+	if e := findEntry(t, d, "fp"); e.CallsDelta != 10 {
+		t.Errorf("calls delta %d, want 10 (the shape is in both captures)", e.CallsDelta)
 	}
 
-	// one side unversioned is unknown, not proof of a change: still comparable
+	// 0 predates versioning: comparable, still flagged
 	to.CaptureRuleVersion = 0
 	d2, err := DiffQueryStats(from, to)
 	if err != nil {
@@ -719,6 +727,19 @@ func TestDiffQueryStats_CaptureRuleVersion(t *testing.T) {
 	}
 	if d2.Incomparable != "" {
 		t.Errorf("refused on an unversioned capture: %s", d2.Incomparable)
+	}
+	if !strings.Contains(strings.Join(d2.CaveatCodes, ","), CaveatCaptureRule) {
+		t.Errorf("unversioned boundary not flagged: codes %v", d2.CaveatCodes)
+	}
+
+	// equal versions carry no caveat
+	to.CaptureRuleVersion = 1
+	d3, err := DiffQueryStats(from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(d3.CaveatCodes, ","), CaveatCaptureRule) {
+		t.Errorf("same rule version flagged: %v", d3.CaveatCodes)
 	}
 }
 

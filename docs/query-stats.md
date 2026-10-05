@@ -32,9 +32,11 @@ dryrun snapshot diff --latest --kind query --node primary
 pgss counters are cumulative, so the diff subtracts two captures. Where subtraction would produce nonsense it refuses and says why:
 
 - different labels
-- qshape or capture-rule version changed between the captures
+- the qshape version changed between the captures
 - pgss was reset inside the window (`stats_reset` moved)
 - a counter went backwards for a queryid present in both captures — pgss evicted it and re-added it
+
+A capture-rule version change is a caveat (`capture_rule_change`), not a refusal. v1 dropped comment-prefixed queries and v3 folds per-role rows before the cap, so the captured sets may not correspond; but the subtraction matches members by queryid and excludes the ones that do not, so it proceeds and flags that absent shapes may be selection artifacts and near-cap deltas unreliable.
 
 Statuses: `grew`, `shrank`, `flat`, `new`, `gone` (absent from an uncapped newer capture), `evicted` (absent from a capped one, so it may still be running), `reset`, `truncated` (the older capture hit its row cap, so "new" shapes may only be newly visible). `reset` and `truncated` rows don't count into the headline totals.
 

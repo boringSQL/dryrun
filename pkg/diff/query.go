@@ -103,6 +103,8 @@ const (
 	CaveatWeekend = "weekend"
 	// a handful of calls account for a large share of the window's time
 	CaveatOneOffHeavy = "one_off_heavy"
+	// the two captures selected statements under different capture-rule versions
+	CaveatCaptureRule = "capture_rule_change"
 )
 
 const (
@@ -139,7 +141,7 @@ const (
 // It refuses rather than guesses. Counters are cumulative since pgss last
 // reset, so a reset, a grouping-version change, or two different nodes make
 // subtraction meaningless, and saying so is more useful than a plausible
-// number.
+// number. A capture-rule change is a caveat, not a refusal.
 func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) {
 	if from == nil || to == nil {
 		return nil, fmt.Errorf("both captures are required")
@@ -162,15 +164,6 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 	if from.QshapeVersion != to.QshapeVersion {
 		d.Incomparable = fmt.Sprintf("query grouping changed (v%d to v%d): fingerprints are not comparable",
 			from.QshapeVersion, to.QshapeVersion)
-		return d, nil
-	}
-
-	// the rule selecting which statements are captured decides the population;
-	// across a change the two sets are not the same thing
-	if from.CaptureRuleVersion != to.CaptureRuleVersion &&
-		from.CaptureRuleVersion != 0 && to.CaptureRuleVersion != 0 {
-		d.Incomparable = fmt.Sprintf("capture rules changed (v%d to v%d): the statement sets do not correspond",
-			from.CaptureRuleVersion, to.CaptureRuleVersion)
 		return d, nil
 	}
 
@@ -240,6 +233,9 @@ func DiffQueryStats(from, to *snapshot.QueryStatsSnapshot) (*QueryDelta, error) 
 		d.SharedBlksReadDelta += e.SharedBlksReadDelta
 	}
 	d.CaveatCodes = windowCaveatCodes(active, from.Node.Timestamp, to.Node.Timestamp)
+	if captureRuleChanged(from, to) {
+		d.CaveatCodes = append(d.CaveatCodes, CaveatCaptureRule)
+	}
 	if markOneOffHeavy(d) {
 		d.CaveatCodes = append(d.CaveatCodes, CaveatOneOffHeavy)
 	}
@@ -543,6 +539,12 @@ func hitRowCap(q *snapshot.QueryStatsSnapshot) bool {
 	return q.RawRows >= limit
 }
 
+// 0 predates the field, so its rule is unknown; unequal (including 0 vs N)
+// counts as a change.
+func captureRuleChanged(from, to *snapshot.QueryStatsSnapshot) bool {
+	return from.CaptureRuleVersion != to.CaptureRuleVersion
+}
+
 func queryCaveats(from, to *snapshot.QueryStatsSnapshot, d *QueryDelta) []string {
 	var out []string
 	if d.StatsReset {
@@ -623,6 +625,8 @@ func CaveatNote(code string) string {
 		return fmt.Sprintf("most of the window fell on a weekend (%s): weekday load is likely higher, so do not compare it with a weekday window", active)
 	case CaveatOneOffHeavy:
 		return fmt.Sprintf("a shape with at most %d calls carries a large share of the window's time (entries are tagged in view=full): possibly a one-off such as a migration or backfill rather than steady load", oneOffMaxCalls)
+	case CaveatCaptureRule:
+		return "the captures selected statements under different capture-rule versions; absent shapes may be selection artifacts and near-cap deltas unreliable (see caveats)"
 	}
 	return code
 }
