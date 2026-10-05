@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -89,24 +90,30 @@ func ActivityKind(label string) SnapshotKind {
 }
 func QueryKind(label string) SnapshotKind { return SnapshotKind{Tag: KindQuery, NodeLabel: label} }
 
-func (k SnapshotKind) String() string {
-	switch k.Tag {
+func (t SnapshotKindTag) String() string {
+	switch t {
 	case KindSchema:
 		return "schema"
 	case KindPlanner:
 		return "planner"
 	case KindActivity:
-		if k.NodeLabel != "" {
-			return "activity:" + k.NodeLabel
-		}
 		return "activity"
 	case KindQuery:
-		if k.NodeLabel != "" {
-			return "query:" + k.NodeLabel
-		}
 		return "query"
 	}
-	return fmt.Sprintf("kind(%d)", k.Tag)
+	return fmt.Sprintf("kind(%d)", int(t))
+}
+
+func (k SnapshotKind) String() string {
+	if k.NodeLabel != "" && (k.Tag == KindActivity || k.Tag == KindQuery) {
+		return k.Tag.String() + ":" + k.NodeLabel
+	}
+	return k.Tag.String()
+}
+
+// not MarshalText: slog and map keys would silently drop the node
+func (k SnapshotKind) MarshalJSON() ([]byte, error) {
+	return json.Marshal(k.Tag.String())
 }
 
 // StoredSnapshot is a tagged union over the four concrete snapshot bodies.

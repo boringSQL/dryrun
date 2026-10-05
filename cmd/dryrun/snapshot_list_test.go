@@ -91,6 +91,33 @@ func TestSortAndLimit(t *testing.T) {
 	})
 }
 
+// `list --json` rows must say which stream they are; without kind, a planner
+// row and a schema row are indistinguishable and the node alone cannot tell
+// activity from query.
+func TestListJSONCarriesKind(t *testing.T) {
+	cases := []struct {
+		kind history.SnapshotKind
+		want string
+	}{
+		{history.SchemaKind(), `"kind":"schema"`},
+		{history.PlannerKind(), `"kind":"planner"`},
+		{history.ActivityKind("replica"), `"kind":"activity"`},
+		{history.QueryKind("replica"), `"kind":"query"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.kind.String(), func(t *testing.T) {
+			s := history.SnapshotSummary{Kind: tc.kind, NodeLabel: tc.kind.NodeLabel, ContentHash: "h"}
+			got := string(marshalJSON([]history.SnapshotSummary{s}, false))
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("json %s lacks %s", got, tc.want)
+			}
+			if tc.kind.NodeLabel != "" && !strings.Contains(got, `"node_label":"replica"`) {
+				t.Errorf("json %s lost the node label", got)
+			}
+		})
+	}
+}
+
 func hashes(in []history.SnapshotSummary) []string {
 	out := make([]string, len(in))
 	for i, s := range in {

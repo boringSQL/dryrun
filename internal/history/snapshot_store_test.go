@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -213,5 +214,47 @@ func TestLatestEmpty(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("got %+v, want nil", got)
+	}
+}
+
+// String() feeds the human list and error messages; MarshalJSON feeds
+// `snapshot list --json`, where the node lives in node_label instead.
+func TestSnapshotKindStringAndJSON(t *testing.T) {
+	cases := []struct {
+		name     string
+		kind     SnapshotKind
+		wantStr  string
+		wantJSON string
+	}{
+		{"schema", SchemaKind(), "schema", `"schema"`},
+		{"schema ignores a stray node", SnapshotKind{Tag: KindSchema, NodeLabel: "x"}, "schema", `"schema"`},
+		{"planner ignores a stray node", SnapshotKind{Tag: KindPlanner, NodeLabel: "x"}, "planner", `"planner"`},
+		{"activity with node", ActivityKind("replica"), "activity:replica", `"activity"`},
+		{"activity without node", ActivityKind(""), "activity", `"activity"`},
+		{"query label with a colon", QueryKind("db:5432"), "query:db:5432", `"query"`},
+		{"unknown tag", SnapshotKind{Tag: 9, NodeLabel: "x"}, "kind(9)", `"kind(9)"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.kind.String(); got != tc.wantStr {
+				t.Errorf("String() = %q, want %q", got, tc.wantStr)
+			}
+			raw, err := json.Marshal(tc.kind)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			if string(raw) != tc.wantJSON {
+				t.Errorf("json = %s, want %s", raw, tc.wantJSON)
+			}
+		})
+	}
+}
+
+// A kind must not be usable as a JSON map key: activity:a and activity:b would
+// collapse onto one "activity" key without an error.
+func TestSnapshotKindIsNotATextKey(t *testing.T) {
+	m := map[SnapshotKind]int{ActivityKind("a"): 1, ActivityKind("b"): 2}
+	if _, err := json.Marshal(m); err == nil {
+		t.Fatal("map[SnapshotKind] marshaled; node labels would collide on the tag")
 	}
 }

@@ -35,7 +35,7 @@ type (
 
 	SnapshotSummary struct {
 		ID            int64        `json:"id"`
-		Kind          SnapshotKind `json:"-"`
+		Kind          SnapshotKind `json:"kind"`
 		DBURLHash     string       `json:"db_url_hash,omitempty"`
 		Timestamp     time.Time    `json:"timestamp"`
 		ContentHash   string       `json:"content_hash"`
