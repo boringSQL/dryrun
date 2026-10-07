@@ -48,6 +48,9 @@ type (
 		PlannerDelta  *diff.PlannerDelta  `json:"planner_delta,omitempty"`
 		ActivityDelta []NodeActivityDelta `json:"activity_delta,omitempty"`
 		QueryDelta    []NodeQueryDelta    `json:"query_delta,omitempty"`
+
+		// per-call cost steps; both views carry it (summary without SQL text, capped)
+		PlanShifts []NodePlanShifts `json:"plan_shifts,omitempty"`
 	}
 
 	// co-locates everything that moved for one object across the three streams
@@ -72,6 +75,8 @@ type (
 		QueryUnknown int `json:"query_unknown,omitempty"`
 		// nodes whose query pair could not be diffed at all
 		QueryRefused int `json:"query_refused,omitempty"`
+		// flagged queryids across nodes, before any cap
+		PlanShifts int `json:"plan_shifts,omitempty"`
 		// distinct caveat codes across nodes (see diff.CaveatNote)
 		QueryCaveatCodes []string `json:"query_caveat_codes,omitempty"`
 		// nodes whose activity pair spanned two servers under one label
@@ -96,6 +101,11 @@ type (
 		Delta *diff.QueryDelta `json:"delta"`
 		// pairing note for summary notes; the full view has it in Delta.Caveats
 		note string
+	}
+
+	NodePlanShifts struct {
+		Node   string                `json:"node"`
+		Result *diff.PlanShiftResult `json:"result"`
 	}
 
 	// which planner/activity captures matched each anchor, and the time skew
@@ -129,7 +139,8 @@ func (r *Result) IsEmpty() bool {
 		r.SchemaDelta.IsEmpty() &&
 		r.PlannerDelta.IsEmpty() &&
 		!hasActivity(r.ActivityDelta) &&
-		len(r.QueryDelta) == 0
+		len(r.QueryDelta) == 0 &&
+		planShiftCount(r.PlanShifts) == 0
 }
 
 func hasActivity(nds []NodeActivityDelta) bool {
@@ -152,7 +163,9 @@ func (r *Result) ForView(view string, limit int) *Result {
 		cp.ActivityDelta, ao = capActivityDeltas(cp.ActivityDelta, limit)
 		var qo int
 		cp.QueryDelta, qo = capQueryDeltas(cp.QueryDelta, limit)
-		cp.OmittedRows += po + ao + qo
+		var so int
+		cp.PlanShifts, so = capPlanShifts(cp.PlanShifts, limit)
+		cp.OmittedRows += po + ao + qo + so
 	} else {
 		cp.SchemaDelta = nil
 		cp.PlannerDelta = nil
@@ -160,6 +173,7 @@ func (r *Result) ForView(view string, limit int) *Result {
 		// a summary carrying every shape's SQL text is not a summary; the
 		// counts and any refusal survive in Summary
 		cp.QueryDelta = nil
+		cp.PlanShifts = summarizePlanShifts(cp.PlanShifts)
 	}
 	cp.Truncated = cp.OmittedObjects > 0 || cp.OmittedRows > 0
 	return &cp

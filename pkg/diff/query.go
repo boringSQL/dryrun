@@ -84,8 +84,8 @@ type (
 		TempBlksWritten        int64 `json:"temp_blks_written"`
 		TempBlksWrittenDelta   int64 `json:"temp_blks_written_delta"`
 
-		// mean over the window, and over the previous window when both are
-		// known; nil when the call count did not move
+		// window mean, and the cumulative mean up to the older capture (not the
+		// previous window); nil when the call count did not move
 		WindowMeanMs *float64 `json:"window_mean_ms,omitempty"`
 		PriorMeanMs  *float64 `json:"prior_mean_ms,omitempty"`
 		// blocks per call over the window; null, never 0, when calls_delta is 0

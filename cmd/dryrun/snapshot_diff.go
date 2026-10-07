@@ -199,6 +199,9 @@ func buildSnapshotDiff(ctx context.Context, store *history.Store, key history.Sn
 			return nil, err
 		}
 		env.Kind, env.Query = "query", d.Query
+		if d.Query != nil && d.Query.Incomparable == "" {
+			env.PlanShifts = snapdiff.PlanShiftsForPair(ctx, store, key, from.AsQueryStats(), to.AsQueryStats())
+		}
 		env.FromHash, env.FromTakenAt = d.From.ContentHash(), d.From.Timestamp()
 	default:
 		return nil, fmt.Errorf("unsupported diff kind %s", kind)

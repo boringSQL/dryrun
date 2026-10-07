@@ -40,6 +40,7 @@ func RenderConsoleMinPct(w io.Writer, env *SnapshotDiff, minPct float64) {
 	}
 	if env.Query != nil {
 		RenderQueryConsole(w, env)
+		RenderPlanShifts(w, env.PlanShifts)
 		return
 	}
 	if env.Schema == nil {

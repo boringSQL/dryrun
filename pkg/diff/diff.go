@@ -22,6 +22,8 @@ type (
 		Planner     *PlannerDelta  `json:"planner,omitempty"`
 		Activity    *ActivityDelta `json:"activity,omitempty"`
 		Query       *QueryDelta    `json:"query,omitempty"`
+		// kind=query only
+		PlanShifts *PlanShiftResult `json:"plan_shifts,omitempty"`
 	}
 
 	SchemaDelta struct {

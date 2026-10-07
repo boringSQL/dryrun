@@ -130,6 +130,7 @@ func buildSummary(r *Result) Summary {
 		}
 	}
 	s.QueryCaveatCodes = queryCaveatCodes(r.QueryDelta)
+	s.PlanShifts = planShiftCount(r.PlanShifts)
 	s.ObjectsChanged = len(r.Objects)
 	for i, o := range r.Objects {
 		if i >= 5 {
@@ -161,6 +162,9 @@ func headline(r *Result, s Summary) string {
 	}
 	if s.QueryUnknown > 0 {
 		parts = append(parts, fmt.Sprintf("%s with no comparable baseline", plural(s.QueryUnknown, "shape", "shapes")))
+	}
+	if s.PlanShifts > 0 {
+		parts = append(parts, fmt.Sprintf("%s with a per-call cost step (possible plan flip)", plural(s.PlanShifts, "queryid", "queryids")))
 	}
 	if s.ActivityRefused > 0 {
 		parts = append(parts, fmt.Sprintf("activity not comparable on %s", plural(s.ActivityRefused, "node", "nodes")))

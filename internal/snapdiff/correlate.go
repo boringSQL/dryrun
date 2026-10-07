@@ -82,6 +82,7 @@ func Build(ctx context.Context, store *history.Store, key history.SnapshotKey, o
 	}
 	res.ActivityDelta = diffActivityByNode(ctx, store, key, fromM, toM)
 	res.QueryDelta = diffQueryByNode(ctx, store, key, fromM, toM)
+	res.PlanShifts = planShiftsByNode(ctx, store, key, fromM, toM)
 
 	if opt.Schema != "" || opt.Table != "" {
 		res.SchemaDelta = filterSchemaDelta(res.SchemaDelta, opt.Schema, opt.Table)
