@@ -446,9 +446,9 @@ func (r streamRead) hasDocument() bool {
 	return r.schema != nil || r.planner != nil || r.activity != nil || r.query != nil
 }
 
-// Runs each wanted stream schema-first. Reads all streams before persisting to avoid idle tx timeouts.
+// Runs streams in captureOrder; reads all before persisting to avoid idle tx timeouts.
 func captureStreams(ctx context.Context, cap initCapturer, store captureStore, key history.SnapshotKey, t captureTarget, wanted []string, schemaRef string, rowCap int, opts captureRunOptions) ([]string, error) {
-	ordered := schemaFirst(wanted)
+	ordered := captureOrder(wanted)
 	reads, base, readErr := readStreams(ctx, cap, store, key, t, ordered, schemaRef, rowCap, opts)
 	releaseCaptureTx(ctx, cap)
 	// persist successful reads even on partial failure
@@ -655,20 +655,20 @@ func persistStream(ctx context.Context, store captureStore, key history.Snapshot
 	return 0, fmt.Errorf("unknown stream %q", r.stream)
 }
 
-// schema writes the hash every other stream binds to, so it leads regardless
-// of listed order; the rest keep their order.
-func schemaFirst(streams []string) []string {
-	out := slices.Clone(streams)
-	slices.SortStableFunc(out, func(a, b string) int {
-		switch {
-		case a == b, a != "schema" && b != "schema":
+// schema leads so its hash is written first; query trails, its grouping can
+// outlast idle_in_transaction_session_timeout. The rest keep their order.
+func captureOrder(streams []string) []string {
+	rank := func(s string) int {
+		switch s {
+		case "schema":
 			return 0
-		case a == "schema":
-			return -1
-		default:
-			return 1
+		case "query":
+			return 2
 		}
-	})
+		return 1
+	}
+	out := slices.Clone(streams)
+	slices.SortStableFunc(out, func(a, b string) int { return rank(a) - rank(b) })
 	return out
 }
 

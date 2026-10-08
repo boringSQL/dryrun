@@ -154,13 +154,10 @@ func (c *pgxCapturer) CaptureActivity(ctx context.Context, schemaRefHash, source
 	return schema.CaptureActivityStats(ctx, tx, schemaRefHash, source)
 }
 
+// pgss isn't MVCC; grouping client-side would idle the tx past idle_in_transaction_session_timeout
 func (c *pgxCapturer) CaptureQueryStats(ctx context.Context, schemaRefHash, source string, rowCap int) (*schema.QueryStatsSnapshot, error) {
-	tx, err := c.snapshotTx(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { c.lastRead = time.Now() }()
-	return schema.CaptureQueryStats(ctx, tx, schemaRefHash, source, rowCap)
+	c.ReleaseTx(ctx)
+	return schema.CaptureQueryStats(ctx, c.pool, schemaRefHash, source, rowCap)
 }
 
 // optional interface for capturers holding an open transaction

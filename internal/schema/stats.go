@@ -150,6 +150,12 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		}
 		return nil, fmt.Errorf("fetch query stats: %w", err)
 	}
+	// read info before grouping: on a tx, grouping can outlast idle_in_transaction_session_timeout
+	var infoAfter *QueryStatsInfo
+	if hasInfoView {
+		infoAfter = fetchPgssInfo(ctx, pool)
+	}
+	phase.mark("info")
 	// The whitelist admits COPY; keep only its literal-free forms.
 	clusters, err := qshape.GroupWithPolicy(dropUnsafeCopy(queries), tags.DefaultPolicy())
 	phase.mark("group")
@@ -204,10 +210,6 @@ func CaptureQueryStats(ctx context.Context, pool Querier, schemaRefHash, source 
 		}
 	}
 
-	var infoAfter *QueryStatsInfo
-	if hasInfoView {
-		infoAfter = fetchPgssInfo(ctx, pool)
-	}
 	snap := &QueryStatsSnapshot{
 		FormatVersion:          FormatVersion,
 		SchemaRefHash:          schemaRefHash,
@@ -382,6 +384,7 @@ func fetchPgssEnvironment(ctx context.Context, pool Querier) pgssEnvironment {
 func fetchPgssInfo(ctx context.Context, pool Querier) *QueryStatsInfo {
 	var info QueryStatsInfo
 	if err := pool.QueryRow(ctx, q("fetch-pgss-info")).Scan(&info.StatsReset, &info.Dealloc); err != nil {
+		slog.Warn("read pg_stat_statements_info", "error", err)
 		return nil
 	}
 	return &info

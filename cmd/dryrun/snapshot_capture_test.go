@@ -783,27 +783,28 @@ func TestCaptureAttempts_NotWrittenByAStoreWrite(t *testing.T) {
 	}
 }
 
-func TestSchemaFirst(t *testing.T) {
+func TestCaptureOrder(t *testing.T) {
 	for _, tc := range []struct {
 		in   []string
 		want string
 	}{
-		{[]string{"query", "schema", "activity"}, "schema,query,activity"},
+		{[]string{"query", "schema", "activity"}, "schema,activity,query"},
 		{[]string{"schema", "planner"}, "schema,planner"},
 		{[]string{"planner", "activity", "query"}, "planner,activity,query"},
+		{[]string{"query", "activity", "planner"}, "activity,planner,query"},
 		{nil, ""},
 	} {
-		if got := strings.Join(schemaFirst(tc.in), ","); got != tc.want {
-			t.Errorf("schemaFirst(%v) = %q, want %q", tc.in, got, tc.want)
+		if got := strings.Join(captureOrder(tc.in), ","); got != tc.want {
+			t.Errorf("captureOrder(%v) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 
 	// the caller's slice must not be reordered under it: capture_check and the
 	// report both read the configured order
 	in := []string{"query", "schema"}
-	schemaFirst(in)
+	captureOrder(in)
 	if in[0] != "query" {
-		t.Errorf("schemaFirst mutated its input: %v", in)
+		t.Errorf("captureOrder mutated its input: %v", in)
 	}
 }
 
