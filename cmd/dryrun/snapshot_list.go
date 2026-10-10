@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -15,11 +17,12 @@ func snapshotListCmd(historyDB *string) *cobra.Command {
 		node, kind, since  string
 		limit              int
 		jsonOut, prettyOut bool
+		oneline            bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List saved snapshots",
+		Short: "List schema versions and the captures taken under each",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := openHistoryStore(*historyDB)
@@ -37,71 +40,77 @@ func snapshotListCmd(historyDB *string) *cobra.Command {
 				rng.From = &from
 			}
 			if kind != "" {
-				if _, err := history.ParseKindTag(kind); err != nil {
-					return err
-				}
-			}
-
-			key := resolveSnapshotKey()
-			kinds, err := store.ListKinds(cmd.Context(), key)
-			if err != nil {
-				return err
-			}
-			var summaries []history.SnapshotSummary
-			for _, k := range kinds {
-				if !kindMatches(k, kind, node) {
-					continue
-				}
-				list, err := store.List(cmd.Context(), key, k, rng)
+				tag, err := history.ParseKindTag(kind)
 				if err != nil {
 					return err
 				}
-				for i := range list {
-					list[i].Kind = k
-				}
-				summaries = append(summaries, list...)
+				kind = tag.String()
 			}
 
-			shown, total := sortAndLimit(summaries, limit)
-			if jsonOut {
-				fmt.Println(string(marshalJSON(shown, prettyOut)))
-				return nil
+			key := resolveSnapshotKey()
+			if oneline && (jsonOut || node != "" || kind != "") {
+				return fmt.Errorf("--oneline lists schema versions only; it does not combine with --json, --node or --kind")
 			}
-			if total == 0 {
+			// schema rows carry no node, so this pair can match nothing (as in --json)
+			if kind == "schema" && node != "" {
 				fmt.Println(emptyListMessage(node, kind, since))
 				return nil
 			}
+			if jsonOut {
+				return listJSON(cmd.Context(), store, key, node, kind, rng, limit, prettyOut)
+			}
 
-			typeW := len("TYPE")
-			for _, s := range shown {
-				if n := len(s.Kind.String()); n > typeW {
-					typeW = n
-				}
+			if !cmd.Flags().Changed("limit") {
+				limit = defaultLogLimit
 			}
-			for _, s := range shown {
-				hash := s.ContentHash
-				if len(hash) > 16 {
-					hash = hash[:16]
-				}
-				fmt.Printf("%s  %-*s  %s  %s\n",
-					s.Timestamp.Format("2006-01-02 15:04:05"),
-					typeW, s.Kind.String(), hash, s.Database)
+			lg, err := buildLog(cmd.Context(), store, key, logFilter{Since: rng.From, Kind: kind, Node: node, Limit: limit})
+			if err != nil {
+				return err
 			}
-			if len(shown) < total {
-				fmt.Printf("\n%d of %d snapshot(s) (--limit %d)\n", len(shown), total, limit)
-			} else {
-				fmt.Printf("\n%d snapshot(s) total\n", total)
+			if len(lg.Versions) == 0 && len(lg.Orphans) == 0 {
+				fmt.Println(emptyListMessage(node, kind, since))
+				return nil
 			}
+			if oneline {
+				renderOneline(os.Stdout, lg)
+				return nil
+			}
+			renderLog(os.Stdout, lg, kind != "schema", node != "" || kind != "")
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&node, "node", "", "only this node label")
 	cmd.Flags().StringVar(&kind, "kind", "", "schema|planner|activity|query")
-	cmd.Flags().StringVar(&since, "since", "", "only captures newer than this (7d, 2w, 24h, or 2006-01-02)")
-	cmd.Flags().IntVar(&limit, "limit", 0, "show at most N (newest first)")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "output as JSON")
+	cmd.Flags().StringVar(&since, "since", "", "schema versions and captures since (7d, 2w, 24h, or 2006-01-02)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "show at most N schema versions (default 20, 0 for all); with --json, N rows (default all)")
+	cmd.Flags().BoolVar(&oneline, "oneline", false, "one line per schema version")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "output one row per stored snapshot as JSON (not grouped)")
 	cmd.Flags().BoolVar(&prettyOut, "pretty", false, "pretty-print JSON")
 	return cmd
+}
+
+func listJSON(ctx context.Context, store *history.Store, key history.SnapshotKey, node, kind string, rng history.TimeRange, limit int, pretty bool) error {
+	kinds, err := store.ListKinds(ctx, key)
+	if err != nil {
+		return err
+	}
+	var summaries []history.SnapshotSummary
+	for _, k := range kinds {
+		if !kindMatches(k, kind, node) {
+			continue
+		}
+		list, err := store.List(ctx, key, k, rng)
+		if err != nil {
+			return err
+		}
+		for i := range list {
+			list[i].Kind = k
+		}
+		summaries = append(summaries, list...)
+	}
+	shown, _ := sortAndLimit(summaries, limit)
+	fmt.Println(string(marshalJSON(shown, pretty)))
+	return nil
 }
 
 // Newest first. Timestamps are second-resolution and `capture --all` writes a
@@ -138,7 +147,7 @@ func emptyListMessage(node, kind, since string) string {
 		filters = append(filters, "--since "+since)
 	}
 	if len(filters) == 0 {
-		return "No snapshots found for this database."
+		return "No snapshots found for this database. Capture one with `dryrun snapshot capture`."
 	}
 	return fmt.Sprintf("No snapshots match %s.", strings.Join(filters, " "))
 }

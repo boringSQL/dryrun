@@ -67,8 +67,8 @@ func RenderConsoleMinPct(w io.Writer, env *SnapshotDiff, minPct float64) {
 	fmt.Fprintf(w, "  %s: %d added, %d modified, %d removed\n\n",
 		plural(len(env.Schema.Changes), "change", "changes"), added, modified, removed)
 
-	for _, g := range groupByObject(env.Schema.Changes) {
-		if len(g) == 1 && isObjectLevel(g[0]) {
+	for _, g := range GroupByObject(env.Schema.Changes) {
+		if len(g) == 1 && IsObjectLevel(g[0]) {
 			c := g[0]
 			line := fmt.Sprintf("%s %s %s", Marker(c), c.Object.Kind, c.Object.Qualified())
 			if c.Note != "" {
@@ -85,7 +85,7 @@ func RenderConsoleMinPct(w io.Writer, env *SnapshotDiff, minPct float64) {
 }
 
 // whole-object changes render as one line, no per-attribute children.
-func isObjectLevel(c Change) bool {
+func IsObjectLevel(c Change) bool {
 	switch c.Type {
 	case TableAdded, TableDropped, TableRenamed,
 		ViewAdded, ViewDropped, ViewDefinitionChanged,
@@ -96,7 +96,7 @@ func isObjectLevel(c Change) bool {
 	return false
 }
 
-func groupByObject(changes []Change) [][]Change {
+func GroupByObject(changes []Change) [][]Change {
 	var groups [][]Change
 	type key struct{ kind, schema, name string }
 	idx := make(map[key]int)
