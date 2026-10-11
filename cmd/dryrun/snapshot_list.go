@@ -17,7 +17,7 @@ func snapshotListCmd(historyDB *string) *cobra.Command {
 		node, kind, since  string
 		limit              int
 		jsonOut, prettyOut bool
-		oneline            bool
+		oneline, patch     bool
 	)
 
 	cmd := &cobra.Command{
@@ -48,8 +48,8 @@ func snapshotListCmd(historyDB *string) *cobra.Command {
 			}
 
 			key := resolveSnapshotKey()
-			if oneline && (jsonOut || node != "" || kind != "") {
-				return fmt.Errorf("--oneline lists schema versions only; it does not combine with --json, --node or --kind")
+			if oneline && (node != "" || kind != "") {
+				return fmt.Errorf("--oneline lists schema versions only; it does not combine with --node or --kind")
 			}
 			// schema rows carry no node, so this pair can match nothing (as in --json)
 			if kind == "schema" && node != "" {
@@ -60,9 +60,7 @@ func snapshotListCmd(historyDB *string) *cobra.Command {
 				return listJSON(cmd.Context(), store, key, node, kind, rng, limit, prettyOut)
 			}
 
-			if !cmd.Flags().Changed("limit") {
-				limit = defaultLogLimit
-			}
+			limit = logLimit(limit, cmd.Flags().Changed("limit"), patch)
 			lg, err := buildLog(cmd.Context(), store, key, logFilter{Since: rng.From, Kind: kind, Node: node, Limit: limit})
 			if err != nil {
 				return err
@@ -75,18 +73,30 @@ func snapshotListCmd(historyDB *string) *cobra.Command {
 				renderOneline(os.Stdout, lg)
 				return nil
 			}
-			renderLog(os.Stdout, lg, kind != "schema", node != "" || kind != "")
+			renderLog(os.Stdout, lg, logView{Captures: kind != "schema", Quiet: node != "" || kind != "", Patch: patch})
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&node, "node", "", "only this node label")
 	cmd.Flags().StringVar(&kind, "kind", "", "schema|planner|activity|query")
 	cmd.Flags().StringVar(&since, "since", "", "schema versions and captures since (7d, 2w, 24h, or 2006-01-02)")
-	cmd.Flags().IntVar(&limit, "limit", 0, "show at most N schema versions (default 20, 0 for all); with --json, N rows (default all)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "show at most N schema versions (default 20, all with -p; 0 for all); with --json, N rows (default all)")
 	cmd.Flags().BoolVar(&oneline, "oneline", false, "one line per schema version")
+	cmd.Flags().BoolVarP(&patch, "patch", "p", false, "show every change under each version, unfolded (no default --limit)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "output one row per stored snapshot as JSON (not grouped)")
 	cmd.Flags().BoolVar(&prettyOut, "pretty", false, "pretty-print JSON")
+	cmd.MarkFlagsMutuallyExclusive("oneline", "json")
+	cmd.MarkFlagsMutuallyExclusive("patch", "json")
+	cmd.MarkFlagsMutuallyExclusive("patch", "oneline")
 	return cmd
+}
+
+// a capped -p | grep would silently miss older versions
+func logLimit(limit int, set, patch bool) int {
+	if set || patch {
+		return limit
+	}
+	return defaultLogLimit
 }
 
 func listJSON(ctx context.Context, store *history.Store, key history.SnapshotKey, node, kind string, rng history.TimeRange, limit int, pretty bool) error {

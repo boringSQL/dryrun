@@ -24,18 +24,22 @@ type (
 		changes int // how many diff changes the line stands for
 		repeat  int // identical consecutive lines (function overloads)
 	}
+
+	logView struct {
+		Captures bool // off for --kind schema
+		Quiet    bool // hide "no captures" under a --node/--kind filter
+		Patch    bool // every change line in full: no budget, fold, hint or clip
+	}
 )
 
-// quiet hides "no captures" when a --node/--kind filter is active and an empty
-// version is expected.
-func renderLog(w io.Writer, lg schemaLog, showCaptures, quiet bool) {
+func renderLog(w io.Writer, lg schemaLog, view logView) {
 	for i, v := range lg.Versions {
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		renderVersion(w, v, showCaptures, quiet)
+		renderVersion(w, v, view)
 	}
-	if showCaptures && len(lg.Orphans) > 0 {
+	if view.Captures && len(lg.Orphans) > 0 {
 		if len(lg.Versions) > 0 {
 			fmt.Fprintln(w)
 		}
@@ -45,7 +49,7 @@ func renderLog(w io.Writer, lg schemaLog, showCaptures, quiet bool) {
 	renderOlder(w, lg.Older)
 }
 
-func renderVersion(w io.Writer, v schemaVersion, showCaptures, quiet bool) {
+func renderVersion(w io.Writer, v schemaVersion, view logView) {
 	left := fmt.Sprintf("schema %s  (%s)", hash7(v.Row.ContentHash), refToken(v.Ref))
 	n, right := versionSummary(v)
 	if n >= 0 {
@@ -65,10 +69,10 @@ func renderVersion(w io.Writer, v schemaVersion, showCaptures, quiet bool) {
 	case v.Delta.IsEmpty() && !v.Oldest:
 		fmt.Fprintln(w, "    no schema change")
 	case !v.Oldest:
-		renderChanges(w, v)
+		renderChanges(w, v, view.Patch)
 	}
 
-	if !showCaptures || (len(v.Captures) == 0 && quiet) {
+	if !view.Captures || (len(v.Captures) == 0 && view.Quiet) {
 		return
 	}
 	fmt.Fprintln(w)
@@ -79,10 +83,17 @@ func renderVersion(w io.Writer, v schemaVersion, showCaptures, quiet bool) {
 	renderCaptures(w, v.Captures)
 }
 
-func renderChanges(w io.Writer, v schemaVersion) {
-	lines, folded := changeLines(v.Delta.Changes, false)
+func renderChanges(w io.Writer, v schemaVersion, patch bool) {
+	if patch {
+		lines, _ := changeLines(v.Delta.Changes, false, true)
+		for _, l := range lines {
+			fmt.Fprintln(w, "    "+l.text)
+		}
+		return
+	}
+	lines, folded := changeLines(v.Delta.Changes, false, false)
 	if len(lines) > maxChangeLines {
-		lines, folded = changeLines(v.Delta.Changes, true)
+		lines, folded = changeLines(v.Delta.Changes, true, false)
 	}
 	if len(lines) > maxChangeLines {
 		lines, folded = lines[:maxChangeLines], true
@@ -106,8 +117,8 @@ func renderChanges(w io.Writer, v schemaVersion) {
 }
 
 // Same grouping and wording as `snapshot diff`; fold collapses busy tables to a
-// count.
-func changeLines(changes []diff.Change, fold bool) (lines []changeLine, folded bool) {
+// count, full keeps function argument lists.
+func changeLines(changes []diff.Change, fold, full bool) (lines []changeLine, folded bool) {
 	add := func(text string, n int) {
 		if k := len(lines) - 1; k >= 0 && lines[k].text == text {
 			lines[k].changes += n
@@ -119,14 +130,14 @@ func changeLines(changes []diff.Change, fold bool) (lines []changeLine, folded b
 	for _, g := range diff.GroupByObject(changes) {
 		if len(g) == 1 && diff.IsObjectLevel(g[0]) {
 			c := g[0]
-			text := fmt.Sprintf("%s %s %s", diff.Marker(c), c.Object.Kind, objectName(c.Object))
+			text := fmt.Sprintf("%s %s %s", diff.Marker(c), c.Object.Kind, objectName(c.Object, full))
 			if c.Note != "" {
 				text += " (" + c.Note + ")"
 			}
 			add(text, 1)
 			continue
 		}
-		head := fmt.Sprintf("~ %s %s", g[0].Object.Kind, objectName(g[0].Object))
+		head := fmt.Sprintf("~ %s %s", g[0].Object.Kind, objectName(g[0].Object, full))
 		if fold && len(g) >= foldTableAt {
 			add(fmt.Sprintf("%-40s %d changes", head, len(g)), len(g))
 			folded = true
@@ -185,7 +196,7 @@ func onelineSummary(changes []diff.Change) string {
 		if len(g) == 1 && diff.IsObjectLevel(g[0]) {
 			marker = diff.Marker(g[0])
 		}
-		p := marker + " " + objectName(g[0].Object)
+		p := marker + " " + objectName(g[0].Object, false)
 		if len(parts) == 0 || parts[len(parts)-1] != p {
 			parts = append(parts, p)
 		}
@@ -221,10 +232,10 @@ func versionSummary(v schemaVersion) (n int, label string) {
 	return n, pluralWord(n, "change", "changes")
 }
 
-// public is the common case; functions collapse their argument list.
-func objectName(r diff.ObjectRef) string {
+// public is the common case; functions collapse their argument list unless full.
+func objectName(r diff.ObjectRef, full bool) string {
 	name := strings.TrimPrefix(r.Qualified(), "public.")
-	if r.Kind == "function" {
+	if r.Kind == "function" && !full {
 		if i := strings.IndexByte(name, '('); i >= 0 {
 			name = name[:i] + "()"
 		}

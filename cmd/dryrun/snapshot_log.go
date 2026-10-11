@@ -116,10 +116,12 @@ func diffVersions(ctx context.Context, store *history.Store, key history.Snapsho
 		return store.GetSchemaByExactHash(ctx, key, rows[ref].ContentHash)
 	}
 	for i := range versions {
-		if ctx.Err() != nil {
-			return
-		}
 		v := &versions[i]
+		// a nil Delta without DiffErr would render as "no schema change"
+		if err := ctx.Err(); err != nil {
+			v.DiffErr = err
+			continue
+		}
 		if v.Oldest {
 			continue
 		}

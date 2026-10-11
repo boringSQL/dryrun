@@ -133,7 +133,7 @@ func TestRenderVersionFolds(t *testing.T) {
 
 	v := schemaVersion{Row: schemaRow("abcdef0123", 0), Ref: 4, Delta: &diff.SchemaDelta{Changes: changes}}
 	var buf bytes.Buffer
-	renderVersion(&buf, v, false, false)
+	renderVersion(&buf, v, logView{})
 	out := buf.String()
 
 	for _, want := range []string{
@@ -149,5 +149,56 @@ func TestRenderVersionFolds(t *testing.T) {
 	}
 	if strings.Contains(out, "~ table small") || strings.Contains(out, "public.") {
 		t.Errorf("dangling header or spelled-out public schema:\n%s", out)
+	}
+}
+
+// -p exists to be grepped: every change must come out whole, with overloads
+// told apart by signature and nothing folded, cut or clipped.
+func TestRenderVersionPatch(t *testing.T) {
+	pub := "public"
+	tbl := diff.ObjectRef{Kind: "table", Schema: &pub, Name: "big"}
+	yes := true
+	var changes []diff.Change
+	for i := range 8 {
+		changes = append(changes, diff.Change{Type: diff.ColumnAdded, Object: tbl, Column: &diff.ColumnChange{Name: fmt.Sprintf("c%d", i), Nullable: &yes}})
+	}
+	for _, args := range []string{"int", "text"} {
+		changes = append(changes, diff.Change{Type: diff.FunctionAdded, Object: diff.ObjectRef{Kind: "function", Schema: &pub, Name: "f(" + args + ")"}})
+	}
+	longType := "TABLE(" + strings.Repeat("col bigint, ", 15) + "last text)"
+	changes = append(changes, diff.Change{Type: diff.ColumnTypeChanged, Object: tbl,
+		Column: &diff.ColumnChange{Name: "wide", FromType: "text", ToType: longType}})
+
+	v := schemaVersion{Row: schemaRow("abcdef0123", 0), Ref: 1, Delta: &diff.SchemaDelta{Changes: changes}}
+	var buf bytes.Buffer
+	renderVersion(&buf, v, logView{Patch: true})
+	out := buf.String()
+
+	for _, want := range []string{"c0 added", "c7 added", "+ function f(int)\n", "+ function f(text)\n", longType} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "…") || strings.Contains(out, "×") {
+		t.Errorf("-p cut, clipped or merged lines:\n%s", out)
+	}
+}
+
+// The text log defaults to 20 versions, but -p is for grepping the whole history:
+// a silent cap there hides older versions, since grep drops the "older" trailer.
+func TestLogLimit(t *testing.T) {
+	cases := []struct {
+		limit      int
+		set, patch bool
+		want       int
+	}{
+		{0, false, false, defaultLogLimit},
+		{0, false, true, 0},
+		{2, true, true, 2},
+	}
+	for _, tc := range cases {
+		if got := logLimit(tc.limit, tc.set, tc.patch); got != tc.want {
+			t.Errorf("logLimit(%d, set=%t, patch=%t) = %d, want %d", tc.limit, tc.set, tc.patch, got, tc.want)
+		}
 	}
 }
