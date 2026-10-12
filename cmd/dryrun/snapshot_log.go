@@ -44,6 +44,7 @@ type (
 		Kind  string
 		Node  string
 		Limit int
+		Table string
 	}
 )
 
@@ -92,13 +93,21 @@ func buildLog(ctx context.Context, store *history.Store, key history.SnapshotKey
 		}
 		lg.Versions = append(lg.Versions, v)
 	}
+	// limit counts matches, so diff before filtering
+	if f.Table != "" {
+		diffVersions(ctx, store, key, rows, lg.Versions)
+		lg.Versions = filterTable(lg.Versions, f.Table)
+		orphans = nil
+	}
 	if f.Limit > 0 && len(lg.Versions) > f.Limit {
 		lg.Older = len(lg.Versions) - f.Limit
 		lg.Versions = lg.Versions[:f.Limit]
 	}
 	lg.Orphans = clusterCaptures(orphans)
 
-	diffVersions(ctx, store, key, rows, lg.Versions)
+	if f.Table == "" {
+		diffVersions(ctx, store, key, rows, lg.Versions)
+	}
 	return lg, nil
 }
 

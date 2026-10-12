@@ -18,6 +18,7 @@ func snapshotListCmd(historyDB *string) *cobra.Command {
 		limit              int
 		jsonOut, prettyOut bool
 		oneline, patch     bool
+		table              string
 	)
 
 	cmd := &cobra.Command{
@@ -53,7 +54,7 @@ func snapshotListCmd(historyDB *string) *cobra.Command {
 			}
 			// schema rows carry no node, so this pair can match nothing (as in --json)
 			if kind == "schema" && node != "" {
-				fmt.Println(emptyListMessage(node, kind, since))
+				fmt.Println(emptyListMessage(node, kind, since, table))
 				return nil
 			}
 			if jsonOut {
@@ -61,19 +62,19 @@ func snapshotListCmd(historyDB *string) *cobra.Command {
 			}
 
 			limit = logLimit(limit, cmd.Flags().Changed("limit"), patch)
-			lg, err := buildLog(cmd.Context(), store, key, logFilter{Since: rng.From, Kind: kind, Node: node, Limit: limit})
+			lg, err := buildLog(cmd.Context(), store, key, logFilter{Since: rng.From, Kind: kind, Node: node, Limit: limit, Table: table})
 			if err != nil {
 				return err
 			}
 			if len(lg.Versions) == 0 && len(lg.Orphans) == 0 {
-				fmt.Println(emptyListMessage(node, kind, since))
+				fmt.Println(emptyListMessage(node, kind, since, table))
 				return nil
 			}
 			if oneline {
 				renderOneline(os.Stdout, lg)
 				return nil
 			}
-			renderLog(os.Stdout, lg, logView{Captures: kind != "schema", Quiet: node != "" || kind != "", Patch: patch})
+			renderLog(os.Stdout, lg, logView{Captures: kind != "schema", Quiet: node != "" || kind != "", Patch: patch, Table: table})
 			return nil
 		},
 	}
@@ -83,10 +84,12 @@ func snapshotListCmd(historyDB *string) *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 0, "show at most N schema versions (default 20, all with -p; 0 for all); with --json, N rows (default all)")
 	cmd.Flags().BoolVar(&oneline, "oneline", false, "one line per schema version")
 	cmd.Flags().BoolVarP(&patch, "patch", "p", false, "show every change under each version, unfolded (no default --limit)")
+	cmd.Flags().StringVar(&table, "table", "", "only versions that change table NAME; also matches views, functions, types and extensions (schema.name pins the schema)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "output one row per stored snapshot as JSON (not grouped)")
 	cmd.Flags().BoolVar(&prettyOut, "pretty", false, "pretty-print JSON")
 	cmd.MarkFlagsMutuallyExclusive("oneline", "json")
 	cmd.MarkFlagsMutuallyExclusive("patch", "json")
+	cmd.MarkFlagsMutuallyExclusive("table", "json")
 	cmd.MarkFlagsMutuallyExclusive("patch", "oneline")
 	return cmd
 }
@@ -145,8 +148,11 @@ func sortAndLimit(summaries []history.SnapshotSummary, limit int) (shown []histo
 }
 
 // "nothing here" and "your filter matched nothing" are different problems.
-func emptyListMessage(node, kind, since string) string {
+func emptyListMessage(node, kind, since, table string) string {
 	var filters []string
+	if table != "" {
+		filters = append(filters, "--table "+table)
+	}
 	if node != "" {
 		filters = append(filters, "--node "+node)
 	}

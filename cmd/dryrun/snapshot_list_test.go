@@ -129,11 +129,11 @@ func hashes(in []history.SnapshotSummary) []string {
 // "nothing captured yet" and "your filter matched nothing" send the user to
 // different places.
 func TestEmptyListMessage(t *testing.T) {
-	if got := emptyListMessage("", "", ""); !strings.Contains(got, "No snapshots found") {
+	if got := emptyListMessage("", "", "", ""); !strings.Contains(got, "No snapshots found") {
 		t.Errorf("unfiltered message is %q", got)
 	}
-	got := emptyListMessage("replica-1", "query", "7d")
-	for _, want := range []string{"replica-1", "query", "7d"} {
+	got := emptyListMessage("replica-1", "query", "7d", "time_entry")
+	for _, want := range []string{"replica-1", "query", "7d", "time_entry"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("filtered message %q omits %q", got, want)
 		}

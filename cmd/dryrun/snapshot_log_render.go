@@ -29,6 +29,7 @@ type (
 		Captures bool // off for --kind schema
 		Quiet    bool // hide "no captures" under a --node/--kind filter
 		Patch    bool // every change line in full: no budget, fold, hint or clip
+		Table    string
 	}
 )
 
@@ -54,6 +55,9 @@ func renderVersion(w io.Writer, v schemaVersion, view logView) {
 	n, right := versionSummary(v)
 	if n >= 0 {
 		right = fmt.Sprintf("%d %s", n, right)
+		if view.Table != "" {
+			right += " to " + view.Table
+		}
 	}
 	fmt.Fprintf(w, "%s%s%s\n", left, strings.Repeat(" ", max(2, headerWidth-len(left)-len(right))), right)
 
