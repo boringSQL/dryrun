@@ -351,6 +351,7 @@ type (
 		Constraints   []schema.Constraint `json:"constraints"`
 		Indexes       []compactIndex      `json:"indexes"`
 		RLSEnabled    bool                `json:"rls_enabled"`
+		RLSForced     bool                `json:"rls_forced,omitempty"`
 		Comment       *string             `json:"comment,omitempty"`
 		Sizing        *schema.TableSizing `json:"stats,omitempty"`
 		Policies      []schema.RlsPolicy  `json:"policies,omitempty"`
@@ -371,7 +372,7 @@ type (
 func toCompactTable(t *schema.Table, sizing *schema.TableSizing) compactTable {
 	out := compactTable{
 		OID: t.OID, Schema: t.Schema, Name: t.Name,
-		Constraints: t.Constraints, RLSEnabled: t.RLSEnabled,
+		Constraints: t.Constraints, RLSEnabled: t.RLSEnabled, RLSForced: t.RLSForced,
 		Comment: t.Comment, Sizing: sizing,
 		Policies: t.Policies, Triggers: t.Triggers, Reloptions: t.Reloptions,
 	}

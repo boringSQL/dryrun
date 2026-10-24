@@ -973,3 +973,99 @@ func TestDrift_TriggersPolicies(t *testing.T) {
 		t.Errorf("policy change: want diverged/1 modified, got %s/%d", r.Direction, r.ModifiedCount)
 	}
 }
+
+// pg_get_triggerdef does not show whether a trigger fires, so the enabled state is
+// its own field and its own change type. Disabling an audit trigger is the case
+// that matters; replica/always modes (logical replication setups) are diffed the
+// same way. A definition edit and a state change in one version are two changes.
+func TestDiffSchema_TriggerEnabled(t *testing.T) {
+	const def = `CREATE TRIGGER audit_t AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn()`
+	const defB = `CREATE TRIGGER audit_t BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn()`
+	trig := func(d, enabled string) snapshot.Trigger {
+		return snapshot.Trigger{Name: "audit_t", Definition: d, Enabled: enabled}
+	}
+	cases := []struct {
+		name     string
+		from, to snapshot.Trigger
+		want     []string
+	}{
+		{"origin to disabled", trig(def, ""), trig(def, "disabled"), []string{"trigger_enabled_changed"}},
+		{"disabled to always", trig(def, "disabled"), trig(def, "always"), []string{"trigger_enabled_changed"}},
+		{"unchanged state", trig(def, "replica"), trig(def, "replica"), nil},
+		{"definition and state", trig(defB, ""), trig(def, "disabled"), []string{"trigger_changed", "trigger_enabled_changed"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			delta, _ := DiffSchema(trigSnap("a", "public", "t", tc.from), trigSnap("b", "public", "t", tc.to))
+			if got := changeTypes(delta); !slices.Equal(got, tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, got)
+			}
+		})
+	}
+
+	delta, _ := DiffSchema(trigSnap("a", "public", "t", trig(def, "")), trigSnap("b", "public", "t", trig(def, "disabled")))
+	c := findChange(t, delta.Changes, TriggerEnabledChanged)
+	if c.Trigger == nil || c.Trigger.FromEnabled != "" || c.Trigger.ToEnabled != "disabled" {
+		t.Errorf("payload: %+v", c.Trigger)
+	}
+	// an added trigger that is already disabled carries its state on the added change
+	delta, _ = DiffSchema(trigSnap("a", "public", "t"), trigSnap("b", "public", "t", trig(def, "disabled")))
+	if c := findChange(t, delta.Changes, TriggerAdded); c.Trigger.ToEnabled != "disabled" {
+		t.Errorf("added payload: %+v", c.Trigger)
+	}
+}
+
+// FORCE ROW LEVEL SECURITY decides whether the table owner bypasses its own
+// policies, so turning it on or off is a separate change from enabling RLS.
+func TestDiffSchema_RLSForceToggled(t *testing.T) {
+	mk := func(hash string, enabled, forced bool) *snapshot.SchemaSnapshot {
+		s := emptySnap(hash)
+		s.Tables = []snapshot.Table{{Schema: "public", Name: "t", RLSEnabled: enabled, RLSForced: forced}}
+		return s
+	}
+	delta, _ := DiffSchema(mk("a", true, false), mk("b", true, true))
+	if got := changeTypes(delta); !slices.Equal(got, []string{"rls_force_toggled"}) {
+		t.Fatalf("force on: got %v", got)
+	}
+	if c := findChange(t, delta.Changes, RLSForceToggled); c.RLS == nil || !c.RLS.Forced || !c.RLS.Enabled {
+		t.Errorf("payload: %+v", c.RLS)
+	}
+	delta, _ = DiffSchema(mk("a", true, true), mk("b", false, false))
+	if got := changeTypes(delta); !slices.Equal(got, []string{"rls_force_toggled", "rls_toggled"}) {
+		t.Fatalf("both off: got %v", got)
+	}
+}
+
+// Wording for the new state changes as snapshot list / diff / drift print them.
+func TestDescribe_TriggerEnabledAndForce(t *testing.T) {
+	def := `CREATE TRIGGER audit_t AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn()`
+	cases := []struct {
+		name string
+		c    Change
+		want string
+	}{
+		{"disabled", Change{Type: TriggerEnabledChanged, Trigger: &TriggerChange{Name: "audit_t", ToEnabled: "disabled"}},
+			"trigger audit_t: enabled → disabled"},
+		{"re-enabled always", Change{Type: TriggerEnabledChanged, Trigger: &TriggerChange{Name: "audit_t", FromEnabled: "disabled", ToEnabled: "always"}},
+			"trigger audit_t: disabled → always"},
+		{"added disabled", Change{Type: TriggerAdded, Trigger: &TriggerChange{Name: "audit_t", ToDefinition: def, ToEnabled: "disabled"}},
+			"trigger audit_t added (disabled; AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn())"},
+		{"forced", Change{Type: RLSForceToggled, RLS: &RLSChange{Enabled: true, Forced: true}}, "RLS forced"},
+		{"forced without enable", Change{Type: RLSForceToggled, RLS: &RLSChange{Forced: true}}, "RLS forced (no effect: RLS not enabled)"},
+		{"unforced", Change{Type: RLSForceToggled, RLS: &RLSChange{Enabled: true}}, "RLS no longer forced"},
+		{"enabled nil payload", Change{Type: TriggerEnabledChanged}, "trigger enabled changed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Describe(tc.c); got != tc.want {
+				t.Errorf("\nwant %s\ngot  %s", tc.want, got)
+			}
+		})
+	}
+	if got := RLSForceToggled.Category(); got != "modified" {
+		t.Errorf("rls_force_toggled category: %s", got)
+	}
+	if got := TriggerEnabledChanged.Category(); got != "modified" {
+		t.Errorf("trigger_enabled_changed category: %s", got)
+	}
+}

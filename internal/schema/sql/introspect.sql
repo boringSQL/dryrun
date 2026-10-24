@@ -3,6 +3,7 @@ SELECT c.oid::int4      AS oid,
        n.nspname         AS schema_name,
        c.relname         AS table_name,
        c.relrowsecurity  AS rls_enabled,
+       c.relforcerowsecurity AS rls_forced,
        c.reloptions      AS reloptions
   FROM pg_catalog.pg_class c
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -262,7 +263,9 @@ SELECT pol.polrelid::int4    AS table_oid,
 -- name: fetch-triggers
 SELECT t.tgrelid::int4                AS table_oid,
        t.tgname                         AS trigger_name,
-       pg_catalog.pg_get_triggerdef(t.oid) AS definition
+       pg_catalog.pg_get_triggerdef(t.oid) AS definition,
+       -- pg_get_triggerdef omits it; '' keeps the origin digest
+       CASE t.tgenabled WHEN 'D' THEN 'disabled' WHEN 'R' THEN 'replica' WHEN 'A' THEN 'always' ELSE '' END AS enabled
   FROM pg_catalog.pg_trigger t
   JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace

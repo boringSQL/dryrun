@@ -281,6 +281,7 @@ func schemaScore(c diff.Change) float64 {
 		diff.TriggerDropped, diff.PolicyDropped, diff.ViewDropped, diff.FunctionDropped, diff.ObjectDropped:
 		return 100
 	case diff.ColumnTypeChanged, diff.ColumnSetNotNull, diff.FuncSecurityDefiner, diff.RLSToggled,
+		diff.RLSForceToggled, diff.TriggerEnabledChanged,
 		diff.PolicyAdded, diff.PolicyChanged,
 		// SET EXPRESSION rewrites the table under ACCESS EXCLUSIVE
 		diff.ColumnGenerationChanged:

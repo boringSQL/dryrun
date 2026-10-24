@@ -122,15 +122,34 @@ func statements(snap *snapshot.SchemaSnapshot, t *snapshot.Table, storedForVirtu
 	if t.RLSEnabled {
 		out = append(out, fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY;", qual(t.Schema, t.Name)))
 	}
+	if t.RLSForced {
+		out = append(out, fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY;", qual(t.Schema, t.Name)))
+	}
 	for _, p := range t.Policies {
 		out = append(out, policy(t, p))
 	}
 	for _, tr := range t.Triggers {
-		if tr.Definition != "" {
-			out = append(out, tr.Definition+";")
+		if tr.Definition == "" {
+			continue
+		}
+		out = append(out, tr.Definition+";")
+		if alter := triggerMode(tr.Enabled); alter != "" {
+			out = append(out, fmt.Sprintf("ALTER TABLE %s %s TRIGGER %s;", qual(t.Schema, t.Name), alter, quoteIdent(tr.Name)))
 		}
 	}
 	return append(out, comments(t)...), nil
+}
+
+func triggerMode(enabled string) string {
+	switch enabled {
+	case "disabled":
+		return "DISABLE"
+	case "replica":
+		return "ENABLE REPLICA"
+	case "always":
+		return "ENABLE ALWAYS"
+	}
+	return ""
 }
 
 // pg_get_indexdef says ON ONLY for an index on a partitioned table, which

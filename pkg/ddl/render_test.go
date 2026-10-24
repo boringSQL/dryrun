@@ -502,3 +502,35 @@ func TestStatementOrder(t *testing.T) {
 		}
 	}
 }
+
+// The rendered DDL must reproduce trigger state and FORCE, or recreating a table
+// from it would silently re-enable a disabled trigger or let the owner bypass RLS.
+func TestRenderTriggerStateAndForceRLS(t *testing.T) {
+	tab := tbl("t", col("a", "integer"))
+	tab.RLSEnabled = true
+	tab.RLSForced = true
+	for _, tr := range []struct{ name, enabled string }{{"t_origin", ""}, {"t_off", "disabled"}, {"t_rep", "replica"}, {"t_all", "always"}} {
+		tab.Triggers = append(tab.Triggers, snapshot.Trigger{
+			Name: tr.name, Enabled: tr.enabled,
+			Definition: "CREATE TRIGGER " + tr.name + " BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION touch()",
+		})
+	}
+	r := render(t, nil, tab)
+	for _, want := range []string{
+		"ALTER TABLE public.t ENABLE ROW LEVEL SECURITY;\nALTER TABLE public.t FORCE ROW LEVEL SECURITY;",
+		"ALTER TABLE public.t DISABLE TRIGGER t_off;",
+		"ALTER TABLE public.t ENABLE REPLICA TRIGGER t_rep;",
+		"ALTER TABLE public.t ENABLE ALWAYS TRIGGER t_all;",
+	} {
+		if !strings.Contains(r.SQL, want) {
+			t.Errorf("missing %q in:\n%s", want, r.SQL)
+		}
+	}
+	// the ALTER must follow the CREATE it modifies
+	if c, a := strings.Index(r.SQL, "CREATE TRIGGER t_off "), strings.Index(r.SQL, "DISABLE TRIGGER t_off;"); c < 0 || a < c {
+		t.Errorf("DISABLE TRIGGER t_off must come after its CREATE TRIGGER:\n%s", r.SQL)
+	}
+	if strings.Contains(r.SQL, "TRIGGER t_origin;") {
+		t.Errorf("origin trigger must not get an ALTER:\n%s", r.SQL)
+	}
+}

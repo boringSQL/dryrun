@@ -54,6 +54,7 @@ type (
 		Policies      []RlsPolicy    `json:"policies"`
 		Triggers      []Trigger      `json:"triggers"`
 		RLSEnabled    bool           `json:"rls_enabled"`
+		RLSForced     bool           `json:"rls_forced,omitempty"`
 		Reloptions    []string       `json:"reloptions,omitempty"`
 	}
 )
@@ -209,6 +210,8 @@ type RlsPolicy struct {
 type Trigger struct {
 	Name       string `json:"name"`
 	Definition string `json:"definition"`
+	// "" = origin; omitempty keeps default triggers' digest unchanged.
+	Enabled string `json:"enabled,omitempty"`
 }
 
 type EnumType struct {

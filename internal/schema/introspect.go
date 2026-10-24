@@ -192,6 +192,7 @@ type (
 		schema     string
 		name       string
 		rlsEnabled bool
+		rlsForced  bool
 		reloptions []string
 	}
 
@@ -282,6 +283,7 @@ type (
 		tableOID   uint32
 		name       string
 		definition string
+		enabled    string
 	}
 )
 
@@ -295,7 +297,7 @@ func fetchTables(ctx context.Context, pool Querier) ([]rawTable, error) {
 	return scanAll(rows, func(r pgx.Rows) (rawTable, error) {
 		var oid int32
 		var rt rawTable
-		err := r.Scan(&oid, &rt.schema, &rt.name, &rt.rlsEnabled, &rt.reloptions)
+		err := r.Scan(&oid, &rt.schema, &rt.name, &rt.rlsEnabled, &rt.rlsForced, &rt.reloptions)
 		rt.oid = uint32(oid)
 		return rt, err
 	})
@@ -542,7 +544,7 @@ func fetchTriggers(ctx context.Context, pool Querier) ([]rawTrigger, error) {
 	return scanAll(rows, func(r pgx.Rows) (rawTrigger, error) {
 		var oid int32
 		var rt rawTrigger
-		err := r.Scan(&oid, &rt.name, &rt.definition)
+		err := r.Scan(&oid, &rt.name, &rt.definition, &rt.enabled)
 		rt.tableOID = uint32(oid)
 		return rt, err
 	})
@@ -801,6 +803,7 @@ func assembleTables(
 		triggersByOID[rt.tableOID] = append(triggersByOID[rt.tableOID], Trigger{
 			Name:       rt.name,
 			Definition: rt.definition,
+			Enabled:    rt.enabled,
 		})
 	}
 
@@ -817,6 +820,7 @@ func assembleTables(
 			Policies:    policiesByOID[rt.oid],
 			Triggers:    triggersByOID[rt.oid],
 			RLSEnabled:  rt.rlsEnabled,
+			RLSForced:   rt.rlsForced,
 			Reloptions:  rt.reloptions,
 		}
 		if comment, ok := tableCommentMap[rt.oid]; ok {

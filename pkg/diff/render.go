@@ -179,7 +179,15 @@ func Describe(c Change) string {
 			return "RLS enabled"
 		}
 		return "RLS disabled"
-	case TriggerAdded, TriggerDropped, TriggerChanged:
+	case RLSForceToggled:
+		if c.RLS != nil && c.RLS.Forced {
+			if !c.RLS.Enabled {
+				return "RLS forced (no effect: RLS not enabled)"
+			}
+			return "RLS forced"
+		}
+		return "RLS no longer forced"
+	case TriggerAdded, TriggerDropped, TriggerChanged, TriggerEnabledChanged:
 		return describeTrigger(c)
 	case PolicyAdded, PolicyDropped, PolicyChanged:
 		return describePolicy(c)
@@ -219,11 +227,27 @@ func describeTrigger(c Change) string {
 	}
 	switch c.Type {
 	case TriggerAdded:
-		return fmt.Sprintf("trigger %s added (%s)", t.Name, triggerTail(t.ToDefinition))
+		return fmt.Sprintf("trigger %s added (%s%s)", t.Name, triggerModeNote(t.ToEnabled), triggerTail(t.ToDefinition))
 	case TriggerDropped:
-		return fmt.Sprintf("trigger %s dropped (%s)", t.Name, triggerTail(t.FromDefinition))
+		return fmt.Sprintf("trigger %s dropped (%s%s)", t.Name, triggerModeNote(t.FromEnabled), triggerTail(t.FromDefinition))
+	case TriggerEnabledChanged:
+		return fmt.Sprintf("trigger %s: %s → %s", t.Name, triggerMode(t.FromEnabled), triggerMode(t.ToEnabled))
 	}
 	return fmt.Sprintf("trigger %s: %s → %s", t.Name, triggerTail(t.FromDefinition), triggerTail(t.ToDefinition))
+}
+
+func triggerMode(enabled string) string {
+	if enabled == "" {
+		return "enabled"
+	}
+	return enabled
+}
+
+func triggerModeNote(enabled string) string {
+	if enabled == "" {
+		return ""
+	}
+	return enabled + "; "
 }
 
 func triggerTail(def string) string {

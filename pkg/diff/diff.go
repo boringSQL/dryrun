@@ -100,12 +100,16 @@ type (
 
 	RLSChange struct {
 		Enabled bool `json:"enabled"`
+		Forced  bool `json:"forced,omitempty"`
 	}
 
+	// "" = origin; else disabled | replica | always
 	TriggerChange struct {
 		Name           string `json:"name"`
 		FromDefinition string `json:"from_definition,omitempty"`
 		ToDefinition   string `json:"to_definition,omitempty"`
+		FromEnabled    string `json:"from_enabled,omitempty"`
+		ToEnabled      string `json:"to_enabled,omitempty"`
 	}
 
 	PolicyChange struct {
@@ -159,10 +163,14 @@ const (
 	ConstraintDropped ChangeType = "constraint_dropped"
 
 	RLSToggled ChangeType = "rls_toggled"
+	// whether the table owner bypasses its own policies
+	RLSForceToggled ChangeType = "rls_force_toggled"
 
 	TriggerAdded   ChangeType = "trigger_added"
 	TriggerDropped ChangeType = "trigger_dropped"
 	TriggerChanged ChangeType = "trigger_changed"
+	// pg_get_triggerdef hides DISABLE/ENABLE [REPLICA|ALWAYS] TRIGGER
+	TriggerEnabledChanged ChangeType = "trigger_enabled_changed"
 
 	PolicyAdded   ChangeType = "policy_added"
 	PolicyDropped ChangeType = "policy_dropped"
@@ -347,6 +355,11 @@ func diffTableBody(old, nw *snapshot.Table, gucs map[string]string, changes *[]C
 	if old.RLSEnabled != nw.RLSEnabled {
 		*changes = append(*changes, Change{Type: RLSToggled, Object: ref, RLS: &RLSChange{Enabled: nw.RLSEnabled}})
 	}
+	if old.RLSForced != nw.RLSForced {
+		*changes = append(*changes, Change{Type: RLSForceToggled, Object: ref, RLS: &RLSChange{
+			Enabled: nw.RLSEnabled, Forced: nw.RLSForced,
+		}})
+	}
 	if params := diffStorageParams(old.Reloptions, nw.Reloptions, gucs); len(params) > 0 {
 		*changes = append(*changes, Change{
 			Type: StorageParamsChanged, Object: ref, StorageParam: params,
@@ -479,21 +492,27 @@ func diffTriggers(old, nw []snapshot.Trigger, ref ObjectRef, changes *[]Change) 
 	newMap := indexBy(nw, func(t snapshot.Trigger) string { return t.Name })
 	for name, t := range newMap {
 		o, ok := oldMap[name]
-		switch {
-		case !ok:
+		if !ok {
 			*changes = append(*changes, Change{Type: TriggerAdded, Object: ref, Trigger: &TriggerChange{
-				Name: name, ToDefinition: t.Definition,
+				Name: name, ToDefinition: t.Definition, ToEnabled: t.Enabled,
 			}})
-		case triggerBody(o.Definition) != triggerBody(t.Definition):
+			continue
+		}
+		if triggerBody(o.Definition) != triggerBody(t.Definition) {
 			*changes = append(*changes, Change{Type: TriggerChanged, Object: ref, Trigger: &TriggerChange{
 				Name: name, FromDefinition: o.Definition, ToDefinition: t.Definition,
+			}})
+		}
+		if o.Enabled != t.Enabled {
+			*changes = append(*changes, Change{Type: TriggerEnabledChanged, Object: ref, Trigger: &TriggerChange{
+				Name: name, FromEnabled: o.Enabled, ToEnabled: t.Enabled,
 			}})
 		}
 	}
 	for name, t := range oldMap {
 		if _, ok := newMap[name]; !ok {
 			*changes = append(*changes, Change{Type: TriggerDropped, Object: ref, Trigger: &TriggerChange{
-				Name: name, FromDefinition: t.Definition,
+				Name: name, FromDefinition: t.Definition, FromEnabled: t.Enabled,
 			}})
 		}
 	}

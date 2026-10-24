@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -1417,5 +1418,51 @@ func TestPlannerContentHash_InheritedFalseKeepsPreFieldDigest(t *testing.T) {
 	}
 	if ComputePlannerContentHash(doc(true)) == preInheritedField {
 		t.Errorf("Inherited=true did not move the planner digest")
+	}
+}
+
+// Trigger.Enabled and Table.RLSForced were added without a format bump, which is
+// only safe because both are written solely when non-default. goldenTriggerRLSDoc
+// predates both fields; its digest was computed with the code before they existed
+// and must still come out the same under every generation, or every stored
+// history and every hosted push would stop verifying.
+const goldenTriggerRLSDoc = `{"format_version":%d,"tables":[{"oid":7,"schema":"public","name":"t","columns":[{"name":"a","type_name":"integer","nullable":true}],"constraints":null,"indexes":null,"policies":[{"name":"p","command":"ALL","permissive":true,"roles":["app"],"using_expr":"(tenant_id = 1)"}],"triggers":[{"name":"trg","definition":"CREATE TRIGGER trg AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION f()"}],"rls_enabled":true}]}`
+
+const goldenTriggerRLSDigest = "c6485f9e8220412e04046fb85ffbacd55359e8b58b09946dae03505607affa22"
+
+func decodeGolden(t *testing.T, version int) *SchemaSnapshot {
+	t.Helper()
+	var s SchemaSnapshot
+	if err := json.Unmarshal([]byte(fmt.Sprintf(goldenTriggerRLSDoc, version)), &s); err != nil {
+		t.Fatal(err)
+	}
+	return &s
+}
+
+func TestDigest_DefaultTriggerStateAndForceKeepDigest(t *testing.T) {
+	for _, v := range []int{1, 2, 3} {
+		if got := DigestFor(decodeGolden(t, v)); got != goldenTriggerRLSDigest {
+			t.Errorf("v%d: digest moved for a doc without the new fields:\n got %s\nwant %s", v, got, goldenTriggerRLSDigest)
+		}
+	}
+}
+
+// The non-default values are the whole point: disabling a trigger or forcing RLS
+// must create a new schema version.
+func TestDigest_SensitiveToTriggerStateAndForce(t *testing.T) {
+	disabled := decodeGolden(t, 3)
+	disabled.Tables[0].Triggers[0].Enabled = "disabled"
+	always := decodeGolden(t, 3)
+	always.Tables[0].Triggers[0].Enabled = "always"
+	forced := decodeGolden(t, 3)
+	forced.Tables[0].RLSForced = true
+
+	seen := map[string]string{goldenTriggerRLSDigest: "base"}
+	for name, s := range map[string]*SchemaSnapshot{"disabled": disabled, "always": always, "forced": forced} {
+		d := DigestFor(s)
+		if prev, dup := seen[d]; dup {
+			t.Errorf("%s hashes the same as %s", name, prev)
+		}
+		seen[d] = name
 	}
 }

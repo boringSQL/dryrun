@@ -111,6 +111,10 @@ func tableToStructural(t *Table, opts digestOpts) map[string]any {
 		"triggers":       t.Triggers,
 		"rls_enabled":    t.RLSEnabled,
 	}
+	// only when set, so unforced tables keep their digest
+	if t.RLSForced {
+		m["rls_forced"] = true
+	}
 	// Omitted, not null, when empty: a table with no storage params keeps its v1 bytes.
 	// Sort a copy; pg_class.reloptions is in set-order, which is not identity.
 	if opts.reloptions && len(t.Reloptions) > 0 {
