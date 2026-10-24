@@ -47,6 +47,8 @@ type (
 		Constraint   *ConstraintChange    `json:"constraint,omitempty"`
 		Function     *FunctionChange      `json:"function,omitempty"`
 		RLS          *RLSChange           `json:"rls,omitempty"`
+		Trigger      *TriggerChange       `json:"trigger,omitempty"`
+		Policy       *PolicyChange        `json:"policy,omitempty"`
 		Rename       *RenameChange        `json:"rename,omitempty"`
 		StorageParam []StorageParamChange `json:"storage_param,omitempty"`
 
@@ -100,6 +102,18 @@ type (
 		Enabled bool `json:"enabled"`
 	}
 
+	TriggerChange struct {
+		Name           string `json:"name"`
+		FromDefinition string `json:"from_definition,omitempty"`
+		ToDefinition   string `json:"to_definition,omitempty"`
+	}
+
+	PolicyChange struct {
+		Name string              `json:"name"`
+		From *snapshot.RlsPolicy `json:"from,omitempty"`
+		To   *snapshot.RlsPolicy `json:"to,omitempty"`
+	}
+
 	RenameChange struct {
 		FromName string `json:"from_name"`
 		ToName   string `json:"to_name"`
@@ -146,6 +160,14 @@ const (
 
 	RLSToggled ChangeType = "rls_toggled"
 
+	TriggerAdded   ChangeType = "trigger_added"
+	TriggerDropped ChangeType = "trigger_dropped"
+	TriggerChanged ChangeType = "trigger_changed"
+
+	PolicyAdded   ChangeType = "policy_added"
+	PolicyDropped ChangeType = "policy_dropped"
+	PolicyChanged ChangeType = "policy_changed"
+
 	ViewAdded             ChangeType = "view_added"
 	ViewDropped           ChangeType = "view_dropped"
 	ViewDefinitionChanged ChangeType = "view_definition_changed"
@@ -170,9 +192,11 @@ const (
 
 func (t ChangeType) Category() string {
 	switch t {
-	case TableAdded, ColumnAdded, IndexAdded, ConstraintAdded, ViewAdded, FunctionAdded, ObjectAdded:
+	case TableAdded, ColumnAdded, IndexAdded, ConstraintAdded, TriggerAdded, PolicyAdded,
+		ViewAdded, FunctionAdded, ObjectAdded:
 		return "added"
-	case TableDropped, ColumnDropped, IndexDropped, ConstraintDropped, ViewDropped, FunctionDropped, ObjectDropped:
+	case TableDropped, ColumnDropped, IndexDropped, ConstraintDropped, TriggerDropped, PolicyDropped,
+		ViewDropped, FunctionDropped, ObjectDropped:
 		return "removed"
 	default:
 		return "modified"
@@ -314,6 +338,8 @@ func diffTableBody(old, nw *snapshot.Table, gucs map[string]string, changes *[]C
 
 	diffIndexes(old.Indexes, nw.Indexes, ref, changes)
 	diffConstraints(old.Constraints, nw.Constraints, ref, changes)
+	diffTriggers(old.Triggers, nw.Triggers, ref, changes)
+	diffPolicies(old.Policies, nw.Policies, ref, changes)
 
 	if ptrStr(old.Comment) != ptrStr(nw.Comment) {
 		*changes = append(*changes, Change{Type: TableCommentChanged, Object: ref})
@@ -446,6 +472,78 @@ func diffConstraints(old, nw []snapshot.Constraint, ref ObjectRef, changes *[]Ch
 			*changes = append(*changes, Change{Type: ConstraintDropped, Object: ref, Constraint: &ConstraintChange{Name: name, Kind: c.Kind}})
 		}
 	}
+}
+
+func diffTriggers(old, nw []snapshot.Trigger, ref ObjectRef, changes *[]Change) {
+	oldMap := indexBy(old, func(t snapshot.Trigger) string { return t.Name })
+	newMap := indexBy(nw, func(t snapshot.Trigger) string { return t.Name })
+	for name, t := range newMap {
+		o, ok := oldMap[name]
+		switch {
+		case !ok:
+			*changes = append(*changes, Change{Type: TriggerAdded, Object: ref, Trigger: &TriggerChange{
+				Name: name, ToDefinition: t.Definition,
+			}})
+		case triggerBody(o.Definition) != triggerBody(t.Definition):
+			*changes = append(*changes, Change{Type: TriggerChanged, Object: ref, Trigger: &TriggerChange{
+				Name: name, FromDefinition: o.Definition, ToDefinition: t.Definition,
+			}})
+		}
+	}
+	for name, t := range oldMap {
+		if _, ok := newMap[name]; !ok {
+			*changes = append(*changes, Change{Type: TriggerDropped, Object: ref, Trigger: &TriggerChange{
+				Name: name, FromDefinition: t.Definition,
+			}})
+		}
+	}
+}
+
+func triggerBody(def string) string {
+	start := unquotedIndex(def, 0, " ON ")
+	if start < 0 {
+		return def
+	}
+	start += len(" ON ")
+	end := unquotedIndex(def, start, " ")
+	if end < 0 {
+		end = len(def)
+	}
+	return def[:start] + "$rel" + def[end:]
+}
+
+func diffPolicies(old, nw []snapshot.RlsPolicy, ref ObjectRef, changes *[]Change) {
+	oldMap := indexBy(old, func(p snapshot.RlsPolicy) string { return p.Name })
+	newMap := indexBy(nw, func(p snapshot.RlsPolicy) string { return p.Name })
+	for name, p := range newMap {
+		to := normPolicy(*p)
+		o, ok := oldMap[name]
+		if !ok {
+			*changes = append(*changes, Change{Type: PolicyAdded, Object: ref, Policy: &PolicyChange{Name: name, To: to}})
+			continue
+		}
+		if from := normPolicy(*o); !samePolicy(from, to) {
+			*changes = append(*changes, Change{Type: PolicyChanged, Object: ref, Policy: &PolicyChange{Name: name, From: from, To: to}})
+		}
+	}
+	for name, p := range oldMap {
+		if _, ok := newMap[name]; !ok {
+			*changes = append(*changes, Change{Type: PolicyDropped, Object: ref, Policy: &PolicyChange{Name: name, From: normPolicy(*p)}})
+		}
+	}
+}
+
+func normPolicy(p snapshot.RlsPolicy) *snapshot.RlsPolicy {
+	p.Roles = slices.Sorted(slices.Values(p.Roles))
+	if len(p.Roles) == 0 || (len(p.Roles) == 1 && p.Roles[0] == "public") {
+		p.Roles = nil
+	}
+	return &p
+}
+
+func samePolicy(a, b *snapshot.RlsPolicy) bool {
+	return a.Command == b.Command && a.Permissive == b.Permissive && slices.Equal(a.Roles, b.Roles) &&
+		ptrStr(a.UsingExpr) == ptrStr(b.UsingExpr) && ptrStr(a.WithCheckExpr) == ptrStr(b.WithCheckExpr)
 }
 
 func diffViews(from, to []snapshot.View, changes *[]Change) {

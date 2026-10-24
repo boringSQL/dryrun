@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/boringsql/dryrun/pkg/snapshot"
 )
 
 // exported so the snapshot_diff correlator can reuse the per-row formatting
@@ -177,6 +179,10 @@ func Describe(c Change) string {
 			return "RLS enabled"
 		}
 		return "RLS disabled"
+	case TriggerAdded, TriggerDropped, TriggerChanged:
+		return describeTrigger(c)
+	case PolicyAdded, PolicyDropped, PolicyChanged:
+		return describePolicy(c)
 	case ViewAdded:
 		return fmt.Sprintf("view %s added", c.Object.Qualified())
 	case ViewDropped:
@@ -204,6 +210,102 @@ func Describe(c Change) string {
 		return fmt.Sprintf("%s %s changed", c.Object.Kind, c.Object.Name)
 	}
 	return string(c.Type)
+}
+
+func describeTrigger(c Change) string {
+	t := c.Trigger
+	if t == nil {
+		return strings.ReplaceAll(string(c.Type), "_", " ")
+	}
+	switch c.Type {
+	case TriggerAdded:
+		return fmt.Sprintf("trigger %s added (%s)", t.Name, triggerTail(t.ToDefinition))
+	case TriggerDropped:
+		return fmt.Sprintf("trigger %s dropped (%s)", t.Name, triggerTail(t.FromDefinition))
+	}
+	return fmt.Sprintf("trigger %s: %s → %s", t.Name, triggerTail(t.FromDefinition), triggerTail(t.ToDefinition))
+}
+
+func triggerTail(def string) string {
+	i := unquotedIndex(def, 0, "TRIGGER ")
+	if i < 0 {
+		return def
+	}
+	j := unquotedIndex(def, i+len("TRIGGER "), " ")
+	if j < 0 {
+		return def
+	}
+	return def[j+1:]
+}
+
+func describePolicy(c Change) string {
+	p := c.Policy
+	if p == nil {
+		return strings.ReplaceAll(string(c.Type), "_", " ")
+	}
+	switch {
+	case c.Type == PolicyAdded && p.To != nil:
+		return fmt.Sprintf("policy %s added (%s)", p.Name, policyShape(p.To))
+	case c.Type == PolicyDropped && p.From != nil:
+		return fmt.Sprintf("policy %s dropped (%s)", p.Name, policyShape(p.From))
+	case c.Type == PolicyChanged && p.From != nil && p.To != nil:
+		if d := policyDelta(p.From, p.To); d != "" {
+			return fmt.Sprintf("policy %s: %s", p.Name, d)
+		}
+	}
+	return fmt.Sprintf("policy %s %s", p.Name, strings.TrimPrefix(string(c.Type), "policy_"))
+}
+
+func policyShape(p *snapshot.RlsPolicy) string {
+	parts := []string{p.Command, policyMode(p), "to " + policyRoles(p)}
+	if p.UsingExpr != nil {
+		parts = append(parts, "using ("+*p.UsingExpr+")")
+	}
+	if p.WithCheckExpr != nil {
+		parts = append(parts, "with check ("+*p.WithCheckExpr+")")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func policyDelta(from, to *snapshot.RlsPolicy) string {
+	var parts []string
+	if from.Command != to.Command {
+		parts = append(parts, from.Command+" → "+to.Command)
+	}
+	if from.Permissive != to.Permissive {
+		parts = append(parts, policyMode(from)+" → "+policyMode(to))
+	}
+	if r1, r2 := policyRoles(from), policyRoles(to); r1 != r2 {
+		parts = append(parts, "to "+r1+" → "+r2)
+	}
+	if a, b := policyExpr(from.UsingExpr), policyExpr(to.UsingExpr); a != b {
+		parts = append(parts, "using "+a+" → "+b)
+	}
+	if a, b := policyExpr(from.WithCheckExpr), policyExpr(to.WithCheckExpr); a != b {
+		parts = append(parts, "with check "+a+" → "+b)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func policyMode(p *snapshot.RlsPolicy) string {
+	if p.Permissive {
+		return "permissive"
+	}
+	return "restrictive"
+}
+
+func policyRoles(p *snapshot.RlsPolicy) string {
+	if len(p.Roles) == 0 {
+		return "public"
+	}
+	return strings.Join(p.Roles, ", ")
+}
+
+func policyExpr(e *string) string {
+	if e == nil {
+		return "∅"
+	}
+	return "(" + *e + ")"
 }
 
 func describeStorageParams(params []StorageParamChange) string {

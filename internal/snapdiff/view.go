@@ -278,9 +278,10 @@ func queryNotes(nds []NodeQueryDelta) []string {
 func schemaScore(c diff.Change) float64 {
 	switch c.Type {
 	case diff.TableDropped, diff.ColumnDropped, diff.IndexDropped, diff.ConstraintDropped,
-		diff.ViewDropped, diff.FunctionDropped, diff.ObjectDropped:
+		diff.TriggerDropped, diff.PolicyDropped, diff.ViewDropped, diff.FunctionDropped, diff.ObjectDropped:
 		return 100
 	case diff.ColumnTypeChanged, diff.ColumnSetNotNull, diff.FuncSecurityDefiner, diff.RLSToggled,
+		diff.PolicyAdded, diff.PolicyChanged,
 		// SET EXPRESSION rewrites the table under ACCESS EXCLUSIVE
 		diff.ColumnGenerationChanged:
 		return 70

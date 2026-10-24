@@ -3,6 +3,7 @@ package diff
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -674,5 +675,301 @@ func TestDiffSchema_GenerationExprChange(t *testing.T) {
 	}
 	if len(same.Changes) != 0 {
 		t.Errorf("identical schemas reported %d changes", len(same.Changes))
+	}
+}
+
+// --- triggers and RLS policies ---
+//
+// Both are captured on snapshot.Table and feed the content hash, so before these
+// differs existed a version that only touched a trigger or a policy moved the hash
+// yet diffed as "no schema change" (and `snapshot list --table` dropped it).
+
+// trigSnap builds a one-table snapshot carrying the given triggers. The OID is
+// fixed so a test can rename the table on one side and still have the differ pair
+// the two tables by OID (that is how TableRenamed is detected).
+func trigSnap(hash, schema, name string, trigs ...snapshot.Trigger) *snapshot.SchemaSnapshot {
+	s := emptySnap(hash)
+	s.Tables = []snapshot.Table{{OID: 42, Schema: schema, Name: name, Triggers: trigs}}
+	return s
+}
+
+// polSnap is the policy counterpart of trigSnap.
+func polSnap(hash, schema, name string, pols ...snapshot.RlsPolicy) *snapshot.SchemaSnapshot {
+	s := emptySnap(hash)
+	s.Tables = []snapshot.Table{{OID: 42, Schema: schema, Name: name, Policies: pols}}
+	return s
+}
+
+// changeTypes flattens a delta to its sorted type list so table-driven cases can
+// assert the exact set of changes, catching both missing and spurious ones.
+func changeTypes(d *SchemaDelta) []string {
+	var out []string
+	for _, c := range d.Changes {
+		out = append(out, string(c.Type))
+	}
+	slices.Sort(out)
+	return out
+}
+
+// Trigger comparison is keyed by name inside the already-paired table and compares
+// pg_get_triggerdef text with the `ON <relation>` blanked. The rename cases are the
+// point of the blanking: pg_get_triggerdef always schema-qualifies the relation, so
+// without it every table rename / SET SCHEMA would report each trigger as changed.
+// A trigger rename has no OID to pair on, so it is deliberately a drop + add.
+func TestDiffSchema_Triggers(t *testing.T) {
+	const (
+		before = `CREATE TRIGGER audit_t BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn()`
+		after  = `CREATE TRIGGER audit_t AFTER UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn()`
+	)
+	trig := func(name, def string) snapshot.Trigger { return snapshot.Trigger{Name: name, Definition: def} }
+	cases := []struct {
+		name string
+		from *snapshot.SchemaSnapshot
+		to   *snapshot.SchemaSnapshot
+		want []string
+	}{
+		{"added", trigSnap("a", "public", "t"), trigSnap("b", "public", "t", trig("audit_t", before)),
+			[]string{"trigger_added"}},
+		{"dropped", trigSnap("a", "public", "t", trig("audit_t", before)), trigSnap("b", "public", "t"),
+			[]string{"trigger_dropped"}},
+		{"definition changed", trigSnap("a", "public", "t", trig("audit_t", before)),
+			trigSnap("b", "public", "t", trig("audit_t", after)), []string{"trigger_changed"}},
+		{"identical", trigSnap("a", "public", "t", trig("audit_t", before)),
+			trigSnap("b", "public", "t", trig("audit_t", before)), nil},
+		{"table renamed", trigSnap("a", "public", "t", trig("audit_t", before)),
+			trigSnap("b", "public", "t2", trig("audit_t", strings.Replace(before, "public.t ", "public.t2 ", 1))),
+			[]string{"table_renamed"}},
+		{"set schema", trigSnap("a", "public", "t", trig("audit_t", before)),
+			trigSnap("b", "archive", "t", trig("audit_t", strings.Replace(before, "public.t ", "archive.t ", 1))),
+			[]string{"table_renamed"}},
+		{"quoted relation renamed",
+			trigSnap("a", "public", "Order Items", trig("audit_t", `CREATE TRIGGER audit_t AFTER INSERT ON public."Order Items" FOR EACH ROW EXECUTE FUNCTION audit_fn()`)),
+			trigSnap("b", "public", "Line Items", trig("audit_t", `CREATE TRIGGER audit_t AFTER INSERT ON public."Line Items" FOR EACH ROW EXECUTE FUNCTION audit_fn()`)),
+			[]string{"table_renamed"}},
+		{"rename plus real change", trigSnap("a", "public", "t", trig("audit_t", before)),
+			trigSnap("b", "public", "t2", trig("audit_t", strings.Replace(after, "public.t ", "public.t2 ", 1))),
+			[]string{"table_renamed", "trigger_changed"}},
+		{"trigger renamed", trigSnap("a", "public", "t", trig("audit_t", before)),
+			trigSnap("b", "public", "t", trig("audit_t2", strings.Replace(before, "audit_t ", "audit_t2 ", 1))),
+			[]string{"trigger_added", "trigger_dropped"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			delta, _ := DiffSchema(tc.from, tc.to)
+			if got := changeTypes(delta); !slices.Equal(got, tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, got)
+			}
+		})
+	}
+
+	// payload shape: added carries only the new text, changed carries both sides
+	delta, _ := DiffSchema(trigSnap("a", "public", "t"), trigSnap("b", "public", "t", trig("audit_t", before)))
+	if c := findChange(t, delta.Changes, TriggerAdded); c.Trigger == nil || c.Trigger.ToDefinition != before || c.Trigger.FromDefinition != "" {
+		t.Errorf("added payload: %+v", c.Trigger)
+	}
+	delta, _ = DiffSchema(trigSnap("a", "public", "t", trig("audit_t", before)), trigSnap("b", "public", "t", trig("audit_t", after)))
+	if c := findChange(t, delta.Changes, TriggerChanged); c.Trigger.FromDefinition != before || c.Trigger.ToDefinition != after {
+		t.Errorf("changed payload: %+v", c.Trigger)
+	}
+}
+
+// triggerBody blanks only the relation after the first unquoted ` ON `. Quoted
+// identifiers can contain spaces, `""` escapes and the word ON, so the scan has to
+// track double-quote state; anything it cannot parse comes back unchanged, which can
+// at worst cause a spurious trigger_changed, never hide a real change.
+func TestTriggerBody(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"plain",
+			`CREATE TRIGGER a AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION f()`,
+			`CREATE TRIGGER a AFTER INSERT ON $rel FOR EACH ROW EXECUTE FUNCTION f()`},
+		{"quoted relation with space and escaped quote",
+			`CREATE TRIGGER a AFTER INSERT ON "my schema"."a ""b"" c" FOR EACH ROW EXECUTE FUNCTION f()`,
+			`CREATE TRIGGER a AFTER INSERT ON $rel FOR EACH ROW EXECUTE FUNCTION f()`},
+		{"quoted trigger name containing ON",
+			`CREATE TRIGGER "x ON y" AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION f()`,
+			`CREATE TRIGGER "x ON y" AFTER INSERT ON $rel FOR EACH ROW EXECUTE FUNCTION f()`},
+		{"update of quoted column named on",
+			`CREATE TRIGGER a AFTER UPDATE OF "on" ON public.t FOR EACH ROW EXECUTE FUNCTION f()`,
+			`CREATE TRIGGER a AFTER UPDATE OF "on" ON $rel FOR EACH ROW EXECUTE FUNCTION f()`},
+		{"constraint trigger keeps FROM relation",
+			`CREATE CONSTRAINT TRIGGER a AFTER INSERT ON public.t FROM public.u NOT DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION f()`,
+			`CREATE CONSTRAINT TRIGGER a AFTER INSERT ON $rel FROM public.u NOT DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION f()`},
+		{"no ON clause", `garbage`, `garbage`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := triggerBody(tc.in); got != tc.want {
+				t.Errorf("\nwant %s\ngot  %s", tc.want, got)
+			}
+		})
+	}
+}
+
+// Policies compare on command, mode, roles (as a set), USING and WITH CHECK. Roles
+// come from an unordered array_agg, so order must not matter. Capture drops PUBLIC
+// (OID 0), so nil roles mean PUBLIC; a lone "public" is normalised to nil now so a
+// future capture fix that starts emitting it does not flag every `TO public` policy.
+func TestDiffSchema_Policies(t *testing.T) {
+	base := snapshot.RlsPolicy{Name: "p", Command: "ALL", Permissive: true, Roles: []string{"app"}, UsingExpr: strp("tenant_id = 1")}
+	with := func(f func(*snapshot.RlsPolicy)) snapshot.RlsPolicy {
+		p := base
+		p.Roles = slices.Clone(base.Roles)
+		f(&p)
+		return p
+	}
+	cases := []struct {
+		name     string
+		from, to *snapshot.SchemaSnapshot
+		want     []string
+	}{
+		{"added", polSnap("a", "public", "t"), polSnap("b", "public", "t", base), []string{"policy_added"}},
+		{"dropped", polSnap("a", "public", "t", base), polSnap("b", "public", "t"), []string{"policy_dropped"}},
+		{"identical", polSnap("a", "public", "t", base), polSnap("b", "public", "t", base), nil},
+		{"using changed", polSnap("a", "public", "t", base),
+			polSnap("b", "public", "t", with(func(p *snapshot.RlsPolicy) { p.UsingExpr = strp("true") })), []string{"policy_changed"}},
+		{"with check set", polSnap("a", "public", "t", base),
+			polSnap("b", "public", "t", with(func(p *snapshot.RlsPolicy) { p.WithCheckExpr = strp("true") })), []string{"policy_changed"}},
+		{"permissive to restrictive", polSnap("a", "public", "t", base),
+			polSnap("b", "public", "t", with(func(p *snapshot.RlsPolicy) { p.Permissive = false })), []string{"policy_changed"}},
+		{"command changed", polSnap("a", "public", "t", base),
+			polSnap("b", "public", "t", with(func(p *snapshot.RlsPolicy) { p.Command = "SELECT" })), []string{"policy_changed"}},
+		{"roles reordered", polSnap("a", "public", "t", with(func(p *snapshot.RlsPolicy) { p.Roles = []string{"b", "a"} })),
+			polSnap("b", "public", "t", with(func(p *snapshot.RlsPolicy) { p.Roles = []string{"a", "b"} })), nil},
+		{"public to role", polSnap("a", "public", "t", with(func(p *snapshot.RlsPolicy) { p.Roles = nil })),
+			polSnap("b", "public", "t", base), []string{"policy_changed"}},
+		{"nil roles equals lone public", polSnap("a", "public", "t", with(func(p *snapshot.RlsPolicy) { p.Roles = nil })),
+			polSnap("b", "public", "t", with(func(p *snapshot.RlsPolicy) { p.Roles = []string{"public"} })), nil},
+		{"table renamed, policy identical", polSnap("a", "public", "t", base), polSnap("b", "public", "t2", base),
+			[]string{"table_renamed"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			delta, _ := DiffSchema(tc.from, tc.to)
+			if got := changeTypes(delta); !slices.Equal(got, tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, got)
+			}
+		})
+	}
+
+	// the payload carries the normalised (sorted) roles
+	delta, _ := DiffSchema(polSnap("a", "public", "t"),
+		polSnap("b", "public", "t", with(func(p *snapshot.RlsPolicy) { p.Roles = []string{"b", "a"} })))
+	if c := findChange(t, delta.Changes, PolicyAdded); c.Policy == nil || c.Policy.To == nil || !slices.Equal(c.Policy.To.Roles, []string{"a", "b"}) {
+		t.Errorf("added payload: %+v", c.Policy)
+	}
+}
+
+// Describe is what snapshot list, snapshot diff and drift print. Triggers show the
+// definition minus the CREATE TRIGGER prefix so `snapshot list -p | grep audit_fn`
+// finds them; policies spell out the expressions because a USING edit is the
+// security-relevant part. A nil payload must not panic.
+func TestDescribe_TriggerPolicy(t *testing.T) {
+	def := `CREATE TRIGGER audit_t AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn()`
+	defB := `CREATE TRIGGER audit_t BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn()`
+	pol := &snapshot.RlsPolicy{Name: "p", Command: "ALL", Permissive: true, UsingExpr: strp("tenant_id = 1")}
+	pol2 := &snapshot.RlsPolicy{Name: "p", Command: "ALL", Permissive: false, Roles: []string{"admin", "app"},
+		UsingExpr: strp("true"), WithCheckExpr: strp("true")}
+	cases := []struct {
+		name string
+		c    Change
+		want string
+	}{
+		{"trigger added", Change{Type: TriggerAdded, Trigger: &TriggerChange{Name: "audit_t", ToDefinition: def}},
+			"trigger audit_t added (AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn())"},
+		{"trigger dropped", Change{Type: TriggerDropped, Trigger: &TriggerChange{Name: "audit_t", FromDefinition: def}},
+			"trigger audit_t dropped (AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn())"},
+		{"trigger changed", Change{Type: TriggerChanged, Trigger: &TriggerChange{Name: "audit_t", FromDefinition: defB, ToDefinition: def}},
+			"trigger audit_t: BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn() → AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn()"},
+		{"quoted trigger name with space", Change{Type: TriggerAdded, Trigger: &TriggerChange{Name: "a b",
+			ToDefinition: `CREATE TRIGGER "a b" AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION f()`}},
+			"trigger a b added (AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION f())"},
+		{"constraint trigger", Change{Type: TriggerAdded, Trigger: &TriggerChange{Name: "c",
+			ToDefinition: `CREATE CONSTRAINT TRIGGER c AFTER INSERT ON public.t FROM public.u NOT DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION f()`}},
+			"trigger c added (AFTER INSERT ON public.t FROM public.u NOT DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION f())"},
+		{"trigger nil payload", Change{Type: TriggerChanged}, "trigger changed"},
+		{"policy added to public", Change{Type: PolicyAdded, Policy: &PolicyChange{Name: "p", To: pol}},
+			"policy p added (ALL, permissive, to public, using (tenant_id = 1))"},
+		{"policy dropped", Change{Type: PolicyDropped, Policy: &PolicyChange{Name: "p", From: pol2}},
+			"policy p dropped (ALL, restrictive, to admin, app, using (true), with check (true))"},
+		{"policy changed", Change{Type: PolicyChanged, Policy: &PolicyChange{Name: "p", From: pol, To: pol2}},
+			"policy p: permissive → restrictive; to public → admin, app; using (tenant_id = 1) → (true); with check ∅ → (true)"},
+		{"policy changed, rendering identical", Change{Type: PolicyChanged, Policy: &PolicyChange{Name: "p",
+			From: &snapshot.RlsPolicy{Name: "p", Command: "ALL", Permissive: true},
+			To:   &snapshot.RlsPolicy{Name: "p", Command: "ALL", Permissive: true}}},
+			"policy p changed"},
+		{"policy nil payload", Change{Type: PolicyDropped}, "policy dropped"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Describe(tc.c); got != tc.want {
+				t.Errorf("\nwant %s\ngot  %s", tc.want, got)
+			}
+		})
+	}
+}
+
+// Category drives Marker, drift direction and every added/removed/modified counter,
+// so the six new types are pinned explicitly.
+func TestCategory_TriggerPolicy(t *testing.T) {
+	cases := map[ChangeType]string{
+		TriggerAdded: "added", TriggerDropped: "removed", TriggerChanged: "modified",
+		PolicyAdded: "added", PolicyDropped: "removed", PolicyChanged: "modified",
+	}
+	for ct, want := range cases {
+		if got := ct.Category(); got != want {
+			t.Errorf("%s: want %s, got %s", ct, want, got)
+		}
+	}
+}
+
+// Same determinism contract as TestDiffSchema_Deterministic, one level down: several
+// triggers and policies added to one table come out of map iteration, so childName
+// must order them or the serialized delta (which the cloud dedups on) would vary.
+func TestDiffSchema_TriggerPolicyOrder(t *testing.T) {
+	var trigs []snapshot.Trigger
+	var pols []snapshot.RlsPolicy
+	for _, n := range []string{"z", "a", "m"} {
+		trigs = append(trigs, snapshot.Trigger{Name: n, Definition: "CREATE TRIGGER " + n + " AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION f()"})
+		pols = append(pols, snapshot.RlsPolicy{Name: n, Command: "ALL", Permissive: true})
+	}
+	from := trigSnap("a", "public", "t")
+	to := trigSnap("b", "public", "t", trigs...)
+	to.Tables[0].Policies = pols
+
+	var first []byte
+	for range 5 {
+		d, _ := DiffSchema(from, to)
+		j, _ := json.Marshal(d)
+		if first == nil {
+			first = j
+		} else if !bytes.Equal(first, j) {
+			t.Fatalf("DiffSchema not deterministic:\n%s\n%s", first, j)
+		}
+	}
+	d, _ := DiffSchema(from, to)
+	var got []string
+	for _, c := range d.Changes {
+		got = append(got, string(c.Type)+":"+childName(c))
+	}
+	want := "policy_added:a,policy_added:m,policy_added:z,trigger_added:a,trigger_added:m,trigger_added:z"
+	if strings.Join(got, ",") != want {
+		t.Errorf("want %s\ngot  %s", want, strings.Join(got, ","))
+	}
+}
+
+// Drift takes its direction from the typed delta, so before this change a saved vs
+// live pair differing only in triggers or policies printed "No drift detected".
+func TestDrift_TriggersPolicies(t *testing.T) {
+	trig := snapshot.Trigger{Name: "a", Definition: "CREATE TRIGGER a AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION f()"}
+	r := ClassifyDrift(trigSnap("old", "public", "t"), trigSnap("new", "public", "t", trig))
+	if r.Direction != DriftAhead || r.AddedCount != 1 {
+		t.Errorf("trigger add: want ahead/1, got %s/%d", r.Direction, r.AddedCount)
+	}
+	p := snapshot.RlsPolicy{Name: "p", Command: "ALL", Permissive: true}
+	p2 := p
+	p2.UsingExpr = strp("true")
+	r = ClassifyDrift(polSnap("old", "public", "t", p), polSnap("new", "public", "t", p2))
+	if r.Direction != DriftDiverged || r.ModifiedCount != 1 {
+		t.Errorf("policy change: want diverged/1 modified, got %s/%d", r.Direction, r.ModifiedCount)
 	}
 }

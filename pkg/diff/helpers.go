@@ -120,6 +120,24 @@ func childName(c Change) string {
 		return c.Index.Name
 	case c.Constraint != nil:
 		return c.Constraint.Name
+	case c.Trigger != nil:
+		return c.Trigger.Name
+	case c.Policy != nil:
+		return c.Policy.Name
 	}
 	return ""
+}
+
+func unquotedIndex(s string, from int, sub string) int {
+	quoted := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '"' {
+			quoted = !quoted
+			continue
+		}
+		if !quoted && i >= from && strings.HasPrefix(s[i:], sub) {
+			return i
+		}
+	}
+	return -1
 }
