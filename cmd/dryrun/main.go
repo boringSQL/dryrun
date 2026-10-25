@@ -70,6 +70,7 @@ func main() {
 		lintCmd(), driftCmd(), checkCmd(), snapshotCmd(), profileCmd(),
 		remoteCmd(), mcpServeCmd(), statsCmd(), versionCmd(),
 	)
+	rejectUnknownSubcommands(root)
 
 	if err := root.Execute(); err != nil {
 		var exitErr *exitError
