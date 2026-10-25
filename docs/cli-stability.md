@@ -11,7 +11,7 @@ OCI registry storage shipped recently. The flags and the on-registry layout may 
 | `dryrun remote add\|list\|rm` | Manage `[[remote]]` entries in dryrun.toml. |
 | `dryrun snapshot push --oci\|--remote` | Push snapshots to an OCI registry. |
 | `dryrun snapshot pull --oci\|--remote` | Pull snapshots from an OCI registry. |
-| `dryrun snapshot take --push [--remote]` | Capture and push in one step. |
+| `dryrun snapshot capture --push [--remote]` | Capture and push in one step. |
 
 `--oci <ref>` targets a registry base path directly. `--remote <name>` resolves the base and credentials from a configured `[[remote]]`. The `--all` flag on push and pull syncs every key in the source rather than the resolved profile's.
 

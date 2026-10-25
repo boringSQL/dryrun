@@ -146,6 +146,6 @@ A snapshot contains:
 - **Planner statistics** — per column `null_frac`, `n_distinct`, `correlation`, `avg_width`, and whatever survived masking
 - **Activity counters** — per table and per index, numbers only
 
-It does not contain table rows, function bodies (signatures only), or credentials — the connection URL is stored as a hash. Query text appears only if you explicitly run `dryrun snapshot query-stats`, as normalized `pg_stat_statements` shapes.
+It does not contain table rows, function bodies (signatures only), or credentials — the connection URL is stored as a hash. Query text appears only if you capture the `query` stream, and then only as normalized `pg_stat_statements` shapes.
 
 Before pushing, check that `CHECK` and `DEFAULT` expressions and view definitions do not embed sensitive literals, and that table and enum names do not disclose anything confidential.

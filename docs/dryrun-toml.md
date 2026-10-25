@@ -86,7 +86,7 @@ A remote is an OCI registry that holds snapshots for sharing. The point is to ca
 The lifecycle is three commands:
 
 ```sh
-dryrun snapshot take --push      # capture from the database and publish
+dryrun snapshot capture --label primary --push  # capture from the database and publish
 dryrun snapshot pull             # fetch the latest snapshots into local history
 dryrun snapshot push             # publish snapshots already in local history
 ```

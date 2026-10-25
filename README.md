@@ -241,23 +241,25 @@ The database runs in SQLite's WAL mode so a scheduled `snapshot capture` and a l
 
 ### Multi-node: capture activity from replicas
 
-`snapshot take` runs against the primary and writes schema + planner stats. Activity counters (`idx_scan`, `n_dead_tup`, last vacuum) live on each replica, so capture them separately:
+`snapshot capture` on the primary writes schema and planner stats. Activity counters (`idx_scan`, `n_dead_tup`, last vacuum) live on each replica, so capture those too:
 
 ```sh
-dryrun --profile primary  snapshot take
-dryrun --profile replica1 snapshot activity --from "$REPLICA1_URL" --label replica1
-dryrun --profile replica2 snapshot activity --from "$REPLICA2_URL" --label replica2
+dryrun --profile primary snapshot capture --label primary
+dryrun snapshot capture --from "$REPLICA1_URL" --label replica1
+dryrun snapshot capture --from "$REPLICA2_URL" --label replica2
 ```
+
+With `[[node]]` blocks in `dryrun.toml`, `dryrun snapshot capture --all` does all of them in one go.
 
 The MCP `describe_table` (node breakdown) and `detect kind=anomalies` tools then expose per-node `idx_scan` so you can spot routing imbalances. See [docs/multi-node-stats.md](docs/multi-node-stats.md).
 
 ### Multiple databases per project
 
-`dryrun snapshot take` keys snapshots by `(project_id, database_id)`. The defaults work — `project_id` is your folder name, `database_id` is the actual database name from `current_database()`:
+`dryrun snapshot capture` keys snapshots by `(project_id, database_id)`. The defaults work — `project_id` is your folder name, `database_id` is the actual database name from `current_database()`:
 
 ```sh
 dryrun init --db "$AUTH_DB"            # captures auth
-dryrun snapshot take --db "$BILLING_DB" # captures billing into its own stream
+dryrun snapshot capture --db "$BILLING_DB" --label primary # billing gets its own stream
 dryrun snapshot list --db "$AUTH_DB"    # only auth snapshots
 ```
 
@@ -300,7 +302,7 @@ cd project_name
 
 # capture from the live DB (use cwd name for project name)
 dryrun init --db "$DATABASE_URL"
-dryrun snapshot take --db "$DATABASE_URL"
+dryrun snapshot capture --db "$DATABASE_URL" --label primary
 dryrun snapshot push --to-path ./snapshots --all
 ```
 
@@ -327,10 +329,10 @@ Authenticate the same way you would for `docker push`, register the remote, and 
 ```sh
 docker login ghcr.io
 dryrun remote add ghcr --ref ghcr.io/myorg/dryrun --default
-dryrun snapshot take --push
+dryrun snapshot capture --label primary --push
 ```
 
-`snapshot take --push` captures and publishes in one step. Consumers pull:
+`snapshot capture --push` captures and publishes in one step. Consumers pull:
 
 ```sh
 dryrun snapshot pull --remote ghcr

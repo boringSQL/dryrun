@@ -8,17 +8,17 @@ dryrun merges statistics from every node in your cluster into one snapshot, then
 
 A snapshot is split into three rows in `~/.dryrun/history.db`:
 
-- **`schema`**: DDL (tables, columns, constraints, indexes, partitions, functions, enums, extensions, GUCs). **Not masked** — `data-masking-policy.yml` and `require_masks` cover planner stats only, so column names, `DEFAULT` expressions, `CHECK` literals and view/function bodies are stored and pushed as introspected. This is unchanged from `snapshot take`, but worth knowing now that schema rides the same cron line as masked planner stats.
+- **`schema`**: DDL (tables, columns, constraints, indexes, partitions, functions, enums, extensions, GUCs). **Not masked** — `data-masking-policy.yml` and `require_masks` cover planner stats only, so column names, `DEFAULT` expressions, `CHECK` literals and view/function bodies are stored and pushed as introspected. That hasn't changed, but note that schema now rides the same cron line as masked planner stats.
 - **`planner_stats`**: what the planner uses (`reltuples`, `relpages`, `pg_statistic`). Masked per `data-masking-policy.yml` at capture time; see [SECURITY.md](../SECURITY.md).
 - **`activity_stats`**: runtime counters (`seq_scan`, `idx_scan`, `n_dead_tup`, `last_vacuum`).
 
-`snapshot take` writes all three rows from the primary, with the activity row labeled `primary`. `snapshot activity` writes one `activity_stats` row per replica, tagged with a `--label`. Activity rows attach to the most recent matching schema by `schema_ref_hash`.
+`snapshot capture` on the primary writes all three rows, with the activity row under its `--label` (`primary` below). On a replica it writes one `activity_stats` row under that replica's label. Activity rows attach to the most recent matching schema by `schema_ref_hash`.
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │  Primary    │     │  Replica 1  │     │  Replica 2  │
 │ snapshot    │     │ snapshot    │     │ snapshot    │
-│ take        │     │ activity    │     │ activity    │
+│ capture     │     │ capture     │     │ capture     │
 └─────┬───────┘     └──────┬──────┘     └──────┬──────┘
       │                    │                    │
       │ schema +           │ activity_stats     │ activity_stats
@@ -33,25 +33,25 @@ A snapshot is split into three rows in `~/.dryrun/history.db`:
 ### Schema + planner stats from the primary
 
 ```sh
-dryrun --profile primary snapshot take
+dryrun --profile primary snapshot capture --label primary
 ```
 
-Refuses to run on a standby (`pg_is_in_recovery() = false` required). Writes one `schema` row, one `planner_stats` row (masked per policy), and one `activity_stats` row labeled `primary`.
+On a standby (`pg_is_in_recovery()`), schema and planner are skipped. On the primary it writes one `schema` row, one `planner_stats` row (masked per policy), and one `activity_stats` row labeled `primary`.
 
 ### Activity stats per node
 
 ```sh
-dryrun --profile replica1 snapshot activity \
+dryrun snapshot capture --streams activity \
   --from "postgres://readonly@replica-1:5432/mydb" --label replica1
 
-dryrun --profile replica2 snapshot activity \
+dryrun snapshot capture --streams activity \
   --from "postgres://readonly@replica-2:5432/mydb" --label replica2
 
-dryrun --profile replica3 snapshot activity \
+dryrun snapshot capture --streams activity \
   --from "postgres://readonly@replica-3:5432/mydb" --label replica3
 ```
 
-`--label` is required and identifies the node in `describe_table` and `detect`. `snapshot activity` runs against either role — `pg_stat_user_tables` is per-node and meaningful on a primary too, so a primary's activity can be re-captured without re-running `snapshot take`. A label whose previous capture recorded the other role is refused with a role-change error, since that usually means `--label` is pointed at a rotating endpoint and two nodes' counters would append into one series; pass `--allow-role-change` after a genuine promotion or failover. Each row captures `pg_stat_user_tables`, `pg_stat_user_indexes`, and `stats_reset` for the node, then joins to the latest schema by `schema_ref_hash`. Use `--allow-orphan` when activity arrives before any schema snapshot exists; orphan rows are stored but not reattached when a matching schema lands later.
+`--label` is required and identifies the node in `describe_table` and `detect`. `--streams activity` works on either role. `pg_stat_user_tables` is per node and useful on a primary too, so you can refresh a primary's activity without capturing the schema again. A label whose previous capture recorded the other role is refused with a role-change error, since that usually means `--label` is pointed at a rotating endpoint and two nodes' counters would append into one series; pass `--allow-role-change` after a genuine promotion or failover. Each row captures `pg_stat_user_tables`, `pg_stat_user_indexes`, and `stats_reset` for the node, then joins to the latest schema by `schema_ref_hash`. Use `--allow-orphan` when activity arrives before any schema snapshot exists; orphan rows are stored but not reattached when a matching schema lands later.
 
 Each capture also records which server answered — `pg_postmaster_start_time()` and `inet_server_addr()` — so a label that stops pointing at one machine can be noticed. A one-way change is reported as a `notice:` (a restart, or a node that was replaced). A fingerprint that *recurs* after a different one intervened is reported as a `warning:`: that is a rotating endpoint — a reader endpoint, a Kubernetes Service, a `kubectl port-forward` reconnecting to whichever pod answers — and it means two servers' cumulative counters are interleaving under one label, so deltas across those rows are wrong. Neither ever fails a capture. If the label deliberately names a pool, pass `--allow-rotation` to silence the warning; the one-way notice still prints. `system_identifier` cannot do this job: replicas inherit the primary's through base backup, so it is identical across a cluster.
 
@@ -249,7 +249,8 @@ warning: analytics, primary and replica-1 are the same server (10.0.0.1), differ
 error: analytics: capture does not match this project's snapshot history: database name differs (history "app", capture "analytics").
        The connection may point at the wrong database, or you may be in the wrong project directory.
        Re-check --db / DATABASE_URL.
-       If the identity legitimately changed, re-baseline with `dryrun snapshot take --force`
+       If the identity legitimately changed, re-baseline with
+       `dryrun snapshot capture --streams schema --force`
        on the primary; --force here bypasses this run only.
 error: primary and replica-1 point at 10.0.0.1 (database app): one server under 2 labels. --all captures it once per label, and the fleet view shows nodes that are the same server.
 error: replica-1: [[node]] replica-1 declares role standby, but this node is a primary;
@@ -257,7 +258,7 @@ error: replica-1: [[node]] replica-1 declares role standby, but this node is a p
 error: replica-2: url_env REPLICA2_URL is unset in this environment
 ```
 
-Each node is checked on its own, so one unreachable node still leaves a full report rather than aborting at the first failure, and `--check-timeout` (10s by default) bounds a node that neither answers nor refuses. Every check is one that capture itself makes: the privileged-role refusal, the declared vs. detected role, the role a label was last captured under, the cluster and database identity against this project's schema baseline (waived by `--force`), whether this label's last capture came from a different server, `pg_stat_statements` for the query stream, the stream names, the row cap, and the masking policy `require_masks` demands. Three checks are only visible across the fleet. The schema binding is one: the whole run shares one schema, so "this project has none and no node in this run captures one" is reported once as a fleet problem rather than as the same failure on every row, and it is waived when some node does capture `schema` — a fresh project's first `--check` therefore passes rather than failing a run that would succeed. `--allow-orphan` waives it for stats-only streams, though `planner` annotates against the snapshot itself and cannot be waived. The other two are two labels resolving to one server (fatal; identified by the server's boot time, not by the URL text, so a hostname and its IP are still caught, and only a warning when one of the labels is a `pool = true` endpoint that lands on a member by design) and a fleet spread over several databases, whose stats all land under one `database_id`. The report also prints the schema the run would bind to, its age, and when this host last captured one. `PutSchema` deduplicates, so a snapshot's own timestamp is when the DDL last *changed*, not when it was last confirmed current — an old snapshot with a recent capture is a stable database, while an old one with no recent capture means captures have stopped. A snapshot newer than this host's last capture was written elsewhere (pulled from a peer, or by `snapshot take`, which does not stamp the local clock) and is labelled as such. A separate warning fires when no node in the run captures `schema` and this host has not captured one recently, since the binding can then only get older. Failures exit nonzero; warnings do not. No capture lock is taken, so the preflight is safe to run while a cron capture is in flight.
+Each node is checked on its own, so one unreachable node still leaves a full report rather than aborting at the first failure, and `--check-timeout` (10s by default) bounds a node that neither answers nor refuses. Every check is one that capture itself makes: the privileged-role refusal, the declared vs. detected role, the role a label was last captured under, the cluster and database identity against this project's schema baseline (waived by `--force`), whether this label's last capture came from a different server, `pg_stat_statements` for the query stream, the stream names, the row cap, and the masking policy `require_masks` demands. Three checks are only visible across the fleet. The schema binding is one: the whole run shares one schema, so "this project has none and no node in this run captures one" is reported once as a fleet problem rather than as the same failure on every row, and it is waived when some node does capture `schema` — a fresh project's first `--check` therefore passes rather than failing a run that would succeed. `--allow-orphan` waives it for stats-only streams, though `planner` annotates against the snapshot itself and cannot be waived. The other two are two labels resolving to one server (fatal; identified by the server's boot time, not by the URL text, so a hostname and its IP are still caught, and only a warning when one of the labels is a `pool = true` endpoint that lands on a member by design) and a fleet spread over several databases, whose stats all land under one `database_id`. The report also prints the schema the run would bind to, its age, and when this host last captured one. `PutSchema` deduplicates, so a snapshot's own timestamp is when the DDL last *changed*, not when it was last confirmed current — an old snapshot with a recent capture is a stable database, while an old one with no recent capture means captures have stopped. A snapshot newer than this host's last capture was written elsewhere (pulled from a peer) and is labelled as such. A separate warning fires when no node in the run captures `schema` and this host has not captured one recently, since the binding can then only get older. Failures exit nonzero; warnings do not. No capture lock is taken, so the preflight is safe to run while a cron capture is in flight.
 
 `--due` is what makes one cron line implement every cadence:
 
@@ -306,19 +307,19 @@ Activity captures are lightweight and safe for cron. With `[[node]]` blocks one 
 */5 * * * * app dryrun snapshot capture --all --due
 ```
 
-Schema is captured by the primary on its own 24h cadence, and nodes that declare it run first so every stat row in a tick binds to the same schema hash. No separate `snapshot take` line is needed.
+Schema is captured by the primary on its own 24h cadence, and nodes that declare it run first so every stat row in a tick binds to the same schema hash. No separate schema line is needed.
 
 Without `[[node]]` blocks, each node needs its own line:
 
 ```sh
-15 2 * * * app dryrun --profile replica1 snapshot activity --from "$REPLICA1_DB" --label replica1
-15 2 * * * app dryrun --profile replica2 snapshot activity --from "$REPLICA2_DB" --label replica2
+15 2 * * * app dryrun snapshot capture --streams activity --from "$REPLICA1_DB" --label replica1
+15 2 * * * app dryrun snapshot capture --streams activity --from "$REPLICA2_DB" --label replica2
 ```
 
-`snapshot take` already captures the primary's own activity row (labeled `primary`), so the cron above has no separate `snapshot activity` line for it. Adding one is legal — `snapshot activity` accepts a primary — and is how you refresh primary activity counters more often than you re-snapshot the schema; reuse the same `--label` so both land in one series. `snapshot take` is idempotent on a quiet schema: repeated runs produce the same `schema_ref_hash`, so re-attaching activity rows is automatic. Run it nightly alongside activity captures, or only after migrations if you want fewer rows in history.
+The primary's full capture already writes its own activity row (labeled `primary`), so the cron above has no activity line for it. You can add one to refresh primary counters more often than the schema; use the same `--label` so both land in one series. Schema captures are idempotent on a quiet schema: repeated runs give the same `schema_ref_hash`, and activity rows attach to it on their own. Run it nightly with the activity captures, or only after migrations if you want fewer rows.
 
 ## Snapshot storage
 
-Snapshots live in `~/.dryrun/history.db`, keyed by `(project_id, database_id, kind, schema_ref_hash, node_label)`. Activity rows from `snapshot activity` carry their `--label` in `node_label`; the activity row from `snapshot take` uses `primary`. `is_standby` is auto-detected from `pg_is_in_recovery()` and recorded on every row. `take` still requires a primary; `activity` accepts either role and instead checks the label: if the newest row for that label recorded the other role, the capture is refused unless `--allow-role-change` is passed.
+Snapshots live in `~/.dryrun/history.db`, keyed by `(project_id, database_id, kind, schema_ref_hash, node_label)`. Activity rows carry their `--label` (or `[[node]]` name) in `node_label`. `is_standby` is auto-detected from `pg_is_in_recovery()` and recorded on every row. Capture works on either role and checks the label: if the newest row for that label recorded the other role, the capture is refused unless `--allow-role-change` is passed.
 
 To share a snapshot across machines, use `snapshot push` / `snapshot pull`. They move `history.db` byte-for-byte between stores without re-masking or re-transforming. See [SECURITY.md](../SECURITY.md) for the sharing trust model.

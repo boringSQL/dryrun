@@ -11,7 +11,7 @@ dryrun snapshot capture --from "$URL" --label replica-1 --streams query
 
 `capture` is the command to use. Given `--node` it reads a `[[node]]` block from `dryrun.toml` and applies the fleet machinery: role assertion, the single-flight lock, `--due`, `--push`. Given `--from` and `--label` it captures a node that is not in config.
 
-`dryrun snapshot query-stats --from "$URL" --label replica-1` still works and writes the same row through the same code, without the lock or the interval check. It is superseded by `capture --from` and kept for existing scripts.
+`dryrun snapshot query-stats` was removed in v0.19; use `dryrun snapshot capture --from "$URL" --label replica-1 --streams query`.
 
 Each row stores the raw `pg_stat_statements` rows, the grouped shapes with their rollups, and one `pg_stat_statements_info` read (`stats_reset`, `dealloc`). Where `pg_stat_statements` is older than 1.9 the info part is absent rather than zero. A zero would look like a reset epoch that never happened.
 
@@ -51,6 +51,16 @@ Console output shows movers only, 25 rows at most. `--json` has every shape.
 The diff also checks which server answered. Two captures whose `inet_server_addr` differ are two machines under one label, and it refuses them. A changed postmaster start time alone is reported but not refused, since pg_stat_statements survives a clean restart. When the address is unknown — a Unix socket, or a tunnel where every member shows 127.0.0.1 — the change is a caveat rather than a refusal.
 
 On a label that rotates between servers (a read pool behind a Service, a reader endpoint or a port-forward), the diff compares the newer capture's server with its own earlier capture instead of the capture immediately before it, and notes which capture it used. See [How a rotating label is read](multi-node-stats.md#how-a-rotating-label-is-read).
+
+### Plan shifts
+
+PostgreSQL 16 has no plan id, so dryrun looks for the symptom instead: a queryid whose shared blocks per call jumped while rows per call stayed flat. `snapshot_diff` reports these as `plan_shifts`, and `dryrun snapshot diff --kind query` prints them below the query table.
+
+Each queryid is compared with the median of its three previous windows on the same server. It is flagged when blocks per call grow at least 5x (and by at least 20), the extra blocks add up to at least 1M, rows per call stay within 1.5x, and every window has at least 50 calls. Treat the list as suspects, not proof.
+
+When nothing can be assessed, `suppressed` says why (too few captures, a restart or stats reset in the span, and so on). `no_baseline` and `unassessable` count the queryids that were skipped.
+
+Expect false positives from queries whose cost follows data volume or tenant mix (aggregates, `LIMIT`), and from prepared statements moving to a generic plan after a deploy or pool churn. A flip back to the good plan and temp-block spills are not reported.
 
 ## Storage
 

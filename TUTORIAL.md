@@ -113,7 +113,7 @@ Creates `dryrun.toml` and the `.dryrun/` directory, and captures the first snaps
 ### 3. Snapshots and diffing
 
 ```sh
-dryrun snapshot take --db "$DATABASE_URL"          # saves to history
+dryrun snapshot capture --db "$DATABASE_URL" --label primary  # saves to history
 dryrun snapshot list --db "$DATABASE_URL"          # show all snapshots
 dryrun snapshot diff --db "$DATABASE_URL" --latest --pretty  # diff last saved vs live
 ```
@@ -157,25 +157,25 @@ All tools available including EXPLAIN ANALYZE (runs in rolled-back transactions,
 
 For setups with one primary and N replicas serving different query patterns. Activity counters (`seq_scan`, `idx_scan`, `n_dead_tup`) differ per node and only live where the queries actually run, on the replicas. dryrun captures schema + planner stats from the primary and activity stats from each replica, then aggregates them.
 
-A snapshot is split into three rows in `.dryrun/history.db`: `schema`, `planner_stats`, `activity_stats`. `snapshot take` writes all three from the primary, with the activity row labeled `primary`. `snapshot activity` writes one additional `activity_stats` row per replica, tagged with `--label`. Planner stats are masked per `data-masking-policy.yml` at capture time; see [SECURITY.md](SECURITY.md).
+A snapshot is split into three rows in `.dryrun/history.db`: `schema`, `planner_stats`, `activity_stats`. `snapshot capture` on the primary writes all three, with the activity row under its `--label`. Each replica adds one more `activity_stats` row under its own `--label`. Planner stats are masked per `data-masking-policy.yml` at capture time; see [SECURITY.md](SECURITY.md).
 
 ### 1. Schema + planner + activity from the primary
 
 ```sh
-dryrun --profile primary snapshot take
+dryrun --profile primary snapshot capture --label primary
 ```
 
-Refuses to run on a standby. Writes `schema` (DDL), `planner_stats` (`reltuples`, `relpages`, `pg_statistic`; masked per policy), and one `activity_stats` row labeled `primary`.
+By default a primary captures schema, planner, activity and query, and a standby only activity and query. Here it writes `schema` (DDL), `planner_stats` (`reltuples`, `relpages`, `pg_statistic`; masked per policy), and one `activity_stats` row labeled `primary`.
 
 ### 2. Activity stats from each replica
 
 ```sh
-dryrun --profile replica1 snapshot activity --from "$REPLICA1_URL" --label replica1
-dryrun --profile replica2 snapshot activity --from "$REPLICA2_URL" --label replica2
-dryrun --profile replica3 snapshot activity --from "$REPLICA3_URL" --label replica3
+dryrun snapshot capture --from "$REPLICA1_URL" --label replica1 --streams activity
+dryrun snapshot capture --from "$REPLICA2_URL" --label replica2 --streams activity
+dryrun snapshot capture --from "$REPLICA3_URL" --label replica3 --streams activity
 ```
 
-`--label` is required and identifies the node in `describe_table` and `detect`. `snapshot activity` refuses to run on the primary. Activity rows attach to the most recent `schema` row by `schema_ref_hash`; pass `--allow-orphan` to capture before a schema exists.
+`--label` is required and identifies the node in `describe_table` and `detect`. Activity rows attach to the most recent `schema` row by `schema_ref_hash`; pass `--allow-orphan` to capture before a schema exists.
 
 ### 3. Define profiles for repeatable runs
 
@@ -196,14 +196,31 @@ db_url = "${REPLICA2_DATABASE_URL}"
 
 ### 4. Cron
 
-Schema changes rarely; activity counters shift daily. Capture each on its own schedule:
+Schema rarely changes, activity counters move daily. Describe the fleet once in `dryrun.toml` and a single cron line handles it. `--due` captures each node on its own schedule:
+
+```toml
+# dryrun.toml
+[[node]]
+name    = "primary"
+url_env = "PRIMARY_DATABASE_URL"
+
+[[node]]
+name    = "replica1"
+role    = "standby"
+url_env = "REPLICA1_DATABASE_URL"
+
+[[node]]
+name    = "replica2"
+role    = "standby"
+url_env = "REPLICA2_DATABASE_URL"
+```
 
 ```sh
 # /etc/cron.d/dryrun-stats
-0  2 * * * app dryrun --profile primary  snapshot take
-15 2 * * * app dryrun --profile replica1 snapshot activity --from "$REPLICA1_URL" --label replica1
-15 2 * * * app dryrun --profile replica2 snapshot activity --from "$REPLICA2_URL" --label replica2
+*/5 * * * * app dryrun snapshot capture --all --due
 ```
+
+The primary captures schema (at most once a day), planner, activity and query. Replicas capture activity and query. Per-stream cadence and the full `[[node]]` reference are in [docs/multi-node-stats.md](docs/multi-node-stats.md).
 
 ### 5. Verify
 
@@ -288,12 +305,12 @@ GRANT pg_monitor TO your_readonly_user;
 
 **EXPLAIN ANALYZE times out** - The query actually runs (rolled back). Use `analyze=false` (default) for cost estimates only.
 
-**Schema is stale** - Re-run `dryrun snapshot take` (or `snapshot pull`). The server picks the new snapshot up on the next tool call.
+**Schema is stale** - Re-run `dryrun snapshot capture` (or `snapshot pull`). The server picks the new snapshot up on the next tool call.
 
 **MCP connection issues** - Server logs to stderr, MCP protocol to stdout. For SSE mode, test with `curl http://host:port/sse`.
 
 **"invalid schema JSON"** - The file must be a valid SchemaSnapshot. If you renamed fields or edited by hand, re-dump from the database.
 
-**Multi-node stats not showing** - Run `dryrun snapshot list` and confirm you see a `schema` row plus `activity_stats` rows for each node sharing the same `schema_ref_hash`. The primary contributes its own `activity_stats` row (labeled `primary`) via `snapshot take`; each replica contributes one via `snapshot activity --label ...`. Activity captured before any schema exists needs `--allow-orphan` and won't reattach automatically.
+**Multi-node stats not showing** - Run `dryrun snapshot list` and check that every node's label shows up in the `captured` lines under the current schema version. Each node writes its own `activity_stats` row with `snapshot capture --label ...`, or under its `[[node]]` name with `--all`. Activity captured before any schema exists needs `--allow-orphan` and won't reattach automatically.
 
 
