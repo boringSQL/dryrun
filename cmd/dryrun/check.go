@@ -238,9 +238,12 @@ func historyPathLabel(historyDB string) string {
 	if historyDB != "" {
 		return historyDB
 	}
-	// an invalid env value surfaces as an open error, which carries its own message
-	if p, err := history.DefaultHistoryPath(); err == nil && os.Getenv(history.HistoryDBEnv) != "" {
-		return p
+	if raw := os.Getenv(history.HistoryDBEnv); raw != "" {
+		if p, err := history.DefaultHistoryPath(); err == nil {
+			return p
+		}
+		// invalid: name it as given, not the cwd default
+		return raw
 	}
 	return ".dryrun/history.db"
 }

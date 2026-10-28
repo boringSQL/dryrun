@@ -371,7 +371,7 @@ func TestSyncAllUsesListKeys(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := runSync(ctx, src, dst, true, fullScope(), &buf); err != nil {
+	if _, err := runSync(ctx, src, dst, true, fullScope(), &buf); err != nil {
 		t.Fatalf("runSync(all=true): %v", err)
 	}
 	out := buf.String()

@@ -136,7 +136,7 @@ func addrOrUnknown(addr string) string {
 	return addr
 }
 
-// maybeAutoPrune prunes history after a successful capture, per [history] in dryrun.toml.
+// maybeAutoPrune prunes history after a successful capture or pull, per [history] in dryrun.toml.
 func maybeAutoPrune(ctx context.Context, store *history.Store, key history.SnapshotKey) {
 	_, cfg, err := loadProjectConfig()
 	if err != nil || cfg.History == nil || !cfg.History.AutoPrune {

@@ -173,7 +173,7 @@ fail.`,
 				if err != nil {
 					return err
 				}
-				if err := runSync(cmd.Context(), store, dst, false, pullScope{latest: true}, os.Stdout); err != nil {
+				if _, err := runSync(cmd.Context(), store, dst, false, pullScope{latest: true}, os.Stdout); err != nil {
 					return err
 				}
 			}

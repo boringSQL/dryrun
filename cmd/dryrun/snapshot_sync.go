@@ -65,7 +65,8 @@ func snapshotPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runSync(cmd.Context(), src, dst, all, scope, os.Stdout)
+			_, err = runSync(cmd.Context(), src, dst, all, scope, os.Stdout)
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&toPath, "to-path", "", "destination directory")
@@ -110,7 +111,17 @@ func snapshotPullCmd() *cobra.Command {
 			if err := historyUsable(dst); err != nil {
 				return err
 			}
-			return runSync(cmd.Context(), src, dst, all, scope, os.Stdout)
+			outs, err := runSync(cmd.Context(), src, dst, all, scope, os.Stdout)
+			if err != nil {
+				return err
+			}
+			// --full asks for the whole history; don't prune it away in the same run
+			if !full {
+				for _, o := range outs {
+					maybeAutoPrune(cmd.Context(), dst, o.Key)
+				}
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&fromPath, "from-path", "", "source directory")
@@ -265,12 +276,12 @@ func isLocalRegistry(ref string) bool {
 }
 
 // --all takes src.ListKeys, otherwise scope is the resolved profile key.
-func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, scope pullScope, w io.Writer) error {
+func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, scope pullScope, w io.Writer) ([]SyncOutcome, error) {
 	var keys []history.SnapshotKey
 	if all {
 		ks, err := src.ListKeys(ctx)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		keys = ks
 	} else {
@@ -279,10 +290,10 @@ func runSync(ctx context.Context, src, dst history.SnapshotStore, all bool, scop
 
 	outs, err := syncKeys(ctx, src, dst, keys, scope)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	printSyncOutcomes(w, outs)
-	return nil
+	return outs, nil
 }
 
 // syncKeys diffs src vs dst by content_hash per kind and copies the gap
