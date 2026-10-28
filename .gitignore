@@ -9,3 +9,4 @@
 vendor/
 ROADMAP-internal.md
 CUSTOM-GUIDELINES.md
+/dist/

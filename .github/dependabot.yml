@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # distroless digest
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

@@ -22,9 +22,11 @@ jobs:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             node_target: linux-x64
+            arch: amd64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             node_target: linux-arm64
+            arch: arm64
           - runner: windows-2022
             target: x86_64-pc-windows-gnu
             node_target: win32-x64
@@ -34,7 +36,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      # linux uses make build-static (docker)
       - uses: actions/setup-go@v5
+        if: runner.os != 'Linux'
         with:
           go-version-file: go.mod
       # Windows cgo build needs a GCC toolchain (pg_query_go uses -std=gnu99)
@@ -45,7 +49,14 @@ jobs:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc
           path-type: inherit
+      # static musl, same bin goes in the image. kept -linux-gnu name so install scripts don't break
+      - name: Build (Linux, static)
+        if: runner.os == 'Linux'
+        run: |
+          make build-static smoke-static ARCH=${{ matrix.arch }} VERSION="${GITHUB_REF_NAME}"
+          cp dist/linux/${{ matrix.arch }}/dryrun dryrun
       - name: Build
+        if: runner.os != 'Linux'
         run: |
           ext=""
           [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
@@ -93,6 +104,74 @@ jobs:
             dist/*.tar.xz dist/*.zip dist/checksums.txt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # lowercase or ghcr complains
+      IMAGE: ghcr.io/boringsql/dryrun
+      # ghcr reads the index annotations
+      DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-linux-*
+          path: bins/
+      - name: Stage binaries
+        run: |
+          mkdir -p dist/linux/amd64 dist/linux/arm64
+          cp bins/bin-linux-x64/dryrun dist/linux/amd64/dryrun
+          cp bins/bin-linux-arm64/dryrun dist/linux/arm64/dryrun
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # no latest / x.y on prereleases
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=dryrun
+            org.opencontainers.image.description=PostgreSQL schema intelligence
+          annotations: |
+            org.opencontainers.image.description=PostgreSQL schema intelligence
+      # smoke before push
+      - uses: docker/build-push-action@v6
+        with:
+          context: dist
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: dryrun:smoke
+      - name: Smoke test
+        run: docker run --rm dryrun:smoke version
+      # no RUN steps -> no qemu needed
+      - uses: docker/build-push-action@v6
+        with:
+          context: dist
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
 
   npm-publish:
     needs: build
