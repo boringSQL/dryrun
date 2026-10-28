@@ -38,6 +38,8 @@ func resetFlags(t *testing.T) {
 	})
 	os.Unsetenv("PROFILE")
 	os.Unsetenv("DATABASE_URL")
+	// a developer's shell value would redirect every seeded .dryrun/history.db
+	t.Setenv(history.HistoryDBEnv, "")
 }
 
 // writeMasks drops a masks YAML file at dir/name and returns its path. It is

@@ -653,7 +653,7 @@ func loadSavedSchema() (*schema.SchemaSnapshot, error) {
 	if err == nil {
 		defer hist.Close()
 		if hist.Compat() == history.CompatNewer {
-			return nil, fmt.Errorf(".dryrun/history.db was written by a newer dryrun; upgrade dryrun")
+			return nil, fmt.Errorf("%s was written by a newer dryrun; upgrade dryrun", historyPathLabel(""))
 		}
 		snap, gerr := hist.GetSchema(context.Background(), key, history.NewRefLatest())
 		if gerr == nil && snap != nil {
@@ -661,16 +661,16 @@ func loadSavedSchema() (*schema.SchemaSnapshot, error) {
 		}
 		// an unreadable db must not read as an empty one
 		if gerr != nil && !errors.Is(gerr, history.ErrSnapshotNotFound) {
-			return nil, fmt.Errorf("read .dryrun/history.db: %w", gerr)
+			return nil, fmt.Errorf("read %s: %w", historyPathLabel(""), gerr)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("open .dryrun/history.db: %w", err)
+		return nil, fmt.Errorf("open %s: %w", historyPathLabel(""), err)
 	}
 
-	return nil, fmt.Errorf("no schema snapshot in .dryrun/history.db for project=%s database=%s. Either:\n"+
+	return nil, fmt.Errorf("no schema snapshot in %s for project=%s database=%s. Either:\n"+
 		"1. Run 'dryrun --db <url> init' to capture one\n"+
 		"2. Run 'dryrun snapshot pull --from-path <dir>' to load a shared one\n"+
-		"3. Pass --db <url> for live database mode", key.ProjectID, key.DatabaseID)
+		"3. Pass --db <url> for live database mode", historyPathLabel(""), key.ProjectID, key.DatabaseID)
 }
 
 func openHistoryStore(path string) (*history.Store, error) {
@@ -689,7 +689,7 @@ func openHistoryStore(path string) (*history.Store, error) {
 	return s, err
 }
 
-// openExistingHistoryStore opens .dryrun/history.db only if it already exists:
+// openExistingHistoryStore opens the default history db only if it already exists:
 // a read-only server must not mkdir .dryrun/ in whatever cwd the MCP client used.
 func openExistingHistoryStore() (*history.Store, error) {
 	path, err := history.DefaultHistoryPath()

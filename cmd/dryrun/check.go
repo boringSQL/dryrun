@@ -213,7 +213,7 @@ func loadAnnotatedForCheck(ctx context.Context, historyDB string) (*schema.Annot
 	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, errors.New("no .dryrun/history.db for this project: run 'dryrun init --db <url>' or 'dryrun snapshot pull --from-path <dir>' first")
+			return nil, fmt.Errorf("no %s for this project: run 'dryrun init --db <url>' or 'dryrun snapshot pull --from-path <dir>' first", historyPathLabel(""))
 		}
 		return nil, fmt.Errorf("open history database: %w", err)
 	}
@@ -237,6 +237,10 @@ func loadAnnotatedForCheck(ctx context.Context, historyDB string) (*schema.Annot
 func historyPathLabel(historyDB string) string {
 	if historyDB != "" {
 		return historyDB
+	}
+	// an invalid env value surfaces as an open error, which carries its own message
+	if p, err := history.DefaultHistoryPath(); err == nil && os.Getenv(history.HistoryDBEnv) != "" {
+		return p
 	}
 	return ".dryrun/history.db"
 }

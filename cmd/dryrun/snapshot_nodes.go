@@ -31,7 +31,7 @@ func snapshotNodesCmd(historyDB *string) *cobra.Command {
 			defer store.Close()
 
 			if store.Compat() == history.CompatNewer {
-				return fmt.Errorf(".dryrun/history.db was written by a newer dryrun; upgrade dryrun")
+				return fmt.Errorf("%s was written by a newer dryrun; upgrade dryrun", historyPathLabel(*historyDB))
 			}
 
 			key := resolveSnapshotKey()

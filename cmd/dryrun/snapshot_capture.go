@@ -755,7 +755,7 @@ func redactSecrets(msg string) string { return schema.RedactSecrets(msg) }
 // the write path is stricter than reads: a newer db is refused, not warned about
 func historyUsable(store *history.Store) error {
 	if store.Compat() == history.CompatNewer {
-		return fmt.Errorf(".dryrun/history.db was written by a newer dryrun; upgrade dryrun")
+		return fmt.Errorf("the history database was written by a newer dryrun; upgrade dryrun")
 	}
 	return nil
 }
@@ -821,6 +821,10 @@ func tryLock(path string) (func(), bool, error) {
 func captureLockPath(historyDB string) string {
 	if historyDB != "" {
 		return historyDB + ".capture.lock"
+	}
+	// lock the shared db, not whichever cwd this run started in
+	if p, err := history.DefaultHistoryPath(); err == nil && os.Getenv(history.HistoryDBEnv) != "" {
+		return p + ".capture.lock"
 	}
 	return filepath.Join(".dryrun", "capture.lock")
 }

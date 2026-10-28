@@ -166,7 +166,7 @@ func stampVersion(db *sql.DB) Compat {
 	return CompatOK
 }
 
-// Opens .dryrun/history.db in cwd
+// Opens $DRYRUN_HISTORY_DB, else .dryrun/history.db in cwd
 func OpenDefault() (*Store, error) {
 	path, err := DefaultHistoryPath()
 	if err != nil {
@@ -1200,7 +1200,19 @@ func (s *Store) ResolveKind(ctx context.Context, key SnapshotKey, hashPrefix str
 // compile-time check that *Store satisfies SnapshotStore
 var _ SnapshotStore = (*Store)(nil)
 
+const (
+	// HistoryDBEnv overrides the history db location for every command.
+	HistoryDBEnv = "DRYRUN_HISTORY_DB"
+)
+
 func DefaultHistoryPath() (string, error) {
+	if p := os.Getenv(HistoryDBEnv); p != "" {
+		// refuse relatives: an unexpanded ~ from an MCP config would land in the client's cwd
+		if !filepath.IsAbs(p) {
+			return "", fmt.Errorf("%s must be an absolute path, got %q", HistoryDBEnv, p)
+		}
+		return filepath.Clean(p), nil
+	}
 	dir, err := DefaultDataDir()
 	if err != nil {
 		return "", err

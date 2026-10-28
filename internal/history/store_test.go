@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,6 +95,7 @@ func TestListKeysEmpty(t *testing.T) {
 }
 
 func TestDefaultHistoryPath(t *testing.T) {
+	t.Setenv(HistoryDBEnv, "")
 	path, err := DefaultHistoryPath()
 	if err != nil {
 		t.Fatal(err)
@@ -102,5 +104,35 @@ func TestDefaultHistoryPath(t *testing.T) {
 	expected := filepath.Join(cwd, ".dryrun", "history.db")
 	if path != expected {
 		t.Errorf("got %q, want %q", path, expected)
+	}
+}
+
+func TestDefaultHistoryPathFromEnv(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "shared", "history.db")
+	t.Setenv(HistoryDBEnv, want)
+
+	got, err := DefaultHistoryPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// "~/x" from an MCP config JSON is not expanded by anyone; it must fail, not
+// create a ./~ directory in the client's cwd.
+func TestDefaultHistoryPathFromEnvRejectsRelative(t *testing.T) {
+	for _, p := range []string{"history.db", ".dryrun/history.db", "~/dryrun/history.db"} {
+		t.Run(p, func(t *testing.T) {
+			t.Setenv(HistoryDBEnv, p)
+			_, err := DefaultHistoryPath()
+			if err == nil {
+				t.Fatalf("%q: expected an error for a relative path", p)
+			}
+			if !strings.Contains(err.Error(), HistoryDBEnv) {
+				t.Errorf("error should name %s: %v", HistoryDBEnv, err)
+			}
+		})
 	}
 }

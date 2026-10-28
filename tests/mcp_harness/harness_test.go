@@ -137,7 +137,8 @@ func startMCP(t *testing.T, projectDir string) *client.Client {
 	cli, err := client.NewStdioMCPClientWithOptions(binaryPath, nil, []string{"mcp-serve"},
 		transport.WithCommandFunc(func(ctx context.Context, cmd string, env []string, args []string) (*exec.Cmd, error) {
 			c := exec.CommandContext(ctx, cmd, args...)
-			c.Env = append(os.Environ(), env...)
+			// empty overrides a developer's shell value: the fixture's .dryrun/ must win
+			c.Env = append(append(os.Environ(), history.HistoryDBEnv+"="), env...)
 			c.Dir = projectDir
 			return c, nil
 		}),
