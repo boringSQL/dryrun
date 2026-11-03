@@ -386,7 +386,10 @@ func (s *Store) aggregateNodes(ctx context.Context, key SnapshotKey, table strin
 }
 
 func nodeJSONExpr(prefix, path string) string {
-	col := prefix + "payload_json"
+	return nodeJSONExprCol(prefix+"payload_json", path)
+}
+
+func nodeJSONExprCol(col, path string) string {
 	return "CASE WHEN json_valid(" + col + ") THEN json_extract(" + col + ", '" + path + "') END"
 }
 

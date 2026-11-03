@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sort"
 	"strconv"
@@ -13,6 +14,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/boringsql/dryrun/internal/history"
+)
+
+const (
+	// long enough that a daily capture job doesn't warn
+	pullStaleAfter = 48 * time.Hour
 )
 
 // latest keeps only the newest take (per node for activity, per server on a pool label); rng is the --since window.
@@ -35,6 +41,8 @@ type SyncOutcome struct {
 	Planner  KindCounts
 	Activity KindCounts
 	Query    KindCounts
+	// newest capture selected across all four streams; zero when the source has nothing
+	SourceNewest time.Time
 }
 
 func snapshotPushCmd() *cobra.Command {
@@ -114,6 +122,10 @@ func snapshotPullCmd() *cobra.Command {
 			outs, err := runSync(cmd.Context(), src, dst, all, scope, os.Stdout)
 			if err != nil {
 				return err
+			}
+			// a window says nothing about the source as a whole
+			if since == "" {
+				warnPullSource(os.Stderr, outs, all, time.Now())
 			}
 			// --full asks for the whole history; don't prune it away in the same run
 			if !full {
@@ -306,6 +318,13 @@ func syncKeys(ctx context.Context, src, dst history.SnapshotStore, keys []histor
 		if err != nil {
 			return out, fmt.Errorf("select %s/%s: %w", key.ProjectID, key.DatabaseID, err)
 		}
+		for _, list := range sel {
+			for _, s := range list {
+				if s.Timestamp.After(o.SourceNewest) {
+					o.SourceNewest = s.Timestamp
+				}
+			}
+		}
 		for _, kind := range kindOrder() {
 			c, err := syncKindList(ctx, src, dst, key, kind, sel[kind.Tag])
 			if err != nil {
@@ -371,10 +390,9 @@ func selectSnapshots(ctx context.Context, src history.SnapshotStore, key history
 	schema := filterByContentHash(allSchema, need)
 
 	switch {
-	case scope.latest && len(schema) == 0:
-		// schema-only stream: nothing references a schema, pull the newest one.
-		schema = newestPerNode(allSchema)
-	case !scope.latest:
+	case scope.latest:
+		schema = withNewestSchema(schema, allSchema, planner, activity, query)
+	default:
 		// full mode also keeps schemas captured within the window itself
 		// (e.g. a schema-only take), unioned with the referenced ones.
 		schema = unionByContentHash(schema, windowed(allSchema, scope.rng))
@@ -403,6 +421,33 @@ func newestPerNode(list []history.SnapshotSummary) []history.SnapshotSummary {
 		out = append(out, s)
 	}
 	return out
+}
+
+// Stats pick schemas, so a newer schema with no stats yet needs adding. Unless
+// stats newer than it are bound to another schema the source still holds: a
+// long-lived remote dedups a reverted schema, leaving the superseded one as its
+// newest row. A dead or clock-skewed node reads the same; the log note is the
+// only signal.
+func withNewestSchema(selected, allSchema []history.SnapshotSummary, stats ...[]history.SnapshotSummary) []history.SnapshotSummary {
+	newest := newestPerNode(allSchema)
+	if len(newest) == 0 {
+		return selected
+	}
+	held := make(map[string]struct{}, len(allSchema))
+	for _, s := range allSchema {
+		held[s.ContentHash] = struct{}{}
+	}
+	for _, list := range stats {
+		for _, s := range list {
+			_, known := held[s.SchemaRefHash]
+			if known && s.SchemaRefHash != newest[0].ContentHash && s.Timestamp.After(newest[0].Timestamp) {
+				slog.Info("newest schema not selected: newer stats are bound to another schema",
+					"newest_schema", newest[0].ContentHash, "stats_schema", s.SchemaRefHash)
+				return selected
+			}
+		}
+	}
+	return unionByContentHash(selected, newest)
 }
 
 // A pool label's newest row is one server's; the others travel with it so a
@@ -495,19 +540,33 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 	if err != nil {
 		return counts, err
 	}
-	// content_hash is stable across stores; set membership decides copy vs skip.
+	// content_hash is stable across stores; a known hash skips unless it refreshes.
 	have := make(map[string]struct{}, len(dstList))
 	for _, s := range dstList {
 		have[s.ContentHash] = struct{}{}
 	}
 
-	// stores list newest-first; push oldest-first so remote history fills in chronological order
+	// stores list newest-first; push oldest-first so remote history fills in chronological order.
+	// Equal-second ties break on hash so the last row is the one newestPerNode would pick.
 	ordered := make([]history.SnapshotSummary, len(srcList))
 	copy(ordered, srcList)
-	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Timestamp.Before(ordered[j].Timestamp) })
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if !ordered[i].Timestamp.Equal(ordered[j].Timestamp) {
+			return ordered[i].Timestamp.Before(ordered[j].Timestamp)
+		}
+		return ordered[i].ContentHash < ordered[j].ContentHash
+	})
 
-	for _, s := range ordered {
-		if _, ok := have[s.ContentHash]; ok {
+	for i, s := range ordered {
+		_, known := have[s.ContentHash]
+		// A known hash can still be newer: a reverted migration is old history
+		// that is current again, and the digest omits partition children. The
+		// column has seconds and the summary may not, so compare in seconds. The
+		// column stays behind after a refresh, so each sync of that row costs
+		// one Get.
+		refresh := kind.Tag == history.KindSchema && i == len(ordered)-1 && len(dstList) > 0 &&
+			s.Timestamp.Truncate(time.Second).After(dstList[0].Timestamp)
+		if known && !refresh {
 			counts.UpToDate++
 			continue
 		}
@@ -529,6 +588,27 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 		counts.Copied++
 	}
 	return counts, nil
+}
+
+// Exit stays 0: a source with no data yet isn't a failed pull, and an absent
+// registry repository reads the same as an empty one.
+func warnPullSource(w io.Writer, outs []SyncOutcome, all bool, now time.Time) {
+	if all && len(outs) == 0 {
+		fmt.Fprintln(w, "warning: source has no snapshots")
+		return
+	}
+	for _, o := range outs {
+		name := fmt.Sprintf("%s/%s", o.Key.ProjectID, o.Key.DatabaseID)
+		switch {
+		case o.SourceNewest.IsZero():
+			// --all took this key from the source, so its config isn't the problem
+			if !all {
+				fmt.Fprintf(w, "warning: source has no snapshots for %s; check project, database_id and stream in dryrun.toml\n", name)
+			}
+		case now.Sub(o.SourceNewest) > pullStaleAfter:
+			fmt.Fprintf(w, "warning: newest snapshot of %s was captured %s ago; the capture job may have stopped\n", name, fmtLived(now.Sub(o.SourceNewest)))
+		}
+	}
 }
 
 func printSyncOutcomes(w io.Writer, outs []SyncOutcome) {

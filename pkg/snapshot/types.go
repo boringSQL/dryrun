@@ -574,7 +574,7 @@ type (
 		Columns      []ColumnStatsEntry `json:"columns"`
 		// Hashed here, not on the schema: the schema digest only moves on DDL, so a
 		// postgresql.conf change never reaches a reader through it. SchemaSnapshot keeps its
-		// own copy, the values as of that generation.
+		// own copy, the values as of the capture that wrote the row or a later pull's refresh.
 		GUCs    []GucSetting `json:"gucs,omitempty"`
 		Masking *MaskingInfo `json:"masking,omitempty"`
 	}

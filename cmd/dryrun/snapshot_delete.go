@@ -99,7 +99,7 @@ Targets the local store only, never a remote.
 			}
 			fmt.Printf("Deleted %s snapshot %s", target.Kind.String(), hash)
 			if twins > 1 {
-				fmt.Printf(" (1 of %d identical rows)", twins)
+				fmt.Printf(" (1 of %d rows with this hash)", twins)
 			}
 			if res.Cascaded {
 				fmt.Printf(" (+%d planner, +%d activity, +%d query)", res.PlannerRemoved, res.ActivityRemoved, res.QueryStatsRemoved)

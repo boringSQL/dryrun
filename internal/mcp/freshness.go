@@ -125,9 +125,9 @@ func (s *Server) adoptNewerSnapshot(ctx context.Context) {
 	s.uninitialized = false
 	s.mu.Unlock()
 	s.freshness.servedAt = a.Schema.Timestamp
-	// the capture that moved the schema moved the counts too: without this the
-	// response can carry a schema_captured_at newer than the newest capture
-	// _meta.history reports, which reads as "what you are served is not stored"
+	// the capture that moved the schema moved the counts too. A pull's same-hash
+	// refresh still leaves schema_captured_at ahead of _meta.history's newest,
+	// which records when the content last changed.
 	s.inventory.invalidate()
 	slog.Info("picked up a newer snapshot from history",
 		"captured_at", a.Schema.Timestamp.UTC().Format(time.RFC3339), "content_hash", a.Schema.ContentHash)
@@ -162,9 +162,18 @@ func pendingReschemaStamps(ctx context.Context, hist *history.Store, key history
 	return c
 }
 
-// a content twin (A -> B -> A) is not newer; fresh stats under an unchanged schema are
+// a newer capture of the same hash may carry a payload the digest ignores, such
+// as new partition children; fresh stats under an unchanged schema are newer too
 func bundleAdvanced(cand, served *schema.AnnotatedSchema) bool {
-	if cand.Schema.ContentHash != served.Schema.ContentHash {
+	if cand.Schema.ContentHash == served.Schema.ContentHash {
+		// same guard as the cross-hash path: an older payload must not win on stats
+		if cand.Schema.Timestamp.Before(served.Schema.Timestamp) {
+			return false
+		}
+		if cand.Schema.Timestamp.After(served.Schema.Timestamp) {
+			return true
+		}
+	} else {
 		// with --db the served schema is stamped now; stats alone must not revert to older DDL
 		if cand.Schema.Timestamp.Before(served.Schema.Timestamp) {
 			return false

@@ -101,7 +101,7 @@ rm -rf .dryrun
 dryrun init --source appdb-primary
 ```
 
-The delete is required: `history.db` is append-only, so the under-masked rows from the first capture are still in the file, and rows deleted from SQLite can survive in free pages. The file you send must come from a single capture with the final policy.
+The delete is required: `history.db` keeps old rows, so the under-masked rows from the first capture are still in the file, and rows deleted from SQLite can survive in free pages. The file you send must come from a single capture with the final policy.
 
 The new capture prints `Masked: 22 planner-stats columns`. That is dryrun's own report; verify it against the file directly:
 

@@ -18,7 +18,8 @@ type (
 	// captured hourly on a quiet database stores one row. Activity does not
 	// dedup and counts every row, a re-imported one included.
 	//
-	// Newest is therefore when the content last CHANGED, and LastAttempt is
+	// Newest is therefore when the content last CHANGED (a pull can refresh the
+	// payload's own timestamp without moving it), and LastAttempt is
 	// when this host last captured it successfully. The gap is a quiet stream,
 	// not a stale one — pulled rows carry no attempt, so Newest can also lead
 	// LastAttempt.

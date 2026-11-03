@@ -142,7 +142,7 @@ func RowSchema(ctx context.Context, store *history.Store, key history.SnapshotKe
 	if a == nil || a.SchemaRefHash == "" {
 		return nil
 	}
-	snap, err := store.GetSchemaByExactHash(ctx, key, a.SchemaRefHash)
+	snap, err := store.GetSchemaByExactHashAtOrBefore(ctx, key, a.SchemaRefHash, a.Node.Timestamp)
 	if err != nil {
 		slog.Debug("activity rollup skipped: schema not resolved", "schema_ref_hash", a.SchemaRefHash, "err", err)
 		return nil

@@ -198,7 +198,7 @@ func assembleMoment(ctx context.Context, store *history.Store, key history.Snaps
 
 	// non-schema anchor: schema exact via ref; other kind by window.
 	if ref := anchor.SchemaRefHash(); ref != "" {
-		if got, err := store.GetSchemaByExactHash(ctx, key, ref); err == nil {
+		if got, err := store.GetSchemaByExactHashAtOrBefore(ctx, key, ref, m.takenAt); err == nil {
 			m.schema = got
 			m.schemaMatch = &MatchInfo{Hash: got.ContentHash, TakenAt: got.Timestamp, Source: "schema_ref"}
 		} else {

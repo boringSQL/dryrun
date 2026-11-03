@@ -217,9 +217,9 @@ func TestAdoptedSnapshotDatesTheMeta(t *testing.T) {
 	}
 }
 
-// PutSchema only dedups against the newest row, so A -> B -> A stores a twin of
-// A. Reloading into a snapshot already served is wasted work.
-func TestAdoptIgnoresAContentTwin(t *testing.T) {
+// PutSchema only dedups against the newest row, so A -> B -> A stores a twin of A.
+// Harmless reload of the same content, and the path a refreshed payload takes.
+func TestAdoptPicksUpANewerCaptureOfTheSameHash(t *testing.T) {
 	t0 := time.Now().Add(-3 * time.Hour).UTC().Truncate(time.Second)
 	hist := historyStore(t)
 
@@ -232,7 +232,38 @@ func TestAdoptIgnoresAContentTwin(t *testing.T) {
 
 	srv := serverWithHistory(t, served, hist)
 	if got := servedTable(t, srv); got != "a" {
-		t.Errorf("reloaded the snapshot it already had: %q", got)
+		t.Errorf("served %q, want the twin's table a", got)
+	}
+	if a := srv.servedBundle(); a == nil || !a.Schema.Timestamp.Equal(t0.Add(2*time.Hour)) {
+		t.Errorf("did not adopt the newer capture: %+v", a)
+	}
+}
+
+func TestBundleAdvancedOnTheSameHash(t *testing.T) {
+	t0 := time.Now().UTC().Truncate(time.Second)
+	at := func(ts time.Time) *schema.AnnotatedSchema {
+		return &schema.AnnotatedSchema{Schema: &schema.SchemaSnapshot{ContentHash: "h", Timestamp: ts}}
+	}
+	cases := []struct {
+		name string
+		cand time.Time
+		want bool
+	}{
+		{"newer capture", t0.Add(time.Second), true},
+		{"same capture", t0, false},
+		{"older capture", t0.Add(-time.Second), false},
+	}
+	for _, c := range cases {
+		if got := bundleAdvanced(at(c.cand), at(t0)); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	// fresh stats must not drag an older payload back in
+	older := at(t0.Add(-time.Second))
+	older.Planner = &schema.PlannerStatsSnapshot{Timestamp: t0.Add(time.Hour)}
+	if bundleAdvanced(older, at(t0)) {
+		t.Error("adopted an older payload on stats alone")
 	}
 }
 

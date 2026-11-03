@@ -122,7 +122,7 @@ func diffVersions(ctx context.Context, store *history.Store, key history.Snapsho
 		if ref == cachedRef {
 			return cached, nil
 		}
-		return store.GetSchemaByExactHash(ctx, key, rows[ref].ContentHash)
+		return store.GetSchemaByID(ctx, key, rows[ref].ID)
 	}
 	for i := range versions {
 		v := &versions[i]

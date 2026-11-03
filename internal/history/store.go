@@ -697,22 +697,57 @@ func (s *Store) putSchema(ctx context.Context, key SnapshotKey, snap *schema.Sch
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
 
-	var latest sql.NullString
-	_ = s.db.QueryRowContext(ctx,
-		`SELECT content_hash FROM snapshots
+	var (
+		latestID   int64
+		latestHash string
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, content_hash FROM snapshots
 		  WHERE project_id = ? AND database_id = ?
 		  ORDER BY timestamp DESC, id DESC LIMIT 1`,
 		pid, did,
-	).Scan(&latest)
+	).Scan(&latestID, &latestHash)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return PutInserted, fmt.Errorf("cannot read latest snapshot: %w", err)
+	}
 
-	if latest.Valid && latest.String == snap.ContentHash {
-		slog.Debug("schema unchanged, skipping put", "hash", snap.ContentHash)
-		return PutDeduped, nil
+	sameHash := err == nil && latestHash == snap.ContentHash
+	if sameHash {
+		refresh := false
+		if !capturedLocally {
+			if refresh, err = s.canRefreshSchemaPayload(ctx, latestID, snap); err != nil {
+				return PutInserted, err
+			}
+		}
+		if !refresh {
+			slog.Debug("schema unchanged, skipping put", "hash", snap.ContentHash)
+			return PutDeduped, nil
+		}
 	}
 
 	data, err := json.Marshal(snap)
 	if err != nil {
 		return PutInserted, fmt.Errorf("cannot serialize snapshot: %w", err)
+	}
+
+	if sameHash {
+		// the digest omits partition children and GUCs, so one hash can carry a
+		// newer payload. The column keeps saying when this version appeared:
+		// snapshot log joins stats to versions on it, and --due reads it.
+		// The hash guard keeps a concurrent capture that moved latest between
+		// the read above and this update from losing its payload.
+		res, err := s.db.ExecContext(ctx,
+			`UPDATE snapshots SET snapshot_json = ?, database_name = ? WHERE id = ? AND content_hash = ?`,
+			string(data), snap.Database, latestID, snap.ContentHash,
+		)
+		if err != nil {
+			return PutInserted, fmt.Errorf("cannot refresh snapshot: %w", err)
+		}
+		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			return PutDeduped, nil
+		}
+		slog.Info("snapshot refreshed", "hash", snap.ContentHash, "project", pid, "database", did)
+		return PutInserted, nil
 	}
 
 	_, err = s.db.ExecContext(ctx,
@@ -728,6 +763,44 @@ func (s *Store) putSchema(ctx context.Context, key SnapshotKey, snap *schema.Sch
 
 	slog.Info("snapshot put", "hash", snap.ContentHash, "project", pid, "database", did)
 	return PutInserted, nil
+}
+
+// May snap replace row id's payload? Stored values that won't parse count as
+// older, since the incoming payload is well formed. Another cluster with the same
+// DDL isn't a newer capture of this one.
+func (s *Store) canRefreshSchemaPayload(ctx context.Context, id int64, snap *schema.SchemaSnapshot) (bool, error) {
+	var (
+		storedAt, storedSystem sql.NullString
+		storedVersion          any
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT `+nodeJSONExprCol("snapshot_json", "$.timestamp")+`, `+nodeJSONExprCol("snapshot_json", "$.format_version")+`,
+		        `+nodeJSONExprCol("snapshot_json", "$.system_identifier")+`
+		   FROM snapshots WHERE id = ?`, id,
+	).Scan(&storedAt, &storedVersion, &storedSystem)
+	if err != nil {
+		return false, fmt.Errorf("cannot read latest snapshot: %w", err)
+	}
+	switch v := storedVersion.(type) {
+	case int64:
+		if int64(snap.FormatVersion) < v {
+			return false, nil
+		}
+	case float64: // valid JSON, e.g. 3.0 written by another tool
+		if float64(snap.FormatVersion) < v {
+			return false, nil
+		}
+	}
+	if storedSystem.String != "" && snap.SystemIdentifier != "" && storedSystem.String != snap.SystemIdentifier {
+		slog.Warn("schema from another cluster has the same content hash; keeping the stored payload until the hash changes",
+			"hash", snap.ContentHash, "stored_system_identifier", storedSystem.String, "incoming_system_identifier", snap.SystemIdentifier)
+		return false, nil
+	}
+	if !storedAt.Valid {
+		return true, nil
+	}
+	at, err := time.Parse(time.RFC3339Nano, storedAt.String)
+	return err != nil || snap.Timestamp.After(at), nil
 }
 
 func localFlag(capturedLocally bool) int {
@@ -754,23 +827,70 @@ func (s *Store) GetSchema(ctx context.Context, key SnapshotKey, at SnapshotRef) 
 	return &snap, nil
 }
 
+// by row, for callers holding a listing: a refreshed twin's payload differs from
+// its older twin's, and an index would shift under a concurrent capture
+func (s *Store) GetSchemaByID(ctx context.Context, key SnapshotKey, id int64) (*schema.SchemaSnapshot, error) {
+	var jsonStr string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT snapshot_json FROM snapshots WHERE project_id = ? AND database_id = ? AND id = ?`,
+		string(key.ProjectID), string(key.DatabaseID), id,
+	).Scan(&jsonStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w (id %d)", ErrSnapshotNotFound, id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var snap schema.SchemaSnapshot
+	if err := json.Unmarshal([]byte(jsonStr), &snap); err != nil {
+		return nil, fmt.Errorf("corrupt snapshot JSON: %w", err)
+	}
+	return &snap, nil
+}
+
 // GetSchemaByExactHash resolves a full content hash from an internal join
 // (e.g. schema_ref_hash). No prefix matching; on content twins it picks the
 // newest row.
 func (s *Store) GetSchemaByExactHash(ctx context.Context, key SnapshotKey, hash string) (*schema.SchemaSnapshot, error) {
+	return s.schemaByExactHash(ctx, key, hash, nil)
+}
+
+// GetSchemaByExactHashAtOrBefore is GetSchemaByExactHash with a twin rule that
+// matches assignVersions: the newest twin at or before ts. Twins can carry
+// different payloads (a pull refreshes in place), so a stats row belongs with
+// the payload that was current when it was captured. A stat older than every
+// twin (clock skew, a schema stamped after its stats in the same capture) gets
+// the oldest twin.
+func (s *Store) GetSchemaByExactHashAtOrBefore(ctx context.Context, key SnapshotKey, hash string, ts time.Time) (*schema.SchemaSnapshot, error) {
+	return s.schemaByExactHash(ctx, key, hash, &ts)
+}
+
+func (s *Store) schemaByExactHash(ctx context.Context, key SnapshotKey, hash string, atOrBefore *time.Time) (*schema.SchemaSnapshot, error) {
 	if hash == "" {
 		return nil, fmt.Errorf("%w (empty schema hash)", ErrSnapshotNotFound)
 	}
 	pid := string(key.ProjectID)
 	did := string(key.DatabaseID)
 
+	q := `SELECT snapshot_json FROM snapshots
+		  WHERE project_id = ? AND database_id = ? AND content_hash = ?`
+	args := []any{pid, did, hash}
+	if atOrBefore != nil {
+		q += ` AND timestamp <= ?`
+		args = append(args, formatHistoryTS(*atOrBefore))
+	}
+	q += ` ORDER BY timestamp DESC, id DESC LIMIT 1`
+
 	var jsonStr string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT snapshot_json FROM snapshots
-		  WHERE project_id = ? AND database_id = ? AND content_hash = ?
-		  ORDER BY timestamp DESC, id DESC LIMIT 1`,
-		pid, did, hash,
-	).Scan(&jsonStr)
+	err := s.db.QueryRowContext(ctx, q, args...).Scan(&jsonStr)
+	if errors.Is(err, sql.ErrNoRows) && atOrBefore != nil {
+		err = s.db.QueryRowContext(ctx,
+			`SELECT snapshot_json FROM snapshots
+			  WHERE project_id = ? AND database_id = ? AND content_hash = ?
+			  ORDER BY timestamp ASC, id ASC LIMIT 1`,
+			pid, did, hash,
+		).Scan(&jsonStr)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w (hash %s)", ErrSnapshotNotFound, hash)
 	}
@@ -794,8 +914,8 @@ func (s *Store) LatestSchema(ctx context.Context, key SnapshotKey) (*SnapshotSum
 	return s.latestKind(ctx, key, mustDesc(KindSchema), "")
 }
 
-// dedupeContentTwins keeps the newest row per (kind, node, content_hash):
-// byte-identical re-captures are one addressable snapshot. Input must be newest-first.
+// dedupeContentTwins keeps the newest row per (kind, node, content_hash): rows
+// with one hash are one addressable snapshot. Input must be newest-first.
 func dedupeContentTwins(matches []SnapshotSummary) []SnapshotSummary {
 	seen := make(map[string]struct{}, len(matches))
 	out := make([]SnapshotSummary, 0, len(matches))
@@ -897,7 +1017,7 @@ func (s *Store) CountCascade(ctx context.Context, key SnapshotKey, snap Snapshot
 }
 
 // CountContentTwins counts rows of this kind carrying the content hash,
-// so delete can report removing 1 of N identical rows.
+// so delete can report removing 1 of N rows with that hash.
 func (s *Store) CountContentTwins(ctx context.Context, key SnapshotKey, snap SnapshotSummary) (int, error) {
 	d, ok := descFor(snap.Kind.Tag)
 	if !ok {
