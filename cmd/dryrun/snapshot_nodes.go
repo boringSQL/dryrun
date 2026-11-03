@@ -117,7 +117,7 @@ func printNodeWarnings(nodes []history.NodeSummary) {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: no role recorded; the role guard cannot check this label.", n.Label))
 		}
-		if n.Oscillating {
+		if n.Oscillating && !n.Pool {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: alternating between %d servers; their counters interleave under one label and deltas will be wrong. "+
 					"If it names a pool, set pool = true on its [[node]].", n.Label, n.Members))

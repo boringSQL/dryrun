@@ -39,6 +39,10 @@ type Bundle struct {
 	Planner  *schema.PlannerStatsSnapshot             `json:"planner"`
 	Activity map[string]*schema.ActivityStatsSnapshot `json:"activity"`
 	Query    map[string]*schema.QueryStatsSnapshot    `json:"query,omitempty"`
+	// a pool label's other servers, newest row each; the maps above stay the
+	// label's newest row, which is all an older dryrun reads
+	ActivityMembers map[string][]*schema.ActivityStatsSnapshot `json:"activity_members,omitempty"`
+	QueryMembers    map[string][]*schema.QueryStatsSnapshot    `json:"query_members,omitempty"`
 }
 
 var (
@@ -115,11 +119,12 @@ func (s *bundleStore) putActivity(ctx context.Context, key SnapshotKey, a *schem
 		if b.Activity == nil {
 			b.Activity = map[string]*schema.ActivityStatsSnapshot{}
 		}
-		if existing, ok := b.Activity[a.Node.Source]; ok && existing.ContentHash == a.ContentHash {
-			return false
+		if b.ActivityMembers == nil {
+			b.ActivityMembers = map[string][]*schema.ActivityStatsSnapshot{}
 		}
-		b.Activity[a.Node.Source] = a
-		return true
+		return mergeNodeRow(b.Activity, b.ActivityMembers, a,
+			func(a *schema.ActivityStatsSnapshot) schema.NodeIdentity { return a.Node },
+			func(a *schema.ActivityStatsSnapshot) string { return a.ContentHash })
 	})
 }
 
@@ -128,11 +133,12 @@ func (s *bundleStore) putQueryStats(ctx context.Context, key SnapshotKey, q *sch
 		if b.Query == nil {
 			b.Query = map[string]*schema.QueryStatsSnapshot{}
 		}
-		if existing, ok := b.Query[q.Node.Source]; ok && existing.ContentHash == q.ContentHash {
-			return false
+		if b.QueryMembers == nil {
+			b.QueryMembers = map[string][]*schema.QueryStatsSnapshot{}
 		}
-		b.Query[q.Node.Source] = q
-		return true
+		return mergeNodeRow(b.Query, b.QueryMembers, q,
+			func(q *schema.QueryStatsSnapshot) schema.NodeIdentity { return q.Node },
+			func(q *schema.QueryStatsSnapshot) string { return q.ContentHash })
 	})
 }
 
@@ -216,6 +222,26 @@ func (s *bundleStore) ListKeys(ctx context.Context) ([]SnapshotKey, error) {
 	return s.backend.listKeys(ctx)
 }
 
+func (s *bundleStore) ListPoolMembers(ctx context.Context, key SnapshotKey, kind SnapshotKind, schemaRef string) ([]SnapshotSummary, error) {
+	b, ok, err := s.backend.load(ctx, key, schemaRef)
+	if err != nil || !ok {
+		return nil, err
+	}
+	switch kind.Tag {
+	case KindActivity:
+		return poolMemberSummaries(b.Activity, b.ActivityMembers, kind,
+			func(a *schema.ActivityStatsSnapshot) schema.NodeIdentity { return a.Node },
+			func(a *schema.ActivityStatsSnapshot) string { return a.ContentHash },
+			func(a *schema.ActivityStatsSnapshot) string { return a.SchemaRefHash }), nil
+	case KindQuery:
+		return poolMemberSummaries(b.Query, b.QueryMembers, kind,
+			func(q *schema.QueryStatsSnapshot) schema.NodeIdentity { return q.Node },
+			func(q *schema.QueryStatsSnapshot) string { return q.ContentHash },
+			func(q *schema.QueryStatsSnapshot) string { return q.SchemaRefHash }), nil
+	}
+	return nil, fmt.Errorf("%s is not a per-node stream", kind)
+}
+
 // per-bundle summaries for one kind; shared by every backend so they report identically
 func bundleSummaries(b *Bundle, kind SnapshotKind, rng TimeRange) ([]SnapshotSummary, error) {
 	var out []SnapshotSummary
@@ -251,6 +277,25 @@ func bundleSummaries(b *Bundle, kind SnapshotKind, rng TimeRange) ([]SnapshotSum
 				NodeLabel: label,
 			})
 		}
+		for label, rows := range b.ActivityMembers {
+			if kind.NodeLabel != "" && kind.NodeLabel != label {
+				continue
+			}
+			// a replay can leave members under an unmarked head; the newest row decides
+			if head, ok := b.Activity[label]; !ok || !head.Node.Pool {
+				continue
+			}
+			for _, a := range rows {
+				if !inRange(a.Node.Timestamp, rng) {
+					continue
+				}
+				out = append(out, SnapshotSummary{
+					Kind: ActivityKind(label), Timestamp: a.Node.Timestamp,
+					ContentHash: a.ContentHash, SchemaRefHash: a.SchemaRefHash,
+					NodeLabel: label,
+				})
+			}
+		}
 	case KindQuery:
 		for label, q := range b.Query {
 			if kind.NodeLabel != "" && kind.NodeLabel != label {
@@ -264,6 +309,24 @@ func bundleSummaries(b *Bundle, kind SnapshotKind, rng TimeRange) ([]SnapshotSum
 				ContentHash: q.ContentHash, SchemaRefHash: q.SchemaRefHash,
 				NodeLabel: label,
 			})
+		}
+		for label, rows := range b.QueryMembers {
+			if kind.NodeLabel != "" && kind.NodeLabel != label {
+				continue
+			}
+			if head, ok := b.Query[label]; !ok || !head.Node.Pool {
+				continue
+			}
+			for _, q := range rows {
+				if !inRange(q.Node.Timestamp, rng) {
+					continue
+				}
+				out = append(out, SnapshotSummary{
+					Kind: QueryKind(label), Timestamp: q.Node.Timestamp,
+					ContentHash: q.ContentHash, SchemaRefHash: q.SchemaRefHash,
+					NodeLabel: label,
+				})
+			}
 		}
 	default:
 		return nil, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
@@ -334,6 +397,7 @@ func pickPlannerBundle(bundles []*Bundle, at SnapshotRef) (*Bundle, error) {
 func pickActivity(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schema.ActivityStatsSnapshot, error) {
 	return pickNode(bundles, nodeLabel, at, "activity",
 		func(b *Bundle) map[string]*schema.ActivityStatsSnapshot { return b.Activity },
+		func(b *Bundle) map[string][]*schema.ActivityStatsSnapshot { return b.ActivityMembers },
 		func(a *schema.ActivityStatsSnapshot) time.Time { return a.Node.Timestamp },
 		func(a *schema.ActivityStatsSnapshot) string { return a.ContentHash })
 }
@@ -341,6 +405,7 @@ func pickActivity(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schema.
 func pickQueryStats(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schema.QueryStatsSnapshot, error) {
 	return pickNode(bundles, nodeLabel, at, "query stats",
 		func(b *Bundle) map[string]*schema.QueryStatsSnapshot { return b.Query },
+		func(b *Bundle) map[string][]*schema.QueryStatsSnapshot { return b.QueryMembers },
 		func(q *schema.QueryStatsSnapshot) time.Time { return q.Node.Timestamp },
 		func(q *schema.QueryStatsSnapshot) string { return q.ContentHash })
 }
@@ -376,7 +441,7 @@ func pickBundle(bundles []*Bundle, at SnapshotRef, noun string, slot func(*Bundl
 // pickNode is pickBundle for the per-node maps (activity, query stats). With
 // an empty nodeLabel any node matches; map order then picks it, as before.
 func pickNode[T any](bundles []*Bundle, nodeLabel string, at SnapshotRef, noun string,
-	snaps func(*Bundle) map[string]T, tsOf func(T) time.Time, hashOf func(T) string) (T, error) {
+	snaps func(*Bundle) map[string]T, members func(*Bundle) map[string][]T, tsOf func(T) time.Time, hashOf func(T) string) (T, error) {
 
 	selectOne := func(b *Bundle) (T, bool) {
 		m := snaps(b)
@@ -408,6 +473,17 @@ func pickNode[T any](bundles []*Bundle, nodeLabel string, at SnapshotRef, noun s
 				}
 				if hashOf(v) == at.Hash {
 					return v, nil
+				}
+			}
+			// only a hash reaches a member row: latest and at-or-before mean the label's newest
+			for label, rows := range members(b) {
+				if nodeLabel != "" && nodeLabel != label {
+					continue
+				}
+				for _, v := range rows {
+					if hashOf(v) == at.Hash {
+						return v, nil
+					}
 				}
 			}
 		}

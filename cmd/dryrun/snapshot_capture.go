@@ -194,7 +194,7 @@ fail.`,
 	cmd.Flags().BoolVar(&all, "all", false, "capture every [[node]] in dryrun.toml")
 	cmd.Flags().BoolVar(&due, "due", false, "skip streams whose interval has not elapsed")
 	cmd.Flags().BoolVar(&allowOrphan, "allow-orphan", false, "permit capture without a bound schema snapshot")
-	cmd.Flags().BoolVar(&allowRotation, "allow-rotation", false, "this label names a pool; do not warn when it alternates between servers")
+	cmd.Flags().BoolVar(&allowRotation, "allow-rotation", false, "this label names a pool: mark its rows as pool rows and do not warn when it alternates between servers")
 	cmd.Flags().BoolVar(&allowRoleChange, "allow-role-change", false, "accept a label whose role flipped (promotion/failover)")
 	cmd.Flags().BoolVar(&force, "force", false, "record even if the cluster/database identity differs from this project's history")
 	cmd.Flags().BoolVar(&check, "check", false, "preflight only: connect, SELECT 1, report what capture would do; capture nothing")
@@ -617,6 +617,7 @@ func persistStream(ctx context.Context, store captureStore, key history.Snapshot
 
 	case "activity":
 		a := r.activity
+		a.Node.Pool = opts.AllowRotation || t.Pool
 		warnNodeIdentityDrift(ctx, store, key, a.Node.Source, a.Node, opts.AllowRotation || t.Pool)
 		if _, err := store.PutActivity(ctx, key, a); err != nil {
 			return 0, err
@@ -628,6 +629,7 @@ func persistStream(ctx context.Context, store captureStore, key history.Snapshot
 
 	case "query":
 		q := r.query
+		q.Node.Pool = opts.AllowRotation || t.Pool
 		warnNodeIdentityDrift(ctx, store, key, q.Node.Source, q.Node, opts.AllowRotation || t.Pool)
 		out, err := store.PutQueryStats(ctx, key, q)
 		if err != nil {

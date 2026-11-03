@@ -229,4 +229,7 @@ type SnapshotStore interface {
 	Latest(ctx context.Context, key SnapshotKey, kind SnapshotKind) (*SnapshotSummary, error)
 	ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error)
 	ListKeys(ctx context.Context) ([]SnapshotKey, error)
+	// other servers of a pool label under schemaRef, newest row each. Empty for
+	// a label not declared a pool, so a restart never drags its old server along.
+	ListPoolMembers(ctx context.Context, key SnapshotKey, kind SnapshotKind, schemaRef string) ([]SnapshotSummary, error)
 }

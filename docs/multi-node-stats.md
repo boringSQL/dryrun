@@ -175,7 +175,7 @@ interval = "30m"
 [[node]]
 name     = "read-pool"
 url      = "service=dryrun-read-pool"
-streams  = ["query"]
+streams  = ["activity", "query"]
 interval = "15m"
 pool     = true
 ```
@@ -208,17 +208,28 @@ dryrun snapshot capture --node primary --streams schema
 
 `url = "service=name"` is preferred: the entry lives in `~/.pg_service.conf` (or `$PGSERVICEFILE`) on the capture host and the password in `~/.pgpass`, so `dryrun.toml` never carries a password — or even a variable name — and stays committable. Where a service file is impractical, `url_env` names an environment variable and `url` may hold a `${VAR}` reference instead; either way nothing secret lands in the file. `role` is asserted against the node at capture time; `auto` (the default) accepts whatever it finds. Omit `streams` and the detected role decides: a primary captures schema, planner, activity and query; a standby has no schema of its own and its planner stats mirror the primary's, so it captures activity and query only. Naming `schema` on a block that declares `role = "standby"` fails at config load rather than at capture. A node that turns out to be a standby at run time (`role = "auto"` on a replica, or a failover between the config edit and the run) reports `schema=n/a` and carries on, like a node without `pg_stat_statements`.
 
-`pool = true` says the label names a read pool rather than one machine. Members rotate by design there, so the identity-drift warning is suppressed for that label — see the fingerprint paragraph above. Do not set it on a label that is supposed to be one node: the warning is the only thing that tells you two servers' counters are interleaving.
+`pool = true` says the label names a read pool rather than one machine. Members rotate by design there, so the identity-drift warning is suppressed for that label — see the fingerprint paragraph above — and its rows are marked so every server's newest row is shared ([details](#how-a-rotating-label-is-read)). Do not set it on a label that is supposed to be one node: the warning is the only thing that tells you two servers' counters are interleaving.
 
 ### How a rotating label is read
 
-Reads do not depend on `pool = true`. A label counts as rotating when its recorded fingerprints recur (A, B, A) within its last 20 captures or 30 days, whichever is shorter. That judgement comes from the stored rows, so pulled history and the MCP server see it too. A one-way change is a restart and reads as before.
+A label counts as rotating when its newest row is marked as a pool row and it has two servers, or when its recorded fingerprints recur (A, B, A) within its last 20 rows across the activity and query streams (about 10 capture runs) or 30 days, whichever is shorter. That judgement comes from the stored rows, so pulled history and the MCP server see it too. On an unmarked label a one-way change is a restart and reads as before.
 
 - `snapshot diff` and `snapshot_diff` compare the server behind the newer capture with that same server's own earlier capture, and say so in a note. If that server has no earlier capture, or the captures are given newest first, the diff is refused rather than subtracting two servers' counters.
 - `list_top_queries` compares each label's newest capture with the same server's previous one, so another server's `stats_reset` no longer reads as a reset. Its hint says the totals are one server's, counted since that server's own reset.
-- Unused indexes, scan totals and `anomalies` add up the newest row of every server the label rotated through, so an index used only through another server is not reported as unused. `node_imbalance` still compares labels, not the servers inside one. `describe_table`'s node breakdown lists each server with `started_at`.
+- Unused indexes, scan totals and `anomalies` add up the newest row of every server the label rotated through, within the limits below, so an index used only through another server is not reported as unused. `node_imbalance` still compares labels, not the servers inside one. `describe_table`'s node breakdown lists each server with `started_at`.
 
 A server that restarts inside the window counts twice until its old row ages out. That inflates totals; it never hides use. None of this adds a pool's servers into one pool-wide diff: a diff describes one server.
+
+Rows captured under `pool = true` or `--allow-rotation` are marked as pool rows, and the newest row decides whether a label is a pool. A marked label counts as rotating as soon as it has two servers, because a fresh clone holds one row per server and nothing in it can recur. Its unused-index totals add up each server's newest row from the label's last 40 activity captures and 7 days. A server quieter than that drops out of a long-lived store's totals while a fresh clone may still count it, so the two can disagree, and a sticky load balancer makes this more likely. Capture often enough that every server answers within 40 captures.
+
+`snapshot push` and `snapshot pull` carry the newest marked row of every server under a marked label, within the label's newest schema and the 7-day member window. A fresh clone therefore adds up the whole pool instead of seeing whichever server answered last. The limits:
+
+- A server's row travels once it has been captured under the marker. After turning `pool = true` on, or after a schema change, a fresh clone sees only the servers captured since, so treat `unused_indexes` as a hint until each has answered.
+- A server unseen for 7 days, measured from the label's newest row, is dropped from the bundle. `push --since` and `pull --since` filter these rows too, so a short window can leave servers out.
+- One capture without the marker clears the other servers from the bundle at the next push, until a marked capture and push put them back. It also takes effect locally at once: that store reads the label as one server, and unless a server recurs in the window, a cross-server diff reads as a restart instead of being refused. `dryrun init` and an ad-hoc `capture --from --label read-pool` don't mark rows; `capture` does if you pass `--allow-rotation`.
+- On a pool's writer and readers, set `[history] max_age` longer than 7 days plus your longest capture gap, for example `8d`. Prune keeps only each label's newest row past that age and measures it from now, while the bundle measures 7 days from the label's newest row, so a shorter one deletes a server's row in the same run that pulled it.
+
+A label captured without the marker keeps one row per label, even if its servers rotate, so a real pool needs `pool = true` for a fresh clone to see it. A diff on a fresh clone is still refused until a server has two captures of its own.
 
 Then capture the whole fleet:
 
@@ -322,4 +333,4 @@ The primary's full capture already writes its own activity row (labeled `primary
 
 Snapshots live in `~/.dryrun/history.db`, keyed by `(project_id, database_id, kind, schema_ref_hash, node_label)`. Activity rows carry their `--label` (or `[[node]]` name) in `node_label`. `is_standby` is auto-detected from `pg_is_in_recovery()` and recorded on every row. Capture works on either role and checks the label: if the newest row for that label recorded the other role, the capture is refused unless `--allow-role-change` is passed.
 
-To share a snapshot across machines, use `snapshot push` / `snapshot pull`. They move `history.db` byte-for-byte between stores without re-masking or re-transforming. See [SECURITY.md](../SECURITY.md) for the sharing trust model.
+To share a snapshot across machines, use `snapshot push` / `snapshot pull`. They move `history.db` byte-for-byte between stores without re-masking or re-transforming. A bundle holds each label's newest row in `activity` and `query`, and a pool label's other servers in `activity_members` and `query_members`; an older dryrun reads only the former and must not be the one writing, because rewriting a bundle would drop the latter. See [SECURITY.md](../SECURITY.md) for the sharing trust model.

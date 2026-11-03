@@ -35,6 +35,8 @@ type (
 		// one another (a restart or a replacement)
 		Members     int  `json:"members,omitempty"`
 		Oscillating bool `json:"oscillating,omitempty"`
+		// the newest row declares a read pool, so rotation here is expected
+		Pool bool `json:"pool,omitempty"`
 		// rows in the window that carry a fingerprint at all: without it
 		// "no rotation" is indistinguishable from "no evidence"
 		Fingerprinted int `json:"fingerprinted_rows"`
@@ -50,6 +52,7 @@ type (
 	NodeFingerprint struct {
 		StartedAt  time.Time
 		ServerAddr string
+		Pool       bool
 	}
 
 	nodeAgg struct {
@@ -138,6 +141,7 @@ func (s *Store) ListNodes(ctx context.Context, key SnapshotKey) ([]NodeSummary, 
 		}
 		n.Fingerprinted = len(fps)
 		n.Members, n.Oscillating = summariseMembers(fps)
+		n.Pool = declaresPool(fps)
 		regs, first, last, err := s.counterRegressions(ctx, key, n.Label)
 		if err != nil {
 			return nil, err
@@ -174,10 +178,10 @@ func (s *Store) fingerprintWindow(ctx context.Context, key SnapshotKey, nodeLabe
 	armArgs = append(armArgs, nodeFingerprintRows)
 	args := append(append(append([]any{}, armArgs...), armArgs...), nodeFingerprintRows)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT started, addr FROM (
-		   SELECT ts, id, 0 AS stream, started, addr FROM (`+fingerprintArmSQL("activity_stats", bound)+`)
+		`SELECT started, addr, pool FROM (
+		   SELECT ts, id, 0 AS stream, started, addr, pool FROM (`+fingerprintArmSQL("activity_stats", bound)+`)
 		   UNION ALL
-		   SELECT ts, id, 1, started, addr FROM (`+fingerprintArmSQL("query_stats", bound)+`)
+		   SELECT ts, id, 1, started, addr, pool FROM (`+fingerprintArmSQL("query_stats", bound)+`)
 		 ) WHERE started IS NOT NULL
 		 ORDER BY ts DESC, stream ASC, id DESC LIMIT ?`,
 		args...,
@@ -189,16 +193,19 @@ func (s *Store) fingerprintWindow(ctx context.Context, key SnapshotKey, nodeLabe
 
 	var out []NodeFingerprint
 	for rows.Next() {
-		var started string
-		var addr sql.NullString
-		if err := rows.Scan(&started, &addr); err != nil {
+		var (
+			started string
+			addr    sql.NullString
+			pool    sql.NullInt64
+		)
+		if err := rows.Scan(&started, &addr, &pool); err != nil {
 			return nil, err
 		}
 		at, perr := time.Parse(time.RFC3339Nano, started)
 		if perr != nil {
 			continue
 		}
-		out = append(out, NodeFingerprint{StartedAt: at, ServerAddr: addr.String})
+		out = append(out, NodeFingerprint{StartedAt: at, ServerAddr: addr.String, Pool: pool.Int64 == 1})
 	}
 	return out, rows.Err()
 }
@@ -286,7 +293,8 @@ func (s *Store) LastCaptureAt(ctx context.Context, key SnapshotKey, nodeLabel, s
 
 // Members counts distinct servers; oscillation is one of them recurring after
 // another intervened, which is what separates a rotating endpoint from a
-// restart.
+// restart. A declared pool skips the wait: a fresh clone holds one row per
+// server, so nothing in it can recur.
 func summariseMembers(fps []NodeFingerprint) (members int, oscillating bool) {
 	var distinct []time.Time
 	for i, f := range fps {
@@ -306,7 +314,17 @@ func summariseMembers(fps []NodeFingerprint) (members int, oscillating bool) {
 			oscillating = true
 		}
 	}
+	if len(distinct) > 1 && declaresPool(fps) {
+		oscillating = true
+	}
 	return len(distinct), oscillating
+}
+
+// the newest row decides, so removing pool = true takes effect at once. The
+// window holds fingerprinted rows only: a fingerprintless newest row defers
+// the decision to an older one, where ListPoolMembers would send none.
+func declaresPool(fps []NodeFingerprint) bool {
+	return len(fps) > 0 && fps[0].Pool
 }
 
 func roleFromExtract(standby sql.NullInt64) string {
@@ -380,7 +398,8 @@ func nodeStandbyExpr(prefix string) string {
 // sorting the whole window would run on every capture.
 func fingerprintArmSQL(table, bound string) string {
 	return `SELECT timestamp AS ts, id, ` + nodeJSONExpr("", "$.node.postmaster_start_time") + ` AS started,
-	               ` + nodeJSONExpr("", "$.node.server_addr") + ` AS addr
+	               ` + nodeJSONExpr("", "$.node.server_addr") + ` AS addr,
+	               ` + nodeJSONExpr("", "$.node.pool") + ` AS pool
 	          FROM ` + table + `
 	         WHERE project_id = ? AND database_id = ? AND node_source = ? AND timestamp >= ?` + bound + `
 	           AND ` + nodeJSONExpr("", "$.node.postmaster_start_time") + ` IS NOT NULL

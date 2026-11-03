@@ -205,7 +205,7 @@ interval = "1h"
 [[node]]
 name     = "read-pool"
 url      = "service=dryrun-read-pool"
-streams  = ["query"]
+streams  = ["activity", "query"]
 interval = "15m"
 pool     = true
 ```
@@ -216,7 +216,7 @@ pool     = true
 - `url_env` names an environment variable, and `url` may hold a `${VAR}` reference — also committable, for environments where a service file is impractical. Set exactly one of `url` / `url_env` per node.
 - Without `streams`, the detected role decides. A standby has no schema of its own and its planner stats mirror the primary's, so it captures `activity` and `query`.
 - `interval` — the cadence enforced by `snapshot capture --all --due`.
-- `pool = true` marks a label that names a read pool rather than one machine, which suppresses the identity-drift warning. Don't set it on a single machine; that warning is how you find out two servers answer on one label. It affects warnings only: diffs, `list_top_queries` and unused-index checks detect rotation from the stored captures whether or not it is set ([details](multi-node-stats.md#how-a-rotating-label-is-read)).
+- `pool = true` marks a label that names a read pool rather than one machine. It suppresses the identity-drift warning, marks the label's rows as pool rows so `snapshot push` and `pull` carry every server's newest row, and makes the label count as rotating from its second server on. Don't set it on a single machine: two servers answering on one label would read as a pool instead of raising that warning. Without it, diffs, `list_top_queries` and unused-index checks still detect rotation once a server recurs in the stored captures, but a fresh clone sees only the newest server ([details](multi-node-stats.md#how-a-rotating-label-is-read)).
 
 See [multi-node-stats.md](multi-node-stats.md) for the capture semantics.
 

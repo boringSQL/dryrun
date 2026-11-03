@@ -508,6 +508,9 @@ type NodeIdentity struct {
 	// distinguishes two members of one cluster; system_identifier cannot
 	PostmasterStartTime *time.Time `json:"postmaster_start_time,omitempty"`
 	ServerAddr          string     `json:"server_addr,omitempty"`
+	// label declared a read pool at capture; outside the content hash, so
+	// marking a row never makes it look new
+	Pool bool `json:"pool,omitempty"`
 }
 
 type TableSizingEntry struct {

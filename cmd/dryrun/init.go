@@ -525,7 +525,7 @@ profile = %q
 # url_env  = "REPLICA_EU_URL"
 # streams  = ["activity", "query"]
 # interval = "30m"
-# pool     = true   # a read pool: members rotate, so do not warn about it
+# pool     = true   # a read pool: every server's newest row is shared, rotation does not warn
 
 # [query_stats]
 # row_cap = 500   # max pg_stat_statements rows to capture; overridable with --query-stats-limit
