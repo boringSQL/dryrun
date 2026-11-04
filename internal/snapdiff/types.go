@@ -6,6 +6,7 @@ package snapdiff
 
 import (
 	"time"
+	"unicode/utf8"
 
 	"github.com/boringsql/dryrun/pkg/diff"
 )
@@ -15,6 +16,8 @@ const (
 	DefaultWindow = 30 * time.Minute
 	// movers below this |%| stay out of the object view
 	minMoverPct = diff.DefaultMinPct
+	// SQL text cap in the full view
+	maxCanonicalBytes = 300
 )
 
 type Options struct {
@@ -99,6 +102,8 @@ type (
 	NodeQueryDelta struct {
 		Node  string           `json:"node"`
 		Delta *diff.QueryDelta `json:"delta"`
+		// flat shapes the full view left out
+		FlatEntries int `json:"flat_entries,omitempty"`
 		// pairing note for summary notes; the full view has it in Delta.Caveats
 		note string
 	}
@@ -218,13 +223,35 @@ func capQueryDeltas(nds []NodeQueryDelta, limit int) ([]NodeQueryDelta, int) {
 		if nd.Delta == nil {
 			continue
 		}
-		e, om := capSlice(nd.Delta.Entries, limit)
+		kept := make([]diff.QueryEntryDelta, 0, len(nd.Delta.Entries))
+		for _, e := range nd.Delta.Entries {
+			// unmatched members make a flat entry a lower bound
+			if e.Status == diff.QueryFlat && e.UnmatchedMembers == 0 {
+				out[i].FlatEntries++
+				continue
+			}
+			e.Canonical = cutSQL(e.Canonical)
+			kept = append(kept, e)
+		}
+		e, om := capSlice(kept, limit)
 		cpd := *nd.Delta
 		cpd.Entries = e
 		out[i].Delta = &cpd
 		total += om
 	}
 	return out, total
+}
+
+// byte cap, on a rune boundary
+func cutSQL(s string) string {
+	if len(s) <= maxCanonicalBytes {
+		return s
+	}
+	n := maxCanonicalBytes
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 func capActivityDeltas(nds []NodeActivityDelta, limit int) ([]NodeActivityDelta, int) {

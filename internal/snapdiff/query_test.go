@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/boringsql/dryrun/pkg/diff"
 	"github.com/boringsql/dryrun/pkg/snapshot"
@@ -510,5 +511,58 @@ func TestQueryNotes_DedupeCodesAcrossNodes(t *testing.T) {
 	s := buildSummary(&Result{QueryDelta: nds})
 	if len(s.QueryCaveatCodes) != 1 {
 		t.Errorf("summary codes %v, want one", s.QueryCaveatCodes)
+	}
+}
+
+func TestForView_FullDropsFlatAndCutsSQL(t *testing.T) {
+	long := "a" + strings.Repeat("é", 400) // byte 300 falls mid-rune, so the cut must back off
+	res := &Result{
+		QueryDelta: []NodeQueryDelta{{Node: "primary", Delta: &diff.QueryDelta{Entries: []diff.QueryEntryDelta{
+			{Fingerprint: "a", Status: diff.QueryGrew, Canonical: long},
+			{Fingerprint: "b", Status: diff.QueryFlat, Canonical: "SELECT 1"},
+			{Fingerprint: "c", Status: diff.QueryFlat, Canonical: "SELECT 2"},
+		}}}},
+		PlanShifts: []NodePlanShifts{{Node: "primary", Result: &diff.PlanShiftResult{
+			Shifts: []diff.PlanShift{{QueryID: 1, Canonical: long}},
+		}}},
+	}
+
+	got := res.ForView("full", 0)
+	nd := got.QueryDelta[0]
+	if nd.FlatEntries != 2 || len(nd.Delta.Entries) != 1 {
+		t.Fatalf("flat_entries=%d entries=%d, want 2 and 1", nd.FlatEntries, len(nd.Delta.Entries))
+	}
+	if got.Truncated || got.OmittedRows != 0 {
+		t.Errorf("dropping flat shapes must not read as a cap: %+v", got)
+	}
+	for name, c := range map[string]string{
+		"query":      nd.Delta.Entries[0].Canonical,
+		"plan shift": got.PlanShifts[0].Result.Shifts[0].Canonical,
+	} {
+		if !utf8.ValidString(c) || !strings.HasSuffix(c, "…") || len(c) > maxCanonicalBytes+len("…") {
+			t.Errorf("%s SQL not cut cleanly: %d bytes", name, len(c))
+		}
+	}
+
+	// the Result is shared with the summary view and must stay whole
+	if len(res.QueryDelta[0].Delta.Entries) != 3 || res.QueryDelta[0].Delta.Entries[0].Canonical != long ||
+		res.PlanShifts[0].Result.Shifts[0].Canonical != long {
+		t.Error("ForView mutated the Result it was called on")
+	}
+}
+
+func TestForView_FullLimitCountsMovedShapesOnly(t *testing.T) {
+	res := &Result{QueryDelta: []NodeQueryDelta{{Node: "primary", Delta: &diff.QueryDelta{Entries: []diff.QueryEntryDelta{
+		{Fingerprint: "a", Status: diff.QueryGrew},
+		{Fingerprint: "f", Status: diff.QueryFlat},
+		{Fingerprint: "b", Status: diff.QueryShrank},
+		{Fingerprint: "u", Status: diff.QueryFlat, UnmatchedMembers: 1},
+	}}}}}
+
+	got := res.ForView("full", 1)
+	nd := got.QueryDelta[0]
+	if len(nd.Delta.Entries) != 1 || got.OmittedRows != 2 || nd.FlatEntries != 1 {
+		t.Errorf("entries=%d omitted=%d flat=%d, want 1, 2, 1 (flat with unmatched members stays a candidate)",
+			len(nd.Delta.Entries), got.OmittedRows, nd.FlatEntries)
 	}
 }

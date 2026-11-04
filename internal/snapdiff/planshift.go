@@ -3,6 +3,7 @@ package snapdiff
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 
@@ -126,6 +127,10 @@ func capPlanShifts(nps []NodePlanShifts, limit int) ([]NodePlanShifts, int) {
 		cp := *np.Result
 		var om int
 		cp.Shifts, om = capSlice(np.Result.Shifts, limit)
+		cp.Shifts = slices.Clone(cp.Shifts)
+		for j := range cp.Shifts {
+			cp.Shifts[j].Canonical = cutSQL(cp.Shifts[j].Canonical)
+		}
 		out[i] = NodePlanShifts{Node: np.Node, Result: &cp}
 		total += om
 	}
