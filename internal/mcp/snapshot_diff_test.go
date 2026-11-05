@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/boringsql/dryrun/internal/history"
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/internal/snapdiff"
+	"github.com/boringsql/dryrun/pkg/diff"
 	"github.com/boringsql/dryrun/pkg/lint"
 )
 
@@ -223,5 +226,117 @@ func TestSnapshotDiff_OffsetPages(t *testing.T) {
 		if truncated != (off < 2) {
 			t.Errorf("offset %v: truncated=%v", off, truncated)
 		}
+	}
+}
+
+func bigQueryResult(n int) *snapdiff.Result {
+	entries := make([]diff.QueryEntryDelta, n)
+	for i := range entries {
+		entries[i] = diff.QueryEntryDelta{
+			Fingerprint: fmt.Sprintf("sha1:%06d", i), Status: diff.QueryGrew,
+			Canonical: strings.Repeat("SELECT 1 ", 30), Calls: int64(i), CallsDelta: int64(i),
+		}
+	}
+	return &snapdiff.Result{
+		Summary:    snapdiff.Summary{Headline: "x"},
+		QueryDelta: []snapdiff.NodeQueryDelta{{Node: "primary", Delta: &diff.QueryDelta{Entries: entries}}},
+	}
+}
+
+func TestFitSnapshotDiff(t *testing.T) {
+	const budget = 32 << 10
+	res := bigQueryResult(2000)
+
+	for _, limit := range []int{0, 1500} {
+		p, err := fitSnapshotDiff(res, "full", limit, 0, budget)
+		if err != nil {
+			t.Fatalf("limit=%d: %v", limit, err)
+		}
+		b, _ := json.MarshalIndent(p, "", "  ")
+		if len(b) > budget {
+			t.Errorf("limit=%d: %d bytes, over the %d budget", limit, len(b), budget)
+		}
+		got := len(p.QueryDelta[0].Delta.Entries)
+		if !p.Truncated || p.TruncatedBy != "bytes" || p.LimitApplied != got || got == 0 || got >= 1500 {
+			t.Errorf("limit=%d: truncated=%v by=%q applied=%d entries=%d", limit, p.Truncated, p.TruncatedBy, p.LimitApplied, got)
+		}
+	}
+
+	// a limit that already fits the budget is the caller's cut, not the budget's
+	p, err := fitSnapshotDiff(res, "full", 5, 0, budget)
+	if err != nil || p.TruncatedBy != "limit" || p.LimitApplied != 5 {
+		t.Errorf("small limit: err=%v by=%q applied=%d", err, p.TruncatedBy, p.LimitApplied)
+	}
+
+	// everything fits: nothing to report
+	p, err = fitSnapshotDiff(bigQueryResult(3), "full", 0, 0, budget)
+	if err != nil || p.Truncated || p.TruncatedBy != "" || p.LimitApplied != 0 {
+		t.Errorf("fitting result: err=%v truncated=%v by=%q", err, p.Truncated, p.TruncatedBy)
+	}
+}
+
+func TestFitSnapshotDiff_PagesCoverEveryEntryOnce(t *testing.T) {
+	res := bigQueryResult(400)
+	seen := map[string]bool{}
+	for off := 0; off < 1000; {
+		p, err := fitSnapshotDiff(res, "full", 0, off, 16<<10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range p.QueryDelta[0].Delta.Entries {
+			if seen[e.Fingerprint] {
+				t.Fatalf("%s repeated at offset %d", e.Fingerprint, off)
+			}
+			seen[e.Fingerprint] = true
+		}
+		if !p.Truncated {
+			break
+		}
+		off += p.LimitApplied
+	}
+	if len(seen) != 400 {
+		t.Errorf("paged through %d of 400 entries", len(seen))
+	}
+}
+
+func TestFitSnapshotDiff_RefusesWhenOneEntryDoesNotFit(t *testing.T) {
+	empty, _ := json.MarshalIndent(bigQueryResult(0).ForPage("full", 0, 0), "", "  ")
+	// room for the envelope but not for one entry
+	if _, err := fitSnapshotDiff(bigQueryResult(10), "full", 0, 0, len(empty)+10); err == nil {
+		t.Error("expected an error when even limit=1 is over budget")
+	}
+}
+
+func TestFitSnapshotDiff_HugeLimitIsClamped(t *testing.T) {
+	p, err := fitSnapshotDiff(bigQueryResult(2000), "full", 1<<50, 0, 32<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(p.QueryDelta[0].Delta.Entries); got < 10 {
+		t.Errorf("an absurd limit left %d entries; the ratio step must not overflow", got)
+	}
+}
+
+// a byte-cut page must not send the agent back to limit=0, which would be cut the same way
+func TestSnapshotDiffFollowups_ByteCut(t *testing.T) {
+	res := bigQueryResult(3)
+	payload := &snapdiff.Result{Truncated: true, TruncatedBy: "bytes", LimitApplied: 8, Offset: 16}
+
+	hint, next := snapshotDiffFollowups(res, snapdiff.Options{Kind: "query"}, "full", payload)
+	for _, n := range next {
+		if n.Tool == "snapshot_diff" {
+			t.Errorf("byte-cut page offered a snapshot_diff re-run: %v", n.Args)
+		}
+	}
+	for _, want := range []string{"limit_applied=8", "offset=24", "node="} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint %q lacks %q", hint, want)
+		}
+	}
+
+	payload = &snapdiff.Result{Truncated: true, TruncatedBy: "limit", LimitApplied: 1}
+	hint, _ = snapshotDiffFollowups(res, snapdiff.Options{Kind: "query"}, "full", payload)
+	if !strings.Contains(hint, "node=") || strings.Contains(hint, "schema=") {
+		t.Errorf("limit-cut hint for kind=query should name node=, got %q", hint)
 	}
 }

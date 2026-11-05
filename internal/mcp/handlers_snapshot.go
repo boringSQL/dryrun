@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"time"
@@ -11,6 +12,11 @@ import (
 	"github.com/boringsql/dryrun/internal/schema"
 	"github.com/boringsql/dryrun/internal/snapdiff"
 	"github.com/boringsql/dryrun/pkg/diff"
+)
+
+// keeps one response readable by clients that cap or drop oversized tool results
+const (
+	maxSnapshotDiffBytes = 64 << 10
 )
 
 // snapshot-to-snapshot only; MCP has no live DB
@@ -46,14 +52,62 @@ func (s *Server) runSnapshotDiff(ctx context.Context, opt snapdiff.Options, view
 		return textResult(s.wrapText(res.Summary.Headline, "")), nil
 	}
 
-	payload := res.ForPage(view, limit, offset)
-	hint, next := snapshotDiffFollowups(res, opt, view, payload.Truncated)
+	payload, err := fitSnapshotDiff(res, view, limit, offset, maxSnapshotDiffBytes)
+	if err != nil {
+		narrow := narrowArgs(opt.Kind)
+		if view == "full" {
+			narrow += ", or use view=summary"
+		}
+		return errResult(fmt.Sprintf("%v; narrow with %s", err, narrow)), nil
+	}
+	hint, next := snapshotDiffFollowups(res, opt, view, payload)
 	return s.metaJSONResult(payload, "", hint, next), nil
 }
 
-func snapshotDiffFollowups(res *snapdiff.Result, opt snapdiff.Options, view string, truncated bool) (string, []NextCall) {
+// kind=query deltas ignore schema=/table=; only node= narrows them
+func narrowArgs(kind string) string {
+	if kind == "query" {
+		return "node="
+	}
+	return "schema=/table="
+}
+
+// Pages are re-cut until the indented JSON (the larger of the two copies on the wire) fits budget.
+// Limit shrinks by the overshoot ratio (always at least by one), so it ends within a few marshals.
+func fitSnapshotDiff(res *snapdiff.Result, view string, limit, offset, budget int) (*snapdiff.Result, error) {
+	// a limit past the longest list cuts nothing; clamping also keeps lim*budget from overflowing
+	start := max(res.LongestList(), 1)
+	if limit > 0 {
+		start = min(limit, start)
+	}
+	for lim := start; ; {
+		p := res.ForPage(view, lim, offset)
+		b, err := json.MarshalIndent(p, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("serialization error: %w", err)
+		}
+		if len(b) <= budget {
+			if p.Truncated {
+				p.TruncatedBy, p.LimitApplied = "limit", lim
+				if lim < start {
+					p.TruncatedBy = "bytes"
+				}
+			}
+			return p, nil
+		}
+		if lim <= 1 {
+			return nil, fmt.Errorf("snapshot_diff result exceeds %d KB even at limit=1", budget>>10)
+		}
+		lim = max(lim*budget/len(b), 1)
+	}
+}
+
+func snapshotDiffFollowups(res *snapdiff.Result, opt snapdiff.Options, view string, payload *snapdiff.Result) (string, []NextCall) {
+	truncated := payload.Truncated
+	byBytes := payload.TruncatedBy == "bytes"
 	var next []NextCall
-	if truncated {
+	// a byte-cut page would just be cut again at limit=0
+	if truncated && !byBytes {
 		next = append(next, NextCall{Tool: "snapshot_diff", Args: rerunUncapped(opt, view)})
 	}
 	for _, o := range res.Objects {
@@ -69,8 +123,12 @@ func snapshotDiffFollowups(res *snapdiff.Result, opt snapdiff.Options, view stri
 		next = append(next, NextCall{Tool: "detect", Args: map[string]any{"kind": "anomalies"}})
 	}
 	hint := "objects are ranked by significance; _meta.correlation shows how the planner/activity captures were matched to each anchor"
-	if truncated {
-		hint += ". Output capped; narrow with schema=/table= or re-run with limit=0"
+	switch {
+	case byBytes:
+		hint += fmt.Sprintf(". Output cut to fit %d KB (limit_applied=%d); page with offset=%d or narrow with %s",
+			maxSnapshotDiffBytes>>10, payload.LimitApplied, payload.Offset+payload.LimitApplied, narrowArgs(opt.Kind))
+	case truncated:
+		hint += ". Output capped; narrow with " + narrowArgs(opt.Kind) + " or re-run with limit=0"
 	}
 	return hint, next
 }

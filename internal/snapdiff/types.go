@@ -44,6 +44,9 @@ type (
 		OmittedObjects int  `json:"omitted_objects,omitempty"`
 		OmittedRows    int  `json:"omitted_rows,omitempty"` // raw delta rows dropped in full view
 		Offset         int  `json:"offset,omitempty"`       // head entries skipped in objects and, in full view, each raw list
+		// what cut the page: the caller's limit, or the response byte budget
+		TruncatedBy  string `json:"truncated_by,omitempty"`
+		LimitApplied int    `json:"limit_applied,omitempty"`
 
 		Correlation Correlation `json:"correlation"`
 
@@ -284,4 +287,31 @@ func capActivityDeltas(nds []NodeActivityDelta, limit, offset int) ([]NodeActivi
 		}
 	}
 	return out, total
+}
+
+// the longest list any limit applies to; a limit at or above it cuts nothing
+func (r *Result) LongestList() int {
+	n := len(r.Objects)
+	if d := r.SchemaDelta; d != nil {
+		n = max(n, len(d.Changes))
+	}
+	if d := r.PlannerDelta; d != nil {
+		n = max(n, len(d.Sizing), len(d.Stats))
+	}
+	for _, nd := range r.ActivityDelta {
+		if nd.Delta != nil {
+			n = max(n, len(nd.Delta.Counters))
+		}
+	}
+	for _, nd := range r.QueryDelta {
+		if nd.Delta != nil {
+			n = max(n, len(nd.Delta.Entries))
+		}
+	}
+	for _, np := range r.PlanShifts {
+		if np.Result != nil {
+			n = max(n, len(np.Result.Shifts))
+		}
+	}
+	return n
 }
