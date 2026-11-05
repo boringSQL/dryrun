@@ -175,3 +175,53 @@ func TestSnapshotDiff_TruncationEmitsRerun(t *testing.T) {
 		t.Errorf("expected a snapshot_diff re-run with limit=0 in _meta.next, got %v", next)
 	}
 }
+
+func TestSnapshotDiff_OffsetPages(t *testing.T) {
+	ctx := context.Background()
+	store, err := history.Open(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatalf("history.Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	key := history.SnapshotKey{ProjectID: "p", DatabaseID: "d"}
+
+	t0 := time.Now().Truncate(time.Second).Add(-2 * time.Hour)
+	if _, err := store.Put(ctx, key, history.WrapSchema(schemaWithTables("s-a", t0, "t1", "t2", "t3"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, key, history.WrapSchema(schemaWithTables("s-b", t0.Add(time.Hour)))); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(nil, "", schemaWithTables("s-b", t0.Add(time.Hour)), store, lint.DefaultConfig(), "")
+	srv.SetSnapshotKey(key)
+
+	page := func(offset float64) (names []string, truncated bool) {
+		res, err := srv.handleSnapshotDiff(ctx, reqWith(map[string]any{"limit": float64(1), "offset": offset}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out struct {
+			Objects   []struct{ Name string } `json:"objects"`
+			Truncated bool                    `json:"truncated"`
+		}
+		if err := json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &out); err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range out.Objects {
+			names = append(names, o.Name)
+		}
+		return names, out.Truncated
+	}
+
+	seen := map[string]bool{}
+	for off := float64(0); off < 3; off++ {
+		names, truncated := page(off)
+		if len(names) != 1 || seen[names[0]] {
+			t.Fatalf("offset %v: got %v, want one object not seen before", off, names)
+		}
+		seen[names[0]] = true
+		if truncated != (off < 2) {
+			t.Errorf("offset %v: truncated=%v", off, truncated)
+		}
+	}
+}

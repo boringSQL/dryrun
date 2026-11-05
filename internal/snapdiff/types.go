@@ -43,6 +43,7 @@ type (
 		Truncated      bool `json:"truncated,omitempty"`
 		OmittedObjects int  `json:"omitted_objects,omitempty"`
 		OmittedRows    int  `json:"omitted_rows,omitempty"` // raw delta rows dropped in full view
+		Offset         int  `json:"offset,omitempty"`       // head entries skipped in objects and, in full view, each raw list
 
 		Correlation Correlation `json:"correlation"`
 
@@ -159,17 +160,23 @@ func hasActivity(nds []NodeActivityDelta) bool {
 
 // full keeps the raw deltas (capped at limit); summary drops them. limit<=0 = all.
 func (r *Result) ForView(view string, limit int) *Result {
+	return r.ForPage(view, limit, 0)
+}
+
+// offset applies to each capped slice on its own, as limit does
+func (r *Result) ForPage(view string, limit, offset int) *Result {
 	cp := *r
-	cp.Objects, cp.OmittedObjects = capSlice(cp.Objects, limit)
+	cp.Offset = max(offset, 0)
+	cp.Objects, cp.OmittedObjects = pageSlice(cp.Objects, limit, offset)
 	if view == "full" {
 		var po, ao int
-		cp.SchemaDelta, cp.OmittedRows = capSchemaDelta(cp.SchemaDelta, limit)
-		cp.PlannerDelta, po = capPlannerDelta(cp.PlannerDelta, limit)
-		cp.ActivityDelta, ao = capActivityDeltas(cp.ActivityDelta, limit)
+		cp.SchemaDelta, cp.OmittedRows = capSchemaDelta(cp.SchemaDelta, limit, offset)
+		cp.PlannerDelta, po = capPlannerDelta(cp.PlannerDelta, limit, offset)
+		cp.ActivityDelta, ao = capActivityDeltas(cp.ActivityDelta, limit, offset)
 		var qo int
-		cp.QueryDelta, qo = capQueryDeltas(cp.QueryDelta, limit)
+		cp.QueryDelta, qo = capQueryDeltas(cp.QueryDelta, limit, offset)
 		var so int
-		cp.PlanShifts, so = capPlanShifts(cp.PlanShifts, limit)
+		cp.PlanShifts, so = capPlanShifts(cp.PlanShifts, limit, offset)
 		cp.OmittedRows += po + ao + qo + so
 	} else {
 		cp.SchemaDelta = nil
@@ -184,35 +191,41 @@ func (r *Result) ForView(view string, limit int) *Result {
 	return &cp
 }
 
-func capSlice[T any](s []T, limit int) ([]T, int) {
+// skips offset, keeps up to limit (<=0 = the rest); the count is what lies beyond the page
+func pageSlice[T any](s []T, limit, offset int) ([]T, int) {
+	offset = max(offset, 0)
+	if offset >= len(s) {
+		return s[:0], 0
+	}
+	s = s[offset:]
 	if limit <= 0 || len(s) <= limit {
 		return s, 0
 	}
 	return s[:limit], len(s) - limit
 }
 
-func capSchemaDelta(d *diff.SchemaDelta, limit int) (*diff.SchemaDelta, int) {
+func capSchemaDelta(d *diff.SchemaDelta, limit, offset int) (*diff.SchemaDelta, int) {
 	if d == nil {
 		return nil, 0
 	}
-	ch, om := capSlice(d.Changes, limit)
+	ch, om := pageSlice(d.Changes, limit, offset)
 	cp := *d
 	cp.Changes = ch
 	return &cp, om
 }
 
-func capPlannerDelta(d *diff.PlannerDelta, limit int) (*diff.PlannerDelta, int) {
+func capPlannerDelta(d *diff.PlannerDelta, limit, offset int) (*diff.PlannerDelta, int) {
 	if d == nil {
 		return nil, 0
 	}
-	sz, o1 := capSlice(d.Sizing, limit)
-	st, o2 := capSlice(d.Stats, limit)
+	sz, o1 := pageSlice(d.Sizing, limit, offset)
+	st, o2 := pageSlice(d.Stats, limit, offset)
 	cp := *d
 	cp.Sizing, cp.Stats = sz, st
 	return &cp, o1 + o2
 }
 
-func capQueryDeltas(nds []NodeQueryDelta, limit int) ([]NodeQueryDelta, int) {
+func capQueryDeltas(nds []NodeQueryDelta, limit, offset int) ([]NodeQueryDelta, int) {
 	if nds == nil {
 		return nil, 0
 	}
@@ -233,7 +246,7 @@ func capQueryDeltas(nds []NodeQueryDelta, limit int) ([]NodeQueryDelta, int) {
 			e.Canonical = cutSQL(e.Canonical)
 			kept = append(kept, e)
 		}
-		e, om := capSlice(kept, limit)
+		e, om := pageSlice(kept, limit, offset)
 		cpd := *nd.Delta
 		cpd.Entries = e
 		out[i].Delta = &cpd
@@ -254,7 +267,7 @@ func cutSQL(s string) string {
 	return s[:n] + "…"
 }
 
-func capActivityDeltas(nds []NodeActivityDelta, limit int) ([]NodeActivityDelta, int) {
+func capActivityDeltas(nds []NodeActivityDelta, limit, offset int) ([]NodeActivityDelta, int) {
 	if nds == nil {
 		return nil, 0
 	}
@@ -263,7 +276,7 @@ func capActivityDeltas(nds []NodeActivityDelta, limit int) ([]NodeActivityDelta,
 	for i, nd := range nds {
 		out[i] = nd
 		if nd.Delta != nil {
-			c, om := capSlice(nd.Delta.Counters, limit)
+			c, om := pageSlice(nd.Delta.Counters, limit, offset)
 			cpd := *nd.Delta
 			cpd.Counters = c
 			out[i].Delta = &cpd

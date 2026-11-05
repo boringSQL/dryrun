@@ -232,6 +232,7 @@ func (s *Server) registerHistoryTools(srv *mcpserver.MCPServer) {
 			mcp.WithString("schema", mcp.Description("Narrow to one schema.")),
 			mcp.WithString("table", mcp.Description("Narrow to one table. Bare names only: unlike detect and lint_schema this filter runs against the snapshots being compared, not the loaded one.")),
 			mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max objects (and moved raw rows in full view); 0 for all. Truncation sets _meta.next to re-run uncapped.")),
+			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Skip the first N objects (and, in full view, N rows of each raw list), to page past a truncated result. The summary view's plan_shifts are not paged.")),
 			mcp.WithNumber("window_minutes", mcp.DefaultNumber(30), mcp.Description("Correlation window for matching planner/activity captures to each anchor (default 30).")),
 			mcp.WithRawOutputSchema(snapshotDiffOutputSchema),
 			annHistory,

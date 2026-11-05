@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -23,10 +24,10 @@ func (s *Server) handleSnapshotDiff(ctx context.Context, req mcp.CallToolRequest
 		Schema: getArg(req, "schema"),
 		Table:  getArg(req, "table"),
 	}
-	return s.runSnapshotDiff(ctx, opt, argOr(req, "view", "summary"), limitArg(req))
+	return s.runSnapshotDiff(ctx, opt, argOr(req, "view", "summary"), limitArg(req), int(min(getFloatArg(req, "offset", 0), math.MaxInt32)))
 }
 
-func (s *Server) runSnapshotDiff(ctx context.Context, opt snapdiff.Options, view string, limit int) (*mcp.CallToolResult, error) {
+func (s *Server) runSnapshotDiff(ctx context.Context, opt snapdiff.Options, view string, limit, offset int) (*mcp.CallToolResult, error) {
 	s.mu.RLock()
 	hist, key := s.history, s.snapshotKey
 	s.mu.RUnlock()
@@ -45,7 +46,7 @@ func (s *Server) runSnapshotDiff(ctx context.Context, opt snapdiff.Options, view
 		return textResult(s.wrapText(res.Summary.Headline, "")), nil
 	}
 
-	payload := res.ForView(view, limit)
+	payload := res.ForPage(view, limit, offset)
 	hint, next := snapshotDiffFollowups(res, opt, view, payload.Truncated)
 	return s.metaJSONResult(payload, "", hint, next), nil
 }

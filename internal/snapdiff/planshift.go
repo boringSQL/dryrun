@@ -117,7 +117,7 @@ func summarizePlanShifts(nps []NodePlanShifts) []NodePlanShifts {
 	return out
 }
 
-func capPlanShifts(nps []NodePlanShifts, limit int) ([]NodePlanShifts, int) {
+func capPlanShifts(nps []NodePlanShifts, limit, offset int) ([]NodePlanShifts, int) {
 	if nps == nil {
 		return nil, 0
 	}
@@ -126,7 +126,7 @@ func capPlanShifts(nps []NodePlanShifts, limit int) ([]NodePlanShifts, int) {
 	for i, np := range nps {
 		cp := *np.Result
 		var om int
-		cp.Shifts, om = capSlice(np.Result.Shifts, limit)
+		cp.Shifts, om = pageSlice(np.Result.Shifts, limit, offset)
 		cp.Shifts = slices.Clone(cp.Shifts)
 		for j := range cp.Shifts {
 			cp.Shifts[j].Canonical = cutSQL(cp.Shifts[j].Canonical)

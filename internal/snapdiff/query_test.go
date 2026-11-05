@@ -3,6 +3,7 @@ package snapdiff
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -564,5 +565,57 @@ func TestForView_FullLimitCountsMovedShapesOnly(t *testing.T) {
 	if len(nd.Delta.Entries) != 1 || got.OmittedRows != 2 || nd.FlatEntries != 1 {
 		t.Errorf("entries=%d omitted=%d flat=%d, want 1, 2, 1 (flat with unmatched members stays a candidate)",
 			len(nd.Delta.Entries), got.OmittedRows, nd.FlatEntries)
+	}
+}
+
+func TestPageSlice(t *testing.T) {
+	s := []int{1, 2, 3, 4, 5}
+	for _, c := range []struct {
+		offset, limit int
+		want          []int
+		beyond        int
+	}{
+		{0, 0, s, 0},
+		{0, 2, []int{1, 2}, 3},
+		{2, 2, []int{3, 4}, 1},
+		{4, 2, []int{5}, 0},
+		{2, 0, []int{3, 4, 5}, 0},
+		{5, 2, nil, 0},
+		{9, 2, nil, 0},
+		{-3, 2, []int{1, 2}, 3},
+	} {
+		got, beyond := pageSlice(s, c.limit, c.offset)
+		if !slices.Equal(got, c.want) || beyond != c.beyond || got == nil {
+			t.Errorf("offset=%d limit=%d: got %v beyond %d, want %v beyond %d", c.offset, c.limit, got, beyond, c.want, c.beyond)
+		}
+	}
+}
+
+// paging walks every shape once, in rank order, and the last page is not truncated
+func TestForPage_WalksQueryEntries(t *testing.T) {
+	var entries []diff.QueryEntryDelta
+	for _, fp := range []string{"a", "b", "c", "d", "e"} {
+		entries = append(entries, diff.QueryEntryDelta{Fingerprint: fp, Status: diff.QueryGrew})
+	}
+	res := &Result{QueryDelta: []NodeQueryDelta{{Node: "primary", Delta: &diff.QueryDelta{Entries: entries}}}}
+
+	var seen []string
+	for off := 0; ; off += 2 {
+		p := res.ForPage("full", 2, off)
+		for _, e := range p.QueryDelta[0].Delta.Entries {
+			seen = append(seen, e.Fingerprint)
+		}
+		if p.Offset != off {
+			t.Errorf("offset not echoed: got %d, want %d", p.Offset, off)
+		}
+		if !p.Truncated {
+			break
+		}
+		if off > len(entries) {
+			t.Fatal("never reached a final page")
+		}
+	}
+	if strings.Join(seen, "") != "abcde" {
+		t.Errorf("pages covered %v, want a..e once each", seen)
 	}
 }
