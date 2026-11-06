@@ -809,6 +809,8 @@ func mcpServeCmd() *cobra.Command {
 
 			mcpSrv := mcpserver.NewMCPServer("dryrun", buildinfo.Get(),
 				mcpserver.WithInstructions(server.Instructions()),
+				// oversized tool results become tool errors instead of one huge frame
+				drmcp.CeilingOption(),
 				// a handler panic (malformed plan_json, bad SQL) returns a tool error instead of killing stdio
 				mcpserver.WithRecovery(),
 				// declared Enum/Required/type constraints reject bad args before handlers run

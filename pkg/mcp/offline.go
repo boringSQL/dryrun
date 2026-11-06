@@ -21,6 +21,12 @@ func NewOfflineServer(a *snapshot.AnnotatedSchema, lintCfg lint.Config) *Server 
 	return &Server{inner: internalmcp.NewOfflineServerAnnotated(a, lintCfg)}
 }
 
+// CeilingOption caps tool result size; callers assembling their own server
+// around RegisterOffline must add it themselves.
+func CeilingOption() mcpserver.ServerOption {
+	return internalmcp.CeilingOption()
+}
+
 // RegisterOffline registers the schema-only subset (no snapshot_diff, no live tools).
 func (s *Server) RegisterOffline(srv *mcpserver.MCPServer) {
 	s.inner.RegisterOffline(srv)
@@ -32,6 +38,7 @@ func BuildOfflineMCPServer(name, version string, a *snapshot.AnnotatedSchema, li
 	s := NewOfflineServer(a, lintCfg)
 	srv := mcpserver.NewMCPServer(name, version,
 		mcpserver.WithInstructions(s.inner.Instructions()),
+		internalmcp.CeilingOption(),
 		mcpserver.WithRecovery(),
 		mcpserver.WithInputSchemaValidation(),
 		mcpserver.WithOutputSchemaValidation(),
