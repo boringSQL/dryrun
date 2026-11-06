@@ -60,7 +60,7 @@ func (s *Server) runSnapshotDiff(ctx context.Context, opt snapdiff.Options, view
 		}
 		return errResult(fmt.Sprintf("%v; narrow with %s", err, narrow)), nil
 	}
-	hint, next := snapshotDiffFollowups(res, opt, view, payload)
+	hint, next := snapshotDiffFollowups(res, opt, view, limit, payload)
 	return s.metaJSONResult(payload, "", hint, next), nil
 }
 
@@ -102,13 +102,10 @@ func fitSnapshotDiff(res *snapdiff.Result, view string, limit, offset, budget in
 	}
 }
 
-func snapshotDiffFollowups(res *snapdiff.Result, opt snapdiff.Options, view string, payload *snapdiff.Result) (string, []NextCall) {
-	truncated := payload.Truncated
-	byBytes := payload.TruncatedBy == "bytes"
+func snapshotDiffFollowups(res *snapdiff.Result, opt snapdiff.Options, view string, limit int, payload *snapdiff.Result) (string, []NextCall) {
 	var next []NextCall
-	// a byte-cut page would just be cut again at limit=0
-	if truncated && !byBytes {
-		next = append(next, NextCall{Tool: "snapshot_diff", Args: rerunUncapped(opt, view)})
+	if payload.Truncated {
+		next = append(next, NextCall{Tool: "snapshot_diff", Args: nextPage(res, opt, view, limit, payload)})
 	}
 	for _, o := range res.Objects {
 		if o.Kind == "table" {
@@ -123,26 +120,32 @@ func snapshotDiffFollowups(res *snapdiff.Result, opt snapdiff.Options, view stri
 		next = append(next, NextCall{Tool: "detect", Args: map[string]any{"kind": "anomalies"}})
 	}
 	hint := "objects are ranked by significance; _meta.correlation shows how the planner/activity captures were matched to each anchor"
-	switch {
-	case byBytes:
-		hint += fmt.Sprintf(". Output cut to fit %d KB (limit_applied=%d); page with offset=%d or narrow with %s",
-			maxSnapshotDiffBytes>>10, payload.LimitApplied, payload.Offset+payload.LimitApplied, narrowArgs(opt.Kind))
-	case truncated:
-		hint += ". Output capped; narrow with " + narrowArgs(opt.Kind) + " or re-run with limit=0"
+	if payload.Truncated {
+		cut := fmt.Sprintf("capped at limit=%d", payload.LimitApplied)
+		if payload.TruncatedBy == "bytes" {
+			cut = fmt.Sprintf("cut to fit %d KB (limit_applied=%d)", maxSnapshotDiffBytes>>10, payload.LimitApplied)
+		}
+		hint += fmt.Sprintf(". Output %s; the next page is in _meta.next (offset=%d), or narrow with %s",
+			cut, payload.Offset+payload.LimitApplied, narrowArgs(opt.Kind))
 	}
 	return hint, next
 }
 
-// pre-validated re-run with the cap lifted, carrying the same selection.
-func rerunUncapped(opt snapdiff.Options, view string) map[string]any {
-	a := map[string]any{"limit": 0}
+// Pins the anchor snapshots by hash, since "latest" moves when a capture lands between pages;
+// planner/activity correlated to a schema anchor are still re-matched per page.
+// The hash carries its own node, so node= is repeated only when the caller gave it.
+func nextPage(res *snapdiff.Result, opt snapdiff.Options, view string, limit int, payload *snapdiff.Result) map[string]any {
+	a := map[string]any{
+		"from":   res.FromHash,
+		"to":     res.ToHash,
+		"limit":  limit,
+		"offset": payload.Offset + payload.LimitApplied,
+	}
 	put := func(k, v string) {
 		if v != "" {
 			a[k] = v
 		}
 	}
-	put("from", opt.From)
-	put("to", opt.To)
 	put("node", opt.Node)
 	put("schema", opt.Schema)
 	put("table", opt.Table)

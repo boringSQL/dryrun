@@ -56,28 +56,19 @@ func TestLimitArg(t *testing.T) {
 	}
 }
 
-// rerunUncapped builds the pre-validated "show me everything" follow-up that
-// rides along in _meta.next, and the whole value of a pre-validated next call is
-// that the agent can replay it verbatim without thinking. That only works if it
-// reproduces the exact same diff the user was looking at — same endpoints, same
-// kind, same node, same filters, same window — with the single difference of
-// limit=0. So the first half of this test asserts every selection field is
-// carried forward faithfully. The second half guards the opposite failure: a
-// next-call cluttered with redundant defaults (kind=schema, view=summary, the
-// 30m window) is noise that costs tokens and invites drift, so anything already
-// at its default must be elided. Only the deliberate override, limit=0, always
-// survives.
-func TestRerunUncapped(t *testing.T) {
-	full := rerunUncapped(snapdiff.Options{
+// nextPage is replayed verbatim by an agent, so it must reproduce the same diff:
+// endpoints pinned by hash (latest moves between pages), the same kind, node,
+// filters and window, with only offset advanced. Defaults are elided to keep it short.
+func TestNextPage(t *testing.T) {
+	res := &snapdiff.Result{FromHash: "aaa", ToHash: "bbb"}
+	payload := &snapdiff.Result{Offset: 20, LimitApplied: 10, Truncated: true}
+
+	full := nextPage(res, snapdiff.Options{
 		From: "latest~2", To: "latest", Kind: "planner", Node: "replica",
 		Schema: "public", Table: "orders", Window: time.Hour,
-	}, "full")
-
-	if full["limit"] != 0 {
-		t.Errorf("limit should be forced to 0, got %v", full["limit"])
-	}
+	}, "full", 0, payload)
 	for k, want := range map[string]any{
-		"from": "latest~2", "to": "latest", "kind": "planner", "node": "replica",
+		"from": "aaa", "to": "bbb", "limit": 0, "offset": 30, "kind": "planner", "node": "replica",
 		"schema": "public", "table": "orders", "view": "full", "window_minutes": 60.0,
 	} {
 		if full[k] != want {
@@ -85,15 +76,14 @@ func TestRerunUncapped(t *testing.T) {
 		}
 	}
 
-	// defaults are elided so the re-run isn't noisier than it needs to be
-	min := rerunUncapped(snapdiff.Options{Kind: "schema", Window: snapdiff.DefaultWindow}, "summary")
-	for _, k := range []string{"kind", "view", "window_minutes", "from", "to", "schema", "table", "node"} {
+	min := nextPage(res, snapdiff.Options{Kind: "schema", Window: snapdiff.DefaultWindow}, "summary", 50, payload)
+	for _, k := range []string{"kind", "view", "window_minutes", "schema", "table", "node"} {
 		if _, ok := min[k]; ok {
 			t.Errorf("default arg %q should be omitted, got %v", k, min[k])
 		}
 	}
-	if min["limit"] != 0 {
-		t.Errorf("limit should still be 0, got %v", min["limit"])
+	if min["limit"] != 50 || min["offset"] != 30 {
+		t.Errorf("limit/offset = %v/%v, want 50/30", min["limit"], min["offset"])
 	}
 }
 
@@ -111,19 +101,13 @@ func schemaWithTables(hash string, ts time.Time, names ...string) *schema.Schema
 	}
 }
 
-// TestSnapshotDiff_TruncationEmitsRerun is the end-to-end proof that the pieces
-// are actually wired together, not just individually correct. The unit tests
-// above prove limitArg honors zero and rerunUncapped builds the right map, but
-// none of that matters if the handler never sets truncated or never attaches the
-// next call to the real response an MCP client parses. So this drives the whole
-// path: seed a store with a three-object diff, call the handler with limit=1,
-// then parse the actual JSON body the client would receive and confirm two
-// things a human would look for — it admits it was capped (truncated=true), and
-// somewhere in _meta.next there's a snapshot_diff entry carrying limit=0 the
-// agent can fire to see the rest. If a future refactor drops either signal, an
-// agent would be stranded with a partial answer and no documented way forward,
-// and this test is what catches that.
-func TestSnapshotDiff_TruncationEmitsRerun(t *testing.T) {
+// TestSnapshotDiff_TruncationEmitsNextPage drives the whole path: seed a store
+// with a three-object diff, call the handler with limit=1, and parse the JSON
+// body the client receives. It must admit the cut (truncated=true) and carry a
+// snapshot_diff call in _meta.next that pins the compared pair by hash and
+// advances the offset. A capture landing before the replay must not change the
+// pair, which is the reason for pinning at all.
+func TestSnapshotDiff_TruncationEmitsNextPage(t *testing.T) {
 	ctx := context.Background()
 	store, err := history.Open(filepath.Join(t.TempDir(), "history.db"))
 	if err != nil {
@@ -134,14 +118,14 @@ func TestSnapshotDiff_TruncationEmitsRerun(t *testing.T) {
 
 	t0 := time.Now().Truncate(time.Second).Add(-2 * time.Hour)
 	// three tables dropped between the two captures -> three objects
-	if _, err := store.Put(ctx, key, history.WrapSchema(schemaWithTables("s-a", t0, "t1", "t2", "t3"))); err != nil {
+	if _, err := store.Put(ctx, key, history.WrapSchema(schemaWithTables("a1a1", t0, "t1", "t2", "t3"))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Put(ctx, key, history.WrapSchema(schemaWithTables("s-b", t0.Add(time.Hour)))); err != nil {
+	if _, err := store.Put(ctx, key, history.WrapSchema(schemaWithTables("b2b2", t0.Add(time.Hour)))); err != nil {
 		t.Fatal(err)
 	}
 
-	srv := NewServer(nil, "", schemaWithTables("s-b", t0.Add(time.Hour)), store, lint.DefaultConfig(), "")
+	srv := NewServer(nil, "", schemaWithTables("b2b2", t0.Add(time.Hour)), store, lint.DefaultConfig(), "")
 	srv.SetSnapshotKey(key)
 
 	res, err := srv.handleSnapshotDiff(ctx, reqWith(map[string]any{"limit": float64(1)}))
@@ -163,19 +147,50 @@ func TestSnapshotDiff_TruncationEmitsRerun(t *testing.T) {
 
 	meta, _ := out["_meta"].(map[string]any)
 	next, _ := meta["next"].([]any)
-	found := false
+	var args map[string]any
 	for _, n := range next {
 		nc, _ := n.(map[string]any)
-		if nc["tool"] != "snapshot_diff" {
-			continue
-		}
-		args, _ := nc["args"].(map[string]any)
-		if args["limit"] == float64(0) {
-			found = true
+		if nc["tool"] == "snapshot_diff" {
+			args, _ = nc["args"].(map[string]any)
 		}
 	}
-	if !found {
-		t.Errorf("expected a snapshot_diff re-run with limit=0 in _meta.next, got %v", next)
+	if args == nil {
+		t.Fatalf("expected a snapshot_diff next page in _meta.next, got %v", next)
+	}
+	if args["from"] != out["from_hash"] || args["to"] != out["to_hash"] {
+		t.Errorf("next page must pin the compared pair by hash: %v vs %v/%v", args, out["from_hash"], out["to_hash"])
+	}
+	if args["offset"] != float64(1) || args["limit"] != float64(1) {
+		t.Errorf("next page should advance offset by the page size: %v", args)
+	}
+	if hint, _ := meta["hint"].(string); strings.Contains(hint, "limit=0") {
+		t.Errorf("hint must not send the agent to limit=0: %q", hint)
+	}
+
+	// a newer capture lands between pages
+	if _, err := store.Put(ctx, key, history.WrapSchema(schemaWithTables("c3c3", t0.Add(90*time.Minute), "t9"))); err != nil {
+		t.Fatal(err)
+	}
+
+	// replaying it yields the next object, from the same pair
+	res2, err := srv.handleSnapshotDiff(ctx, reqWith(args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out2 struct {
+		Objects  []struct{ Name string } `json:"objects"`
+		FromHash string                  `json:"from_hash"`
+		ToHash   string                  `json:"to_hash"`
+	}
+	if err := json.Unmarshal([]byte(res2.Content[0].(mcp.TextContent).Text), &out2); err != nil {
+		t.Fatal(err)
+	}
+	var first []struct{ Name string }
+	b, _ := json.Marshal(out["objects"])
+	_ = json.Unmarshal(b, &first)
+	if len(out2.Objects) != 1 || len(first) != 1 || out2.Objects[0].Name == first[0].Name ||
+		out2.FromHash != out["from_hash"] || out2.ToHash != out["to_hash"] {
+		t.Errorf("replayed page: %+v after %+v", out2, first)
 	}
 }
 
@@ -317,26 +332,44 @@ func TestFitSnapshotDiff_HugeLimitIsClamped(t *testing.T) {
 	}
 }
 
-// a byte-cut page must not send the agent back to limit=0, which would be cut the same way
+// a byte-cut page continues from where it stopped and never sends the agent to limit=0
 func TestSnapshotDiffFollowups_ByteCut(t *testing.T) {
 	res := bigQueryResult(3)
+	res.FromHash, res.ToHash = "aaa", "bbb"
 	payload := &snapdiff.Result{Truncated: true, TruncatedBy: "bytes", LimitApplied: 8, Offset: 16}
 
-	hint, next := snapshotDiffFollowups(res, snapdiff.Options{Kind: "query"}, "full", payload)
+	hint, next := snapshotDiffFollowups(res, snapdiff.Options{Kind: "query"}, "full", 0, payload)
+	var args map[string]any
 	for _, n := range next {
 		if n.Tool == "snapshot_diff" {
-			t.Errorf("byte-cut page offered a snapshot_diff re-run: %v", n.Args)
+			args = n.Args
 		}
+	}
+	if args == nil || args["offset"] != 24 || args["from"] != "aaa" || args["to"] != "bbb" {
+		t.Errorf("next page = %v, want offset 24 pinned to aaa..bbb", args)
+	}
+	if _, ok := args["node"]; ok {
+		t.Errorf("node was not given, so the pinned hashes alone must carry it: %v", args)
 	}
 	for _, want := range []string{"limit_applied=8", "offset=24", "node="} {
 		if !strings.Contains(hint, want) {
 			t.Errorf("hint %q lacks %q", hint, want)
 		}
 	}
+	if strings.Contains(hint, "limit=0") {
+		t.Errorf("hint sends the agent to limit=0: %q", hint)
+	}
 
 	payload = &snapdiff.Result{Truncated: true, TruncatedBy: "limit", LimitApplied: 1}
-	hint, _ = snapshotDiffFollowups(res, snapdiff.Options{Kind: "query"}, "full", payload)
+	hint, _ = snapshotDiffFollowups(res, snapdiff.Options{Kind: "query"}, "full", 1, payload)
 	if !strings.Contains(hint, "node=") || strings.Contains(hint, "schema=") {
 		t.Errorf("limit-cut hint for kind=query should name node=, got %q", hint)
+	}
+
+	_, next = snapshotDiffFollowups(res, snapdiff.Options{Kind: "query"}, "full", 0, &snapdiff.Result{})
+	for _, n := range next {
+		if n.Tool == "snapshot_diff" {
+			t.Errorf("a complete result offered a next page: %v", n.Args)
+		}
 	}
 }
