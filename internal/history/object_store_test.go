@@ -78,12 +78,13 @@ func testObjectReaderContract(t *testing.T, newReader func(t *testing.T, objects
 	t.Helper()
 	ctx := context.Background()
 	objects := map[string][]byte{
-		"top.json.zst":                     []byte("top"),
-		"team/acme/primary/a.json.zst":     []byte("a"),
-		"team/acme/primary/b.json.zst":     []byte("b"),
-		"team/acme/primary/sub/c.json.zst": []byte("c"),
-		"team/acme/primaryx/d.json.zst":    []byte("d"),
-		"team/acme/primary/ünï code.zst":   []byte("u"),
+		"top.json.zst":                      []byte("top"),
+		"team/acme/primary/a.json.zst":      []byte("a"),
+		"team/acme/primary/b.json.zst":      []byte("b"),
+		"team/acme/primary/sub/c.json.zst":  []byte("c"),
+		"team/acme/primaryx/d.json.zst":     []byte("d"),
+		"team/acme/primary/ünï code.zst":    []byte("u"),
+		"team/acme/primary/a+b %25#?&=.zst": []byte("p"),
 	}
 	for i := 0; i < 1200; i++ {
 		objects[fmt.Sprintf("bulk/acme/db/%05d.json.zst", i)] = []byte{byte(i)}
@@ -119,7 +120,7 @@ func testObjectReaderContract(t *testing.T, newReader func(t *testing.T, objects
 		t.Errorf("list of an absent prefix = %v, want empty and no error", got)
 	}
 
-	for _, name := range []string{"team/acme/primary/a.json.zst", "team/acme/primary/ünï code.zst", "bulk/acme/db/00999.json.zst"} {
+	for _, name := range []string{"team/acme/primary/a.json.zst", "team/acme/primary/ünï code.zst", "team/acme/primary/a+b %25#?&=.zst", "bulk/acme/db/00999.json.zst"} {
 		got, err := r.get(ctx, name)
 		if err != nil {
 			t.Fatalf("get %q: %v", name, err)
