@@ -153,11 +153,12 @@ var (
 
 	detectOutputSchema = json.RawMessage(`{
 		"type": "object",
-		"description": "kind=all: one {entries, count, truncated?, omitted?} block per category (stale_stats, unused_indexes, anomalies, bloated_indexes, bloated_tables, vacuum_health). Single kind: the entries under the kind's key plus count/truncated/omitted at the top level.",
+		"description": "kind=all: one {entries, count, truncated?, omitted?} block per category (stale_stats, unused_indexes, anomalies, bloated_indexes, bloated_tables, vacuum_health). Single kind: the entries under the kind's key plus count/truncated/omitted at the top level; offset echoes the page start when paged.",
 		"properties": {
 			"count": {"type": "integer"},
 			"truncated": {"type": "boolean"},
 			"omitted": {"type": "integer"},
+			"offset": {"type": "integer"},
 			` + metaProperty + `
 		},
 		"additionalProperties": true

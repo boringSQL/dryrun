@@ -13,6 +13,9 @@ import (
 
 func (s *Server) handleDetect(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	kind := argOr(req, "kind", "all")
+	if kind == "all" && offsetArg(req) > 0 {
+		return errResult("offset pages one kind at a time; pass kind= (the _meta.next calls already do)"), nil
+	}
 
 	switch kind {
 	case "stale_stats":
@@ -47,7 +50,7 @@ func anomalyKey(m map[string]any) (string, string) {
 }
 
 // caps never-analyzed and stale independently so it can provide more targeted advice
-func capStaleStats(entries []schema.StaleStatsEntry, max int) (kept []schema.StaleStatsEntry, omitted int) {
+func capStaleStats(entries []schema.StaleStatsEntry, max, offset int) (kept []schema.StaleStatsEntry, omitted int) {
 	var never, stale []schema.StaleStatsEntry
 	for _, e := range entries {
 		if e.LastAnalyzedDaysAgo == nil {
@@ -56,14 +59,15 @@ func capStaleStats(entries []schema.StaleStatsEntry, max int) (kept []schema.Sta
 			stale = append(stale, e)
 		}
 	}
-	neverKept, neverOmitted := capItems(never, max)
-	staleKept, staleOmitted := capItems(stale, max)
-	return append(neverKept, staleKept...), neverOmitted + staleOmitted
+	neverKept, neverOmitted := pageItems(never, max, offset)
+	staleKept, staleOmitted := pageItems(stale, max, offset)
+	return append(append(make([]schema.StaleStatsEntry, 0, len(neverKept)+len(staleKept)), neverKept...), staleKept...), neverOmitted + staleOmitted
 }
 
-// Pre-validated re-run of one kind, uncapped, keeping any active filter.
-func narrowNext(kind, schemaF, tableF string) []NextCall {
-	args := map[string]any{"kind": kind, "limit": 0}
+// Pre-validated next page of one kind, keeping any active filter. Every list in a kind
+// pages by the same offset, so the page size is also the step.
+func nextDetectPage(kind, schemaF, tableF string, max, offset int) []NextCall {
+	args := map[string]any{"kind": kind, "limit": max, "offset": offset + max}
 	if schemaF != "" {
 		args["schema"] = schemaF
 	}
@@ -93,7 +97,7 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	rawAnomalies, anomalyNote := buildAnomalies(a)
 	anomalies := filterByQual(rawAnomalies, schemaF, tableF, anomalyKey)
 
-	staleKept, staleOmitted := capStaleStats(staleEntries, max)
+	staleKept, staleOmitted := capStaleStats(staleEntries, max, 0)
 	// cap before the hint so unattributedScansHint covers only shown rows
 	anomaliesKept, anomaliesOmitted := capItems(anomalies, max)
 	wrapper := map[string]any{
@@ -125,14 +129,14 @@ func (s *Server) handleDetectAll(_ context.Context, req mcp.CallToolRequest) (*m
 	var next []NextCall
 	for _, k := range []string{"stale_stats", "unused_indexes", "anomalies", "bloated_indexes", "bloated_tables", "vacuum_health"} {
 		if block, ok := wrapper[k].(map[string]any); ok && block["truncated"] == true {
-			next = append(next, narrowNext(k, schemaF, tableF)...)
+			next = append(next, nextDetectPage(k, schemaF, tableF, max, 0)...)
 		}
 	}
 	if len(next) > 0 {
 		if hint != "" {
 			hint += " "
 		}
-		hint += fmt.Sprintf("Some categories capped at %d; _meta.next re-runs them uncapped, or narrow with schema=/table=.", max)
+		hint += fmt.Sprintf("Some categories capped at %d; _meta.next pages through them, or narrow with schema=/table=.", max)
 	}
 
 	s.injectMeta(wrapper, hint, next)
@@ -154,7 +158,8 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 	}
 
 	total := len(entries)
-	kept, omitted := capStaleStats(entries, limitArg(req))
+	max, offset := limitArg(req), offsetArg(req)
+	kept, omitted := capStaleStats(entries, max, offset)
 	var lines []string
 	for _, e := range kept {
 		if e.LastAnalyzedDaysAgo == nil {
@@ -167,11 +172,17 @@ func (s *Server) handleDetectStaleStats(_ context.Context, req mcp.CallToolReque
 	wrapper := map[string]any{"stale_stats": kept, "count": total}
 	hint, next := "", []NextCall(nil)
 	if omitted > 0 {
-		body += fmt.Sprintf("\n\n%d more not shown; narrow with schema=/table= or re-run with limit=0.", omitted)
+		body += fmt.Sprintf("\n\n%d more not shown; the next page is in _meta.next, or narrow with schema=/table=.", omitted)
 		wrapper["truncated"] = true
 		wrapper["omitted"] = omitted
-		hint = fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), total, omitted)
-		next = narrowNext("stale_stats", schemaF, tableF)
+		hint = fmt.Sprintf("Showing %d of %d; %d not shown. The next page is in _meta.next, or narrow with schema=/table=.", len(kept), total, omitted)
+		next = nextDetectPage("stale_stats", schemaF, tableF, max, offset)
+	}
+	if offset > 0 {
+		wrapper["offset"] = offset
+		if len(kept) == 0 {
+			hint = fmt.Sprintf("Offset %d is beyond the end (%d total).", offset, total)
+		}
 	}
 	// same invariant as cappedKindResult: _meta carries the capture stamps
 	s.injectMeta(wrapper, hint, next)
@@ -216,7 +227,7 @@ func (s *Server) handleDetectUnusedIndexes(_ context.Context, req mcp.CallToolRe
 		}
 		return s.emptyKindResult("unused_indexes", "No unused indexes detected among indexes with recorded activity. Unique and primary key indexes are never listed.", filterNote), nil
 	}
-	return cappedKindResult(s, "unused_indexes", entries, limitArg(req), schemaF, tableF), nil
+	return cappedKindResult(s, "unused_indexes", entries, limitArg(req), offsetArg(req), schemaF, tableF), nil
 }
 
 func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -239,9 +250,9 @@ func (s *Server) handleDetectAnomalies(_ context.Context, req mcp.CallToolReques
 	if len(anomalies) == 0 {
 		return s.emptyKindResult("anomalies", "No anomalies detected.", filterNote, anomalyNote), nil
 	}
-	max := limitArg(req)
-	shown, _ := capItems(anomalies, max)
-	return cappedKindResult(s, "anomalies", anomalies, max, schemaF, tableF, anomalyNote, unattributedScansHint(shown)), nil
+	max, offset := limitArg(req), offsetArg(req)
+	shown, _ := pageItems(anomalies, max, offset)
+	return cappedKindResult(s, "anomalies", anomalies, max, offset, schemaF, tableF, anomalyNote, unattributedScansHint(shown)), nil
 }
 
 func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -258,7 +269,7 @@ func (s *Server) handleDetectBloatedIndexes(_ context.Context, req mcp.CallToolR
 	if len(entries) == 0 {
 		return s.emptyKindResult("bloated_indexes", "No bloated indexes detected.", filterNote), nil
 	}
-	return cappedKindResult(s, "bloated_indexes", entries, limitArg(req), schemaF, tableF), nil
+	return cappedKindResult(s, "bloated_indexes", entries, limitArg(req), offsetArg(req), schemaF, tableF), nil
 }
 
 func (s *Server) handleDetectBloatedTables(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -275,11 +286,11 @@ func (s *Server) handleDetectBloatedTables(_ context.Context, req mcp.CallToolRe
 	if len(entries) == 0 {
 		return s.emptyKindResult("bloated_tables", "No bloated tables detected.", filterNote), nil
 	}
-	return cappedKindResult(s, "bloated_tables", entries, limitArg(req), schemaF, tableF), nil
+	return cappedKindResult(s, "bloated_tables", entries, limitArg(req), offsetArg(req), schemaF, tableF), nil
 }
 
-func cappedKindResult[T any](s *Server, kind string, entries []T, max int, schemaF, tableF string, notes ...string) *mcp.CallToolResult {
-	kept, omitted := capItems(entries, max)
+func cappedKindResult[T any](s *Server, kind string, entries []T, max, offset int, schemaF, tableF string, notes ...string) *mcp.CallToolResult {
+	kept, omitted := pageItems(entries, max, offset)
 	wrapper := map[string]any{
 		kind:    kept,
 		"count": len(entries),
@@ -289,8 +300,14 @@ func cappedKindResult[T any](s *Server, kind string, entries []T, max int, schem
 	if omitted > 0 {
 		wrapper["truncated"] = true
 		wrapper["omitted"] = omitted
-		hint = fmt.Sprintf("Showing first %d of %d; %d not shown. Narrow with schema=/table= or re-run with limit=0.", len(kept), len(entries), omitted)
-		next = narrowNext(kind, schemaF, tableF)
+		hint = fmt.Sprintf("Showing %d of %d; %d not shown. The next page is in _meta.next, or narrow with schema=/table=.", len(kept), len(entries), omitted)
+		next = nextDetectPage(kind, schemaF, tableF, max, offset)
+	}
+	if offset > 0 {
+		wrapper["offset"] = offset
+		if offset >= len(entries) {
+			hint = fmt.Sprintf("Offset %d is beyond the end (%d total).", offset, len(entries))
+		}
 	}
 	hint = joinHints(append([]string{hint}, notes...)...)
 	// always: _meta carries the capture stamps the tool description promises,
@@ -326,7 +343,7 @@ func (s *Server) handleDetectVacuumHealth(_ context.Context, req mcp.CallToolReq
 	if len(entries) == 0 {
 		return s.emptyKindResult("vacuum_health", "No vacuum health concerns found.", filterNote), nil
 	}
-	return cappedKindResult(s, "vacuum_health", entries, limitArg(req), schemaF, tableF), nil
+	return cappedKindResult(s, "vacuum_health", entries, limitArg(req), offsetArg(req), schemaF, tableF), nil
 }
 
 const notMeasuredIndexNote = "not_measured: this snapshot has no per-index activity (idx_scan), so no index can be called unused. Take a snapshot from a live database to record it."

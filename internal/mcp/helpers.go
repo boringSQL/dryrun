@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -165,10 +166,25 @@ const defaultMaxItems = 50
 
 // max <= 0 disables the cap.
 func capItems[T any](items []T, max int) (kept []T, omitted int) {
-	if max <= 0 || len(items) <= max {
+	return pageItems(items, max, 0)
+}
+
+// skips offset, keeps up to max; omitted counts what lies beyond the page, not what was skipped
+func pageItems[T any](items []T, limit, offset int) (kept []T, omitted int) {
+	offset = max(offset, 0)
+	if offset >= len(items) {
+		return items[:0], 0
+	}
+	items = items[offset:]
+	if limit <= 0 || len(items) <= limit {
 		return items, 0
 	}
-	return items[:max], len(items) - max
+	return items[:limit], len(items) - limit
+}
+
+// clamped on both sides: an absurd float wraps on conversion, and a negative offset panics the slice expressions
+func offsetArg(req mcp.CallToolRequest) int {
+	return max(int(min(getFloatArg(req, "offset", 0), math.MaxInt32)), 0)
 }
 
 // count is the full total even when entries is capped, so callers see more exists.

@@ -284,7 +284,7 @@ func DetectUnusedIndexes(a *AnnotatedSchema) []UnusedIndexEntry {
 			})
 		}
 	}
-	sort.Slice(entries, func(i, j int) bool {
+	sort.SliceStable(entries, func(i, j int) bool {
 		return entries[i].TotalSizeBytes > entries[j].TotalSizeBytes
 	})
 	return entries
@@ -333,7 +333,7 @@ func DetectBloatedTables(a *AnnotatedSchema, threshold float64) []BloatedTableEn
 			ExpectedPages: b.ExpectedPages, ActualSize: sizeBytes,
 		})
 	}
-	sort.Slice(entries, func(i, j int) bool {
+	sort.SliceStable(entries, func(i, j int) bool {
 		return entries[i].BloatRatio > entries[j].BloatRatio
 	})
 	return entries
@@ -364,7 +364,7 @@ func DetectBloatedIndexes(a *AnnotatedSchema, threshold float64) []BloatedIndexE
 			})
 		}
 	}
-	sort.Slice(entries, func(i, j int) bool {
+	sort.SliceStable(entries, func(i, j int) bool {
 		return entries[i].BloatRatio > entries[j].BloatRatio
 	})
 	return entries

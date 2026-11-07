@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -368,5 +369,27 @@ func TestMetaJSONResult_ProducesValidJSON(t *testing.T) {
 	}
 	if decoded["valid"] != true {
 		t.Errorf("expected payload merged: valid=true")
+	}
+}
+
+func TestPageItems(t *testing.T) {
+	items := []int{1, 2, 3, 4, 5}
+	for _, c := range []struct {
+		limit, offset int
+		want          []int
+		omitted       int
+	}{
+		{0, 0, items, 0},
+		{2, 0, []int{1, 2}, 3},
+		{2, 2, []int{3, 4}, 1},
+		{2, 4, []int{5}, 0},
+		{2, 5, nil, 0},
+		{0, 3, []int{4, 5}, 0},
+		{2, -1, []int{1, 2}, 3},
+	} {
+		got, omitted := pageItems(items, c.limit, c.offset)
+		if !slices.Equal(got, c.want) || omitted != c.omitted || got == nil {
+			t.Errorf("limit=%d offset=%d: got %v omitted %d, want %v omitted %d", c.limit, c.offset, got, omitted, c.want, c.omitted)
+		}
 	}
 }

@@ -368,7 +368,7 @@ func TestFindObjects_PagingIsStable(t *testing.T) {
 	}
 }
 
-func TestFindObjects_TruncationOffersTheUncappedRerun(t *testing.T) {
+func TestFindObjects_TruncationOffersTheNextPage(t *testing.T) {
 	res := find(t, findServer(t), map[string]any{"query": "order", "limit": float64(1)})
 	if res.Meta == nil || len(res.Meta.Next) == 0 {
 		t.Fatal("truncated result carries no follow-up")
@@ -382,8 +382,11 @@ func TestFindObjects_TruncationOffersTheUncappedRerun(t *testing.T) {
 	if rerun == nil {
 		t.Fatalf("no find_objects re-run in %+v", res.Meta.Next)
 	}
-	if rerun.Args["limit"] != 0 {
-		t.Errorf("re-run is not uncapped: %+v", rerun.Args)
+	if rerun.Args["limit"] != 1 || rerun.Args["offset"] != 1 {
+		t.Errorf("next page should keep limit 1 and start at offset 1: %+v", rerun.Args)
+	}
+	if strings.Contains(res.Meta.Hint, "limit=0") {
+		t.Errorf("hint sends the agent to limit=0: %q", res.Meta.Hint)
 	}
 	if rerun.Args["query"] != "order" {
 		t.Errorf("re-run dropped the query: %+v", rerun.Args)
@@ -824,5 +827,27 @@ func TestFindObjects_ExcerptSurvivesCaseFoldingByteGrowth(t *testing.T) {
 				t.Errorf("window missed the match: %q", res.Objects[0].Detail)
 			}
 		})
+	}
+}
+
+func TestFindObjects_MiddlePageAdvancesAndNegativeOffsetIsSafe(t *testing.T) {
+	srv := findServer(t)
+	first := find(t, srv, map[string]any{"query": "order", "limit": float64(1), "offset": float64(1)})
+	var next *NextCall
+	for i, n := range first.Meta.Next {
+		if n.Tool == "find_objects" {
+			next = &first.Meta.Next[i]
+		}
+	}
+	if first.Count <= 2 {
+		t.Skip("fixture has too few matches for a middle page")
+	}
+	if next == nil || next.Args["offset"] != 2 || next.Args["limit"] != 1 {
+		t.Fatalf("a middle page should continue from offset 2: %+v", next)
+	}
+
+	// a negative offset used to slice out of range
+	if got := find(t, srv, map[string]any{"query": "order", "limit": float64(1), "offset": float64(-5)}); len(got.Objects) != 1 {
+		t.Errorf("a negative offset should start at the top, got %d objects", len(got.Objects))
 	}
 }

@@ -456,7 +456,7 @@ func AnalyzeVacuumHealth(a *snapshot.AnnotatedSchema) []VacuumHealth {
 		results = append(results, vh)
 	}
 
-	sort.Slice(results, func(i, j int) bool {
+	sort.SliceStable(results, func(i, j int) bool {
 		return results[i].VacuumProgress > results[j].VacuumProgress
 	})
 	return results

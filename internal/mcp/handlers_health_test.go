@@ -117,8 +117,8 @@ func TestHealthHandlers_OfflineSmoke(t *testing.T) {
 // relies on — (1) `count` reports the true 60 so it knows the haystack's real
 // size, (2) only 50 entries actually cross the wire, (3) truncated/omitted
 // honestly advertise that 10 were withheld, and (4) _meta.next hands back a
-// pre-validated, uncapped re-run of exactly this category (limit:0) so the agent
-// can fetch the rest mechanically rather than guessing at the args.
+// pre-validated call for the next page of exactly this category (offset past the
+// 50 shown) so the agent can fetch the rest mechanically rather than guessing.
 func TestCappedKindResult_TruncationContract(t *testing.T) {
 	snap := &schema.SchemaSnapshot{
 		PgVersion: "PostgreSQL 18", Database: "appdb", Timestamp: time.Now().UTC(),
@@ -130,7 +130,7 @@ func TestCappedKindResult_TruncationContract(t *testing.T) {
 		entries[i] = i
 	}
 
-	res := cappedKindResult(srv, "unused_indexes", entries, 50, "", "")
+	res := cappedKindResult(srv, "unused_indexes", entries, 50, 0, "", "")
 	tc, ok := res.Content[0].(mcp.TextContent)
 	if !ok {
 		t.Fatalf("expected TextContent, got %T", res.Content[0])
@@ -171,8 +171,8 @@ func TestCappedKindResult_TruncationContract(t *testing.T) {
 	if args["kind"] != "unused_indexes" {
 		t.Errorf("next.args.kind must echo the category, got %v", args["kind"])
 	}
-	if args["limit"] != float64(0) {
-		t.Errorf("next.args.limit must be 0 (uncapped) so the re-run returns everything, got %v", args["limit"])
+	if args["limit"] != float64(50) || args["offset"] != float64(50) {
+		t.Errorf("next page should be limit 50 from offset 50, got limit=%v offset=%v", args["limit"], args["offset"])
 	}
 }
 
@@ -186,7 +186,7 @@ func TestCappedKindResult_NoTruncationWhenUnderCap(t *testing.T) {
 	}
 	srv := NewOfflineServer(snap, lint.DefaultConfig())
 
-	res := cappedKindResult(srv, "bloated_indexes", []int{1, 2, 3}, 50, "", "")
+	res := cappedKindResult(srv, "bloated_indexes", []int{1, 2, 3}, 50, 0, "", "")
 	tc := res.Content[0].(mcp.TextContent)
 
 	var decoded map[string]any
@@ -283,7 +283,7 @@ func TestCapStaleStats_TwoBuckets(t *testing.T) {
 		mk("stale1", d(40)), mk("stale2", d(30)), mk("stale3", d(20)), mk("stale4", d(15)), mk("stale5", d(10)),
 	}
 
-	kept, omitted := capStaleStats(entries, 2)
+	kept, omitted := capStaleStats(entries, 2, 0)
 
 	// 2 from each bucket survive; the other 2 never + 3 stale are omitted.
 	if len(kept) != 4 {
@@ -317,7 +317,7 @@ func TestCapStaleStats_NeverFloodDoesNotStarveStale(t *testing.T) {
 	days := int64(12)
 	entries = append(entries, schema.StaleStatsEntry{Schema: "public", Table: "stale", LastAnalyzedDaysAgo: &days})
 
-	kept, _ := capStaleStats(entries, 10)
+	kept, _ := capStaleStats(entries, 10, 0)
 	if len(kept) != 11 {
 		t.Fatalf("expected 10 never + 1 stale = 11 kept, got %d", len(kept))
 	}
@@ -567,5 +567,77 @@ func TestDetectVacuumHealth_ExcludesHealthyTables(t *testing.T) {
 				t.Errorf("a table with no vacuum finding must not appear: %s", entries)
 			}
 		})
+	}
+}
+
+// A later page keeps the true total, says where it starts, and offers nothing further once the end is reached.
+func TestCappedKindResult_LaterPage(t *testing.T) {
+	srv := NewOfflineServer(&schema.SchemaSnapshot{PgVersion: "PostgreSQL 18", Database: "appdb", Timestamp: time.Now().UTC()}, lint.DefaultConfig())
+	entries := make([]int, 60)
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(cappedKindResult(srv, "unused_indexes", entries, 50, 50, "", "").Content[0].(mcp.TextContent).Text), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if shown, _ := decoded["unused_indexes"].([]any); len(shown) != 10 {
+		t.Errorf("last page should hold the remaining 10, got %d", len(shown))
+	}
+	if decoded["count"] != float64(60) || decoded["offset"] != float64(50) {
+		t.Errorf("count/offset = %v/%v, want 60/50", decoded["count"], decoded["offset"])
+	}
+	if _, has := decoded["truncated"]; has {
+		t.Error("the last page is not truncated")
+	}
+	if meta, _ := decoded["_meta"].(map[string]any); meta["next"] != nil {
+		t.Errorf("the last page must not offer a next page: %v", meta["next"])
+	}
+}
+
+func TestCapStaleStats_PagesBothListsByTheSameOffset(t *testing.T) {
+	days := int64(30)
+	var entries []schema.StaleStatsEntry
+	for i := 0; i < 3; i++ {
+		entries = append(entries, schema.StaleStatsEntry{Table: "never"}, schema.StaleStatsEntry{Table: "stale", LastAnalyzedDaysAgo: &days})
+	}
+	kept, omitted := capStaleStats(entries, 2, 2)
+	if len(kept) != 2 || omitted != 0 {
+		t.Errorf("offset 2 of 3+3 with a page of 2: kept %d omitted %d, want one of each and nothing beyond", len(kept), omitted)
+	}
+}
+
+func TestDetectAllRefusesOffset(t *testing.T) {
+	srv := NewOfflineServer(&schema.SchemaSnapshot{PgVersion: "PostgreSQL 18", Database: "appdb", Timestamp: time.Now().UTC()}, lint.DefaultConfig())
+	var req mcp.CallToolRequest
+	req.Params.Name = "detect"
+	req.Params.Arguments = map[string]any{"kind": "all", "offset": float64(10)}
+	res, err := srv.handleDetect(context.Background(), req)
+	if err != nil || !res.IsError || !strings.Contains(res.Content[0].(mcp.TextContent).Text, "kind=") {
+		t.Errorf("kind=all with an offset should be refused and say to pass kind=: %v %v", res, err)
+	}
+}
+
+// The next page advances from where this one started, not from zero.
+func TestCappedKindResult_MiddlePageAdvances(t *testing.T) {
+	srv := NewOfflineServer(&schema.SchemaSnapshot{PgVersion: "PostgreSQL 18", Database: "appdb", Timestamp: time.Now().UTC()}, lint.DefaultConfig())
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(cappedKindResult(srv, "bloated_tables", make([]int, 150), 50, 50, "public", "orders").Content[0].(mcp.TextContent).Text), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := decoded["_meta"].(map[string]any)
+	next, _ := meta["next"].([]any)
+	if len(next) != 1 || decoded["omitted"] != float64(50) {
+		t.Fatalf("a middle page is truncated with 50 beyond it: next=%v omitted=%v", next, decoded["omitted"])
+	}
+	args, _ := next[0].(map[string]any)["args"].(map[string]any)
+	if args["offset"] != float64(100) || args["limit"] != float64(50) || args["kind"] != "bloated_tables" || args["schema"] != "public" || args["table"] != "orders" {
+		t.Errorf("next page = %v, want offset 100 with limit, kind and filters kept", args)
+	}
+}
+
+func TestCapStaleStats_NeverNull(t *testing.T) {
+	days := int64(1)
+	kept, _ := capStaleStats([]schema.StaleStatsEntry{{Table: "t", LastAnalyzedDaysAgo: &days}}, 5, 9)
+	if kept == nil {
+		t.Error("a page past the end must marshal as [], not null")
 	}
 }

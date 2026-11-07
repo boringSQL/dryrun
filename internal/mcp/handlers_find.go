@@ -81,7 +81,7 @@ func (s *Server) handleFindObjects(_ context.Context, req mcp.CallToolRequest) (
 	orderCandidates(cands, sortBy, query)
 
 	total := len(cands)
-	offset := int(getFloatArg(req, "offset", 0))
+	offset := offsetArg(req)
 	limit := limitArgOr(req, defaultMaxItems)
 
 	res := findObjectsResult{Query: query, Kind: kind, Objects: []objectMatch{}, Count: total, Offset: offset}
@@ -104,7 +104,7 @@ func (s *Server) handleFindObjects(_ context.Context, req mcp.CallToolRequest) (
 		lines[i] = renderMatch(c.match)
 	}
 
-	hint, next := s.findFollowups(page, query, kind, schemaFilter, sortBy, offset, total, end)
+	hint, next := s.findFollowups(page, query, kind, schemaFilter, sortBy, limit, offset, total, end)
 	hint = joinHints(hint, foldNote(foldedParts))
 	res.Meta = s.newMeta(hint, next)
 
@@ -385,7 +385,7 @@ func orderCandidates(cands []candidate, sortBy, query string) {
 	}
 }
 
-func (s *Server) findFollowups(page []candidate, query, kind, schemaFilter, sortBy string, offset, total, end int) (string, []NextCall) {
+func (s *Server) findFollowups(page []candidate, query, kind, schemaFilter, sortBy string, limit, offset, total, end int) (string, []NextCall) {
 	var hint string
 	var next []NextCall
 
@@ -407,13 +407,13 @@ func (s *Server) findFollowups(page []candidate, query, kind, schemaFilter, sort
 	}
 
 	if end < total {
-		args := map[string]any{"limit": 0}
+		args := map[string]any{"limit": limit, "offset": end}
 		for k, v := range map[string]string{"query": query, "kind": kind, "schema": schemaFilter, "sort": sortBy} {
 			if v != "" {
 				args[k] = v
 			}
 		}
-		hint = fmt.Sprintf("Showing %d of %d; re-run with limit=0 for all of them.", end-offset, total)
+		hint = fmt.Sprintf("Showing %d of %d; the next page is in _meta.next (offset=%d).", end-offset, total, end)
 		next = append(next, NextCall{Tool: "find_objects", Args: args})
 	}
 	return hint, next

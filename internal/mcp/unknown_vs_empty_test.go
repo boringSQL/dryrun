@@ -225,3 +225,61 @@ func TestSnapshotDiffStatesThatItIsNotARate(t *testing.T) {
 		}
 	}
 }
+
+// A truncated list hands back the next page, with the caller's selection and no limit=0.
+func TestListTopQueriesOffersTheNextPage(t *testing.T) {
+	hist := historyStore(t)
+	snap := datedSnap(t, time.Now().Add(-time.Hour).UTC(), "t")
+	put(t, hist, snap)
+	queryStatsSnap(t, hist, snap.ContentHash, 50, 40, 30, 20, 10)
+	srv := serverWithHistory(t, snap, hist)
+
+	seen := map[string]bool{}
+	args := map[string]any{"limit": float64(2), "sort": "calls", "node": "primary"}
+	for page := 0; ; page++ {
+		got := topQueries(t, srv, args)
+		for _, q := range got.Queries {
+			if seen[q.Canonical] {
+				t.Fatalf("%q repeated on page %d", q.Canonical, page)
+			}
+			seen[q.Canonical] = true
+		}
+		var next *NextCall
+		for i, n := range got.Meta.Next {
+			if n.Tool == "list_top_queries" {
+				next = &got.Meta.Next[i]
+			}
+		}
+		if next == nil {
+			break
+		}
+		if page > 5 {
+			t.Fatal("never reached the last page")
+		}
+		if strings.Contains(got.Meta.Hint, "limit=0") || next.Args["sort"] != "calls" || next.Args["node"] != "primary" || next.Args["limit"] != 2 {
+			t.Fatalf("next page lost the selection or points at limit=0: %v / %q", next.Args, got.Meta.Hint)
+		}
+		args = map[string]any{}
+		for k, v := range next.Args {
+			if n, ok := v.(int); ok {
+				v = float64(n)
+			}
+			args[k] = v
+		}
+	}
+	if len(seen) != 5 {
+		t.Errorf("paging covered %d of 5 shapes", len(seen))
+	}
+}
+
+func TestListTopQueriesNegativeOffsetStartsAtTheTop(t *testing.T) {
+	hist := historyStore(t)
+	snap := datedSnap(t, time.Now().Add(-time.Hour).UTC(), "t")
+	put(t, hist, snap)
+	queryStatsSnap(t, hist, snap.ContentHash, 10, 5)
+
+	got := topQueries(t, serverWithHistory(t, snap, hist), map[string]any{"offset": float64(-3)})
+	if len(got.Queries) != 2 || got.Offset != 0 {
+		t.Errorf("negative offset: %d queries, offset %d; want the full page from the top", len(got.Queries), got.Offset)
+	}
+}

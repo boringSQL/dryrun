@@ -155,11 +155,11 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 
 	switch getArg(req, "sort") {
 	case "calls":
-		sort.Slice(entries, func(i, j int) bool { return entries[i].Calls > entries[j].Calls })
+		sort.SliceStable(entries, func(i, j int) bool { return entries[i].Calls > entries[j].Calls })
 	case "mean_time":
-		sort.Slice(entries, func(i, j int) bool { return entries[i].MeanExecTimeMs > entries[j].MeanExecTimeMs })
+		sort.SliceStable(entries, func(i, j int) bool { return entries[i].MeanExecTimeMs > entries[j].MeanExecTimeMs })
 	default:
-		sort.Slice(entries, func(i, j int) bool { return entries[i].TotalExecTimeMs > entries[j].TotalExecTimeMs })
+		sort.SliceStable(entries, func(i, j int) bool { return entries[i].TotalExecTimeMs > entries[j].TotalExecTimeMs })
 	}
 
 	total := len(entries)
@@ -172,7 +172,7 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 			listTopQueriesResult{Queries: []queryStatsEntry{}, Meta: s.newMeta(hint, nil)},
 			s.wrapText(body, hint)), nil
 	}
-	offset := int(getFloatArg(req, "offset", 0))
+	offset := offsetArg(req)
 	limit := limitArg(req)
 	if offset >= total {
 		return structuredTextResult(
@@ -193,7 +193,26 @@ func (s *Server) handleListTopQueries(ctx context.Context, req mcp.CallToolReque
 	} else {
 		body = fmt.Sprintf("Showing %d-%d of %d querie(s):\n%s", offset+1, end, total, strings.Join(lines, "\n"))
 	}
+	var next []NextCall
+	if end < total {
+		hint = joinHints(hint, fmt.Sprintf("Showing %d of %d; the next page is in _meta.next (offset=%d).", end-offset, total, end))
+		next = []NextCall{{Tool: "list_top_queries", Args: nextTopQueriesPage(req, limit, end)}}
+	}
 	return structuredTextResult(
-		listTopQueriesResult{Queries: page, Count: total, Offset: offset, Meta: s.newMeta(hint, nil)},
+		listTopQueriesResult{Queries: page, Count: total, Offset: offset, Meta: s.newMeta(hint, next)},
 		s.wrapText(body, hint)), nil
+}
+
+// the same selection, advanced; only what the caller set is repeated
+func nextTopQueriesPage(req mcp.CallToolRequest, limit, offset int) map[string]any {
+	a := map[string]any{"limit": limit, "offset": offset}
+	for _, k := range []string{"node", "sort"} {
+		if v := getArg(req, k); v != "" {
+			a[k] = v
+		}
+	}
+	if v, ok := req.GetArguments()["min_calls"]; ok {
+		a["min_calls"] = v
+	}
+	return a
 }
