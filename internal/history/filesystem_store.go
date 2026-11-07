@@ -142,15 +142,18 @@ func readBundleEntries(dir string) ([]bundleEntry, error) {
 		}
 		out = append(out, bundleEntry{name: f.Name(), timestamp: ts, contentHash: hash})
 	}
-	// newest first; sync loops and Latest expect descending order. The hash
-	// tiebreak keeps latest~N stable when two bundles share a timestamp.
+	sortBundleEntries(out)
+	return out, nil
+}
+
+// newest first; the hash tiebreak keeps latest~N stable for equal timestamps
+func sortBundleEntries(out []bundleEntry) {
 	sort.SliceStable(out, func(i, j int) bool {
 		if !out[i].timestamp.Equal(out[j].timestamp) {
 			return out[i].timestamp.After(out[j].timestamp)
 		}
 		return out[i].contentHash < out[j].contentHash
 	})
-	return out, nil
 }
 
 func readBundle(path string) (*Bundle, error) {
