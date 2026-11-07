@@ -41,14 +41,20 @@ func schemaWithTables(hash string, ts time.Time, tables ...string) *schema.Schem
 	return s
 }
 
-func newRemote(t *testing.T) (string, history.SnapshotStore) {
+func newRemote(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	return t.TempDir()
+}
+
+// a store reads its bundles once, as each `dryrun snapshot pull` opens its own;
+// a test that publishes behind a store's back pulls through a fresh one
+func reopenRemote(t *testing.T, dir string) history.SnapshotStore {
+	t.Helper()
 	store, err := history.NewFilesystemStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return dir, store
+	return store
 }
 
 func pullOnce(t *testing.T, remote, reader history.SnapshotStore, k history.SnapshotKey, scope pullScope) SyncOutcome {
@@ -96,15 +102,16 @@ func TestPullFollowsARevertedMigration(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			k := syncKey("acme", "primary")
 			t0 := baseT0()
-			dir, remote := newRemote(t)
+			dir := newRemote(t)
+			remote := func() history.SnapshotStore { return reopenRemote(t, dir) }
 			reader := openPoolStore(t)
 
 			publishSchema(t, dir, k, schemaWithTables("hash-a", t0))
-			pullOnce(t, remote, reader, k, scope)
+			pullOnce(t, remote(), reader, k, scope)
 			publishSchema(t, dir, k, schemaWithTables("hash-b", t0.Add(time.Hour), "added"))
-			pullOnce(t, remote, reader, k, scope)
+			pullOnce(t, remote(), reader, k, scope)
 			publishSchema(t, dir, k, schemaWithTables("hash-a", t0.Add(2*time.Hour)))
-			out := pullOnce(t, remote, reader, k, scope)
+			out := pullOnce(t, remote(), reader, k, scope)
 
 			if got := readerLatest(t, reader, k); got.ContentHash != "hash-a" || hasTable(got, "added") {
 				t.Errorf("reader's latest = %s, want hash-a without the reverted table", got.ContentHash)
@@ -120,15 +127,16 @@ func TestPullFollowsARevertedMigration(t *testing.T) {
 func TestPullRefreshesPayloadOfAnUnchangedHash(t *testing.T) {
 	k := syncKey("acme", "primary")
 	t0 := baseT0()
-	dir, remote := newRemote(t)
+	dir := newRemote(t)
+	remote := func() history.SnapshotStore { return reopenRemote(t, dir) }
 	reader := openPoolStore(t)
 
 	publishSchema(t, dir, k, schemaWithTables("hash-a", t0))
-	pullOnce(t, remote, reader, k, pullScope{latest: true})
+	pullOnce(t, remote(), reader, k, pullScope{latest: true})
 	firstColumn := schemaRows(t, reader, k)[0].Timestamp
 
 	publishSchema(t, dir, k, schemaWithTables("hash-a", t0.Add(time.Hour), "ev_2027"))
-	out := pullOnce(t, remote, reader, k, pullScope{latest: true})
+	out := pullOnce(t, remote(), reader, k, pullScope{latest: true})
 
 	got := readerLatest(t, reader, k)
 	if !hasTable(got, "ev_2027") {
@@ -153,16 +161,17 @@ func TestPullRefreshesPayloadOfAnUnchangedHash(t *testing.T) {
 func TestRepeatPullOfOneBundleWritesNothing(t *testing.T) {
 	k := syncKey("acme", "primary")
 	t0 := baseT0()
-	dir, remote := newRemote(t)
+	dir := newRemote(t)
+	remote := func() history.SnapshotStore { return reopenRemote(t, dir) }
 	reader := openPoolStore(t)
 
 	publishSchema(t, dir, k, schemaWithTables("hash-a", t0))
-	pullOnce(t, remote, reader, k, pullScope{latest: true})
+	pullOnce(t, remote(), reader, k, pullScope{latest: true})
 	publishSchema(t, dir, k, schemaWithTables("hash-a", t0.Add(time.Hour)))
-	pullOnce(t, remote, reader, k, pullScope{latest: true})
+	pullOnce(t, remote(), reader, k, pullScope{latest: true})
 
 	for range 2 {
-		out := pullOnce(t, remote, reader, k, pullScope{latest: true})
+		out := pullOnce(t, remote(), reader, k, pullScope{latest: true})
 		if out.Schema.Copied != 0 || out.Schema.UpToDate != 1 {
 			t.Errorf("repeat pull = %+v, want 1 up-to-date", out.Schema)
 		}
@@ -175,14 +184,14 @@ func TestRepeatPullOfOneBundleWritesNothing(t *testing.T) {
 func TestPullFromAnOlderSourceLeavesTheReaderAlone(t *testing.T) {
 	k := syncKey("acme", "primary")
 	t0 := baseT0()
-	dir, remote := newRemote(t)
+	dir := newRemote(t)
 	reader := openPoolStore(t)
 
 	publishSchema(t, dir, k, schemaWithTables("hash-a", t0, "old"))
 	if _, err := reader.Put(context.Background(), k, history.WrapSchema(schemaWithTables("hash-a", t0.Add(time.Hour), "new"))); err != nil {
 		t.Fatal(err)
 	}
-	pullOnce(t, remote, reader, k, pullScope{latest: true})
+	pullOnce(t, reopenRemote(t, dir), reader, k, pullScope{latest: true})
 
 	got := readerLatest(t, reader, k)
 	if !hasTable(got, "new") || hasTable(got, "old") {
@@ -262,16 +271,17 @@ func TestLatestPullSelectsANewerSchemaWithNoStats(t *testing.T) {
 	ctx := context.Background()
 	k := syncKey("acme", "primary")
 	t0 := baseT0()
-	dir, remote := newRemote(t)
+	dir := newRemote(t)
+	remote := func() history.SnapshotStore { return reopenRemote(t, dir) }
 	reader := openPoolStore(t)
 
 	publishSchema(t, dir, k, schemaWithTables("hash-a", t0))
-	if _, err := remote.Put(ctx, k, history.WrapActivity(syncTestActivity("hash-a", "act-1", "primary", t0.Add(time.Minute), false))); err != nil {
+	if _, err := remote().Put(ctx, k, history.WrapActivity(syncTestActivity("hash-a", "act-1", "primary", t0.Add(time.Minute), false))); err != nil {
 		t.Fatal(err)
 	}
 	publishSchema(t, dir, k, schemaWithTables("hash-b", t0.Add(time.Hour)))
 
-	pullOnce(t, remote, reader, k, pullScope{latest: true})
+	pullOnce(t, remote(), reader, k, pullScope{latest: true})
 	if got := readerLatest(t, reader, k); got.ContentHash != "hash-b" {
 		t.Errorf("latest = %s, want the newer schema", got.ContentHash)
 	}
@@ -287,7 +297,7 @@ func TestLatestPullSelectsANewerSchemaWithNoStats(t *testing.T) {
 func TestPushToALongLivedRemoteIsUnchanged(t *testing.T) {
 	k := syncKey("acme", "primary")
 	t0 := baseT0()
-	_, remote := newRemote(t)
+	remote := reopenRemote(t, newRemote(t))
 	writer := openPoolStore(t)
 	ctx := context.Background()
 
@@ -306,16 +316,17 @@ func TestSnapshotLogAfterARefresh(t *testing.T) {
 	ctx := context.Background()
 	k := syncKey("acme", "primary")
 	t0 := baseT0()
-	dir, remote := newRemote(t)
+	dir := newRemote(t)
+	remote := func() history.SnapshotStore { return reopenRemote(t, dir) }
 	reader := openPoolStore(t)
 
 	publishSchema(t, dir, k, schemaWithTables("hash-a", t0))
-	if _, err := remote.Put(ctx, k, history.WrapActivity(syncTestActivity("hash-a", "act-1", "primary", t0.Add(time.Minute), false))); err != nil {
+	if _, err := remote().Put(ctx, k, history.WrapActivity(syncTestActivity("hash-a", "act-1", "primary", t0.Add(time.Minute), false))); err != nil {
 		t.Fatal(err)
 	}
-	pullOnce(t, remote, reader, k, pullScope{latest: true})
+	pullOnce(t, remote(), reader, k, pullScope{latest: true})
 	publishSchema(t, dir, k, schemaWithTables("hash-a", t0.Add(5*time.Hour), "ev_2027"))
-	pullOnce(t, remote, reader, k, pullScope{latest: true})
+	pullOnce(t, remote(), reader, k, pullScope{latest: true})
 
 	schemas := schemaRows(t, reader, k)
 	stats, err := reader.List(ctx, k, history.ActivityKind(""), history.TimeRange{})
@@ -407,7 +418,7 @@ func TestSourceNewestIncludesStats(t *testing.T) {
 	ctx := context.Background()
 	k := syncKey("acme", "primary")
 	t0 := baseT0()
-	_, remote := newRemote(t)
+	remote := reopenRemote(t, newRemote(t))
 	reader := openPoolStore(t)
 
 	statsAt := t0.Add(9 * time.Hour)
@@ -437,13 +448,13 @@ func (c *getCountingStore) Get(ctx context.Context, key history.SnapshotKey, kin
 // seconds in the column must not make an unchanged bundle look newer.
 func TestRepeatPullOfTheOnlyBundleFetchesNothing(t *testing.T) {
 	k := syncKey("acme", "primary")
-	dir, remote := newRemote(t)
+	dir := newRemote(t)
 	reader := openPoolStore(t)
 
 	publishSchema(t, dir, k, schemaWithTables("hash-a", baseT0()))
-	pullOnce(t, remote, reader, k, pullScope{latest: true})
+	pullOnce(t, reopenRemote(t, dir), reader, k, pullScope{latest: true})
 
-	c := &getCountingStore{SnapshotStore: remote}
+	c := &getCountingStore{SnapshotStore: reopenRemote(t, dir)}
 	pullOnce(t, c, reader, k, pullScope{latest: true})
 	if c.gets != 0 {
 		t.Errorf("repeat pull made %d Get calls, want 0", c.gets)
@@ -472,14 +483,14 @@ func TestPullCommandWarnsOnStaleAndMissingSource(t *testing.T) {
 		}
 	})
 	t.Run("stale", func(t *testing.T) {
-		dir, _ := newRemote(t)
+		dir := newRemote(t)
 		publishSchema(t, dir, k, schemaWithTables("hash-a", time.Now().UTC().Add(-72*time.Hour)))
 		if out := pull(t, dir); !strings.Contains(out, "the capture job may have stopped") {
 			t.Errorf("stderr = %q", out)
 		}
 	})
 	t.Run("fresh", func(t *testing.T) {
-		dir, _ := newRemote(t)
+		dir := newRemote(t)
 		publishSchema(t, dir, k, schemaWithTables("hash-a", time.Now().UTC().Add(-time.Hour)))
 		if out := pull(t, dir); strings.Contains(out, "warning:") {
 			t.Errorf("stderr = %q", out)
@@ -493,7 +504,7 @@ func TestPullRefreshesOnlyTheNewestRow(t *testing.T) {
 	ctx := context.Background()
 	k := syncKey("acme", "primary")
 	t0 := baseT0()
-	dir, remote := newRemote(t)
+	dir := newRemote(t)
 	reader := openPoolStore(t)
 
 	for _, snap := range []*schema.SchemaSnapshot{schemaWithTables("hash-a", t0), schemaWithTables("hash-c", t0.Add(time.Hour))} {
@@ -503,7 +514,7 @@ func TestPullRefreshesOnlyTheNewestRow(t *testing.T) {
 	}
 	publishSchema(t, dir, k, schemaWithTables("hash-a", t0.Add(2*time.Hour)))
 	publishSchema(t, dir, k, schemaWithTables("hash-b", t0.Add(3*time.Hour)))
-	pullOnce(t, remote, reader, k, pullScope{})
+	pullOnce(t, reopenRemote(t, dir), reader, k, pullScope{})
 
 	rows := schemaRows(t, reader, k)
 	if len(rows) != 3 || rows[0].ContentHash != "hash-b" {
@@ -517,7 +528,7 @@ func TestFreshPullFromALongLivedRemoteAfterARevertLandsOnA(t *testing.T) {
 	ctx := context.Background()
 	k := syncKey("acme", "primary")
 	t0 := baseT0()
-	_, remote := newRemote(t)
+	remote := reopenRemote(t, newRemote(t))
 	reader := openPoolStore(t)
 
 	for _, snap := range []history.StoredSnapshot{
@@ -541,7 +552,7 @@ func TestFreshPullFromALongLivedRemoteAfterARevertLandsOnA(t *testing.T) {
 func TestPullSinceStaysQuiet(t *testing.T) {
 	resetFlags(t)
 	k := syncKey("acme", "primary")
-	dir, _ := newRemote(t)
+	dir := newRemote(t)
 	publishSchema(t, dir, k, schemaWithTables("hash-a", time.Now().UTC().Add(-30*24*time.Hour)))
 	withCWD(t, writeTOML(t, t.TempDir(), "[project]\nid = \"acme\"\n\n[default]\nprofile = \"p\"\n\n[profiles.p]\ndatabase_id = \"primary\"\n"))
 	for _, args := range [][]string{{"--since", "1h"}, {"--full", "--since", "1h"}} {

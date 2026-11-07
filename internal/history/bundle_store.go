@@ -29,6 +29,10 @@ type bundleBackend interface {
 type bundleStore struct {
 	backend bundleBackend
 	mu      sync.Mutex
+	// cache of backend.list per key; saves drop it. Cached bundles are shared,
+	// so callers must not mutate what Get/List hand out.
+	cacheMu sync.Mutex
+	cache   map[SnapshotKey][]*Bundle
 }
 
 var _ SnapshotStore = (*bundleStore)(nil)
@@ -79,10 +83,37 @@ func (s *bundleStore) putSchema(ctx context.Context, key SnapshotKey, snap *sche
 		return PutDeduped, nil
 	}
 	b := &Bundle{Schema: snap, Activity: map[string]*schema.ActivityStatsSnapshot{}}
-	if err := s.backend.save(ctx, key, b); err != nil {
+	if err := s.save(ctx, key, b); err != nil {
 		return PutInserted, err
 	}
 	return PutInserted, nil
+}
+
+// save clears the key's cache even on error, since a failed save may have written.
+func (s *bundleStore) save(ctx context.Context, key SnapshotKey, b *Bundle) error {
+	err := s.backend.save(ctx, key, b)
+	s.cacheMu.Lock()
+	delete(s.cache, key)
+	s.cacheMu.Unlock()
+	return err
+}
+
+// bundles returns the cached backend.list for key, loading it once until the next save.
+func (s *bundleStore) bundles(ctx context.Context, key SnapshotKey) ([]*Bundle, error) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if b, ok := s.cache[key]; ok {
+		return b, nil
+	}
+	b, err := s.backend.list(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if s.cache == nil {
+		s.cache = map[SnapshotKey][]*Bundle{}
+	}
+	s.cache[key] = b
+	return b, nil
 }
 
 // merge loads the bundle bound to schemaRefHash, applies the change, and saves
@@ -98,7 +129,7 @@ func (s *bundleStore) merge(ctx context.Context, key SnapshotKey, schemaRefHash 
 	if !apply(b) {
 		return PutDeduped, nil
 	}
-	if err := s.backend.save(ctx, key, b); err != nil {
+	if err := s.save(ctx, key, b); err != nil {
 		return PutInserted, err
 	}
 	return PutInserted, nil
@@ -143,7 +174,7 @@ func (s *bundleStore) putQueryStats(ctx context.Context, key SnapshotKey, q *sch
 }
 
 func (s *bundleStore) Get(ctx context.Context, key SnapshotKey, kind SnapshotKind, at SnapshotRef) (StoredSnapshot, error) {
-	bundles, err := s.backend.list(ctx, key)
+	bundles, err := s.bundles(ctx, key)
 	if err != nil {
 		return StoredSnapshot{}, err
 	}
@@ -178,7 +209,7 @@ func (s *bundleStore) Get(ctx context.Context, key SnapshotKey, kind SnapshotKin
 }
 
 func (s *bundleStore) List(ctx context.Context, key SnapshotKey, kind SnapshotKind, rng TimeRange) ([]SnapshotSummary, error) {
-	bundles, err := s.backend.list(ctx, key)
+	bundles, err := s.bundles(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +242,7 @@ func (s *bundleStore) Latest(ctx context.Context, key SnapshotKey, kind Snapshot
 }
 
 func (s *bundleStore) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error) {
-	bundles, err := s.backend.list(ctx, key)
+	bundles, err := s.bundles(ctx, key)
 	if err != nil {
 		return nil, err
 	}
