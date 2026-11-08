@@ -3,6 +3,7 @@ package lint
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/boringsql/dryrun/pkg/jit"
@@ -570,49 +571,37 @@ func checkPartitionTooManyChildren(t *snapshot.Table, qualified string, violatio
 	}
 }
 
-var rangeBoundRe = regexp.MustCompile(`FROM \('([^']+)'\) TO \('([^']+)'\)`)
-
 func checkPartitionRangeGaps(t *snapshot.Table, qualified string, violations *[]Finding) {
 	if t.PartitionInfo == nil || t.PartitionInfo.Strategy != snapshot.PartitionRange {
 		return
 	}
-
-	type bound struct {
-		lower, upper string
+	isTime, ok := rangeKeyType(t)
+	if !ok {
+		return
 	}
-	var bounds []bound
-	for _, child := range t.PartitionInfo.Children {
-		m := rangeBoundRe.FindStringSubmatch(child.Bound)
-		if m == nil {
+	spans, ok := parseRangeSpans(t.PartitionInfo.Children, isTime)
+	if !ok {
+		return
+	}
+	slices.SortFunc(spans, func(a, b rangeSpan) int { return cmpBound(a.lower, b.lower) })
+
+	for i := 0; i < len(spans)-1; i++ {
+		upper, next := spans[i].upper, spans[i+1].lower
+		if cmpBound(upper, next) >= 0 {
 			continue
 		}
-		bounds = append(bounds, bound{lower: m[1], upper: m[2]})
-	}
-
-	// sort by lower bound - string compare works for ISO dates and numbers
-	for i := 0; i < len(bounds); i++ {
-		for j := i + 1; j < len(bounds); j++ {
-			if bounds[j].lower < bounds[i].lower {
-				bounds[i], bounds[j] = bounds[j], bounds[i]
-			}
-		}
-	}
-
-	for i := 0; i < len(bounds)-1; i++ {
-		if bounds[i].upper != bounds[i+1].lower {
-			e := jit.PartitionRangeGap(t.Name, bounds[i].upper, bounds[i+1].lower)
-			*violations = append(*violations, Finding{
-				Rule:     "partition/range_gaps",
-				Severity: SeverityWarning,
-				Tables:   []string{qualified},
-				Message: fmt.Sprintf(
-					"gap in partition range between '%s' and '%s'; INSERTs for values in this gap will fail without a DEFAULT partition",
-					bounds[i].upper, bounds[i+1].lower),
-				Recommendation: e.Reason,
-				DDLFix:         strp(e.Fix),
-				ConventionDoc:  "partitioning",
-			})
-		}
+		e := jit.PartitionRangeGap(t.Name, upper.raw, next.raw)
+		*violations = append(*violations, Finding{
+			Rule:     "partition/range_gaps",
+			Severity: SeverityWarning,
+			Tables:   []string{qualified},
+			Message: fmt.Sprintf(
+				"gap in partition range between '%s' and '%s'; INSERTs for values in this gap will fail without a DEFAULT partition",
+				upper.raw, next.raw),
+			Recommendation: e.Reason,
+			DDLFix:         strp(e.Fix),
+			ConventionDoc:  "partitioning",
+		})
 	}
 }
 
