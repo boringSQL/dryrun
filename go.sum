@@ -42,8 +42,8 @@ github.com/boringsql/fixturize v0.7.0 h1:qvqYFKgKFsmG9U0OBzrqqBKmOT+eCOKpBO1qGfE
 github.com/boringsql/fixturize v0.7.0/go.mod h1:ACmNFJBq7a9yar4GYkNBh8sRWDBew/85BYdZCFfS6Vs=
 github.com/boringsql/qshape v0.4.2 h1:TSUe8VFBaIDey3HHkNojk5LcpeOM4xqAWUVP9cmldVo=
 github.com/boringsql/qshape v0.4.2/go.mod h1:Kz+WaTiP8nthD18z33IdgIrdCr1YwJuf8OzGQDtZSXw=
-github.com/boringsql/queries v1.6.4 h1:8uV/DCcxWid39g1tbR1K6II0o5BBLwts+Et5167OaAU=
-github.com/boringsql/queries v1.6.4/go.mod h1:zRQzwzZZ8e9o8PZWTKMxPqxTTg8hGvvinwitEBd0FCQ=
+github.com/boringsql/queries v1.6.5 h1:zMr7GDU6jHFTDa5U7zWrYI0KL4l0sKrEarY7gFacD54=
+github.com/boringsql/queries v1.6.5/go.mod h1:zRQzwzZZ8e9o8PZWTKMxPqxTTg8hGvvinwitEBd0FCQ=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
