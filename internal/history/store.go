@@ -534,31 +534,20 @@ func (s *Store) migrate() error {
 
 	// in-place upgrade for legacy history.db: columns added nullable; legacy rows stay NULL
 	for _, col := range []string{"project_id", "database_id"} {
-		if _, err := s.db.Exec("ALTER TABLE snapshots ADD COLUMN " + col + " TEXT"); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column name") {
-				return fmt.Errorf("migration failed (%s): %w", col, err)
-			}
+		if err := s.addColumnIfMissing("snapshots", col, "TEXT"); err != nil {
+			return err
 		}
 	}
-	// db_url_hash predates project_id/database_id but legacy DBs from the very first cut lack it
-	if _, err := s.db.Exec("ALTER TABLE snapshots ADD COLUMN db_url_hash TEXT NOT NULL DEFAULT ''"); err != nil {
-		if !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("migration failed (db_url_hash): %w", err)
-		}
-	}
+	// no ALTER for db_url_hash: isForeignStore refuses any snapshots table without it
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_snapshots_db_url_hash
 		ON snapshots(db_url_hash, timestamp DESC)`); err != nil {
 		return fmt.Errorf("migration failed (idx_snapshots_db_url_hash): %w", err)
 	}
 
-	// v4 -> v5: existing rows backfill as local via DEFAULT 1; table is a
-	// caller-side literal, never user input.
+	// v4 -> v5: existing rows backfill as local via DEFAULT 1
 	for _, tbl := range []string{"snapshots", "planner_stats", "activity_stats", "query_stats"} {
-		if _, err := s.db.Exec("ALTER TABLE " + tbl +
-			" ADD COLUMN captured_locally INTEGER NOT NULL DEFAULT 1"); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column name") {
-				return fmt.Errorf("migration failed (%s.captured_locally): %w", tbl, err)
-			}
+		if err := s.addColumnIfMissing(tbl, "captured_locally", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+			return err
 		}
 	}
 
@@ -620,6 +609,16 @@ func (s *Store) migrate() error {
 			"(project_id, database_id, node_source, timestamp)"); err != nil {
 			slog.Debug("label index not created", "table", table, "err", err)
 		}
+	}
+	return nil
+}
+
+// addColumnIfMissing is the idempotence guard for legacy upgrades; table and
+// column are caller-side literals, never user input.
+func (s *Store) addColumnIfMissing(table, col, def string) error {
+	_, err := s.db.Exec("ALTER TABLE " + table + " ADD COLUMN " + col + " " + def)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("migration failed (%s.%s): %w", table, col, err)
 	}
 	return nil
 }
