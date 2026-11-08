@@ -60,10 +60,12 @@ jobs:
         run: |
           ext=""
           [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
-          CGO_ENABLED=1 go build \
-            -ldflags "-X github.com/boringsql/dryrun/internal/buildinfo.Version=${GITHUB_REF_NAME}" \
+          CGO_ENABLED=1 go build -trimpath \
+            -ldflags "-s -w -X github.com/boringsql/dryrun/internal/buildinfo.Version=${GITHUB_REF_NAME}" \
             -o "dryrun${ext}" \
             ./cmd/dryrun
+          # these bins go to the release and npm unrun otherwise
+          ./dryrun${ext} version | grep -qF "${GITHUB_REF_NAME}"
       - name: Archive (tar.xz)
         if: runner.os != 'Windows'
         run: tar -cJf dry_run_cli-${{ matrix.target }}.tar.xz dryrun
