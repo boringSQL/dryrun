@@ -10,7 +10,7 @@ require (
 	github.com/aws/smithy-go v1.28.8
 	github.com/boringsql/fixturize v0.7.0
 	github.com/boringsql/qshape v0.4.2
-	github.com/boringsql/queries v1.6.1
+	github.com/boringsql/queries v1.6.4
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/klauspost/compress v1.18.6
 	github.com/mark3labs/mcp-go v0.54.1
