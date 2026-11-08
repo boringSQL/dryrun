@@ -45,8 +45,13 @@ var (
 	errObjectNotFound = errors.New("object not found")
 )
 
-// bounds GETs in flight per list
-const objectFetchConcurrency = 8
+const (
+	// bounds GETs in flight per list
+	objectFetchConcurrency = 8
+
+	// rsync DIR's contents; `cp -r` would nest it one level too deep
+	BucketUploadHint = "push to a directory with `dryrun snapshot push --to-path DIR`, then `gcloud storage rsync -r DIR gs://bucket/prefix` or `aws s3 sync DIR s3://bucket/prefix`"
+)
 
 func ParseObjectURL(raw string) (ObjectURL, error) {
 	u, err := url.Parse(raw)
@@ -177,7 +182,7 @@ func (o *objectBackend) load(ctx context.Context, key SnapshotKey, schemaRefHash
 }
 
 func (o *objectBackend) save(context.Context, SnapshotKey, *Bundle) error {
-	return fmt.Errorf("%w: push to a directory and upload it with `gcloud storage cp -r` / `aws s3 cp --recursive`", ErrReadOnlyStore)
+	return fmt.Errorf("%w: %s", ErrReadOnlyStore, BucketUploadHint)
 }
 
 // a key counts once it holds a bundle, as on fs; stream overrides aren't reversible.

@@ -138,6 +138,14 @@ fail.`,
 				return runCaptureCheck(cmd.Context(), store, key, targets, opts, checkTimeout, cmd.OutOrStdout())
 			}
 
+			// check the push target before touching production
+			var dst history.SnapshotStore
+			if pushAfter {
+				if dst, err = resolveSyncStore(cmd.Context(), "", "", pushRemote, true); err != nil {
+					return err
+				}
+			}
+
 			// one capture at a time per project: an overlapping cron tick on a
 			// slow node would otherwise stack connections on production
 			unlock, err := lockCaptures(*historyDB)
@@ -169,10 +177,6 @@ fail.`,
 			}
 
 			if pushAfter && len(failed) < len(targets) {
-				dst, err := resolveSyncStore("", "", pushRemote)
-				if err != nil {
-					return err
-				}
 				if _, err := runSync(cmd.Context(), store, dst, false, pullScope{latest: true}, os.Stdout); err != nil {
 					return err
 				}

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,14 +64,17 @@ type (
 		KeepPlanner *int   `toml:"keep_planner"`
 	}
 
-	// [[remote]] block; Ref is the registry base, e.g. ghcr.io/org/dryrun
+	// [[remote]] block; Ref is a registry base or a gs:// / s3:// bucket URL
 	RemoteConfig struct {
-		Name     string `toml:"name"`
-		Type     string `toml:"type"`
-		Ref      string `toml:"ref"`
-		TokenEnv string `toml:"token_env"`
-		Auth     string `toml:"auth"` // "" docker creds; "gcp" GAR/GCR via ADC
-		Default  bool   `toml:"default"`
+		Name      string `toml:"name"`
+		Type      string `toml:"type"` // oci, gcs or s3 ("" = oci)
+		Ref       string `toml:"ref"`
+		TokenEnv  string `toml:"token_env"`
+		Auth      string `toml:"auth"` // "" docker creds; "gcp" GAR/GCR via ADC
+		Default   bool   `toml:"default"`
+		Region    string `toml:"region"`     // s3 only
+		Endpoint  string `toml:"endpoint"`   // s3 only: R2 or self-hosted
+		PathStyle bool   `toml:"path_style"` // s3 only; set by hand
 	}
 
 	ProjectMeta struct {
@@ -167,6 +171,53 @@ func (c *ProjectConfig) ResolveRemote(name string) (*RemoteConfig, error) {
 		return nil, fmt.Errorf("multiple remotes and no default; pass --remote")
 	}
 	return def, nil
+}
+
+// BucketURL validates a gcs/s3 remote and parses its ref; OCI-only keys are
+// refused rather than ignored.
+func (r *RemoteConfig) BucketURL() (history.ObjectURL, error) {
+	scheme := map[string]string{"gcs": "gs", "s3": "s3"}[r.Type]
+	bad := func(format string, args ...any) (history.ObjectURL, error) {
+		return history.ObjectURL{}, fmt.Errorf("remote %q: "+format, append([]any{r.Name}, args...)...)
+	}
+	switch {
+	case scheme == "":
+		return bad("type %q is not a bucket", r.Type)
+	case !strings.HasPrefix(r.Ref, scheme+"://"):
+		return bad("type %q needs ref = \"%s://bucket[/prefix]\", got %q", r.Type, scheme, r.Ref)
+	case r.TokenEnv != "" || r.Auth != "":
+		return bad("token_env and auth are for oci remotes; %s uses the cloud's own credentials", r.Type)
+	case r.Type != "s3" && (r.Region != "" || r.Endpoint != "" || r.PathStyle):
+		return bad("region, endpoint and path_style are for s3 remotes")
+	case r.Region == "auto" && r.Endpoint == "":
+		return bad("region \"auto\" is R2's and needs its endpoint")
+	}
+	if r.Endpoint != "" {
+		if u, err := url.Parse(r.Endpoint); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return bad("endpoint %q: want http(s)://host[:port]", r.Endpoint)
+		}
+	}
+	u, err := history.ParseObjectURL(r.Ref)
+	if err != nil {
+		return u, fmt.Errorf("remote %q: %w", r.Name, err)
+	}
+	return u, nil
+}
+
+// Check validates the remote for its type; a bucket ref on an oci remote would
+// parse as a bad registry ref.
+func (r *RemoteConfig) Check() error {
+	switch r.Type {
+	case "", "oci":
+		if strings.Contains(r.Ref, "://") {
+			return fmt.Errorf("remote %q: ref %q is a bucket URL; set type = \"gcs\" or \"s3\"", r.Name, r.Ref)
+		}
+		return nil
+	case "gcs", "s3":
+		_, err := r.BucketURL()
+		return err
+	}
+	return fmt.Errorf("remote %q has unsupported type %q; supported: oci, gcs, s3", r.Name, r.Type)
 }
 
 func (r *ResolvedProfile) SnapshotKey() history.SnapshotKey {

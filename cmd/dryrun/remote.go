@@ -65,15 +65,14 @@ func remoteAddCmd() *cobra.Command {
 					return fmt.Errorf("remote %q already exists", name)
 				}
 			}
-			if typ != "oci" {
-				return fmt.Errorf("--type must be \"oci\"")
-			}
-			if authMode != "" && authMode != "gcp" {
+			r := config.RemoteConfig{Name: name, Type: typ, Ref: ref, TokenEnv: tokenEnv, Auth: authMode, Default: isDefault}
+			if typ == "oci" && authMode != "" && authMode != "gcp" {
 				return fmt.Errorf("--auth must be empty or \"gcp\"")
 			}
-			block := remoteBlock(config.RemoteConfig{
-				Name: name, Type: typ, Ref: ref, TokenEnv: tokenEnv, Auth: authMode, Default: isDefault,
-			})
+			if err := r.Check(); err != nil {
+				return err
+			}
+			block := remoteBlock(r)
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return err
@@ -86,8 +85,8 @@ func remoteAddCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&typ, "type", "oci", "remote type")
-	cmd.Flags().StringVar(&ref, "ref", "", "registry base ref (e.g. ghcr.io/org/dryrun)")
+	cmd.Flags().StringVar(&typ, "type", "oci", "remote type: oci, gcs or s3")
+	cmd.Flags().StringVar(&ref, "ref", "", "registry base ref (ghcr.io/org/dryrun) or bucket URL (gs://b/prefix, s3://b/prefix)")
 	cmd.Flags().StringVar(&tokenEnv, "token-env", "", "env var holding a bearer token")
 	cmd.Flags().StringVar(&authMode, "auth", "", "auth mode: \"gcp\" for GAR/GCR via ADC")
 	cmd.Flags().BoolVar(&isDefault, "default", false, "mark as the default remote")

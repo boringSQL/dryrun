@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/boringsql/dryrun/internal/history"
@@ -746,5 +747,39 @@ func TestParse_CalendarBlock(t *testing.T) {
 	}
 	if unset.Calendar.Weekend != nil {
 		t.Errorf("absent weekend decoded to %#v, want nil", unset.Calendar.Weekend)
+	}
+}
+
+func TestRemoteBucketURL(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		r       RemoteConfig
+		want    string
+		wantErr string
+	}{
+		{name: "gcs", r: RemoteConfig{Type: "gcs", Ref: "gs://snaps/us"}, want: "gs://snaps/us"},
+		{name: "s3 with R2", r: RemoteConfig{Type: "s3", Ref: "s3://snaps", Region: "auto", Endpoint: "https://acc.r2.cloudflarestorage.com"}, want: "s3://snaps"},
+		{name: "ref scheme mismatch", r: RemoteConfig{Type: "gcs", Ref: "s3://snaps"}, wantErr: `needs ref = "gs://`},
+		{name: "auth on gcs", r: RemoteConfig{Type: "gcs", Ref: "gs://snaps", Auth: "gcp"}, wantErr: "token_env and auth are for oci"},
+		{name: "region on gcs", r: RemoteConfig{Type: "gcs", Ref: "gs://snaps", Region: "us"}, wantErr: "for s3 remotes"},
+		{name: "auto without endpoint", r: RemoteConfig{Type: "s3", Ref: "s3://snaps", Region: "auto"}, wantErr: `"auto" is R2's`},
+		{name: "endpoint without scheme", r: RemoteConfig{Type: "s3", Ref: "s3://snaps", Endpoint: "minio.local:9000"}, wantErr: "want http(s)://"},
+		{name: "oci", r: RemoteConfig{Type: "oci", Ref: "ghcr.io/org/dryrun"}, wantErr: "is not a bucket"},
+		{name: "self-hosted s3", r: RemoteConfig{Type: "s3", Ref: "s3://snaps", Endpoint: "http://ceph.local:7480", PathStyle: true}, want: "s3://snaps"},
+		{name: "bad bucket", r: RemoteConfig{Type: "gcs", Ref: "gs://"}, wantErr: `remote "r": store URL`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.r.Name = "r"
+			u, err := tc.r.BucketURL()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || u.String() != tc.want {
+				t.Fatalf("BucketURL = %v, %v; want %s", u, err, tc.want)
+			}
+		})
 	}
 }

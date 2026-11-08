@@ -69,7 +69,7 @@ func snapshotPushCmd() *cobra.Command {
 				return err
 			}
 			defer src.Close()
-			dst, err := resolveSyncStore(toPath, ociRef, remoteName)
+			dst, err := resolveSyncStore(cmd.Context(), toPath, ociRef, remoteName, true)
 			if err != nil {
 				return err
 			}
@@ -106,7 +106,7 @@ func snapshotPullCmd() *cobra.Command {
 				}
 				scope.rng = history.TimeRange{From: &from}
 			}
-			src, err := resolveSyncStore(fromPath, ociRef, remoteName)
+			src, err := resolveSyncStore(cmd.Context(), fromPath, ociRef, remoteName, false)
 			if err != nil {
 				return err
 			}
@@ -136,7 +136,7 @@ func snapshotPullCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&fromPath, "from-path", "", "source directory")
+	cmd.Flags().StringVar(&fromPath, "from-path", "", "source directory, gs://bucket[/prefix] or s3://bucket[/prefix]")
 	cmd.Flags().StringVar(&ociRef, "oci", "", "OCI registry base ref (e.g. ghcr.io/org/dryrun)")
 	cmd.Flags().StringVar(&remoteName, "remote", "", "configured [[remote]] name")
 	cmd.Flags().BoolVar(&all, "all", false, "sync all keys from the source")
@@ -195,38 +195,63 @@ func parseRelative(s string) (time.Duration, error) {
 }
 
 // explicit flags win; with none, fall back to the profile's configured remote.
-func resolveSyncStore(path, ociRef, remoteName string) (history.SnapshotStore, error) {
+func resolveSyncStore(ctx context.Context, path, ociRef, remoteName string, push bool) (history.SnapshotStore, error) {
 	switch {
-	case ociRef != "" || remoteName != "":
-		return buildOCIStore(ociRef, remoteName)
+	case ociRef != "":
+		return buildOCIStore(ociRef, "", "")
+	case remoteName != "":
+		return buildRemoteStore(ctx, remoteName, push)
+	case strings.Contains(path, "://"):
+		// else s3://b becomes the local directory ./s3:/b
+		u, err := history.ParseObjectURL(path)
+		if err != nil {
+			return nil, err
+		}
+		return openBucketStore(ctx, u, history.S3Options{}, push)
 	case path != "":
 		return history.NewFilesystemStore(path)
 	default:
 		if r := profileRemote(); r != "" {
-			return buildOCIStore("", r)
+			return buildRemoteStore(ctx, r, push)
 		}
 		return nil, fmt.Errorf("specify --to-path/--from-path, --oci, or --remote")
 	}
 }
 
-// --oci is a direct ref; --remote resolves base+token_env+auth from [[remote]].
-func buildOCIStore(ociRef, remoteName string) (history.SnapshotStore, error) {
-	base := ociRef
-	var tokenEnv, authMode string
-	if base == "" {
-		_, cfg, err := loadProjectConfig()
-		if err != nil {
-			return nil, err
-		}
-		r, err := cfg.ResolveRemote(remoteName)
-		if err != nil {
-			return nil, err
-		}
-		if r.Type != "" && r.Type != "oci" {
-			return nil, fmt.Errorf("remote %q has unsupported type %q; only oci remotes are supported, run `dryrun remote rm %s` and re-add it", r.Name, r.Type, r.Name)
-		}
-		base, tokenEnv, authMode = r.Ref, r.TokenEnv, r.Auth
+func buildRemoteStore(ctx context.Context, name string, push bool) (history.SnapshotStore, error) {
+	_, cfg, err := loadProjectConfig()
+	if err != nil {
+		return nil, err
 	}
+	r, err := cfg.ResolveRemote(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.Check(); err != nil {
+		return nil, err
+	}
+	if r.Type == "gcs" || r.Type == "s3" {
+		u, err := r.BucketURL()
+		if err != nil {
+			return nil, err
+		}
+		return openBucketStore(ctx, u, history.S3Options{Region: r.Region, Endpoint: r.Endpoint, PathStyle: r.PathStyle}, push)
+	}
+	return buildOCIStore(r.Ref, r.TokenEnv, r.Auth)
+}
+
+// Refused here, not at Put: a deduped Put would report success.
+func openBucketStore(ctx context.Context, u history.ObjectURL, opts history.S3Options, push bool) (history.SnapshotStore, error) {
+	if push {
+		return nil, fmt.Errorf("push to %s:// is not supported yet: %s", u.Scheme, history.BucketUploadHint)
+	}
+	if u.Scheme == "gs" {
+		return history.NewGCSStore(ctx, u, streamMapper())
+	}
+	return history.NewS3Store(ctx, u, opts, streamMapper())
+}
+
+func buildOCIStore(base, tokenEnv, authMode string) (history.SnapshotStore, error) {
 	client, err := history.NewAuthClient(history.AuthConfig{TokenEnv: tokenEnv, Mode: authMode})
 	if err != nil {
 		return nil, err

@@ -81,7 +81,7 @@ db_url = "postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:5432/myapp"
 
 ## Remotes
 
-A remote is an OCI registry that holds snapshots for sharing. The point is to capture once and distribute: someone with database access takes a snapshot and pushes it; everyone else, and CI, pulls it and works offline. No one else needs credentials to the database.
+A remote is an OCI registry, or a [bucket](#bucket-remotes), that holds snapshots for sharing. The point is to capture once and distribute: someone with database access takes a snapshot and pushes it; everyone else, and CI, pulls it and works offline. No one else needs credentials to the database.
 
 The lifecycle is three commands:
 
@@ -106,8 +106,8 @@ default = true
 | Key | Meaning |
 |-----|---------|
 | `name` | How you refer to it: `--remote ghcr`. |
-| `type` | `oci`. The only type today; defaults to `oci` when omitted. |
-| `ref` | Registry base path. The repository is `<ref>/<project_id>/<database_id>`. |
+| `type` | `oci` (the default), `gcs` or `s3`. See [buckets](#bucket-remotes). |
+| `ref` | Registry base path, or `gs://`/`s3://` bucket URL. The repository is `<ref>/<project_id>/<database_id>`. |
 | `token_env` | Name of an environment variable holding a bearer token. Optional. |
 | `default` | Use this remote when `--remote` is omitted. |
 
@@ -155,6 +155,36 @@ token_env = "GHCR_TOKEN"
 ```
 
 dryrun reads the token from `$GHCR_TOKEN` at push and pull time, so it never appears in the config file. A `token_env` that names an unset variable is an error, not a silent fall back to anonymous access.
+
+### Bucket remotes
+
+Pull-only. Same layout as `--to-path`: `<prefix>/<project_id>/<database_id>/<ts>-<hash>.json.zst`.
+
+```sh
+dryrun snapshot push --to-path /data/bundles
+gcloud storage rsync -r /data/bundles gs://bucket-with-the-snapshots   # s3: aws s3 sync; not cp -r, it nests a level deeper
+dryrun snapshot pull --from-path gs://bucket-with-the-snapshots        # or through a remote:
+```
+
+```toml
+[[remote]]
+name = "myapp-prod-snapshots"
+type = "gcs"   # or "s3"
+ref = "gs://bucket-with-the-snapshots/"
+```
+
+| Type | Credentials | Needs |
+|------|-------------|-------|
+| `gcs` | ADC, then `gcloud auth print-access-token` | `roles/storage.objectViewer` |
+| `s3` | AWS chain: `AWS_PROFILE`, `~/.aws`, SSO, instance role | `s3:ListBucket`, `s3:GetObject` |
+
+`token_env` and `auth` are refused. s3-only keys, no `remote add` flags:
+
+| Key | Meaning |
+|-----|---------|
+| `region` | Default `AWS_REGION` or the AWS profile's; `auto` for R2. |
+| `endpoint` | `https://host[:port]` (R2, Ceph). |
+| `path_style` | `true` for most self-hosted endpoints. |
 
 ### Per-profile remote and stream
 
