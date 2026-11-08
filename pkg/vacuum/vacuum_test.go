@@ -542,3 +542,30 @@ func TestFreshGUCs_FallsBackToSchema(t *testing.T) {
 		}
 	}
 }
+
+// autovacuum=off cluster-wide: the launcher doesn't run, so a table-level
+// autovacuum_enabled=true must not report the table as vacuumed.
+func TestAnalyzeVacuumHealth_ClusterAutovacuumOffBeatsTableReloption(t *testing.T) {
+	tests := []struct {
+		name       string
+		reloptions []string
+	}{
+		{"no reloption", nil},
+		{"explicit true", []string{"autovacuum_enabled=true"}},
+		{"explicit on", []string{"autovacuum_enabled=on"}},
+		{"unparseable", []string{"autovacuum_enabled=maybe"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			a := vacuumFixture("cluster_off", 50_000, 10000, tc.reloptions)
+			a.Schema.GUCs = []snapshot.GucSetting{{Name: "autovacuum", Setting: "off"}}
+			vh := AnalyzeVacuumHealth(a)[0]
+			if vh.AutovacuumEnabled {
+				t.Error("cluster autovacuum=off, table must not be reported enabled")
+			}
+			if findingFor([]VacuumHealth{vh}, CodeAutovacuumDisabled) == nil {
+				t.Error("expected a disabled-autovacuum finding")
+			}
+		})
+	}
+}

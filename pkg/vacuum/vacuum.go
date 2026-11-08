@@ -295,8 +295,9 @@ func analyzeTable(a *snapshot.AnnotatedSchema, t *snapshot.Table, defaults Autov
 		// An unparseable value (never valid DDL, but pg_class.reloptions is trusted
 		// verbatim) falls back to the cluster default rather than asserting disabled —
 		// same asserting-direction rule the cloud's reloptionBool documents for itself.
+		// A table-level true can't re-enable autovacuum when the cluster GUC is off.
 		if enabled, valid := parsePGBool(v); valid {
-			avEnabled = enabled
+			avEnabled = defaults.Enabled && enabled
 		}
 	}
 
