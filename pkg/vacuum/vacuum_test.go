@@ -569,3 +569,80 @@ func TestAnalyzeVacuumHealth_ClusterAutovacuumOffBeatsTableReloption(t *testing.
 		})
 	}
 }
+
+// reltuples = -1 means never vacuumed/analyzed. The size is unknown, so the 10k floor
+// must not hide the findings that do not depend on it.
+func TestAnalyzeVacuumHealth_UnknownSizeSurfacesSizeIndependentFindings(t *testing.T) {
+	t.Run("autovacuum disabled", func(t *testing.T) {
+		a := vacuumFixture("never_analyzed", -1, 0, []string{"autovacuum_enabled=false"})
+		got := AnalyzeVacuumHealth(a)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 result for unknown-size table, got %d", len(got))
+		}
+		if findingFor(got, CodeAutovacuumDisabled) == nil {
+			t.Error("expected a disabled-autovacuum finding")
+		}
+	})
+	t.Run("wraparound", func(t *testing.T) {
+		a := vacuumFixture("never_analyzed", -1, 0, nil)
+		a.Planner.DatabaseXid = 1_710_000_000
+		a.Planner.Tables[0].Sizing.RelfrozenXid = 10_000_000
+		got := AnalyzeVacuumHealth(a)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 result for unknown-size table, got %d", len(got))
+		}
+		if findingFor(got, CodeFreezeAgeHigh) == nil {
+			t.Error("expected a freeze-age finding")
+		}
+	})
+}
+
+// Row-count derived values are meaningless at -1: no trigger points, no
+// size-based findings, however many dead tuples the activity row reports.
+func TestAnalyzeVacuumHealth_UnknownSizeNoRowCountFindings(t *testing.T) {
+	a := vacuumFixture("never_analyzed", -1, 5_000_000, nil)
+	got := AnalyzeVacuumHealth(a)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 result for unknown-size table, got %d", len(got))
+	}
+	vh := got[0]
+	if vh.Reltuples != -1 {
+		t.Errorf("Reltuples=%g want -1 (unknown stays visible)", vh.Reltuples)
+	}
+	if vh.VacuumTriggerAt != 0 || vh.AnalyzeTriggerAt != 0 || vh.VacuumProgress != 0 || vh.AnalyzeProgress != 0 {
+		t.Errorf("trigger/progress must stay 0 for unknown size, got %+v", vh)
+	}
+	for _, code := range []VacuumCode{CodeDefaultKnobsLargeTable, CodeHighDeadTupleRatio, CodeVacuumThresholdHigh} {
+		if findingFor(got, code) != nil {
+			t.Errorf("unexpected row-count finding %s for unknown size", code)
+		}
+	}
+}
+
+// A known small table stays below the floor even with autovacuum disabled; only unknown size passes.
+func TestAnalyzeVacuumHealth_KnownSmallTableStillSkipped(t *testing.T) {
+	a := vacuumFixture("small", 5_000, 100, []string{"autovacuum_enabled=false"})
+	if got := AnalyzeVacuumHealth(a); len(got) != 0 {
+		t.Errorf("expected 0 results for known small table, got %d", len(got))
+	}
+}
+
+// 0 is a known empty table (the < 0 vs <= 0 boundary): still below the floor.
+func TestAnalyzeVacuumHealth_ZeroRowsStillSkipped(t *testing.T) {
+	a := vacuumFixture("empty", 0, 0, []string{"autovacuum_enabled=false"})
+	if got := AnalyzeVacuumHealth(a); len(got) != 0 {
+		t.Errorf("expected 0 results for reltuples=0, got %d", len(got))
+	}
+}
+
+// describe_table goes through the single-table path; unknown size must reach it too.
+func TestAnalyzeVacuumHealthFor_UnknownSize(t *testing.T) {
+	a := vacuumFixture("never_analyzed", -1, 0, []string{"autovacuum_enabled=false"})
+	vh := AnalyzeVacuumHealthFor(a, snapshot.QualifiedName{Schema: "public", Name: "never_analyzed"})
+	if vh == nil {
+		t.Fatal("expected a result for unknown-size table")
+	}
+	if vh.Reltuples != -1 || vh.VacuumTriggerAt != 0 {
+		t.Errorf("Reltuples=%g VacuumTriggerAt=%g want -1 and 0", vh.Reltuples, vh.VacuumTriggerAt)
+	}
+}

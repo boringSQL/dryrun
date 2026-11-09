@@ -125,9 +125,9 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 	// not in the summary default: it is a derived view, and the default response
 	// is already the widest in the product
 	if detail == "stats" || detail == "full" || wantsField(fields, "vacuum") {
-		// detect reports offenders only, so this is the only home for the
-		// trigger points, effective knobs and last-vacuum times of a table with
-		// no concern. Nil below the analyzer's 10k-row floor.
+		// detect reports offenders only; this holds the quiet table's trigger
+		// points, knobs and last-vacuum times. Nil below the 10k-row floor
+		// unless the size is unknown (reltuples -1).
 		if vh := vacuum.AnalyzeVacuumHealthFor(a, qual); vh != nil {
 			result["vacuum"] = vh
 		}

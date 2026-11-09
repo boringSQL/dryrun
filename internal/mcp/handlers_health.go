@@ -316,10 +316,9 @@ func cappedKindResult[T any](s *Server, kind string, entries []T, max, offset in
 	return jsonResult(wrapper)
 }
 
-// AnalyzeVacuumHealth returns a row per large table whether or not it found
-// anything. detect reports offenders, so every path here filters to rows that
-// carry a finding; the per-table picture (trigger points, effective knobs, last
-// vacuum times) is describe_table's question, not a detection.
+// AnalyzeVacuumHealth returns a row per table past the row floor whether or not it
+// found anything. detect reports offenders only; the per-table picture (trigger
+// points, effective knobs, last vacuum times) is describe_table's question.
 func withFindings(entries []vacuum.VacuumHealth) []vacuum.VacuumHealth {
 	kept := make([]vacuum.VacuumHealth, 0, len(entries))
 	for _, e := range entries {

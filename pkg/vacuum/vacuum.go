@@ -245,7 +245,10 @@ func analyzeTable(a *snapshot.AnnotatedSchema, t *snapshot.Table, defaults Autov
 	sizing := a.SizingFor(qual)
 	bloat := a.TableBloatFor(qual)
 	activity := a.PrimaryActivity(qual)
-	if sizing == nil || sizing.Reltuples < 10_000 {
+	// reltuples < 0 means never analyzed: size unknown, so it passes the floor.
+	// Row-count findings stay quiet; autovacuum-off and freeze-age ones still fire.
+	unknownSize := sizing != nil && sizing.Reltuples < 0
+	if sizing == nil || (!unknownSize && sizing.Reltuples < 10_000) {
 		return VacuumHealth{}, false
 	}
 	reltuples := sizing.Reltuples
@@ -301,8 +304,11 @@ func analyzeTable(a *snapshot.AnnotatedSchema, t *snapshot.Table, defaults Autov
 		}
 	}
 
-	triggerAt := float64(threshold) + scaleFactor*reltuples
-	analyzeTrigger := float64(analyzeThreshold) + analyzeScaleFactor*reltuples
+	var triggerAt, analyzeTrigger float64 // 0 when size is unknown; threshold + sf*(-1) is meaningless
+	if !unknownSize {
+		triggerAt = float64(threshold) + scaleFactor*reltuples
+		analyzeTrigger = float64(analyzeThreshold) + analyzeScaleFactor*reltuples
+	}
 	var progress float64
 	if triggerAt > 0 {
 		progress = float64(deadTuples) / triggerAt

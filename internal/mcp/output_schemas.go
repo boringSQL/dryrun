@@ -133,7 +133,7 @@ var (
 
 	describeTableOutputSchema = json.RawMessage(`{
 		"type": "object",
-		"description": "Table detail. Sections vary with detail= and fields=: columns, indexes, constraints, stats, bloat, column_profiles, node_breakdown, partition_summary, partition_child_sizing. detail=stats and detail=full add vacuum (dead tuples, trigger points, effective autovacuum knobs, last vacuum/analyze) for a table over 10k rows. detail=relations returns schema, name and relations only -- outgoing and incoming foreign keys, each with a pasteable JOIN and its ON DELETE/ON UPDATE action. fields=[ddl] adds ddl (the CREATE TABLE and what finishes it), ddl_omitted (what the snapshot cannot reproduce) and, where the render failed, ddl_error.",
+		"description": "Table detail. Sections vary with detail= and fields=: columns, indexes, constraints, stats, bloat, column_profiles, node_breakdown, partition_summary, partition_child_sizing. detail=stats and detail=full add vacuum (dead tuples, trigger points, effective autovacuum knobs, last vacuum/analyze) for a table over 10k rows, or one of unknown size (reltuples -1; trigger points and progress are 0). detail=relations returns schema, name and relations only -- outgoing and incoming foreign keys, each with a pasteable JOIN and its ON DELETE/ON UPDATE action. fields=[ddl] adds ddl (the CREATE TABLE and what finishes it), ddl_omitted (what the snapshot cannot reproduce) and, where the render failed, ddl_error.",
 		"properties": {
 			"schema": {"type": "string"},
 			"name": {"type": "string"},
