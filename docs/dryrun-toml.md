@@ -271,6 +271,17 @@ timezone = "Asia/Riyadh"    # IANA name, default UTC
 
 The block is project-wide, not per profile or node. It is read when `snapshot diff` or `mcp-serve` starts (restart the server after editing), and applies at diff time, so older snapshots are judged by the current calendar. A bad day or zone fails the command, including `mcp-serve`, which then does not start at all. A `dryrun.toml` that does not parse is skipped by discovery (a parent directory's file may be used instead), so pass `--config` when in doubt.
 
+## Snapshot freshness
+
+```toml
+[history]
+stale_after = "72h"
+```
+
+Commands that read a stored snapshot (`lint`, `check`, `stats apply`) warn when its newest data is older than this. The default is 72 hours, long enough to cover a weekend without a capture. Set it to `"0"` to silence the warning, or to any duration (`48h`, `3d`, `2w`). `DRYRUN_NO_STALE_WARNING=1` silences it for one environment without touching the config.
+
+Age is the newest of the schema payload's capture time, the newest row per stream, and the last successful local capture attempt. That means an unchanged schema that is still being captured does not warn, and neither does a snapshot refreshed by `snapshot pull` with the same content hash. A single fresh replica hides stagnation elsewhere, so use `snapshot nodes` when per-node staleness matters.
+
 ## Conventions
 
 These control what `dryrun lint` checks. Skip the whole section to use the defaults.
@@ -427,6 +438,9 @@ database_id = "staging"
 name = "ghcr"
 ref = "ghcr.io/myorg/dryrun"
 default = true
+
+[history]
+stale_after = "72h"
 
 [conventions]
 table_name = "snake_singular"

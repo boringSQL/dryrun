@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,7 +52,7 @@ id = "demo"
 	withCWD(t, checkout)
 	t.Setenv(history.HistoryDBEnv, shared)
 
-	snap, err := loadSavedSchema()
+	snap, err := loadSavedSchema(io.Discard)
 	if err != nil {
 		t.Fatalf("loadSavedSchema: %v", err)
 	}
@@ -113,7 +114,7 @@ id = "demo"
 	withCWD(t, dir)
 	t.Setenv(history.HistoryDBEnv, envDB)
 
-	a, err := loadAnnotatedForCheck(context.Background(), flagDB)
+	a, err := loadAnnotatedForCheck(context.Background(), flagDB, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +171,7 @@ id = "demo"
 	withCWD(t, dir)
 	t.Setenv(history.HistoryDBEnv, shared)
 
-	_, err := loadSavedSchema()
+	_, err := loadSavedSchema(io.Discard)
 	if err == nil {
 		t.Fatal("expected a missing-snapshot error")
 	}

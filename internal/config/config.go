@@ -62,6 +62,7 @@ type (
 		AutoPrune   bool   `toml:"auto_prune"`
 		KeepSchemas *int   `toml:"keep_schemas"`
 		KeepPlanner *int   `toml:"keep_planner"`
+		StaleAfter  string `toml:"stale_after"`
 	}
 
 	// [[remote]] block; Ref is a registry base or a gs:// / s3:// bucket URL

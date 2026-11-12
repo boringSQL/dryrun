@@ -16,3 +16,7 @@ min_severity = "warning"
 
 [conventions.disabled_rules]
 rules = ["naming/fk_pattern", "naming/index_pattern", "constraints/unnamed"]
+
+[history]
+# frozen fixture
+stale_after = "0"

@@ -63,7 +63,7 @@ func checkMigrationCmd(historyDB *string) *cobra.Command {
 				return toolError(cmd, fmt.Errorf("--direction must be 'up' or 'down', got %q", want))
 			}
 
-			annotated, err := loadAnnotatedForCheck(cmd.Context(), *historyDB)
+			annotated, err := loadAnnotatedForCheck(cmd.Context(), *historyDB, cmd.ErrOrStderr())
 			if err != nil {
 				return toolError(cmd, err)
 			}
@@ -131,7 +131,7 @@ func checkQueryCmd(historyDB *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			annotated, err := loadAnnotatedForCheck(cmd.Context(), *historyDB)
+			annotated, err := loadAnnotatedForCheck(cmd.Context(), *historyDB, cmd.ErrOrStderr())
 			if err != nil {
 				return toolError(cmd, err)
 			}
@@ -197,7 +197,7 @@ func migrationExitCode(r query.MigrationReport) int {
 
 // loadAnnotatedForCheck reads the newest snapshot from history.db. Offline only:
 // the CLI never introspects a live database.
-func loadAnnotatedForCheck(ctx context.Context, historyDB string) (*schema.AnnotatedSchema, error) {
+func loadAnnotatedForCheck(ctx context.Context, historyDB string, w io.Writer) (*schema.AnnotatedSchema, error) {
 	var (
 		store *history.Store
 		err   error
@@ -230,6 +230,9 @@ func loadAnnotatedForCheck(ctx context.Context, historyDB string) (*schema.Annot
 			return nil, fmt.Errorf("no schema snapshot in %s for project=%s database=%s: run 'dryrun init --db <url>' or 'dryrun snapshot pull --from-path <dir>' first", historyPathLabel(historyDB), key.ProjectID, key.DatabaseID)
 		}
 		return nil, fmt.Errorf("read %s: %w", historyPathLabel(historyDB), err)
+	}
+	if annotated.Schema != nil {
+		warnIfSnapshotStale(ctx, w, store, key, annotated.Schema.Timestamp)
 	}
 	return annotated, nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -205,7 +206,7 @@ func lintCmd() *cobra.Command {
 		Use:   "lint",
 		Short: "Run lint rules against schema",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			snap, err := loadSchemaForLint()
+			snap, err := loadSchemaForLint(cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -275,7 +276,7 @@ func driftCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// never loadSchemaForLint here: with --db set it would introspect the
 			// same connection `live` comes from, and drift would always be clean
-			saved, err := loadSavedSchema()
+			saved, err := loadSavedSchema(io.Discard)
 			if err != nil {
 				return fmt.Errorf("cannot load saved schema: %w", err)
 			}
@@ -429,9 +430,13 @@ func statsCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			annotated, err := store.GetAnnotated(cmd.Context(), resolveSnapshotKey(), history.NewRefLatest())
+			key := resolveSnapshotKey()
+			annotated, err := store.GetAnnotated(cmd.Context(), key, history.NewRefLatest())
 			if err != nil {
 				return fmt.Errorf("load annotated snapshot from history: %w", err)
+			}
+			if annotated.Schema != nil {
+				warnIfSnapshotStale(cmd.Context(), cmd.ErrOrStderr(), store, key, annotated.Schema.Timestamp)
 			}
 
 			if err := schema.CanInjectStats(annotated); err != nil {
@@ -630,7 +635,7 @@ func loadLintConfig() lint.Config {
 
 // loadSchemaForLint resolves the schema for lint: an explicit --db means "read
 // the live database", otherwise the newest snapshot in history.db.
-func loadSchemaForLint() (*schema.SchemaSnapshot, error) {
+func loadSchemaForLint(w io.Writer) (*schema.SchemaSnapshot, error) {
 	if flagDB != "" {
 		ctx, conn, err := connectDBProd()
 		if err != nil {
@@ -639,14 +644,14 @@ func loadSchemaForLint() (*schema.SchemaSnapshot, error) {
 		defer conn.Close()
 		return conn.Introspect(ctx)
 	}
-	return loadSavedSchema()
+	return loadSavedSchema(w)
 }
 
 // loadSavedSchema reads the newest schema snapshot from history.db. It never
 // falls back to a live connection: `drift` compares its result against the live
 // database, and sourcing both sides from one connection reports no drift by
 // construction.
-func loadSavedSchema() (*schema.SchemaSnapshot, error) {
+func loadSavedSchema(w io.Writer) (*schema.SchemaSnapshot, error) {
 	key := resolveSnapshotKey()
 
 	hist, err := openExistingHistoryStore()
@@ -657,6 +662,7 @@ func loadSavedSchema() (*schema.SchemaSnapshot, error) {
 		}
 		snap, gerr := hist.GetSchema(context.Background(), key, history.NewRefLatest())
 		if gerr == nil && snap != nil {
+			warnIfSnapshotStale(context.Background(), w, hist, key, snap.Timestamp)
 			return snap, nil
 		}
 		// an unreadable db must not read as an empty one

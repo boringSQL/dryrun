@@ -783,3 +783,31 @@ func TestRemoteBucketURL(t *testing.T) {
 		})
 	}
 }
+
+func TestParse_HistoryStaleAfter(t *testing.T) {
+	cfg, err := Parse(`
+[history]
+max_age = "30d"
+auto_prune = true
+stale_after = "3d"
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.History == nil || cfg.History.StaleAfter != "3d" {
+		t.Fatalf("stale_after = %+v, want 3d", cfg.History)
+	}
+	if cfg.History.MaxAge != "30d" || !cfg.History.AutoPrune {
+		t.Errorf("other [history] keys changed: %+v", cfg.History)
+	}
+}
+
+func TestParse_HistoryStaleAfterOmitted(t *testing.T) {
+	cfg, err := Parse("[history]\nmax_age = \"30d\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.History.StaleAfter != "" {
+		t.Errorf("stale_after = %q, want empty (default applies)", cfg.History.StaleAfter)
+	}
+}

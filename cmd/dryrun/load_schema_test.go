@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,7 @@ profile = "local"
 	seedHistorySchema(t, dir, history.SnapshotKey{ProjectID: "demo", DatabaseID: "demo"}, "t_from_history")
 	withCWD(t, dir)
 
-	snap, err := loadSchemaForLint()
+	snap, err := loadSchemaForLint(io.Discard)
 	if err != nil {
 		t.Fatalf("loadSchemaForLint: %v", err)
 	}
@@ -80,7 +81,7 @@ profile = "local"
 	}
 	withCWD(t, dir)
 
-	snap, err := loadSchemaForLint()
+	snap, err := loadSchemaForLint(io.Discard)
 	if err != nil {
 		t.Fatalf("loadSchemaForLint: %v", err)
 	}
@@ -102,7 +103,7 @@ id = "demo"
 	// a URL that would fail loudly if anything tried to dial it
 	flagDB = "postgres://drift-must-not-connect@127.0.0.1:1/x"
 
-	_, err := loadSavedSchema()
+	_, err := loadSavedSchema(io.Discard)
 	if err == nil {
 		t.Fatal("expected an error; loadSavedSchema must not fall back to --db")
 	}
@@ -123,7 +124,7 @@ id = "demo"
 `)
 	withCWD(t, dir)
 
-	_, err := loadSchemaForLint()
+	_, err := loadSchemaForLint(io.Discard)
 	if err == nil {
 		t.Fatal("expected an error with no snapshot and no --db")
 	}
@@ -133,4 +134,3 @@ id = "demo"
 		}
 	}
 }
-
