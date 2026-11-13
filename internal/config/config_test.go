@@ -65,6 +65,33 @@ func TestParseEmptyConfig(t *testing.T) {
 	}
 }
 
+func TestParse_Update(t *testing.T) {
+	yes, no := true, false
+	tests := []struct {
+		name string
+		toml string
+		want *bool
+	}{
+		{"absent", "", nil},
+		{"enabled", "update = true\n", &yes},
+		{"disabled", "update = false\n", &no},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse(tc.toml)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (cfg.Update == nil) != (tc.want == nil) {
+				t.Fatalf("update = %v, want %v", cfg.Update, tc.want)
+			}
+			if tc.want != nil && *cfg.Update != *tc.want {
+				t.Errorf("update = %v, want %v", *cfg.Update, *tc.want)
+			}
+		})
+	}
+}
+
 func TestParseInvalidConfig(t *testing.T) {
 	_, err := Parse("not valid toml [[[")
 	if err == nil {

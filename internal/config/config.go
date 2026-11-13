@@ -26,6 +26,7 @@ type (
 		QueryStats   *QueryStatsConfig        `toml:"query_stats"`
 		Calendar     *CalendarConfig          `toml:"calendar"`
 		Nodes        []NodeConfig             `toml:"node"`
+		Update       *bool                    `toml:"update"`
 	}
 
 	// [[node]] block; one physical node (or one read pool) and its cadence.

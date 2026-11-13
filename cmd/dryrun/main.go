@@ -58,12 +58,13 @@ func main() {
 	pf.IntVar(&flagQueryStatsLimit, "query-stats-limit", 0, "max pg_stat_statements rows to capture (default: 500, or [query_stats].row_cap in dryrun.toml)")
 	pf.BoolVar(&flagDebug, "debug", os.Getenv("DRYRUN_DEBUG") != "", "log debug detail, including per-phase capture timings [env: DRYRUN_DEBUG]")
 
-	root.PersistentPreRun = func(*cobra.Command, []string) {
+	root.PersistentPreRun = func(cmd *cobra.Command, _ []string) {
 		level := slog.LevelInfo
 		if flagDebug {
 			level = slog.LevelDebug
 		}
 		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+		maybeUpdateNotice(cmd)
 	}
 
 	root.AddCommand(
