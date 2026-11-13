@@ -681,3 +681,90 @@ func TestOrphanStatsDoNotVetoTheNewestSchema(t *testing.T) {
 		t.Errorf("latest = %s, want hash-new: orphan stats are not a revert", got.ContentHash)
 	}
 }
+
+// A stateless writer leaves one bundle per run, so an unchanged schema has a
+// twin per capture. A fresh reader must date the version by its first twin, or
+// the earlier captures come out orphaned and Lived shrinks to the last run.
+func TestFreshPullDatesAVersionByItsFirstTwin(t *testing.T) {
+	for name, scope := range map[string]pullScope{"latest": {latest: true}, "full": {}} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			k := syncKey("acme", "primary")
+			t0 := baseT0()
+			dir := newRemote(t)
+			reader := openPoolStore(t)
+
+			type run struct {
+				hash   string
+				at     time.Time
+				tables []string
+			}
+			runs := []run{
+				{"hash-a", t0, nil},
+				{"hash-a", t0.Add(time.Hour), nil},
+				{"hash-a", t0.Add(2 * time.Hour), []string{"ev_2027"}},
+			}
+			if !scope.latest {
+				runs = append(runs, run{"hash-b", t0.Add(3 * time.Hour), []string{"added"}})
+			}
+			for i, r := range runs {
+				publishSchema(t, dir, k, schemaWithTables(r.hash, r.at, r.tables...))
+				act := syncTestActivity(r.hash, fmt.Sprintf("act-%d", i), "primary", r.at.Add(time.Minute), false)
+				if _, err := reopenRemote(t, dir).Put(ctx, k, history.WrapActivity(act)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pullOnce(t, reopenRemote(t, dir), reader, k, scope)
+
+			schemas := schemaRows(t, reader, k)
+			a := schemas[len(schemas)-1]
+			if a.ContentHash != "hash-a" || !a.Timestamp.Equal(t0.Truncate(time.Second)) {
+				t.Errorf("hash-a dated %s, want its first twin's %s", a.Timestamp, t0.Truncate(time.Second))
+			}
+			got, err := reader.GetSchemaByExactHash(ctx, k, "hash-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasTable(got, "ev_2027") || !got.Timestamp.Equal(t0.Add(2*time.Hour)) {
+				t.Errorf("hash-a payload from %s, want the newest twin's", got.Timestamp)
+			}
+
+			stats, err := reader.List(ctx, k, history.ActivityKind(""), history.TimeRange{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, orphans := assignVersions(schemas, stats); len(orphans) != 0 {
+				t.Errorf("%d of %d captures orphaned", len(orphans), len(stats))
+			}
+		})
+	}
+}
+
+// A bundle store keeps one bundle per hash; feeding it the first twin would
+// date a reverted schema before the version it replaced.
+func TestPushAfterARevertKeepsTheRevertedSchemaNewest(t *testing.T) {
+	ctx := context.Background()
+	k := syncKey("acme", "primary")
+	t0 := baseT0()
+	writer := openPoolStore(t)
+	remote := reopenRemote(t, newRemote(t))
+
+	for _, snap := range []*schema.SchemaSnapshot{
+		schemaWithTables("hash-a", t0),
+		schemaWithTables("hash-b", t0.Add(time.Hour), "added"),
+		schemaWithTables("hash-a", t0.Add(2*time.Hour)),
+	} {
+		if _, err := writer.PutSchema(ctx, k, snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pullOnce(t, writer, remote, k, pullScope{})
+
+	latest, err := remote.Get(ctx, k, history.SchemaKind(), history.NewRefLatest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := latest.AsSchema().ContentHash; got != "hash-a" {
+		t.Errorf("remote's newest schema = %s, want hash-a", got)
+	}
+}

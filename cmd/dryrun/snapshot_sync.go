@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -420,7 +421,7 @@ func selectSnapshots(ctx context.Context, src history.SnapshotStore, key history
 	default:
 		// full mode also keeps schemas captured within the window itself
 		// (e.g. a schema-only take), unioned with the referenced ones.
-		schema = unionByContentHash(schema, windowed(allSchema, scope.rng))
+		schema = unionSummaries(schema, windowed(allSchema, scope.rng))
 	}
 
 	return map[history.SnapshotKindTag][]history.SnapshotSummary{
@@ -472,7 +473,7 @@ func withNewestSchema(selected, allSchema []history.SnapshotSummary, stats ...[]
 			}
 		}
 	}
-	return unionByContentHash(selected, newest)
+	return unionSummaries(selected, newest)
 }
 
 // A pool label's newest row is one server's; the others travel with it so a
@@ -529,15 +530,22 @@ func windowed(list []history.SnapshotSummary, rng history.TimeRange) []history.S
 	return out
 }
 
-func unionByContentHash(a, b []history.SnapshotSummary) []history.SnapshotSummary {
-	seen := make(map[string]struct{}, len(a)+len(b))
+// Keyed by hash and time, not hash alone: content twins are separate captures,
+// and history.db dates a version by the first one.
+func unionSummaries(a, b []history.SnapshotSummary) []history.SnapshotSummary {
+	type at struct {
+		hash string
+		ts   time.Time
+	}
+	seen := make(map[at]struct{}, len(a)+len(b))
 	out := make([]history.SnapshotSummary, 0, len(a)+len(b))
 	for _, list := range [][]history.SnapshotSummary{a, b} {
 		for _, s := range list {
-			if _, ok := seen[s.ContentHash]; ok {
+			k := at{s.ContentHash, s.Timestamp.UTC()}
+			if _, ok := seen[k]; ok {
 				continue
 			}
-			seen[s.ContentHash] = struct{}{}
+			seen[k] = struct{}{}
 			out = append(out, s)
 		}
 	}
@@ -597,7 +605,7 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 		}
 		// summary carries the resolved kind (with NodeLabel for activity/query)
 		// so Get works the same for all four streams.
-		stored, err := src.Get(ctx, key, s.Kind, history.NewRefHash(s.ContentHash))
+		stored, err := getForSync(ctx, src, dst, key, s)
 		if err != nil {
 			return counts, err
 		}
@@ -613,6 +621,23 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 		counts.Copied++
 	}
 	return counts, nil
+}
+
+// A hash resolves to its newest content twin. history.db dates a version by the
+// twin it first sees and refreshes the payload from later ones, so it gets each
+// twin in turn; a bundle store keeps one bundle per hash and wants the newest.
+func getForSync(ctx context.Context, src, dst history.SnapshotStore, key history.SnapshotKey, s history.SnapshotSummary) (history.StoredSnapshot, error) {
+	if _, toHistoryDB := dst.(*history.Store); toHistoryDB && s.Kind.Tag == history.KindSchema {
+		stored, err := src.Get(ctx, key, s.Kind, history.SnapshotRef{Kind: history.RefAt, At: s.Timestamp})
+		if err != nil && !errors.Is(err, history.ErrSnapshotNotFound) {
+			return history.StoredSnapshot{}, err
+		}
+		// at-or-before can land on another hash captured in the same second
+		if err == nil && stored.AsSchema().ContentHash == s.ContentHash {
+			return stored, nil
+		}
+	}
+	return src.Get(ctx, key, s.Kind, history.NewRefHash(s.ContentHash))
 }
 
 // Exit stays 0: a source with no data yet isn't a failed pull, and an absent
