@@ -91,12 +91,12 @@ func refTag(schemaHash string) string {
 	return "ref-" + schemaHash
 }
 
-func (o *ociBackend) list(ctx context.Context, key SnapshotKey) ([]*Bundle, error) {
+func (o *ociBackend) list(ctx context.Context, key SnapshotKey) ([]listedBundle, error) {
 	repo, err := o.repo(key)
 	if err != nil {
 		return nil, err
 	}
-	var items []*Bundle
+	var items []listedBundle
 	err = repo.Tags(ctx, "", func(tags []string) error {
 		for _, t := range tags {
 			if _, _, ok := parseVersionTag(t); !ok {
@@ -109,11 +109,17 @@ func (o *ociBackend) list(ctx context.Context, key SnapshotKey) ([]*Bundle, erro
 			if !ok {
 				continue
 			}
-			b, err := fetchBundle(ctx, repo, desc)
+			raw, err := fetchBundleRaw(ctx, repo, desc)
 			if err != nil {
 				return err
 			}
-			items = append(items, b)
+			b, err := decodeLeanBundle(raw)
+			if err != nil {
+				return fmt.Errorf("oci store: %s: %w", t, err)
+			}
+			items = append(items, listedBundle{b: b, full: func(context.Context) (*Bundle, error) {
+				return DecodeBundle(raw)
+			}})
 		}
 		return nil
 	})
@@ -125,10 +131,11 @@ func (o *ociBackend) list(ctx context.Context, key SnapshotKey) ([]*Bundle, erro
 		return nil, err
 	}
 	sort.SliceStable(items, func(i, j int) bool {
-		if !items[i].Schema.Timestamp.Equal(items[j].Schema.Timestamp) {
-			return items[i].Schema.Timestamp.After(items[j].Schema.Timestamp)
+		a, b := items[i].b.Schema, items[j].b.Schema
+		if !a.Timestamp.Equal(b.Timestamp) {
+			return a.Timestamp.After(b.Timestamp)
 		}
-		return items[i].Schema.ContentHash < items[j].Schema.ContentHash
+		return a.ContentHash < b.ContentHash
 	})
 	return items, nil
 }
@@ -261,6 +268,14 @@ func resolveTag(ctx context.Context, repo *remote.Repository, tag string) (ocisp
 }
 
 func fetchBundle(ctx context.Context, repo *remote.Repository, manifest ocispec.Descriptor) (*Bundle, error) {
+	raw, err := fetchBundleRaw(ctx, repo, manifest)
+	if err != nil {
+		return nil, err
+	}
+	return DecodeBundle(raw)
+}
+
+func fetchBundleRaw(ctx context.Context, repo *remote.Repository, manifest ocispec.Descriptor) ([]byte, error) {
 	mr, err := repo.Fetch(ctx, manifest)
 	if err != nil {
 		return nil, err
@@ -282,11 +297,7 @@ func fetchBundle(ctx context.Context, repo *remote.Repository, manifest ocispec.
 		return nil, err
 	}
 	defer lr.Close()
-	raw, err := io.ReadAll(lr)
-	if err != nil {
-		return nil, err
-	}
-	return DecodeBundle(raw)
+	return io.ReadAll(lr)
 }
 
 // inverse of versionTag; ref-* and other tags fail the time parse and are skipped

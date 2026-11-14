@@ -27,19 +27,26 @@ func NewFilesystemStore(root string) (SnapshotStore, error) {
 	return &bundleStore{backend: &fsBackend{root: root}}, nil
 }
 
-func (f *fsBackend) list(_ context.Context, key SnapshotKey) ([]*Bundle, error) {
+func (f *fsBackend) list(_ context.Context, key SnapshotKey) ([]listedBundle, error) {
 	dir := BundleDir(f.root, key)
 	entries, err := readBundleEntries(dir)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*Bundle, 0, len(entries))
+	out := make([]listedBundle, 0, len(entries))
 	for _, e := range entries {
-		b, err := readBundle(filepath.Join(dir, e.name))
+		path := filepath.Join(dir, e.name)
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, b)
+		b, err := decodeLeanBundle(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		out = append(out, listedBundle{b: b, full: func(context.Context) (*Bundle, error) {
+			return readBundle(path)
+		}})
 	}
 	return out, nil
 }

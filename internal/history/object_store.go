@@ -130,31 +130,40 @@ func (o *objectBackend) entries(ctx context.Context, key SnapshotKey) ([]bundleE
 	return out, nil
 }
 
-func (o *objectBackend) list(ctx context.Context, key SnapshotKey) ([]*Bundle, error) {
+func (o *objectBackend) list(ctx context.Context, key SnapshotKey) ([]listedBundle, error) {
 	entries, err := o.entries(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	got := make([]*Bundle, len(entries))
+	got := make([]listedBundle, len(entries))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(objectFetchConcurrency)
 	for i, e := range entries {
 		g.Go(func() error {
-			b, err := o.fetch(gctx, e.name)
+			raw, err := o.reader.get(gctx, e.name)
 			if errors.Is(err, errObjectNotFound) {
 				return nil // expired by a lifecycle rule between list and get
 			}
-			got[i] = b
-			return err
+			if err != nil {
+				return err
+			}
+			b, err := decodeLeanBundle(raw)
+			if err != nil {
+				return fmt.Errorf("%s/%s: %w", o.base, e.name, err)
+			}
+			got[i] = listedBundle{b: b, full: func(context.Context) (*Bundle, error) {
+				return o.decode(e.name, raw)
+			}}
+			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
 	out := got[:0]
-	for _, b := range got {
-		if b != nil {
-			out = append(out, b)
+	for _, lb := range got {
+		if lb.b != nil {
+			out = append(out, lb)
 		}
 	}
 	return out, nil
@@ -225,6 +234,10 @@ func (o *objectBackend) fetch(ctx context.Context, name string) (*Bundle, error)
 	if err != nil {
 		return nil, err
 	}
+	return o.decode(name, raw)
+}
+
+func (o *objectBackend) decode(name string, raw []byte) (*Bundle, error) {
 	b, err := DecodeBundle(raw)
 	if err != nil {
 		return nil, fmt.Errorf("%s/%s: %w", o.base, name, err)

@@ -14,14 +14,19 @@ import (
 // bundleBackend is the transport seam under bundleStore. A backend only reads
 // and writes bundles; dedup, orphan detection and selection live above it.
 type bundleBackend interface {
-	// list returns every versioned bundle for key, newest first.
-	list(ctx context.Context, key SnapshotKey) ([]*Bundle, error)
+	// list returns every versioned bundle for key, newest first, decoded lean.
+	list(ctx context.Context, key SnapshotKey) ([]listedBundle, error)
 	// load returns the bundle bound to schemaRef, or found=false if none.
 	load(ctx context.Context, key SnapshotKey, schemaRef string) (*Bundle, bool, error)
 	// save persists b under its schema's version, creating or replacing.
 	save(ctx context.Context, key SnapshotKey, b *Bundle) error
 	// listKeys returns every key holding at least one bundle.
 	listKeys(ctx context.Context) ([]SnapshotKey, error)
+}
+
+type listedBundle struct {
+	b    *Bundle
+	full func(context.Context) (*Bundle, error)
 }
 
 // bundleStore is the backend-independent half of every SnapshotStore: the four
@@ -32,7 +37,13 @@ type bundleStore struct {
 	// cache of backend.list per key; saves drop it. Cached bundles are shared,
 	// so callers must not mutate what Get/List hand out.
 	cacheMu sync.Mutex
-	cache   map[SnapshotKey][]*Bundle
+	cache   map[SnapshotKey]*listing
+}
+
+type listing struct {
+	bundles            []*Bundle
+	full               map[*Bundle]func(context.Context) (*Bundle, error)
+	lastLean, lastFull *Bundle
 }
 
 var _ SnapshotStore = (*bundleStore)(nil)
@@ -99,21 +110,57 @@ func (s *bundleStore) save(ctx context.Context, key SnapshotKey, b *Bundle) erro
 }
 
 // bundles returns the cached backend.list for key, loading it once until the next save.
-func (s *bundleStore) bundles(ctx context.Context, key SnapshotKey) ([]*Bundle, error) {
+func (s *bundleStore) bundles(ctx context.Context, key SnapshotKey) (*listing, error) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
-	if b, ok := s.cache[key]; ok {
-		return b, nil
+	if l, ok := s.cache[key]; ok {
+		return l, nil
 	}
-	b, err := s.backend.list(ctx, key)
+	listed, err := s.backend.list(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	if s.cache == nil {
-		s.cache = map[SnapshotKey][]*Bundle{}
+	l := &listing{
+		bundles: make([]*Bundle, len(listed)),
+		full:    make(map[*Bundle]func(context.Context) (*Bundle, error), len(listed)),
 	}
-	s.cache[key] = b
+	for i, lb := range listed {
+		l.bundles[i] = lb.b
+		if lb.full != nil {
+			l.full[lb.b] = lb.full
+		}
+	}
+	if s.cache == nil {
+		s.cache = map[SnapshotKey]*listing{}
+	}
+	s.cache[key] = l
+	return l, nil
+}
+
+func (s *bundleStore) fullBundle(ctx context.Context, l *listing, lean *Bundle) (*Bundle, error) {
+	full, ok := l.full[lean]
+	if !ok {
+		return lean, nil
+	}
+	s.cacheMu.Lock()
+	if l.lastLean == lean {
+		b := l.lastFull
+		s.cacheMu.Unlock()
+		return b, nil
+	}
+	s.cacheMu.Unlock()
+	b, err := full(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.cacheMu.Lock()
+	l.lastLean, l.lastFull = lean, b
+	s.cacheMu.Unlock()
 	return b, nil
+}
+
+func bundleChanged(noun, hash string) error {
+	return fmt.Errorf("%w (%s hash %s: bundle changed since it was listed)", ErrSnapshotNotFound, noun, hash)
 }
 
 // merge loads the bundle bound to schemaRefHash, applies the change, and saves
@@ -174,48 +221,84 @@ func (s *bundleStore) putQueryStats(ctx context.Context, key SnapshotKey, q *sch
 }
 
 func (s *bundleStore) Get(ctx context.Context, key SnapshotKey, kind SnapshotKind, at SnapshotRef) (StoredSnapshot, error) {
-	bundles, err := s.bundles(ctx, key)
+	l, err := s.bundles(ctx, key)
 	if err != nil {
 		return StoredSnapshot{}, err
 	}
 
 	switch kind.Tag {
 	case KindSchema:
-		b, err := pickSchemaBundle(bundles, at)
+		b, err := pickSchemaBundle(l.bundles, at)
 		if err != nil {
 			return StoredSnapshot{}, err
 		}
 		return WrapSchema(b.Schema), nil
 	case KindPlanner:
-		b, err := pickPlannerBundle(bundles, at)
+		b, err := pickPlannerBundle(l.bundles, at)
 		if err != nil {
 			return StoredSnapshot{}, err
 		}
-		return WrapPlanner(b.Planner), nil
+		full, err := s.fullBundle(ctx, l, b)
+		if err != nil {
+			return StoredSnapshot{}, err
+		}
+		if full.Planner == nil || full.Planner.ContentHash != b.Planner.ContentHash {
+			return StoredSnapshot{}, bundleChanged("planner", b.Planner.ContentHash)
+		}
+		return WrapPlanner(full.Planner), nil
 	case KindActivity:
-		a, err := pickActivity(bundles, kind.NodeLabel, at)
+		_, a, err := pickActivity(l.bundles, kind.NodeLabel, at)
 		if err != nil {
 			return StoredSnapshot{}, err
 		}
 		return WrapActivity(a), nil
 	case KindQuery:
-		q, err := pickQueryStats(bundles, kind.NodeLabel, at)
+		b, q, err := pickQueryStats(l.bundles, kind.NodeLabel, at)
 		if err != nil {
 			return StoredSnapshot{}, err
 		}
-		return WrapQueryStats(q), nil
+		full, err := s.fullBundle(ctx, l, b)
+		if err != nil {
+			return StoredSnapshot{}, err
+		}
+		if full == b {
+			return WrapQueryStats(q), nil
+		}
+		fq, ok := findNodeRow(full.Query, full.QueryMembers, q.ContentHash,
+			func(q *schema.QueryStatsSnapshot) string { return q.ContentHash })
+		if !ok {
+			return StoredSnapshot{}, bundleChanged("query stats", q.ContentHash)
+		}
+		return WrapQueryStats(fq), nil
 	}
 	return StoredSnapshot{}, fmt.Errorf("unknown SnapshotKind tag: %d", kind.Tag)
 }
 
+func findNodeRow[T any](heads map[string]T, members map[string][]T, hash string, hashOf func(T) string) (T, bool) {
+	for _, v := range heads {
+		if hashOf(v) == hash {
+			return v, true
+		}
+	}
+	for _, rows := range members {
+		for _, v := range rows {
+			if hashOf(v) == hash {
+				return v, true
+			}
+		}
+	}
+	var zero T
+	return zero, false
+}
+
 func (s *bundleStore) List(ctx context.Context, key SnapshotKey, kind SnapshotKind, rng TimeRange) ([]SnapshotSummary, error) {
-	bundles, err := s.bundles(ctx, key)
+	l, err := s.bundles(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 
 	var out []SnapshotSummary
-	for _, b := range bundles {
+	for _, b := range l.bundles {
 		ss, err := bundleSummaries(b, kind, rng)
 		if err != nil {
 			return nil, err
@@ -242,11 +325,11 @@ func (s *bundleStore) Latest(ctx context.Context, key SnapshotKey, kind Snapshot
 }
 
 func (s *bundleStore) ListKinds(ctx context.Context, key SnapshotKey) ([]SnapshotKind, error) {
-	bundles, err := s.bundles(ctx, key)
+	l, err := s.bundles(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	return bundleKinds(bundles), nil
+	return bundleKinds(l.bundles), nil
 }
 
 func (s *bundleStore) ListKeys(ctx context.Context) ([]SnapshotKey, error) {
@@ -425,7 +508,7 @@ func pickPlannerBundle(bundles []*Bundle, at SnapshotRef) (*Bundle, error) {
 	})
 }
 
-func pickActivity(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schema.ActivityStatsSnapshot, error) {
+func pickActivity(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*Bundle, *schema.ActivityStatsSnapshot, error) {
 	return pickNode(bundles, nodeLabel, at, "activity",
 		func(b *Bundle) map[string]*schema.ActivityStatsSnapshot { return b.Activity },
 		func(b *Bundle) map[string][]*schema.ActivityStatsSnapshot { return b.ActivityMembers },
@@ -433,7 +516,7 @@ func pickActivity(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schema.
 		func(a *schema.ActivityStatsSnapshot) string { return a.ContentHash })
 }
 
-func pickQueryStats(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*schema.QueryStatsSnapshot, error) {
+func pickQueryStats(bundles []*Bundle, nodeLabel string, at SnapshotRef) (*Bundle, *schema.QueryStatsSnapshot, error) {
 	return pickNode(bundles, nodeLabel, at, "query stats",
 		func(b *Bundle) map[string]*schema.QueryStatsSnapshot { return b.Query },
 		func(b *Bundle) map[string][]*schema.QueryStatsSnapshot { return b.QueryMembers },
@@ -472,7 +555,7 @@ func pickBundle(bundles []*Bundle, at SnapshotRef, noun string, slot func(*Bundl
 // pickNode is pickBundle for the per-node maps (activity, query stats). With
 // an empty nodeLabel any node matches; map order then picks it, as before.
 func pickNode[T any](bundles []*Bundle, nodeLabel string, at SnapshotRef, noun string,
-	snaps func(*Bundle) map[string]T, members func(*Bundle) map[string][]T, tsOf func(T) time.Time, hashOf func(T) string) (T, error) {
+	snaps func(*Bundle) map[string]T, members func(*Bundle) map[string][]T, tsOf func(T) time.Time, hashOf func(T) string) (*Bundle, T, error) {
 
 	selectOne := func(b *Bundle) (T, bool) {
 		m := snaps(b)
@@ -494,7 +577,7 @@ func pickNode[T any](bundles []*Bundle, nodeLabel string, at SnapshotRef, noun s
 			if !ok || (at.Kind == RefAt && tsOf(v).After(at.At)) {
 				continue
 			}
-			return v, nil
+			return b, v, nil
 		}
 	case RefHash:
 		for _, b := range bundles {
@@ -503,7 +586,7 @@ func pickNode[T any](bundles []*Bundle, nodeLabel string, at SnapshotRef, noun s
 					continue
 				}
 				if hashOf(v) == at.Hash {
-					return v, nil
+					return b, v, nil
 				}
 			}
 			// only a hash reaches a member row: latest and at-or-before mean the label's newest
@@ -513,7 +596,7 @@ func pickNode[T any](bundles []*Bundle, nodeLabel string, at SnapshotRef, noun s
 				}
 				for _, v := range rows {
 					if hashOf(v) == at.Hash {
-						return v, nil
+						return b, v, nil
 					}
 				}
 			}
@@ -526,13 +609,13 @@ func pickNode[T any](bundles []*Bundle, nodeLabel string, at SnapshotRef, noun s
 				continue
 			}
 			if skip == 0 {
-				return v, nil
+				return b, v, nil
 			}
 			skip--
 		}
 	}
 	var zero T
-	return zero, refMiss(at, noun)
+	return nil, zero, refMiss(at, noun)
 }
 
 // refMiss formats the not-found error; noun is "" for schema, else the kind

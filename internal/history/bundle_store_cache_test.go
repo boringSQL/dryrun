@@ -16,7 +16,7 @@ type countingBackend struct {
 	saveErr      error
 }
 
-func (c *countingBackend) list(ctx context.Context, key SnapshotKey) ([]*Bundle, error) {
+func (c *countingBackend) list(ctx context.Context, key SnapshotKey) ([]listedBundle, error) {
 	c.lists++
 	if err := c.listErr; err != nil {
 		c.listErr = nil
