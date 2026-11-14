@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -735,5 +737,58 @@ func TestCheckDriftRefusesAnotherDatabase(t *testing.T) {
 	out := driftText(t, srv.driftAgainst(context.Background(), live))
 	if !strings.Contains(out, "not drift") {
 		t.Errorf("comparing prod history against a staging connection:\n%s", out)
+	}
+}
+
+// mcp-serve can start before the first pull; the docs promise the snapshot is
+// picked up on the next tool call, so the freshness tick has to reopen a db
+// that a pull created after startup. It must never create the file itself.
+func TestAdoptHistoryDatabaseCreatedAfterStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "history.db")
+	srv := NewOfflineServerAnnotated(nil, lint.DefaultConfig())
+	srv.SetSnapshotKey(testKey)
+	srv.SetUninitialized()
+	srv.SetHistoryPath(path)
+
+	for range 2 {
+		if _, err := srv.getSchema(); err == nil {
+			t.Fatal("served a schema before history.db existed")
+		}
+		expireFreshness(srv)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the server created %s while waiting: %v", filepath.Dir(path), err)
+	}
+
+	hist, err := history.Open(path)
+	if err != nil {
+		t.Fatalf("history.Open: %v", err)
+	}
+	defer hist.Close()
+
+	// an empty db is not a snapshot: still uninitialized, but now watched
+	if _, err := srv.getSchema(); err == nil {
+		t.Fatal("served a schema from an empty history.db")
+	}
+	expireFreshness(srv)
+	put(t, hist, datedSnap(t, time.Now().UTC().Truncate(time.Second), "late"))
+
+	snap, err := srv.getSchema()
+	if err != nil {
+		t.Fatalf("did not adopt history.db created after startup: %v", err)
+	}
+	if len(snap.Tables) != 1 || snap.Tables[0].Name != "late" {
+		t.Fatalf("served %+v, want the late table", snap.Tables)
+	}
+}
+
+// Without a path nothing is reopened: offline servers built from a blob must
+// not go looking for a file.
+func TestNoHistoryPathNoReopen(t *testing.T) {
+	srv := NewOfflineServerAnnotated(nil, lint.DefaultConfig())
+	srv.SetSnapshotKey(testKey)
+	srv.SetUninitialized()
+	if srv.reopenHistory() {
+		t.Fatal("reopened a history db with no path")
 	}
 }

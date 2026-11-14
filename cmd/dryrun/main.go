@@ -792,6 +792,10 @@ func mcpServeCmd() *cobra.Command {
 				hist, err := openExistingHistoryStore()
 				if err != nil {
 					if errors.Is(err, os.ErrNotExist) {
+						// the freshness tick adopts it if a pull creates it later
+						if path, perr := history.DefaultHistoryPath(); perr == nil {
+							server.SetHistoryPath(path)
+						}
 						fmt.Fprintln(os.Stderr, "dryrun: no history database — starting in uninitialized mode")
 					} else {
 						fmt.Fprintf(os.Stderr, "dryrun: history database unusable (%v) — starting in uninitialized mode\n", err)

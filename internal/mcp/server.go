@@ -28,6 +28,7 @@ type (
 		pendingStamps   captureStamps
 		mu              sync.RWMutex
 		history         *history.Store
+		historyPath     string
 		snapshotKey     history.SnapshotKey
 		lintConfig      lint.Config
 		pgmustardClient *pgmustard.Client
@@ -84,6 +85,13 @@ func (s *Server) SetHistory(hist *history.Store) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.history = hist
+}
+
+// SetHistoryPath remembers where a pull may create history.db after startup.
+func (s *Server) SetHistoryPath(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.historyPath = path
 }
 
 func (s *Server) BootstrapFromHistory(ctx context.Context) bool {

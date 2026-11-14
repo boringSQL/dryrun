@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -64,15 +65,33 @@ func (s *Server) historyKey() (*history.Store, history.SnapshotKey) {
 	return s.history, s.snapshotKey
 }
 
+// reopenHistory adopts a db a pull created after startup. Stat first: history.Open creates.
+func (s *Server) reopenHistory() bool {
+	s.mu.RLock()
+	path := s.historyPath
+	s.mu.RUnlock()
+	if path == "" {
+		return false
+	}
+	if _, err := os.Stat(path); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("cannot read history db path", "path", path, "error", err)
+		}
+		return false
+	}
+	h, err := history.Open(path)
+	if err != nil {
+		slog.Warn("cannot open history db created after startup", "path", path, "error", err)
+		return false
+	}
+	s.SetHistory(h)
+	slog.Info("picked up history.db created after startup", "path", path)
+	return true
+}
+
 // adoptNewerSnapshot swaps in the newest history.db bundle when any stream
 // (schema, planner, activity, query stats) advanced. Throttled by freshnessTTL.
 func (s *Server) adoptNewerSnapshot(ctx context.Context) {
-	hist, key := s.historyKey()
-	// a history.db this build cannot read is not a source to serve from
-	if hist == nil || s.historyNote() != nil {
-		return
-	}
-
 	// lock order: freshness.mu before s.mu, never the reverse
 	s.freshness.mu.Lock()
 	defer s.freshness.mu.Unlock()
@@ -87,6 +106,15 @@ func (s *Server) adoptNewerSnapshot(ctx context.Context) {
 	}
 	s.freshness.checkedAt = time.Now()
 	s.freshness.servedAt = servedAt
+
+	hist, key := s.historyKey()
+	if hist == nil && s.reopenHistory() {
+		hist, key = s.historyKey()
+	}
+	// a history.db this build cannot read is not a source to serve from
+	if hist == nil || s.historyNote() != nil {
+		return
+	}
 
 	// shorter than the store's busy_timeout: the next tick retries a contended read
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
