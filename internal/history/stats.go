@@ -334,7 +334,7 @@ func (s *Store) GetAnnotated(ctx context.Context, key SnapshotKey, at SnapshotRe
 		}
 		for i := range acts {
 			// best-effort: without them the label keeps its newest row
-			members, err := s.activityMembers(ctx, key, snap.ContentHash, acts[i])
+			members, err := s.activityMembers(ctx, key, acts[i])
 			if err != nil {
 				if ctxErr(err) {
 					return nil, err

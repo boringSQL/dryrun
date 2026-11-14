@@ -441,40 +441,6 @@ func TestListNodesReportsDeclaredPool(t *testing.T) {
 	}
 }
 
-type countingStore struct {
-	history.SnapshotStore
-	memberCalls int
-}
-
-func (c *countingStore) ListPoolMembers(ctx context.Context, key history.SnapshotKey, kind history.SnapshotKind, schemaRef string) ([]history.SnapshotSummary, error) {
-	c.memberCalls++
-	return c.SnapshotStore.ListPoolMembers(ctx, key, kind, schemaRef)
-}
-
-// On a registry each members lookup fetches a whole bundle: a label with one
-// row under its schema must not pay for it.
-func TestPullOfPlainLabelSkipsMemberLookup(t *testing.T) {
-	ctx := context.Background()
-	k := syncKey("acme", "primary")
-	t0 := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
-
-	remote, err := history.NewFilesystemStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	putPoolRows(t, remote, k,
-		history.WrapSchema(poolSyncSchema("sh", t0.Add(-time.Hour))),
-		history.WrapActivity(poolSyncActivity("sh", "a", t0, t0.Add(-72*time.Hour), 1, false)),
-	)
-	c := &countingStore{SnapshotStore: remote}
-	if _, err := selectSnapshots(ctx, c, k, pullScope{latest: true}); err != nil {
-		t.Fatal(err)
-	}
-	if c.memberCalls != 0 {
-		t.Errorf("ListPoolMembers called %d times, want 0", c.memberCalls)
-	}
-}
-
 func TestPullSinceFiltersPoolMembers(t *testing.T) {
 	ctx := context.Background()
 	k := syncKey("acme", "primary")
@@ -563,5 +529,56 @@ func TestUnmarkedCaptureClearsMembersUntilNextMarkedPush(t *testing.T) {
 	poolPush(t, writer, remote, k, pullScope{latest: true})
 	if got := listHashes(t, remote, k); !got["a"] || !got["b2"] {
 		t.Errorf("after marked push: %v, want a back alongside b2", got)
+	}
+}
+
+// The writer is stateless and the schema changes between runs, so each bundle
+// holds only the replica its capture hit. A fresh latest pull must carry the
+// other one too, and the annotated view must add both.
+func TestLatestPullTakesPoolServersAcrossSchemaVersions(t *testing.T) {
+	ctx := context.Background()
+	k := syncKey("acme", "primary")
+	t0 := time.Now().UTC().Truncate(time.Second).Add(-24 * time.Hour)
+	bootA, bootB := t0.Add(-72*time.Hour), t0.Add(-48*time.Hour)
+	dir := newRemote(t)
+	reader := openPoolStore(t)
+
+	publishSchema(t, dir, k, poolSyncSchema("sref-a", t0))
+	if _, err := reopenRemote(t, dir).Put(ctx, k,
+		history.WrapActivity(poolSyncActivity("sref-a", "a1", t0, bootA, 1, true))); err != nil {
+		t.Fatal(err)
+	}
+	publishSchema(t, dir, k, poolSyncSchema("sref-b", t0.Add(6*time.Hour)))
+	if _, err := reopenRemote(t, dir).Put(ctx, k,
+		history.WrapActivity(poolSyncActivity("sref-b", "b1", t0.Add(6*time.Hour), bootB, 0, true))); err != nil {
+		t.Fatal(err)
+	}
+
+	pullOnce(t, reopenRemote(t, dir), reader, k, pullScope{latest: true})
+
+	list, err := reader.List(ctx, k, history.ActivityKind(""), history.TimeRange{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := map[string]string{}
+	for _, s := range list {
+		refs[s.ContentHash] = s.SchemaRefHash
+	}
+	if len(list) != 2 || refs["a1"] != "sref-a" || refs["b1"] != "sref-b" {
+		t.Fatalf("activity rows = %+v, want a1 under sref-a and b1 under sref-b", list)
+	}
+
+	a, err := reader.GetAnnotated(ctx, k, history.NewRefLatest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var servers int
+	for _, n := range a.Merged.Nodes {
+		if n.Node.Source == "read-pool" {
+			servers++
+		}
+	}
+	if servers != 2 {
+		t.Errorf("annotated pool rows = %d, want both servers", servers)
 	}
 }

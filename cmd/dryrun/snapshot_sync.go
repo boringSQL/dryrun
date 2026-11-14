@@ -476,24 +476,15 @@ func withNewestSchema(selected, allSchema []history.SnapshotSummary, stats ...[]
 	return unionSummaries(selected, newest)
 }
 
-// A pool label's newest row is one server's; the others travel with it so a
-// fresh clone can add them up. Same schema only: an older schema's rows would
-// pull that schema along and the read side would ignore them anyway. A members
-// error fails the pull: skipping them silently would recreate the one-server
-// clone this exists to fix.
+// A pool label's newest row is one server's; the others travel with it, with
+// the schema each was captured under, so a fresh clone can add them up. A
+// members error fails the pull: skipping them silently would recreate the
+// one-server clone this exists to fix.
 func withPoolMembers(ctx context.Context, src history.SnapshotStore, key history.SnapshotKey, all []history.SnapshotSummary, rng history.TimeRange) ([]history.SnapshotSummary, error) {
-	rowsUnder := make(map[[2]string]int, len(all))
-	for _, s := range all {
-		rowsUnder[[2]string{s.Kind.NodeLabel, s.SchemaRefHash}]++
-	}
 	newest := newestPerNode(all)
 	out := append([]history.SnapshotSummary(nil), newest...)
 	for _, n := range newest {
-		// a lone row has no members; asking would fetch a whole bundle from a registry
-		if rowsUnder[[2]string{n.Kind.NodeLabel, n.SchemaRefHash}] < 2 {
-			continue
-		}
-		members, err := src.ListPoolMembers(ctx, key, n.Kind, n.SchemaRefHash)
+		members, err := src.ListPoolMembers(ctx, key, n.Kind)
 		if err != nil {
 			return nil, err
 		}

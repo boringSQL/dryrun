@@ -97,24 +97,52 @@ func newestPerServer[T any](rows []T, nodeOf func(T) schema.NodeIdentity, hashOf
 	return out
 }
 
-// A replay can pair an unmarked head with marked members (marked row applied
-// after the head); the SQL store never answers for such a label, so the bundle
-// re-checks the head at read time rather than trusting what merge last wrote.
-func poolMemberSummaries[T any](head map[string]T, members map[string][]T, kind SnapshotKind, nodeOf func(T) schema.NodeIdentity, hashOf, refOf func(T) string) []SnapshotSummary {
-	h, ok := head[kind.NodeLabel]
-	if !ok || !nodeOf(h).Pool {
+// A stateless writer leaves one server per bundle, so a label's servers are
+// spread over bundles and schema versions. The label's newest row decides
+// whether it is a pool; another bundle's head counts only if marked, as in
+// the SQL store, while stored members were already vetted on merge.
+func poolMembers[T any](bundles []*Bundle, kind SnapshotKind,
+	heads func(*Bundle) map[string]T, members func(*Bundle) map[string][]T,
+	nodeOf func(T) schema.NodeIdentity, hashOf, refOf func(T) string) []SnapshotSummary {
+
+	var (
+		head  T
+		found bool
+		rows  []T
+	)
+	for _, b := range bundles {
+		h, ok := heads(b)[kind.NodeLabel]
+		if !ok {
+			continue
+		}
+		if !found || newerRow(nodeOf(h), nodeOf(head), hashOf(h), hashOf(head)) {
+			head, found = h, true
+		}
+		if n := nodeOf(h); n.Pool && n.PostmasterStartTime != nil {
+			rows = append(rows, h)
+		}
+		for _, m := range members(b)[kind.NodeLabel] {
+			if nodeOf(m).PostmasterStartTime != nil {
+				rows = append(rows, m)
+			}
+		}
+	}
+	if !found || !nodeOf(head).Pool || nodeOf(head).PostmasterStartTime == nil {
 		return nil
 	}
-	return memberSummaries(members[kind.NodeLabel], kind, nodeOf, hashOf, refOf)
-}
-
-func memberSummaries[T any](rows []T, kind SnapshotKind, nodeOf func(T) schema.NodeIdentity, hashOf, refOf func(T) string) []SnapshotSummary {
-	out := make([]SnapshotSummary, 0, len(rows))
-	for _, r := range rows {
+	var out []SnapshotSummary
+	for _, r := range newestPerServer(rows, nodeOf, hashOf) {
+		if nodeOf(r).PostmasterStartTime.Equal(*nodeOf(head).PostmasterStartTime) {
+			continue
+		}
 		out = append(out, SnapshotSummary{
 			Kind: kind, Timestamp: nodeOf(r).Timestamp,
 			ContentHash: hashOf(r), SchemaRefHash: refOf(r), NodeLabel: kind.NodeLabel,
 		})
 	}
 	return out
+}
+
+func newerRow(a, b schema.NodeIdentity, hashA, hashB string) bool {
+	return a.Timestamp.After(b.Timestamp) || (a.Timestamp.Equal(b.Timestamp) && hashA > hashB)
 }

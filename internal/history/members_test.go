@@ -367,9 +367,8 @@ func TestGetAnnotated_OnlyRotatingLabelsExpand(t *testing.T) {
 		}
 	})
 
-	// the bundle is per schema: another server's rows under an older schema
-	// describe different objects
-	t.Run("other servers only under the same schema ref", func(t *testing.T) {
+	// a server whose newest row predates the current schema still counts
+	t.Run("other servers under an older schema are included", func(t *testing.T) {
 		s := testStore(t)
 		putIndexedSchema(t, s, k, "sref-old")
 		putPoolActivityAt(t, s, k, "sref-old", "a1", "pool", t0, bootA, 40)
@@ -381,8 +380,11 @@ func TestGetAnnotated_OnlyRotatingLabelsExpand(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := poolEntries(t, a, "pool"); len(got) != 1 {
-			t.Fatalf("want b4 alone under sref-new, got %d", len(got))
+		got := poolEntries(t, a, "pool")
+		if len(got) != 2 ||
+			!got[0].Node.Timestamp.Equal(t0.Add(3*time.Hour)) ||
+			!got[1].Node.Timestamp.Equal(t0.Add(2*time.Hour)) {
+			t.Fatalf("want b4 and a3, got %+v", got)
 		}
 	})
 
@@ -474,8 +476,8 @@ func TestGetAnnotated_CorruptServerRowSkipsOnlyThatServer(t *testing.T) {
 	}
 }
 
-// Schema X, then Y, then X again. Server B's only row under X is two months
-// old: those counters describe a past that the current bundle does not cover.
+// Schema X, then Y, then X again. Server B's row under the returning X is two
+// months old and stays out; its recent row under Y counts.
 func TestGetAnnotated_RecurringSchemaIgnoresOldServerRows(t *testing.T) {
 	ctx := context.Background()
 	k := key("acme", "primary")
@@ -495,7 +497,9 @@ func TestGetAnnotated_RecurringSchemaIgnoresOldServerRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := poolEntries(t, a, "pool"); len(got) != 1 {
-		t.Fatalf("B's two-month-old row under X must stay out, got %d rows", len(got))
+	if got := poolEntries(t, a, "pool"); len(got) != 2 ||
+		!got[0].Node.Timestamp.Equal(t0.Add(3*time.Hour)) ||
+		!got[1].Node.Timestamp.Equal(t0.Add(time.Hour)) {
+		t.Fatalf("want ax4 and b2, got %+v", got)
 	}
 }

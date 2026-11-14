@@ -370,12 +370,10 @@ func assertSameReads(t *testing.T, want, got SnapshotStore, k SnapshotKey) {
 		}
 
 		if kind.Tag == KindActivity || kind.Tag == KindQuery {
-			for _, sum := range wantList {
-				w, werr := want.ListPoolMembers(ctx, k, kind, sum.SchemaRefHash)
-				g, gerr := got.ListPoolMembers(ctx, k, kind, sum.SchemaRefHash)
-				if werr != nil || gerr != nil || !reflect.DeepEqual(w, g) {
-					t.Fatalf("%s ListPoolMembers %s %s: object (%+v, %v), fs (%+v, %v)", k, kind, sum.SchemaRefHash, g, gerr, w, werr)
-				}
+			w, werr := want.ListPoolMembers(ctx, k, kind)
+			g, gerr := got.ListPoolMembers(ctx, k, kind)
+			if werr != nil || gerr != nil || !reflect.DeepEqual(w, g) {
+				t.Fatalf("%s ListPoolMembers %s: object (%+v, %v), fs (%+v, %v)", k, kind, g, gerr, w, werr)
 			}
 		}
 	}

@@ -76,7 +76,7 @@ func TestPoolBundleKeepsNewestRowPerServer(t *testing.T) {
 	if err != nil || latest == nil || latest.ContentHash != "a2" {
 		t.Fatalf("Latest = %+v, %v; want a2", latest, err)
 	}
-	members, err := s.ListPoolMembers(ctx, k, ActivityKind("pool"), "sref")
+	members, err := s.ListPoolMembers(ctx, k, ActivityKind("pool"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestPoolBundleUnmarkedRowClearsMembers(t *testing.T) {
 	if got := activityHashes(t, s, k); len(got) != 1 || !got["plain"] {
 		t.Errorf("rows = %v, want only plain", got)
 	}
-	members, err := s.ListPoolMembers(ctx, k, ActivityKind("pool"), "sref")
+	members, err := s.ListPoolMembers(ctx, k, ActivityKind("pool"))
 	if err != nil || len(members) != 0 {
 		t.Errorf("members = %+v, %v; want none", members, err)
 	}
@@ -260,7 +260,7 @@ func TestStoreListPoolMembers(t *testing.T) {
 	}
 	hashes := func(s *Store) map[string]bool {
 		t.Helper()
-		list, err := s.ListPoolMembers(ctx, k, ActivityKind("pool"), "sref")
+		list, err := s.ListPoolMembers(ctx, k, ActivityKind("pool"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -298,7 +298,7 @@ func TestStoreListPoolMembers(t *testing.T) {
 			t.Errorf("got %v, want none", got)
 		}
 	})
-	t.Run("other schema's rows are left out", func(t *testing.T) {
+	t.Run("other schema's rows are included", func(t *testing.T) {
 		s := testStore(t)
 		other := poolBundleActivity("other", t0, bootA, true)
 		other.SchemaRefHash = "sref-old"
@@ -306,8 +306,8 @@ func TestStoreListPoolMembers(t *testing.T) {
 			t.Fatal(err)
 		}
 		put(s, "b", t0.Add(time.Hour), bootB, true)
-		if got := hashes(s); len(got) != 0 {
-			t.Errorf("got %v, want none", got)
+		if got := hashes(s); len(got) != 1 || !got["other"] {
+			t.Errorf("got %v, want other", got)
 		}
 	})
 	t.Run("older unmarked rows are left out", func(t *testing.T) {
@@ -321,10 +321,51 @@ func TestStoreListPoolMembers(t *testing.T) {
 	})
 	t.Run("schema and planner are refused", func(t *testing.T) {
 		s := testStore(t)
-		if _, err := s.ListPoolMembers(ctx, k, SchemaKind(), "sref"); err == nil {
+		if _, err := s.ListPoolMembers(ctx, k, SchemaKind()); err == nil {
 			t.Error("want an error")
 		}
 	})
+}
+
+// A stateless writer pushes one server per bundle, so a label's other servers
+// live in other bundles, often under another schema version.
+func TestBundleStorePoolMembersAcrossSchemaVersions(t *testing.T) {
+	ctx := context.Background()
+	k := key("acme", "pooled")
+	t0 := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	bootA, bootB := t0.Add(-72*time.Hour), t0.Add(-48*time.Hour)
+
+	store, err := NewFilesystemStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(ref string, ts time.Time, row *schema.ActivityStatsSnapshot) {
+		t.Helper()
+		snap := testSnapshot(ref, "appdb")
+		snap.Timestamp = ts
+		for _, s := range []StoredSnapshot{WrapSchema(snap), WrapActivity(row)} {
+			if _, err := store.Put(ctx, k, s); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	a := poolBundleActivity("a1", t0, bootA, true)
+	a.SchemaRefHash = "sref-a"
+	plain := poolBundleActivity("c1", t0.Add(30*time.Minute), t0.Add(-24*time.Hour), false)
+	plain.SchemaRefHash = "sref-c"
+	b := poolBundleActivity("b1", t0.Add(time.Hour), bootB, true)
+	b.SchemaRefHash = "sref-b"
+	put("sref-a", t0, a)
+	put("sref-c", t0.Add(30*time.Minute), plain)
+	put("sref-b", t0.Add(time.Hour), b)
+
+	members, err := store.ListPoolMembers(ctx, k, ActivityKind("pool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 1 || members[0].ContentHash != "a1" || members[0].SchemaRefHash != "sref-a" {
+		t.Errorf("members = %+v, want a1 from sref-a and no unmarked c1", members)
+	}
 }
 
 // A declared pool counts as rotating from its second server on; nothing recurs
@@ -512,7 +553,7 @@ func TestPoolBundleMarkedReplayUnderUnmarkedHeadStaysPlain(t *testing.T) {
 	if _, err := s.Put(ctx, k, WrapActivity(poolBundleActivity("b", t0.Add(time.Hour), bootC, true))); err != nil {
 		t.Fatal(err)
 	}
-	members, err := s.ListPoolMembers(ctx, k, ActivityKind("pool"), "sref")
+	members, err := s.ListPoolMembers(ctx, k, ActivityKind("pool"))
 	if err != nil || len(members) != 0 {
 		t.Errorf("members = %+v, %v; want none under an unmarked head", members, err)
 	}

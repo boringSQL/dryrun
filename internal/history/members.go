@@ -174,15 +174,15 @@ func (s *Store) previousWithinMember(ctx context.Context, key SnapshotKey, prev 
 // first: a row cap would bound retention in captures, so a quiet server would
 // drop out after a busy day, not after 7 days. The cap that remains is a
 // backstop for a pathological store; 7 days at a 15m cadence is 672 rows.
-func (s *Store) ListPoolMembers(ctx context.Context, key SnapshotKey, kind SnapshotKind, schemaRef string) ([]SnapshotSummary, error) {
+func (s *Store) ListPoolMembers(ctx context.Context, key SnapshotKey, kind SnapshotKind) ([]SnapshotSummary, error) {
 	d, ok := descFor(kind.Tag)
 	if !ok || !d.perNode {
 		return nil, fmt.Errorf("%s is not a per-node stream", kind)
 	}
-	keyArgs := []any{string(key.ProjectID), string(key.DatabaseID), kind.NodeLabel, schemaRef}
+	keyArgs := []any{string(key.ProjectID), string(key.DatabaseID), kind.NodeLabel}
 	var newestTS sql.NullString
 	err := s.db.QueryRowContext(ctx, `SELECT MAX(timestamp) FROM `+d.table+
-		` WHERE project_id = ? AND database_id = ? AND node_source = ? AND schema_ref_hash = ?`, keyArgs...).Scan(&newestTS)
+		` WHERE project_id = ? AND database_id = ? AND node_source = ?`, keyArgs...).Scan(&newestTS)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +191,7 @@ func (s *Store) ListPoolMembers(ctx context.Context, key SnapshotKey, kind Snaps
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, poolMembersSQL(d.table),
-		string(key.ProjectID), string(key.DatabaseID), kind.NodeLabel, schemaRef,
+		string(key.ProjectID), string(key.DatabaseID), kind.NodeLabel,
 		formatHistoryTS(newest.Add(-poolMemberMaxAge)), poolMemberSyncScan)
 	if err != nil {
 		return nil, err
@@ -205,11 +205,11 @@ func (s *Store) ListPoolMembers(ctx context.Context, key SnapshotKey, kind Snaps
 	)
 	for rows.Next() {
 		var (
-			ts, hash string
-			st       sql.NullString
-			pool     sql.NullInt64
+			ts, hash, ref string
+			st            sql.NullString
+			pool          sql.NullInt64
 		)
-		if err := rows.Scan(&ts, &hash, &st, &pool); err != nil {
+		if err := rows.Scan(&ts, &hash, &ref, &st, &pool); err != nil {
 			return nil, err
 		}
 		at, perr := time.Parse(time.RFC3339, ts)
@@ -238,16 +238,16 @@ func (s *Store) ListPoolMembers(ctx context.Context, key SnapshotKey, kind Snaps
 		seen = append(seen, started)
 		out = append(out, SnapshotSummary{
 			Kind: SnapshotKind{Tag: kind.Tag, NodeLabel: kind.NodeLabel}, Timestamp: at,
-			ContentHash: hash, SchemaRefHash: schemaRef, NodeLabel: kind.NodeLabel,
+			ContentHash: hash, SchemaRefHash: ref, NodeLabel: kind.NodeLabel,
 		})
 	}
 	return out, rows.Err()
 }
 
 func poolMembersSQL(table string) string {
-	return `SELECT timestamp, content_hash, ` + nodeJSONExpr("", "$.node.postmaster_start_time") + `, ` + nodeJSONExpr("", "$.node.pool") + `
+	return `SELECT timestamp, content_hash, schema_ref_hash, ` + nodeJSONExpr("", "$.node.postmaster_start_time") + `, ` + nodeJSONExpr("", "$.node.pool") + `
 	          FROM ` + table + `
-	         WHERE project_id = ? AND database_id = ? AND node_source = ? AND schema_ref_hash = ?
+	         WHERE project_id = ? AND database_id = ? AND node_source = ?
 	           AND timestamp >= ?
 	         ORDER BY timestamp DESC, id DESC LIMIT ?`
 }
@@ -258,7 +258,7 @@ func ctxErr(err error) bool {
 
 // adds the other servers' newest rows for a rotating label; a restart inside
 // the window counts twice until it ages out: inflates, never hides use
-func (s *Store) activityMembers(ctx context.Context, key SnapshotKey, schemaRef string, newest schema.ActivityStatsSnapshot) ([]schema.ActivityStatsSnapshot, error) {
+func (s *Store) activityMembers(ctx context.Context, key SnapshotKey, newest schema.ActivityStatsSnapshot) ([]schema.ActivityStatsSnapshot, error) {
 	started := newest.Node.PostmasterStartTime
 	if started == nil {
 		return nil, nil
@@ -285,10 +285,9 @@ func (s *Store) activityMembers(ctx context.Context, key SnapshotKey, schemaRef 
 		age, scan = nodeFingerprintAge, memberBaselineScan
 	}
 
-	// lower bound: a hash returning months later must not pull that server's
-	// old counters in
+	// lower bound: a server last seen months ago must not count
 	rows, err := s.db.QueryContext(ctx, activityMembersSQL(),
-		string(key.ProjectID), string(key.DatabaseID), newest.Node.Source, schemaRef,
+		string(key.ProjectID), string(key.DatabaseID), newest.Node.Source,
 		formatHistoryTS(newest.Node.Timestamp.Add(-age)), formatHistoryTS(newest.Node.Timestamp),
 		scan)
 	if err != nil {
@@ -351,7 +350,7 @@ func (s *Store) activityMembers(ctx context.Context, key SnapshotKey, schemaRef 
 func activityMembersSQL() string {
 	return `SELECT id, ` + nodeJSONExpr("", "$.node.postmaster_start_time") + `
 	          FROM activity_stats
-	         WHERE project_id = ? AND database_id = ? AND node_source = ? AND schema_ref_hash = ?
+	         WHERE project_id = ? AND database_id = ? AND node_source = ?
 	           AND timestamp >= ? AND timestamp <= ?
 	         ORDER BY timestamp DESC, id DESC LIMIT ?`
 }

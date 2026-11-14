@@ -336,19 +336,23 @@ func (s *bundleStore) ListKeys(ctx context.Context) ([]SnapshotKey, error) {
 	return s.backend.listKeys(ctx)
 }
 
-func (s *bundleStore) ListPoolMembers(ctx context.Context, key SnapshotKey, kind SnapshotKind, schemaRef string) ([]SnapshotSummary, error) {
-	b, ok, err := s.backend.load(ctx, key, schemaRef)
-	if err != nil || !ok {
+func (s *bundleStore) ListPoolMembers(ctx context.Context, key SnapshotKey, kind SnapshotKind) ([]SnapshotSummary, error) {
+	l, err := s.bundles(ctx, key)
+	if err != nil {
 		return nil, err
 	}
 	switch kind.Tag {
 	case KindActivity:
-		return poolMemberSummaries(b.Activity, b.ActivityMembers, kind,
+		return poolMembers(l.bundles, kind,
+			func(b *Bundle) map[string]*schema.ActivityStatsSnapshot { return b.Activity },
+			func(b *Bundle) map[string][]*schema.ActivityStatsSnapshot { return b.ActivityMembers },
 			func(a *schema.ActivityStatsSnapshot) schema.NodeIdentity { return a.Node },
 			func(a *schema.ActivityStatsSnapshot) string { return a.ContentHash },
 			func(a *schema.ActivityStatsSnapshot) string { return a.SchemaRefHash }), nil
 	case KindQuery:
-		return poolMemberSummaries(b.Query, b.QueryMembers, kind,
+		return poolMembers(l.bundles, kind,
+			func(b *Bundle) map[string]*schema.QueryStatsSnapshot { return b.Query },
+			func(b *Bundle) map[string][]*schema.QueryStatsSnapshot { return b.QueryMembers },
 			func(q *schema.QueryStatsSnapshot) schema.NodeIdentity { return q.Node },
 			func(q *schema.QueryStatsSnapshot) string { return q.ContentHash },
 			func(q *schema.QueryStatsSnapshot) string { return q.SchemaRefHash }), nil
