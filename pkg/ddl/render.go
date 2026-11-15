@@ -394,11 +394,20 @@ func omitted(snap *snapshot.SchemaSnapshot, t *snapshot.Table) []string {
 			break
 		}
 	}
-	if len(t.Triggers) > 0 {
+	// captured edges can name these; otherwise describe the shapes
+	exact := snap != nil && snap.DependenciesHash != ""
+	if len(t.Triggers) > 0 && !exact {
 		add("the functions these triggers call")
 	}
-	if hasExpressions(t) {
+	if hasExpressions(t) && !exact {
 		add("functions and operator classes used by defaults, generated columns, indexes and policies")
+	}
+	// pg_policy is not captured, so policies stay a guess
+	if exact && len(t.Policies) > 0 {
+		add("the functions and operator classes these policies use")
+	}
+	for _, need := range requiredObjects(snap, t) {
+		add(need)
 	}
 	if snap != nil && len(snap.Extensions) > 0 {
 		add("CREATE EXTENSION for anything these types or operators come from")
