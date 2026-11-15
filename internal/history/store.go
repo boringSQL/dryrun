@@ -717,6 +717,11 @@ func (s *Store) putSchema(ctx context.Context, key SnapshotKey, snap *schema.Sch
 			if refresh, err = s.canRefreshSchemaPayload(ctx, latestID, snap); err != nil {
 				return PutInserted, err
 			}
+		} else if snap.DependenciesHash != "" {
+			// Derived metadata: refresh without creating a new schema version.
+			if refresh, err = s.dependenciesChanged(ctx, latestID, snap.DependenciesHash); err != nil {
+				return PutInserted, err
+			}
 		}
 		if !refresh {
 			slog.Debug("schema unchanged, skipping put", "hash", snap.ContentHash)
@@ -769,14 +774,14 @@ func (s *Store) putSchema(ctx context.Context, key SnapshotKey, snap *schema.Sch
 // DDL isn't a newer capture of this one.
 func (s *Store) canRefreshSchemaPayload(ctx context.Context, id int64, snap *schema.SchemaSnapshot) (bool, error) {
 	var (
-		storedAt, storedSystem sql.NullString
-		storedVersion          any
+		storedAt, storedSystem, storedDeps sql.NullString
+		storedVersion                      any
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT `+nodeJSONExprCol("snapshot_json", "$.timestamp")+`, `+nodeJSONExprCol("snapshot_json", "$.format_version")+`,
-		        `+nodeJSONExprCol("snapshot_json", "$.system_identifier")+`
+		        `+nodeJSONExprCol("snapshot_json", "$.system_identifier")+`, `+nodeJSONExprCol("snapshot_json", "$.dependencies_hash")+`
 		   FROM snapshots WHERE id = ?`, id,
-	).Scan(&storedAt, &storedVersion, &storedSystem)
+	).Scan(&storedAt, &storedVersion, &storedSystem, &storedDeps)
 	if err != nil {
 		return false, fmt.Errorf("cannot read latest snapshot: %w", err)
 	}
@@ -795,11 +800,27 @@ func (s *Store) canRefreshSchemaPayload(ctx context.Context, id int64, snap *sch
 			"hash", snap.ContentHash, "stored_system_identifier", storedSystem.String, "incoming_system_identifier", snap.SystemIdentifier)
 		return false, nil
 	}
+	if snap.DependenciesHash != "" && (!storedDeps.Valid || storedDeps.String != snap.DependenciesHash) {
+		return true, nil
+	}
 	if !storedAt.Valid {
 		return true, nil
 	}
 	at, err := time.Parse(time.RFC3339Nano, storedAt.String)
 	return err != nil || snap.Timestamp.After(at), nil
+}
+
+// dependenciesChanged reports whether the stored payload has older edges.
+func (s *Store) dependenciesChanged(ctx context.Context, id int64, hash string) (bool, error) {
+	var stored sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT `+nodeJSONExprCol("snapshot_json", "$.dependencies_hash")+` FROM snapshots WHERE id = ?`,
+		id,
+	).Scan(&stored)
+	if err != nil {
+		return false, fmt.Errorf("cannot read stored dependency hash: %w", err)
+	}
+	return !stored.Valid || stored.String != hash, nil
 }
 
 func localFlag(capturedLocally bool) int {

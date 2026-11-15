@@ -144,6 +144,10 @@ func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error
 	if err != nil {
 		return nil, fmt.Errorf("fetch extensions: %w", err)
 	}
+	dependencies, err := fetchDependencies(ctx, pool)
+	if err != nil {
+		return nil, fmt.Errorf("fetch dependencies: %w", err)
+	}
 	gucs, err := fetchGUCs(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("fetch gucs: %w", err)
@@ -179,7 +183,9 @@ func IntrospectSchema(ctx context.Context, pool Querier) (*SchemaSnapshot, error
 		Functions:     functions,
 		Extensions:    extensions,
 		GUCs:          gucs,
+		Dependencies:  dependencies,
 	}
+	snap.DependenciesHash = ComputeDependenciesHash(dependencies)
 	snap.ContentHash = DigestFor(snap)
 	return snap, nil
 }
@@ -655,6 +661,26 @@ func fetchGUCs(ctx context.Context, pool Querier) ([]GucSetting, error) {
 		var g GucSetting
 		err := r.Scan(&g.Name, &g.Setting, &g.Unit)
 		return g, err
+	})
+}
+
+func fetchDependencies(ctx context.Context, pool Querier) ([]Dependency, error) {
+	rows, err := query(ctx, pool, "fetch-dependencies")
+	if err != nil {
+		return nil, err
+	}
+	return scanAll(rows, func(r pgx.Rows) (Dependency, error) {
+		var d Dependency
+		err := r.Scan(
+			&d.Deptype,
+			&d.DependentClass,
+			&d.DependentType,
+			&d.DependentIdentity,
+			&d.ReferencedClass,
+			&d.ReferencedType,
+			&d.ReferencedIdentity,
+		)
+		return d, err
 	})
 }
 

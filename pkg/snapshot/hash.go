@@ -60,6 +60,39 @@ func ComputeContentHashV3(snap *SchemaSnapshot) string {
 	return hashSchema(snap, digestOpts{reloptions: true, stripPartChildren: true})
 }
 
+// ComputeDependenciesHash digests the pg_depend edge list; it is not part of
+// ContentHash, so existing snapshots keep their digest.
+func ComputeDependenciesHash(deps []Dependency) string {
+	sorted := slices.Clone(deps)
+	if sorted == nil {
+		sorted = []Dependency{}
+	}
+	slices.SortFunc(sorted, func(a, b Dependency) int {
+		if c := cmp.Compare(a.Deptype, b.Deptype); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.DependentClass, b.DependentClass); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.DependentType, b.DependentType); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.DependentIdentity, b.DependentIdentity); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.ReferencedClass, b.ReferencedClass); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.ReferencedType, b.ReferencedType); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ReferencedIdentity, b.ReferencedIdentity)
+	})
+	b, _ := json.Marshal(sorted)
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("%x", h)
+}
+
 func hashSchema(snap *SchemaSnapshot, opts digestOpts) string {
 	var children map[QualifiedName]bool
 	if opts.stripPartChildren {

@@ -40,6 +40,21 @@ type (
 		Functions        []Function      `json:"functions"`
 		Extensions       []Extension     `json:"extensions"`
 		GUCs             []GucSetting    `json:"gucs"`
+		// Derived metadata, outside ContentHash; DependenciesHash refreshes
+		// the stored payload when only these edges changed.
+		Dependencies     []Dependency `json:"dependencies,omitempty"`
+		DependenciesHash string       `json:"dependencies_hash,omitempty"`
+	}
+
+	// Dependency is one pg_depend edge keyed by pg_identify_object identities.
+	Dependency struct {
+		Deptype            string `json:"deptype"`
+		DependentClass     string `json:"dependent_class"`
+		DependentType      string `json:"dependent_type"`
+		DependentIdentity  string `json:"dependent_identity"`
+		ReferencedClass    string `json:"referenced_class"`
+		ReferencedType     string `json:"referenced_type"`
+		ReferencedIdentity string `json:"referenced_identity"`
 	}
 
 	Table struct {

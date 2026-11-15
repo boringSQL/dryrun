@@ -53,6 +53,7 @@ type (
 	QueryStatsInfo           = snapshot.QueryStatsInfo
 	QueryStatsSnapshot       = snapshot.QueryStatsSnapshot
 	MaskingInfo              = snapshot.MaskingInfo
+	Dependency               = snapshot.Dependency
 	AnnotatedSchema          = snapshot.AnnotatedSchema
 	MergedActivity           = snapshot.MergedActivity
 	NodeActivity             = snapshot.NodeActivity
@@ -94,6 +95,7 @@ var (
 	RollUpActivitySnapshot  = snapshot.RollUpActivitySnapshot
 
 	ComputeContentHash           = snapshot.ComputeContentHash
+	ComputeDependenciesHash      = snapshot.ComputeDependenciesHash
 	ComputeStructuralHash        = snapshot.ComputeStructuralHash
 	ComputeContentHashV2         = snapshot.ComputeContentHashV2
 	DigestFor                    = snapshot.DigestFor
