@@ -212,10 +212,14 @@ func resolveSyncStore(ctx context.Context, path, ociRef, remoteName string, push
 	case path != "":
 		return history.NewFilesystemStore(path)
 	default:
-		if r := profileRemote(); r != "" {
-			return buildRemoteStore(ctx, r, push)
+		r, err := profileRemote()
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("specify --to-path/--from-path, --oci, or --remote")
+		if r == "" {
+			return nil, fmt.Errorf("no store given and the profile pins no remote; pass --remote <name> (see --help for other stores)")
+		}
+		return buildRemoteStore(ctx, r, push)
 	}
 }
 
@@ -265,18 +269,18 @@ func buildOCIStore(base, tokenEnv, authMode string) (history.SnapshotStore, erro
 	})
 }
 
-// profileRemote is the [[remote]] name a profile pins, "" if none/unresolvable.
-func profileRemote() string {
+// profileRemote is the [[remote]] name a profile pins, "" if none.
+func profileRemote() (string, error) {
 	cwd, _ := os.Getwd()
 	_, cfg, err := loadProjectConfig()
 	if err != nil {
-		return ""
+		return "", err
 	}
 	rp, err := cfg.ResolveProfile(nil, nilIfEmpty(flagProfile), cwd)
 	if err != nil || rp.Remote == nil {
-		return ""
+		return "", err
 	}
-	return *rp.Remote
+	return *rp.Remote, nil
 }
 
 // streamMapper maps each key to its profile's stream override, else StreamSuffix.

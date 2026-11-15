@@ -619,9 +619,12 @@ func loadProjectConfig() (string, *config.ProjectConfig, error) {
 		return flagConfig, cfg, nil
 	}
 	cwd, _ := os.Getwd()
-	path, cfg, found := config.Discover(cwd)
-	if !found {
-		return "", nil, fmt.Errorf("no dryrun.toml found")
+	path, cfg, err := config.Discover(cwd)
+	if cfg == nil {
+		if err == nil {
+			err = fmt.Errorf("no dryrun.toml in %s or its parents (is your checkout up to date?)", cwd)
+		}
+		return "", nil, err
 	}
 	return path, cfg, nil
 }

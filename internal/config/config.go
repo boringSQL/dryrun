@@ -249,23 +249,28 @@ func Load(path string) (*ProjectConfig, error) {
 	return Parse(string(data))
 }
 
-// Walks up from startDir looking for dryrun.toml, stops at .git
-func Discover(startDir string) (string, *ProjectConfig, bool) {
+// Walks up from startDir looking for dryrun.toml, stops at .git. If none
+// loads, the error names the first file that failed to.
+func Discover(startDir string) (string, *ProjectConfig, error) {
+	var skipped error
 	dir := startDir
 	for {
 		candidate := filepath.Join(dir, "dryrun.toml")
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			cfg, err := Load(candidate)
 			if err == nil {
-				return candidate, cfg, true
+				return candidate, cfg, nil
+			}
+			if skipped == nil {
+				skipped = fmt.Errorf("%s: %w", candidate, err)
 			}
 		}
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return "", nil, false
+			return "", nil, skipped
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", nil, false
+			return "", nil, skipped
 		}
 		dir = parent
 	}

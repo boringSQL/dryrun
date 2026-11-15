@@ -838,3 +838,21 @@ func TestParse_HistoryStaleAfterOmitted(t *testing.T) {
 		t.Errorf("stale_after = %q, want empty (default applies)", cfg.History.StaleAfter)
 	}
 }
+
+// A skipped bad file is reported, not silently treated as absent.
+func TestDiscover_ReportsUnparseableConfig(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Discover(root); err != nil {
+		t.Fatalf("no file at all is a plain miss, got %v", err)
+	}
+	bad := filepath.Join(root, "dryrun.toml")
+	if err := os.WriteFile(bad, []byte("[project\nid = broken\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, cfg, err := Discover(root); cfg != nil || err == nil || !strings.Contains(err.Error(), bad) {
+		t.Fatalf("cfg = %v, err = %v; want the unparseable file named", cfg, err)
+	}
+}
