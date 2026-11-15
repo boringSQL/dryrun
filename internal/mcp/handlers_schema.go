@@ -16,7 +16,7 @@ import (
 var describeTableFields = []string{
 	"columns", "indexes", "constraints", "stats", "partition_info",
 	"column_profiles", "comment", "policies", "triggers", "reloptions",
-	"rls_enabled", "ddl", "vacuum", "relations",
+	"rls_enabled", "ddl", "vacuum", "relations", "dependents",
 }
 
 func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -257,6 +257,12 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 				hint = joinHints(hint, "The ddl is the whole table; the columns argument narrows the other sections only.")
 			}
 		}
+	}
+
+	if wantsField(fields, "dependents") {
+		deps, depHint := buildDependents(snap, t, limitArgOr(req, defaultMaxItems))
+		result["dependents"] = deps
+		hint = joinHints(hint, depHint)
 	}
 
 	if kinds := tableFindings(a, t); len(kinds) > 0 {

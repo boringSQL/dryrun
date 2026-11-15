@@ -196,3 +196,59 @@ func TestRenderTableOmittedUsesDependencies(t *testing.T) {
 		t.Fatalf("omitted = %v", r.Omitted)
 	}
 }
+
+func TestViewDependents(t *testing.T) {
+	tab := tbl("t", col("id", "integer"), col("v", "integer"))
+	snap := &snapshot.SchemaSnapshot{
+		DependenciesHash: "dep-1",
+		Views: []snapshot.View{
+			{Schema: "public", Name: "v"},
+			{Schema: "app", Name: "mv", IsMaterialized: true},
+			{Schema: "public", Name: "count_v"},
+			{Schema: "public", Name: "unrelated"},
+		},
+		Dependencies: []snapshot.Dependency{
+			dep("n", "pg_class", "public.v", "pg_class", "public.t.id"),
+			dep("n", "pg_class", "public.v", "pg_class", "public.t.v"),
+			dep("n", "pg_class", "app.mv", "pg_class", "public.t.v"),
+			dep("n", "pg_class", "public.count_v", "pg_class", "public.t"),
+			dep("n", "pg_class", "public.unrelated", "pg_class", "public.other.id"),
+		},
+	}
+
+	got := ViewDependents(snap, tab)
+	if len(got) != 3 {
+		t.Fatalf("ViewDependents = %+v", got)
+	}
+	if got[0].Name != "mv" || !got[0].Materialized || len(got[0].Columns) != 1 || got[0].Columns[0] != "v" {
+		t.Errorf("materialized view = %+v", got[0])
+	}
+	if got[1].Name != "count_v" || len(got[1].Columns) != 0 {
+		t.Errorf("table-level dependent = %+v", got[1])
+	}
+	if got[2].Name != "v" || len(got[2].Columns) != 2 || got[2].Columns[0] != "id" || got[2].Columns[1] != "v" {
+		t.Errorf("view = %+v", got[2])
+	}
+}
+
+func TestViewDependentsQuotedTable(t *testing.T) {
+	tab := &snapshot.Table{Schema: "Odd.Schema", Name: "Order.Items",
+		Columns: []snapshot.Column{{Name: "Line ID", TypeName: "integer"}}}
+	snap := &snapshot.SchemaSnapshot{
+		DependenciesHash: "dep-1",
+		Views:            []snapshot.View{{Schema: "Odd.Schema", Name: "Items.V"}},
+		Dependencies: []snapshot.Dependency{
+			dep("n", "pg_class", `"Odd.Schema"."Items.V"`, "pg_class", `"Odd.Schema"."Order.Items"."Line ID"`),
+		},
+	}
+	got := ViewDependents(snap, tab)
+	if len(got) != 1 || got[0].Name != "Items.V" || len(got[0].Columns) != 1 || got[0].Columns[0] != "Line ID" {
+		t.Fatalf("ViewDependents = %+v", got)
+	}
+}
+
+func TestViewDependentsWithoutCapture(t *testing.T) {
+	if got := ViewDependents(&snapshot.SchemaSnapshot{}, tbl("t")); got != nil {
+		t.Fatalf("ViewDependents = %+v, want nil", got)
+	}
+}
