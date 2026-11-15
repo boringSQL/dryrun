@@ -34,16 +34,17 @@ type (
 	}
 
 	SnapshotSummary struct {
-		ID            int64        `json:"id"`
-		Kind          SnapshotKind `json:"kind"`
-		DBURLHash     string       `json:"db_url_hash,omitempty"`
-		Timestamp     time.Time    `json:"timestamp"`
-		ContentHash   string       `json:"content_hash"`
-		Database      string       `json:"database,omitempty"`
-		SchemaRefHash string       `json:"schema_ref_hash,omitempty"`
-		NodeLabel     string       `json:"node_label,omitempty"`
-		ProjectID     *string      `json:"project_id,omitempty"`
-		DatabaseID    *string      `json:"database_id,omitempty"`
+		ID               int64        `json:"id"`
+		Kind             SnapshotKind `json:"kind"`
+		DBURLHash        string       `json:"db_url_hash,omitempty"`
+		Timestamp        time.Time    `json:"timestamp"`
+		ContentHash      string       `json:"content_hash"`
+		DependenciesHash string       `json:"dependencies_hash,omitempty"`
+		Database         string       `json:"database,omitempty"`
+		SchemaRefHash    string       `json:"schema_ref_hash,omitempty"`
+		NodeLabel        string       `json:"node_label,omitempty"`
+		ProjectID        *string      `json:"project_id,omitempty"`
+		DatabaseID       *string      `json:"database_id,omitempty"`
 	}
 )
 
@@ -222,6 +223,7 @@ func (d tableDesc) summarySelect() string {
 		nodeSrc   string
 		dbName    string
 		dbHash    string
+		depsHash  string
 	)
 	if d.tag == KindSchema {
 		schemaRef = "content_hash"
@@ -236,29 +238,34 @@ func (d tableDesc) summarySelect() string {
 	if d.tag == KindSchema {
 		dbName = "database_name"
 		dbHash = "db_url_hash"
+		depsHash = nodeJSONExprCol("snapshot_json", "$.dependencies_hash")
 	} else {
 		dbName = "''"
 		dbHash = "''"
+		depsHash = "NULL"
 	}
 	return "SELECT id, " + dbHash + " AS db_url_hash, timestamp, content_hash, " +
 		dbName + " AS database_name, " + schemaRef + " AS schema_ref_hash, " +
-		nodeSrc + " AS node_source, project_id, database_id FROM " + d.table
+		nodeSrc + " AS node_source, project_id, database_id, " + depsHash +
+		" AS dependencies_hash FROM " + d.table
 }
 
-// scanSummary reads the nine-column projection above. The timestamp is parsed
-// strictly: callers (inventory, LatestSchema) rely on a corrupt one surfacing.
+// scanSummary reads the projection above; callers rely on a bad timestamp
+// surfacing.
 func scanSummary(rows rowScanner, tag SnapshotKindTag) (SnapshotSummary, error) {
 	var (
-		ss    SnapshotSummary
-		tsStr string
-		label string
-		pid   sql.NullString
-		did   sql.NullString
+		ss       SnapshotSummary
+		tsStr    string
+		label    string
+		pid      sql.NullString
+		did      sql.NullString
+		depsHash sql.NullString
 	)
 	if err := rows.Scan(&ss.ID, &ss.DBURLHash, &tsStr, &ss.ContentHash, &ss.Database,
-		&ss.SchemaRefHash, &label, &pid, &did); err != nil {
+		&ss.SchemaRefHash, &label, &pid, &did, &depsHash); err != nil {
 		return ss, err
 	}
+	ss.DependenciesHash = depsHash.String
 	t, err := time.Parse(time.RFC3339, tsStr)
 	if err != nil {
 		return ss, fmt.Errorf("bad timestamp %q: %w", tsStr, err)
@@ -728,6 +735,11 @@ func (s *Store) putSchema(ctx context.Context, key SnapshotKey, snap *schema.Sch
 			return PutDeduped, nil
 		}
 	}
+	if sameHash && !capturedLocally && snap.DependenciesHash == "" {
+		if err := s.reuseStoredDependencies(ctx, latestID, snap); err != nil {
+			return PutInserted, err
+		}
+	}
 
 	data, err := json.Marshal(snap)
 	if err != nil {
@@ -800,14 +812,22 @@ func (s *Store) canRefreshSchemaPayload(ctx context.Context, id int64, snap *sch
 			"hash", snap.ContentHash, "stored_system_identifier", storedSystem.String, "incoming_system_identifier", snap.SystemIdentifier)
 		return false, nil
 	}
-	if snap.DependenciesHash != "" && (!storedDeps.Valid || storedDeps.String != snap.DependenciesHash) {
-		return true, nil
-	}
 	if !storedAt.Valid {
 		return true, nil
 	}
 	at, err := time.Parse(time.RFC3339Nano, storedAt.String)
-	return err != nil || snap.Timestamp.After(at), nil
+	if err != nil {
+		return true, nil
+	}
+	if snap.DependenciesHash != "" && (!storedDeps.Valid || storedDeps.String != snap.DependenciesHash) {
+		if !storedDeps.Valid || storedDeps.String == "" {
+			// missing edges may be filled at the same timestamp
+			return !snap.Timestamp.Before(at), nil
+		}
+		// never replace newer edges with older ones
+		return snap.Timestamp.After(at), nil
+	}
+	return snap.Timestamp.After(at), nil
 }
 
 // dependenciesChanged reports whether the stored payload has older edges.
@@ -821,6 +841,30 @@ func (s *Store) dependenciesChanged(ctx context.Context, id int64, hash string) 
 		return false, fmt.Errorf("cannot read stored dependency hash: %w", err)
 	}
 	return !stored.Valid || stored.String != hash, nil
+}
+
+// reuseStoredDependencies keeps edges when a newer payload has none.
+func (s *Store) reuseStoredDependencies(ctx context.Context, id int64, snap *schema.SchemaSnapshot) error {
+	var rawDeps, hash sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT `+nodeJSONExprCol("snapshot_json", "$.dependencies")+`, `+
+			nodeJSONExprCol("snapshot_json", "$.dependencies_hash")+`
+		   FROM snapshots WHERE id = ?`, id,
+	).Scan(&rawDeps, &hash)
+	if err != nil {
+		return fmt.Errorf("cannot read stored dependencies: %w", err)
+	}
+	if !hash.Valid || hash.String == "" {
+		return nil
+	}
+	snap.DependenciesHash = hash.String
+	if !rawDeps.Valid || rawDeps.String == "" {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(rawDeps.String), &snap.Dependencies); err != nil {
+		return fmt.Errorf("cannot decode stored dependencies: %w", err)
+	}
+	return nil
 }
 
 func localFlag(capturedLocally bool) int {

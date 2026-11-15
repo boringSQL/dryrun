@@ -86,15 +86,45 @@ func (s *bundleStore) Put(ctx context.Context, key SnapshotKey, snap StoredSnaps
 }
 
 func (s *bundleStore) putSchema(ctx context.Context, key SnapshotKey, snap *schema.SchemaSnapshot) (PutOutcome, error) {
-	// a schema is its content: an existing bundle carrying this hash wins,
-	// regardless of when it was captured.
-	if _, ok, err := s.backend.load(ctx, key, snap.ContentHash); err != nil {
+	existing, ok, err := s.backend.load(ctx, key, snap.ContentHash)
+	if err != nil {
 		return PutInserted, err
-	} else if ok {
-		return PutDeduped, nil
 	}
-	b := &Bundle{Schema: snap, Activity: map[string]*schema.ActivityStatsSnapshot{}}
-	if err := s.save(ctx, key, b); err != nil {
+	if !ok {
+		b := &Bundle{Schema: snap, Activity: map[string]*schema.ActivityStatsSnapshot{}}
+		if err := s.save(ctx, key, b); err != nil {
+			return PutInserted, err
+		}
+		return PutInserted, nil
+	}
+
+	incoming := *snap
+	carried := false
+	if incoming.DependenciesHash == "" && existing.Schema != nil && existing.Schema.DependenciesHash != "" {
+		incoming.Dependencies = existing.Schema.Dependencies
+		incoming.DependenciesHash = existing.Schema.DependenciesHash
+		carried = true
+	}
+	if existing.Schema != nil {
+		switch {
+		case incoming.DependenciesHash == existing.Schema.DependenciesHash:
+			if !carried || !incoming.Timestamp.After(existing.Schema.Timestamp) {
+				return PutDeduped, nil
+			}
+		case existing.Schema.DependenciesHash == "":
+			if incoming.Timestamp.Before(existing.Schema.Timestamp) {
+				return PutDeduped, nil
+			}
+		default:
+			if !incoming.Timestamp.After(existing.Schema.Timestamp) {
+				return PutDeduped, nil
+			}
+		}
+		// overwrite the same versioned bundle, not a new twin
+		incoming.Timestamp = existing.Schema.Timestamp
+	}
+	existing.Schema = &incoming
+	if err := s.save(ctx, key, existing); err != nil {
 		return PutInserted, err
 	}
 	return PutInserted, nil
@@ -370,7 +400,7 @@ func bundleSummaries(b *Bundle, kind SnapshotKind, rng TimeRange) ([]SnapshotSum
 			out = append(out, SnapshotSummary{
 				Kind: SchemaKind(), Timestamp: s.Timestamp,
 				ContentHash: s.ContentHash, SchemaRefHash: s.ContentHash,
-				Database: s.Database,
+				DependenciesHash: s.DependenciesHash, Database: s.Database,
 			})
 		}
 	case KindPlanner:

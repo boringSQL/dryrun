@@ -565,9 +565,11 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 		return counts, err
 	}
 	// content_hash is stable across stores; a known hash skips unless it refreshes.
-	have := make(map[string]struct{}, len(dstList))
+	have := make(map[string]history.SnapshotSummary, len(dstList))
 	for _, s := range dstList {
-		have[s.ContentHash] = struct{}{}
+		if _, seen := have[s.ContentHash]; !seen {
+			have[s.ContentHash] = s
+		}
 	}
 
 	// stores list newest-first; push oldest-first so remote history fills in chronological order.
@@ -582,7 +584,7 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 	})
 
 	for i, s := range ordered {
-		_, known := have[s.ContentHash]
+		dstSummary, known := have[s.ContentHash]
 		// A known hash can still be newer: a reverted migration is old history
 		// that is current again, and the digest omits partition children. The
 		// column has seconds and the summary may not, so compare in seconds. The
@@ -590,6 +592,9 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 		// one Get.
 		refresh := kind.Tag == history.KindSchema && i == len(ordered)-1 && len(dstList) > 0 &&
 			s.Timestamp.Truncate(time.Second).After(dstList[0].Timestamp)
+		if known && kind.Tag == history.KindSchema && schemaDepsRefresh(s, dstSummary) {
+			refresh = true
+		}
 		if known && !refresh {
 			counts.UpToDate++
 			continue
@@ -612,6 +617,20 @@ func syncKindList(ctx context.Context, src, dst history.SnapshotStore, key histo
 		counts.Copied++
 	}
 	return counts, nil
+}
+
+// schemaDepsRefresh reports whether the source has newer dependency metadata.
+// Missing edges fill at the same timestamp; different edges need a newer one.
+func schemaDepsRefresh(src, dst history.SnapshotSummary) bool {
+	if src.DependenciesHash == "" || src.DependenciesHash == dst.DependenciesHash {
+		return false
+	}
+	srcTS := src.Timestamp.Truncate(time.Second)
+	dstTS := dst.Timestamp.Truncate(time.Second)
+	if dst.DependenciesHash == "" {
+		return !srcTS.Before(dstTS)
+	}
+	return srcTS.After(dstTS)
 }
 
 // A hash resolves to its newest content twin. history.db dates a version by the
