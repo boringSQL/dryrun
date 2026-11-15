@@ -263,6 +263,11 @@ func (s *Server) handleDescribeTable(_ context.Context, req mcp.CallToolRequest)
 		deps, depHint := buildDependents(snap, t, limitArgOr(req, defaultMaxItems))
 		result["dependents"] = deps
 		hint = joinHints(hint, depHint)
+		if deps.Omitted > 0 {
+			next = append(next, NextCall{Tool: "describe_table", Args: map[string]any{
+				"table": ref.Name, "schema": ref.Schema, "fields": []string{"dependents"}, "limit": 0,
+			}})
+		}
 	}
 
 	if kinds := tableFindings(a, t); len(kinds) > 0 {

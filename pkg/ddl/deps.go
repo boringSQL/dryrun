@@ -3,6 +3,7 @@ package ddl
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/boringsql/dryrun/pkg/snapshot"
 )
@@ -37,12 +38,23 @@ func dependentOrigins(t *snapshot.Table) map[objKey]string {
 	return out
 }
 
-// DependentView is a captured view that reads a table.
+// DependentVia is an immediate parent of a transitive dependent.
+type DependentVia struct {
+	Schema  string
+	Name    string
+	Columns []string
+}
+
+// DependentView is a captured view that reads a table, directly or through
+// another view. Columns holds table columns at depth 1; deeper views carry
+// Via, the parent views and the columns read from each.
 type DependentView struct {
 	Schema       string
 	Name         string
 	Materialized bool
+	Depth        int
 	Columns      []string
+	Via          []DependentVia
 }
 
 // ViewDependents lists captured views and materialized views reading t.
@@ -50,52 +62,135 @@ func ViewDependents(snap *snapshot.SchemaSnapshot, t *snapshot.Table) []Dependen
 	if snap == nil || t == nil || snap.DependenciesHash == "" {
 		return nil
 	}
-	q := qual(t.Schema, t.Name)
-	targets := map[objKey]string{{"pg_class", q}: ""}
-	for _, c := range t.Columns {
-		targets[objKey{"pg_class", q + "." + quoteIdent(c.Name)}] = c.Name
-	}
-	views := make(map[objKey]DependentView, len(snap.Views))
+	root := qual(t.Schema, t.Name)
+	views := make(map[string]DependentView, len(snap.Views))
+	nodes := map[string]bool{root: true}
 	for _, v := range snap.Views {
-		views[objKey{"pg_class", qual(v.Schema, v.Name)}] = DependentView{
-			Schema: v.Schema, Name: v.Name, Materialized: v.IsMaterialized,
-		}
+		id := qual(v.Schema, v.Name)
+		views[id] = DependentView{Schema: v.Schema, Name: v.Name, Materialized: v.IsMaterialized}
+		nodes[id] = true
 	}
 
-	columns := make(map[objKey]map[string]struct{})
+	type edge struct{ src, column string }
+	incoming := make(map[string][]edge)
+	outgoing := make(map[string][]string)
 	for _, d := range snap.Dependencies {
-		if d.DependentClass != "pg_class" {
+		if d.DependentClass != "pg_class" || d.ReferencedClass != "pg_class" {
 			continue
 		}
-		col, ok := targets[objKey{"pg_class", d.ReferencedIdentity}]
+		child := d.DependentIdentity
+		if _, ok := views[child]; !ok {
+			continue
+		}
+		src, col, ok := identitySource(d.ReferencedIdentity, nodes)
 		if !ok {
 			continue
 		}
-		key := objKey{"pg_class", d.DependentIdentity}
-		if _, ok := views[key]; !ok {
-			continue
-		}
-		if columns[key] == nil {
-			columns[key] = make(map[string]struct{})
-		}
-		if col != "" {
-			columns[key][col] = struct{}{}
+		outgoing[src] = append(outgoing[src], child)
+		incoming[child] = append(incoming[child], edge{src: src, column: col})
+	}
+
+	depth := map[string]int{root: 0}
+	queue := []string{root}
+	for len(queue) > 0 {
+		src := queue[0]
+		queue = queue[1:]
+		for _, child := range outgoing[src] {
+			if _, seen := depth[child]; seen {
+				continue
+			}
+			depth[child] = depth[src] + 1
+			queue = append(queue, child)
 		}
 	}
 
-	out := make([]DependentView, 0, len(columns))
-	for key := range columns {
-		v := views[key]
-		v.Columns = sortedSet(columns[key])
+	out := make([]DependentView, 0, len(depth))
+	for id, at := range depth {
+		if at == 0 {
+			continue
+		}
+		v := views[id]
+		v.Depth = at
+		hops := make(map[string]map[string]struct{})
+		for _, e := range incoming[id] {
+			if depth[e.src] != at-1 {
+				continue
+			}
+			if hops[e.src] == nil {
+				hops[e.src] = make(map[string]struct{})
+			}
+			if e.column != "" {
+				hops[e.src][e.column] = struct{}{}
+			}
+		}
+		if at == 1 {
+			v.Columns = sortedSet(hops[root])
+		} else {
+			for src, cols := range hops {
+				p := views[src]
+				v.Via = append(v.Via, DependentVia{Schema: p.Schema, Name: p.Name, Columns: sortedSet(cols)})
+			}
+			sort.Slice(v.Via, func(i, j int) bool {
+				if v.Via[i].Schema != v.Via[j].Schema {
+					return v.Via[i].Schema < v.Via[j].Schema
+				}
+				return v.Via[i].Name < v.Via[j].Name
+			})
+		}
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].Depth != out[j].Depth {
+			return out[i].Depth < out[j].Depth
+		}
 		if out[i].Schema != out[j].Schema {
 			return out[i].Schema < out[j].Schema
 		}
 		return out[i].Name < out[j].Name
 	})
 	return out
+}
+
+// identitySource resolves a referenced identity to the table or view it
+// belongs to; a column reference returns the column name too.
+func identitySource(identity string, nodes map[string]bool) (string, string, bool) {
+	if nodes[identity] {
+		return identity, "", true
+	}
+	parent, col, ok := cutLastIdent(identity)
+	if !ok || !nodes[parent] {
+		return "", "", false
+	}
+	return parent, unquoteIdent(col), true
+}
+
+func unquoteIdent(s string) string {
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return s
+	}
+	return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
+}
+
+func cutLastIdent(identity string) (string, string, bool) {
+	last, quoted := -1, false
+	for i := 0; i < len(identity); i++ {
+		switch identity[i] {
+		case '"':
+			if quoted && i+1 < len(identity) && identity[i+1] == '"' {
+				i++
+				continue
+			}
+			quoted = !quoted
+		case '.':
+			if !quoted {
+				last = i
+			}
+		}
+	}
+	if last < 0 {
+		return "", "", false
+	}
+	return identity[:last], identity[last+1:], true
 }
 
 func sortedSet(set map[string]struct{}) []string {

@@ -534,3 +534,11 @@ func TestRenderTriggerStateAndForceRLS(t *testing.T) {
 		t.Errorf("origin trigger must not get an ALTER:\n%s", r.SQL)
 	}
 }
+
+func TestRenderQuotesDollarIdentifiers(t *testing.T) {
+	tab := tbl("orders$2024", col("total$", "numeric"))
+	r := render(t, nil, tab)
+	if !contains(r.SQL, `CREATE TABLE public."orders$2024"`) || !contains(r.SQL, `"total$" numeric`) {
+		t.Fatalf("dollar identifiers were not quoted:\n%s", r.SQL)
+	}
+}

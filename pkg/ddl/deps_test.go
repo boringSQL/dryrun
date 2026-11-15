@@ -1,6 +1,7 @@
 package ddl
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/boringsql/dryrun/pkg/snapshot"
@@ -220,14 +221,108 @@ func TestViewDependents(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("ViewDependents = %+v", got)
 	}
-	if got[0].Name != "mv" || !got[0].Materialized || len(got[0].Columns) != 1 || got[0].Columns[0] != "v" {
+	if got[0].Name != "mv" || !got[0].Materialized || got[0].Depth != 1 || len(got[0].Columns) != 1 || got[0].Columns[0] != "v" {
 		t.Errorf("materialized view = %+v", got[0])
 	}
-	if got[1].Name != "count_v" || len(got[1].Columns) != 0 {
+	if got[1].Name != "count_v" || got[1].Depth != 1 || len(got[1].Columns) != 0 {
 		t.Errorf("table-level dependent = %+v", got[1])
 	}
-	if got[2].Name != "v" || len(got[2].Columns) != 2 || got[2].Columns[0] != "id" || got[2].Columns[1] != "v" {
+	if got[2].Name != "v" || got[2].Depth != 1 || len(got[2].Columns) != 2 || got[2].Columns[0] != "id" || got[2].Columns[1] != "v" {
 		t.Errorf("view = %+v", got[2])
+	}
+}
+
+func TestViewDependentsTransitive(t *testing.T) {
+	tab := tbl("t", col("id", "integer"), col("email", "text"))
+	snap := &snapshot.SchemaSnapshot{
+		DependenciesHash: "dep-1",
+		Views: []snapshot.View{
+			{Schema: "public", Name: "v1"},
+			{Schema: "public", Name: "v2"},
+			{Schema: "public", Name: "v3"},
+			{Schema: "public", Name: "sibling"},
+		},
+		Dependencies: []snapshot.Dependency{
+			dep("n", "pg_class", "public.v1", "pg_class", "public.t.email"),
+			dep("n", "pg_class", "public.v2", "pg_class", "public.v1.email"),
+			dep("n", "pg_class", "public.v3", "pg_class", "public.v2.email"),
+			dep("n", "pg_class", "public.sibling", "pg_class", "public.v1.id"),
+		},
+	}
+	got := ViewDependents(snap, tab)
+	if len(got) != 4 {
+		t.Fatalf("ViewDependents = %+v", got)
+	}
+	want := map[string]struct {
+		depth   int
+		cols    string
+		via     string
+		viaCols string
+	}{
+		"v1":      {1, "email", "", ""},
+		"v2":      {2, "", "public.v1", "email"},
+		"v3":      {3, "", "public.v2", "email"},
+		"sibling": {2, "", "public.v1", "id"},
+	}
+	for _, v := range got {
+		w := want[v.Name]
+		via, viaCols := "", ""
+		if len(v.Via) > 0 {
+			via = v.Via[0].Schema + "." + v.Via[0].Name
+			viaCols = strings.Join(v.Via[0].Columns, ",")
+		}
+		if v.Depth != w.depth || strings.Join(v.Columns, ",") != w.cols || via != w.via || viaCols != w.viaCols {
+			t.Errorf("%s = depth %d cols %v via %s/%s, want depth %d cols %s via %s/%s",
+				v.Name, v.Depth, v.Columns, via, viaCols, w.depth, w.cols, w.via, w.viaCols)
+		}
+	}
+	if got[0].Name != "v1" || got[3].Name != "v3" {
+		t.Errorf("order = %v", []string{got[0].Name, got[1].Name, got[2].Name, got[3].Name})
+	}
+}
+
+func TestViewDependentsDiamond(t *testing.T) {
+	tab := tbl("t", col("id", "integer"))
+	snap := &snapshot.SchemaSnapshot{
+		DependenciesHash: "dep-1",
+		Views: []snapshot.View{
+			{Schema: "public", Name: "v1"},
+			{Schema: "public", Name: "v2"},
+			{Schema: "public", Name: "last"},
+		},
+		Dependencies: []snapshot.Dependency{
+			dep("n", "pg_class", "public.v1", "pg_class", "public.t.id"),
+			dep("n", "pg_class", "public.v2", "pg_class", "public.t.id"),
+			dep("n", "pg_class", "public.last", "pg_class", "public.v1.id"),
+			dep("n", "pg_class", "public.last", "pg_class", "public.v2.id"),
+		},
+	}
+	got := ViewDependents(snap, tab)
+	if len(got) != 3 || got[2].Name != "last" || got[2].Depth != 2 {
+		t.Fatalf("ViewDependents = %+v", got)
+	}
+	if len(got[2].Via) != 2 || got[2].Via[0].Name != "v1" || got[2].Via[1].Name != "v2" {
+		t.Fatalf("diamond parents = %+v", got[2].Via)
+	}
+}
+
+func TestViewDependentsCycle(t *testing.T) {
+	tab := tbl("t", col("id", "integer"))
+	snap := &snapshot.SchemaSnapshot{
+		DependenciesHash: "dep-1",
+		Views: []snapshot.View{
+			{Schema: "public", Name: "v1"},
+			{Schema: "public", Name: "v2"},
+		},
+		Dependencies: []snapshot.Dependency{
+			dep("n", "pg_class", "public.v1", "pg_class", "public.t.id"),
+			dep("n", "pg_class", "public.v2", "pg_class", "public.v1.id"),
+			dep("n", "pg_class", "public.v1", "pg_class", "public.v2.id"),
+		},
+	}
+	got := ViewDependents(snap, tab)
+	if len(got) != 2 || got[0].Depth != 1 || got[1].Depth != 2 {
+		t.Fatalf("ViewDependents = %+v", got)
 	}
 }
 
@@ -250,5 +345,56 @@ func TestViewDependentsQuotedTable(t *testing.T) {
 func TestViewDependentsWithoutCapture(t *testing.T) {
 	if got := ViewDependents(&snapshot.SchemaSnapshot{}, tbl("t")); got != nil {
 		t.Fatalf("ViewDependents = %+v, want nil", got)
+	}
+}
+
+func TestViewDependentsQuotedTransitiveColumn(t *testing.T) {
+	tab := tbl("t", col("id", "integer"))
+	snap := &snapshot.SchemaSnapshot{
+		DependenciesHash: "dep-1",
+		Views: []snapshot.View{
+			{Schema: "public", Name: "v1"},
+			{Schema: "public", Name: "v2"},
+		},
+		Dependencies: []snapshot.Dependency{
+			dep("n", "pg_class", "public.v1", "pg_class", "public.t.id"),
+			dep("n", "pg_class", "public.v2", "pg_class", `public.v1."Email Address"`),
+		},
+	}
+	got := ViewDependents(snap, tab)
+	if len(got) != 2 || len(got[1].Via) != 1 {
+		t.Fatalf("ViewDependents = %+v", got)
+	}
+	if cols := got[1].Via[0].Columns; len(cols) != 1 || cols[0] != "Email Address" {
+		t.Fatalf("transitive columns = %q, want the catalog name", cols)
+	}
+}
+
+func TestViewDependentsIgnoresTypeReferences(t *testing.T) {
+	tab := tbl("t", col("id", "integer"))
+	snap := &snapshot.SchemaSnapshot{
+		DependenciesHash: "dep-1",
+		Views:            []snapshot.View{{Schema: "public", Name: "typed"}},
+		Dependencies: []snapshot.Dependency{
+			dep("n", "pg_class", "public.typed", "pg_type", "public.t"),
+		},
+	}
+	if got := ViewDependents(snap, tab); len(got) != 0 {
+		t.Fatalf("a composite type reference was read as the table: %+v", got)
+	}
+}
+
+func TestViewDependentsDollarIdentifier(t *testing.T) {
+	tab := &snapshot.Table{Schema: "public", Name: "orders$2024", Columns: []snapshot.Column{{Name: "id", TypeName: "integer"}}}
+	snap := &snapshot.SchemaSnapshot{
+		DependenciesHash: "dep-1",
+		Views:            []snapshot.View{{Schema: "public", Name: "v"}},
+		Dependencies: []snapshot.Dependency{
+			dep("n", "pg_class", "public.v", "pg_class", `public."orders$2024".id`),
+		},
+	}
+	got := ViewDependents(snap, tab)
+	if len(got) != 1 || got[0].Name != "v" {
+		t.Fatalf("ViewDependents = %+v", got)
 	}
 }

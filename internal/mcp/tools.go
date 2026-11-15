@@ -114,7 +114,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 	)
 	srv.AddTool(
 		mcp.NewTool("describe_table",
-			mcp.WithDescription("Before writing SQL against a table you have not read in this session, before a JOIN, or before a DELETE that might cascade: one table in full -- its columns and types, constraints, indexes, and planner stats. Needs no database connection; answers from the snapshot, and points at detect when the table has findings. detail=relations gives the incoming and outgoing foreign keys, each with a JOIN clause you can paste and the ON DELETE / ON UPDATE action it carries (declared constraints only, one hop, so a table reached by a cascade may cascade further). detail=stats adds vacuum: dead tuples, trigger points, effective autovacuum knobs and last vacuum/analyze times, for any table over 10k rows whether or not detect flagged it. Ask for the ddl field to get the CREATE TABLE that would rebuild it, with whatever the snapshot cannot reproduce listed beside it. Ask for dependents to see the captured views that directly read this table before changing or dropping it. Structure as of the last capture: no row data, and nothing a later migration changed."),
+			mcp.WithDescription("Before writing SQL against a table you have not read in this session, before a JOIN, or before a DELETE that might cascade: one table in full -- its columns and types, constraints, indexes, and planner stats. Needs no database connection; answers from the snapshot, and points at detect when the table has findings. detail=relations gives the incoming and outgoing foreign keys, each with a JOIN clause you can paste and the ON DELETE / ON UPDATE action it carries (declared constraints only, one hop, so a table reached by a cascade may cascade further). detail=stats adds vacuum: dead tuples, trigger points, effective autovacuum knobs and last vacuum/analyze times, for any table over 10k rows whether or not detect flagged it. Ask for the ddl field to get the CREATE TABLE that would rebuild it, with whatever the snapshot cannot reproduce listed beside it. Ask for dependents to see the captured views that read this table directly or through other views before changing or dropping it; depth 1 carries table columns, deeper rows carry via parent views. Structure as of the last capture: no row data, and nothing a later migration changed."),
 			mcp.WithString("table", mcp.Required(), mcp.Description("Table name, bare or schema-qualified.")),
 			mcp.WithString("schema", mcp.Description("Schema name. Without it a bare name resolves in public, or in the one schema that holds it.")),
 			mcp.WithString("detail",
@@ -124,7 +124,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			),
 			mcp.WithArray("fields",
 				mcp.Items(map[string]any{"type": "string"}),
-				mcp.Description("Whitelist of sections: columns, indexes, constraints, stats, partition_info, column_profiles, comment, policies, triggers, reloptions, rls_enabled, ddl, vacuum, relations, dependents. Ask for ddl to get the CREATE TABLE, or dependents for the views that directly read this table."),
+				mcp.Description("Whitelist of sections: columns, indexes, constraints, stats, partition_info, column_profiles, comment, policies, triggers, reloptions, rls_enabled, ddl, vacuum, relations, dependents. Ask for ddl to get the CREATE TABLE, or dependents for the views that read this table, including indirect ones."),
 			),
 			mcp.WithArray("columns",
 				mcp.Items(map[string]any{"type": "string"}),
@@ -132,7 +132,7 @@ func (s *Server) registerSchemaTools(srv *mcpserver.MCPServer) {
 			),
 			mcp.WithNumber("limit",
 				mcp.DefaultNumber(50),
-				mcp.Description("Max columns, indexes, constraints, partition children and relations per direction (default 50, 0 for all). Key, unique and indexed columns are kept past it, as are relations that cascade or clear on delete."),
+				mcp.Description("Max columns, indexes, constraints, partition children, relations per direction and dependents (default 50, 0 for all). Key, unique and indexed columns are kept past it, as are relations that cascade or clear on delete."),
 			),
 			mcp.WithRawOutputSchema(describeTableOutputSchema),
 			annSnapshot,

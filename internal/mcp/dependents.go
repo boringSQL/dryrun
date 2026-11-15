@@ -8,11 +8,19 @@ import (
 )
 
 type (
-	dependentView struct {
+	dependentVia struct {
 		Schema  string   `json:"schema"`
 		Name    string   `json:"name"`
-		Kind    string   `json:"kind"`
 		Columns []string `json:"columns,omitempty"`
+	}
+
+	dependentView struct {
+		Schema  string         `json:"schema"`
+		Name    string         `json:"name"`
+		Kind    string         `json:"kind"`
+		Depth   int            `json:"depth"`
+		Columns []string       `json:"columns,omitempty"`
+		Via     []dependentVia `json:"via,omitempty"`
 	}
 
 	tableDependents struct {
@@ -42,7 +50,11 @@ func buildDependents(snap *schema.SchemaSnapshot, t *schema.Table, max int) (tab
 		if v.Materialized {
 			kind = "materialized_view"
 		}
-		out.Views[i] = dependentView{Schema: v.Schema, Name: v.Name, Kind: kind, Columns: v.Columns}
+		via := make([]dependentVia, len(v.Via))
+		for j, p := range v.Via {
+			via[j] = dependentVia{Schema: p.Schema, Name: p.Name, Columns: p.Columns}
+		}
+		out.Views[i] = dependentView{Schema: v.Schema, Name: v.Name, Kind: kind, Depth: v.Depth, Columns: v.Columns, Via: via}
 	}
 	switch {
 	case omitted > 0:

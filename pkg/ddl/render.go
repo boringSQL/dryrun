@@ -526,7 +526,7 @@ func needsQuote(s string) bool {
 		c := s[i]
 		switch {
 		case c >= 'a' && c <= 'z', c == '_':
-		case (c >= '0' && c <= '9') || c == '$':
+		case c >= '0' && c <= '9':
 			if i == 0 {
 				return true
 			}
