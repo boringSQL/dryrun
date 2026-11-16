@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/boringsql/dryrun/internal/dryrun"
 )
 
 type InjectResult struct {
@@ -63,6 +65,7 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 	}
 
 	result.PgRegresqlLoaded = probePgRegresql(ctx, tx)
+	srcVer := sourceVersionNum(a.Schema.PgVersion)
 
 	relStatsInjected := false
 	for _, t := range a.Schema.Tables {
@@ -95,7 +98,7 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 				result.warn("table %s.%s: snapshot reltuples is %g; injected plan will be degenerate", t.Schema, t.Name, sz.Reltuples)
 			}
 			if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
-				return injectRelationStats(ctx, tx, pgMajor, t.Schema, t.Name, sz.Relpages, sz.Reltuples)
+				return injectRelationStats(ctx, tx, pgMajor, srcVer, t.Schema, t.Name, sz.Relpages, sz.Reltuples)
 			}); err != nil {
 				result.warn("table %s.%s: %v", t.Schema, t.Name, err)
 			} else {
@@ -110,7 +113,7 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 				continue
 			}
 			if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
-				return injectRelationStats(ctx, tx, pgMajor, t.Schema, idx.Name, isz.Relpages, isz.Reltuples)
+				return injectRelationStats(ctx, tx, pgMajor, srcVer, t.Schema, idx.Name, isz.Relpages, isz.Reltuples)
 			}); err != nil {
 				result.warn("index %s.%s: %v", t.Schema, idx.Name, err)
 			} else {
@@ -125,7 +128,7 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 		if pgMajor >= 18 {
 			for _, cs := range colsWithStats {
 				if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
-					return injectColumnStatsPG18(ctx, tx, pgMajor, t.Schema, t.Name, cs.col, cs.stats, cs.inherited)
+					return injectColumnStatsPG18(ctx, tx, srcVer, t.Schema, t.Name, cs.col, cs.stats, cs.inherited)
 				}); err != nil {
 					result.warn("column %s.%s.%s: %v", t.Schema, t.Name, cs.col.Name, err)
 				} else {
@@ -263,10 +266,21 @@ func batchLookupColumnMeta(ctx context.Context, tx pgx.Tx, schemaName, tableName
 	return result, rows.Err()
 }
 
-func injectRelationStats(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName, relName string, relpages int64, reltuples float64) error {
+// 'version' is the server_version_num the stats came from (pg_dump sends the
+// source's); nil when the banner doesn't parse, and a NULL pair is skipped
+func sourceVersionNum(banner string) *int {
+	v, err := dryrun.ParsePgVersion(banner)
+	if err != nil {
+		return nil
+	}
+	n := v.Major*10000 + v.Minor
+	return &n
+}
+
+func injectRelationStats(ctx context.Context, tx pgx.Tx, pgMajor int, srcVer *int, schemaName, relName string, relpages int64, reltuples float64) error {
 	if pgMajor >= 18 {
 		_, err := tx.Exec(ctx, q("restore-relation-stats-pg18"),
-			pgMajor, schemaName, relName, relpages, float32(reltuples))
+			srcVer, schemaName, relName, relpages, float32(reltuples))
 		return err
 	}
 
@@ -281,7 +295,7 @@ func injectRelationStats(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName
 	return nil
 }
 
-func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaName, tableName string, col Column, s *ColumnStats, inherited bool) error {
+func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, srcVer *int, schemaName, tableName string, col Column, s *ColumnStats, inherited bool) error {
 	parts := []string{
 		"'version', $1::int",
 		"'schemaname', $2::text",
@@ -289,7 +303,7 @@ func injectColumnStatsPG18(ctx context.Context, tx pgx.Tx, pgMajor int, schemaNa
 		"'attname', $4::text",
 		"'inherited', $5::boolean",
 	}
-	args := []any{pgMajor, schemaName, tableName, col.Name, inherited}
+	args := []any{srcVer, schemaName, tableName, col.Name, inherited}
 	idx := 6
 
 	if s.NullFrac != nil {
