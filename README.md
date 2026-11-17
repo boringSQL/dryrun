@@ -49,7 +49,7 @@ No database connection needed. The assistant never sees credentials.
 
 ## Install
 
-**Requires PostgreSQL 14 or newer.** Older servers are not refused — dryrun
+**Requires PostgreSQL 15 or newer.** Older servers are not refused — dryrun
 warns and captures what it can — but they are untested, and some streams
 (planner stats in particular) will be unavailable. The floor tracks the oldest
 release still supported upstream.

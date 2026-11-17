@@ -16,7 +16,7 @@ func quoteLiteral(s string) string {
 // current server can carry pgss 1.8, with no toplevel column and no
 // pg_stat_statements_info view. Capture must degrade, not fail.
 //
-// This is the regression the PG14-floor cleanup could most easily have caused:
+// This is the regression a past floor cleanup could most easily have caused:
 // the probes for toplevel/info/shared_blk_read_time look like server-version
 // checks and are not. Nothing tested it before.
 //

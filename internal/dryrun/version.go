@@ -10,7 +10,7 @@ import (
 // The oldest major dryrun supports; tracks the oldest community-supported
 // release. Older servers are warned about, not refused. Never use this to
 // interpret a stored snapshot: it moves between binaries.
-const MinSupportedMajor = 14
+const MinSupportedMajor = 15
 
 type PgVersion struct {
 	Major int `json:"major"`

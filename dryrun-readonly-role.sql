@@ -1,7 +1,7 @@
 -- dryrun-readonly-role.sql
 --
 -- Creates a read-only role for use with dryrun's dump-schema functionality.
--- Works with PostgreSQL 14+.
+-- Works with PostgreSQL 15+.
 --
 -- Usage:
 --   psql -v db_name=mydb -v dryrun_password="'s3cret'" -f dryrun-readonly-role.sql
@@ -12,7 +12,7 @@ CREATE ROLE dryrun_readonly NOLOGIN;
 -- 2. Allow connecting to the target database
 GRANT CONNECT ON DATABASE :db_name TO dryrun_readonly;
 
--- 3. pg_read_all_data covers SELECT on all tables, views, sequences across all schemas (PG14+)
+-- 3. pg_read_all_data covers SELECT on all tables, views, sequences across all schemas
 GRANT pg_read_all_data TO dryrun_readonly;
 
 -- 4. pg_read_all_stats exposes pg_stat_replication peers. Without it the section

@@ -17,14 +17,15 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
 
-  # Every supported major (14-18): the engine verdict harness checks check_migration against each.
+  # Every supported major (15-19): the engine verdict harness checks check_migration against each.
+  # 19rc2 is the current prerelease tag; rename to 19 once it is released.
   # docker run, not a service container: the pgss tests need shared_preload_libraries.
   live:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        pg: ["14", "15", "16", "17", "18"]
+        pg: ["15", "16", "17", "18", "19rc2"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
