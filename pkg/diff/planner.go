@@ -33,14 +33,15 @@ type (
 
 // planner payloads carry no OID, so identity is qualified-name keyed.
 const (
-	MetricReltuples    = "reltuples"
-	MetricRelpages     = "relpages"
-	MetricTableBytes   = "table_bytes"
-	MetricTotalBytes   = "total_bytes"
-	MetricIndexesBytes = "indexes_bytes"
-	MetricToastBytes   = "toast_bytes"
-	MetricIndexBytes   = "index_bytes"
-	MetricBloatRatio   = "bloat_ratio"
+	MetricReltuples     = "reltuples"
+	MetricRelpages      = "relpages"
+	MetricRelAllVisible = "relallvisible"
+	MetricTableBytes    = "table_bytes"
+	MetricTotalBytes    = "total_bytes"
+	MetricIndexesBytes  = "indexes_bytes"
+	MetricToastBytes    = "toast_bytes"
+	MetricIndexBytes    = "index_bytes"
+	MetricBloatRatio    = "bloat_ratio"
 
 	MetricNDistinct   = "n_distinct"
 	MetricNullFrac    = "null_frac"
@@ -65,6 +66,10 @@ func DiffPlanner(from, to *snapshot.PlannerStatsSnapshot) (*PlannerDelta, error)
 			sizingRow(ref, MetricTotalBytes, float64(a.TotalRelationSize), float64(b.TotalRelationSize)),
 			sizingRow(ref, MetricIndexesBytes, float64(a.IndexesSize), float64(b.IndexesSize)),
 		)
+		// one-sided means unknown (pre-upgrade capture), not zero
+		if a.RelAllVisible != nil && b.RelAllVisible != nil {
+			rows = append(rows, sizingRow(ref, MetricRelAllVisible, float64(*a.RelAllVisible), float64(*b.RelAllVisible)))
+		}
 		if a.ToastSize != 0 || b.ToastSize != 0 {
 			rows = append(rows, sizingRow(ref, MetricToastBytes, float64(a.ToastSize), float64(b.ToastSize)))
 		}
@@ -301,10 +306,10 @@ func unionKeys[T any](a, b map[string]*T) []string {
 }
 
 var sizingMetricOrder = map[string]int{
-	MetricReltuples: 0, MetricRelpages: 1, MetricTableBytes: 2,
-	MetricTotalBytes: 3, MetricIndexesBytes: 4, MetricToastBytes: 5,
-	MetricIndexBytes: 6, MetricBloatRatio: 7,
-	MetricNDistinct: 8, MetricNullFrac: 9, MetricCorrelation: 10, MetricMCVChurn: 11,
+	MetricReltuples: 0, MetricRelpages: 1, MetricRelAllVisible: 2, MetricTableBytes: 3,
+	MetricTotalBytes: 4, MetricIndexesBytes: 5, MetricToastBytes: 6,
+	MetricIndexBytes: 7, MetricBloatRatio: 8,
+	MetricNDistinct: 9, MetricNullFrac: 10, MetricCorrelation: 11, MetricMCVChurn: 12,
 }
 
 // keep this deterministic; consumers dedup on the serialized delta.

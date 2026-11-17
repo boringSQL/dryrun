@@ -311,7 +311,7 @@ func fetchPlannerTableSizing(ctx context.Context, pool Querier) ([]TableSizingEn
 		var e TableSizingEntry
 		err := r.Scan(
 			&e.Table.Schema, &e.Table.Name,
-			&e.Sizing.Reltuples, &e.Sizing.Relpages,
+			&e.Sizing.Reltuples, &e.Sizing.Relpages, &e.Sizing.RelAllVisible,
 			&e.Sizing.TableSize, &e.Sizing.TotalRelationSize,
 			&e.Sizing.IndexesSize, &e.Sizing.ToastSize,
 			&e.Sizing.RelfrozenXid, &e.Sizing.RelminMxid,

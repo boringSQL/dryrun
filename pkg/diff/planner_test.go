@@ -49,6 +49,15 @@ func findSizing(t *testing.T, rows []SizingDelta, name, metric string) SizingDel
 	return SizingDelta{}
 }
 
+func hasSizing(rows []SizingDelta, name, metric string) bool {
+	for _, r := range rows {
+		if r.Identity.Name == name && r.Metric == metric {
+			return true
+		}
+	}
+	return false
+}
+
 // --- sizing deltas: signed values + percent ---
 //
 // The core contract: a table whose row/byte counters moved between two planner
@@ -152,6 +161,40 @@ func TestDiffPlanner_ToastOnlyWhenPresent(t *testing.T) {
 	row := findSizing(t, delta.Sizing, "toasty", MetricToastBytes)
 	if row.Delta != 4096 {
 		t.Errorf("expected toast delta 4096, got %v", row.Delta)
+	}
+}
+
+// relallvisible is absent from snapshots taken before it was captured. A
+// nil endpoint means unknown, so the differ must stay silent rather than
+// present the first post-upgrade capture as a whole-table change.
+func TestDiffPlanner_RelAllVisibleOnlyWhenBothPresent(t *testing.T) {
+	fromVisible, toVisible := int64(400), int64(300)
+	from := emptyPlanner("a")
+	from.Tables = []snapshot.TableSizingEntry{
+		tbl("public", "both", snapshot.TableSizing{Relpages: 500, RelAllVisible: &fromVisible}),
+		tbl("public", "upgraded", snapshot.TableSizing{Relpages: 500}),
+		tbl("public", "downgraded", snapshot.TableSizing{Relpages: 500, RelAllVisible: &fromVisible}),
+	}
+	to := emptyPlanner("b")
+	to.Tables = []snapshot.TableSizingEntry{
+		tbl("public", "both", snapshot.TableSizing{Relpages: 500, RelAllVisible: &toVisible}),
+		tbl("public", "upgraded", snapshot.TableSizing{Relpages: 500, RelAllVisible: &toVisible}),
+		tbl("public", "downgraded", snapshot.TableSizing{Relpages: 500}),
+	}
+
+	delta, _ := DiffPlanner(from, to)
+
+	row := findSizing(t, delta.Sizing, "both", MetricRelAllVisible)
+	if row.ValueA != 400 || row.ValueB != 300 || row.Delta != -100 {
+		t.Errorf("relallvisible values wrong: %+v", row)
+	}
+	if row.Pct == nil || math.Abs(*row.Pct-(-25)) > 0.001 {
+		t.Errorf("expected pct -25, got %v", row.Pct)
+	}
+	for _, name := range []string{"upgraded", "downgraded"} {
+		if hasSizing(delta.Sizing, name, MetricRelAllVisible) {
+			t.Errorf("%s: one-sided relallvisible must not produce a row", name)
+		}
 	}
 }
 

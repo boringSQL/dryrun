@@ -618,3 +618,66 @@ func TestFetchPlannerColumnStats_DedupsInheritedRows(t *testing.T) {
 	requireOneRow(t, "dr_inh_parent_c", "id", true)
 	requireOneRow(t, "dr_inh_parent_c", "v", true)
 }
+
+// relallvisible drives the planner's allvisfrac, and injection uses it to cost
+// index-only scans against the visibility map. Capture must read it from
+// pg_class, and it must track the VM rather than stay at the zero default.
+func TestCapturePlannerStats_RelAllVisible(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS dr_relallvisible;
+		CREATE TABLE dr_relallvisible (id int);
+		INSERT INTO dr_relallvisible SELECT g FROM generate_series(1, 50) g;
+	`); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, "DROP TABLE IF EXISTS dr_relallvisible") })
+	if _, err := pool.Exec(ctx, "VACUUM dr_relallvisible"); err != nil {
+		t.Fatalf("vacuum: %v", err)
+	}
+
+	entry := func() TableSizingEntry {
+		t.Helper()
+		planner, err := CapturePlannerStats(ctx, pool, "sref")
+		if err != nil {
+			t.Fatalf("planner capture: %v", err)
+		}
+		for _, e := range planner.Tables {
+			if e.Table.Schema == "public" && e.Table.Name == "dr_relallvisible" {
+				return e
+			}
+		}
+		t.Fatal("dr_relallvisible missing from planner capture")
+		return TableSizingEntry{}
+	}
+
+	afterVacuum := entry()
+	if afterVacuum.Sizing.RelAllVisible == nil {
+		t.Fatal("relallvisible not captured")
+	}
+	if afterVacuum.Sizing.Relpages <= 0 {
+		t.Fatalf("relpages = %d, want > 0", afterVacuum.Sizing.Relpages)
+	}
+	// A freshly vacuumed table has every page all-visible.
+	if got := *afterVacuum.Sizing.RelAllVisible; got != afterVacuum.Sizing.Relpages {
+		t.Errorf("after VACUUM relallvisible = %d, want relpages %d", got, afterVacuum.Sizing.Relpages)
+	}
+
+	// ANALYZE recomputes the count from the map; rows added since the vacuum
+	// occupy pages that are not all-visible, so coverage must drop below 1.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO dr_relallvisible SELECT g FROM generate_series(51, 5000) g;
+		ANALYZE dr_relallvisible;
+	`); err != nil {
+		t.Fatalf("grow+analyze: %v", err)
+	}
+	afterAnalyze := entry()
+	if afterAnalyze.Sizing.RelAllVisible == nil {
+		t.Fatal("relallvisible missing after ANALYZE")
+	}
+	if got := *afterAnalyze.Sizing.RelAllVisible; got >= afterAnalyze.Sizing.Relpages {
+		t.Errorf("after growth relallvisible = %d, want < relpages %d", got, afterAnalyze.Sizing.Relpages)
+	}
+}

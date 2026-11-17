@@ -382,12 +382,14 @@ func (q QualifiedName) String() string {
 
 // Sizing inputs the planner uses: row estimate, on-disk footprint
 type TableSizing struct {
-	Reltuples         float64 `json:"reltuples"`
-	Relpages          int64   `json:"relpages"`
-	TableSize         int64   `json:"table_size"`
-	TotalRelationSize int64   `json:"total_relation_size"`
-	IndexesSize       int64   `json:"indexes_size"`
-	ToastSize         int64   `json:"toast_size,omitempty"`
+	Reltuples float64 `json:"reltuples"`
+	Relpages  int64   `json:"relpages"`
+	// all-visible heap pages; 0 is real, nil means captured before this field
+	RelAllVisible     *int64 `json:"relallvisible,omitempty"`
+	TableSize         int64  `json:"table_size"`
+	TotalRelationSize int64  `json:"total_relation_size"`
+	IndexesSize       int64  `json:"indexes_size"`
+	ToastSize         int64  `json:"toast_size,omitempty"`
 	// raw relfrozenxid/relminmxid (0 = partitioned parent); stable, so kept in the hash.
 	// ages are derived against DatabaseXid/DatabaseMxid, not stored, to stay dedup-stable.
 	RelfrozenXid int64 `json:"relfrozenxid,omitempty"`

@@ -81,6 +81,14 @@ func addTableSizing(dst *TableSizing, src TableSizing) {
 		dst.Reltuples += src.Reltuples
 	}
 	dst.Relpages += src.Relpages
+	if src.RelAllVisible != nil {
+		var v int64
+		if dst.RelAllVisible != nil {
+			v = *dst.RelAllVisible
+		}
+		dst.RelAllVisible = new(int64)
+		*dst.RelAllVisible = v + *src.RelAllVisible
+	}
 	dst.TableSize += src.TableSize
 	dst.TotalRelationSize += src.TotalRelationSize
 	dst.IndexesSize += src.IndexesSize

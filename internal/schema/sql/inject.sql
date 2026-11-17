@@ -19,12 +19,15 @@ SELECT a.attname,
 -- name: restore-relation-stats-pg18
 SELECT pg_restore_relation_stats(
     'version', $1::int, 'schemaname', $2::text, 'relname', $3::text,
-    'relpages', $4::integer, 'reltuples', $5::real
+    'relpages', $4::integer, 'reltuples', $5::real,
+    'relallvisible', $6::integer
 )
 
 -- name: update-relation-stats-legacy
+-- NULL $5 (pre-relallvisible snapshot) keeps the target's value
 UPDATE pg_catalog.pg_class
-   SET reltuples = $1, relpages = $2
+   SET reltuples = $1, relpages = $2,
+       relallvisible = COALESCE($5::int4, relallvisible)
  WHERE relname = $3
    AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $4)
 

@@ -75,7 +75,7 @@ When activity rows from multiple nodes attach to the same schema, the `MergedAct
 | `vacuum_count_sum` | sum across nodes | Total vacuum runs observed |
 | `partial` | true if any node is missing a `stats_reset` | Flags counters that aren't comparable |
 
-`reltuples` / `relpages` come from the primary's `planner_stats` row, not from activity rows.
+`reltuples` / `relpages` come from the primary's `planner_stats` row, not from activity rows. The same row carries `relallvisible`, the count of all-visible heap pages in the visibility map (refreshed by `VACUUM` or `ANALYZE`); it is absent from snapshots captured before it was added.
 
 ## Analysis tools
 

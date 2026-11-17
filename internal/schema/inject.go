@@ -98,7 +98,7 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 				result.warn("table %s.%s: snapshot reltuples is %g; injected plan will be degenerate", t.Schema, t.Name, sz.Reltuples)
 			}
 			if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
-				return injectRelationStats(ctx, tx, pgMajor, srcVer, t.Schema, t.Name, sz.Relpages, sz.Reltuples)
+				return injectRelationStats(ctx, tx, pgMajor, srcVer, t.Schema, t.Name, sz.Relpages, sz.Reltuples, sz.RelAllVisible)
 			}); err != nil {
 				result.warn("table %s.%s: %v", t.Schema, t.Name, err)
 			} else {
@@ -113,7 +113,7 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 				continue
 			}
 			if err := runSavepoint(ctx, tx, func(tx pgx.Tx) error {
-				return injectRelationStats(ctx, tx, pgMajor, srcVer, t.Schema, idx.Name, isz.Relpages, isz.Reltuples)
+				return injectRelationStats(ctx, tx, pgMajor, srcVer, t.Schema, idx.Name, isz.Relpages, isz.Reltuples, nil)
 			}); err != nil {
 				result.warn("index %s.%s: %v", t.Schema, idx.Name, err)
 			} else {
@@ -166,10 +166,10 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 		}
 	}
 
-	// injected relpages/reltuples get rescaled to the empty relation's physical
-	// size without pg_regresql's hook, collapsing row estimates
+	// without pg_regresql's hook, injected relation stats get rescaled to
+	// physical size and collapse row estimates
 	if relStatsInjected && !result.PgRegresqlLoaded {
-		result.warn("pg_regresql not loaded: injected relpages/reltuples may be ignored (rescaled to physical size); LOAD pg_regresql before EXPLAIN")
+		result.warn("pg_regresql not loaded: injected relpages/reltuples/relallvisible may be ignored (rescaled to physical size); LOAD pg_regresql before EXPLAIN")
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -277,15 +277,15 @@ func sourceVersionNum(banner string) *int {
 	return &n
 }
 
-func injectRelationStats(ctx context.Context, tx pgx.Tx, pgMajor int, srcVer *int, schemaName, relName string, relpages int64, reltuples float64) error {
+func injectRelationStats(ctx context.Context, tx pgx.Tx, pgMajor int, srcVer *int, schemaName, relName string, relpages int64, reltuples float64, relAllVisible *int64) error {
 	if pgMajor >= 18 {
 		_, err := tx.Exec(ctx, q("restore-relation-stats-pg18"),
-			srcVer, schemaName, relName, relpages, float32(reltuples))
+			srcVer, schemaName, relName, relpages, float32(reltuples), relAllVisible)
 		return err
 	}
 
 	tag, err := tx.Exec(ctx, q("update-relation-stats-legacy"),
-		reltuples, relpages, relName, schemaName)
+		reltuples, relpages, relName, schemaName, relAllVisible)
 	if err != nil {
 		return err
 	}

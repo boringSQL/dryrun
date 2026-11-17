@@ -267,3 +267,43 @@ func TestActivityStatsSnapshot_ReplicationPeersRoundTrip(t *testing.T) {
 		t.Errorf("absent peers section became present: read_ok=%v peers=%+v", emptyOut.ReplicationPeersReadOK, emptyOut.ReplicationPeers)
 	}
 }
+
+// relallvisible is a pointer because zero is a real value (a never-vacuumed
+// table), so an old snapshot must read as unknown rather than as "no visible
+// pages". Both directions matter: pre-field JSON must decode to nil, and a
+// captured zero must survive the round-trip.
+func TestTableSizing_RelAllVisibleDistinguishesZeroFromAbsent(t *testing.T) {
+	var legacy TableSizing
+	b, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
+	}
+	if strings.Contains(string(b), "relallvisible") {
+		t.Errorf("absent relallvisible leaked into JSON: %s", b)
+	}
+
+	var decoded TableSizing
+	if err := json.Unmarshal([]byte(`{"reltuples":1,"relpages":2}`), &decoded); err != nil {
+		t.Fatalf("unmarshal legacy: %v", err)
+	}
+	if decoded.RelAllVisible != nil {
+		t.Errorf("pre-field snapshot decoded relallvisible as %v, want nil", *decoded.RelAllVisible)
+	}
+
+	zero := int64(0)
+	b, err = json.Marshal(TableSizing{RelAllVisible: &zero})
+	if err != nil {
+		t.Fatalf("marshal zero: %v", err)
+	}
+	if !strings.Contains(string(b), `"relallvisible":0`) {
+		t.Errorf("captured zero lost in JSON: %s", b)
+	}
+
+	var out TableSizing
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal zero: %v", err)
+	}
+	if out.RelAllVisible == nil || *out.RelAllVisible != 0 {
+		t.Errorf("zero relallvisible did not round-trip: %v", out.RelAllVisible)
+	}
+}

@@ -1466,3 +1466,50 @@ func TestDigest_SensitiveToTriggerStateAndForce(t *testing.T) {
 		seen[d] = name
 	}
 }
+
+// relallvisible must be in the digest: a static table can be vacuumed without
+// relpages or reltuples moving, and dedup on an unchanged hash would otherwise
+// keep the stale visibility count forever. A document captured before the field
+// existed must still re-hash to its stored digest.
+func TestPlannerContentHash_TracksRelAllVisible(t *testing.T) {
+	qual := QualifiedName{Schema: "public", Name: "events"}
+	base := &PlannerStatsSnapshot{
+		SchemaRefHash: "ddl-hash",
+		Tables: []TableSizingEntry{{
+			Table:  qual,
+			Sizing: TableSizing{Relpages: 500, Reltuples: 10_000},
+		}},
+	}
+
+	data, err := json.Marshal(base)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var legacy PlannerStatsSnapshot
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got, want := ComputePlannerContentHash(&legacy), ComputePlannerContentHash(base); got != want {
+		t.Errorf("legacy planner digest moved on re-hash: %s vs %s", got, want)
+	}
+
+	visible := int64(400)
+	withVisible := *base
+	withVisible.Tables = []TableSizingEntry{{
+		Table:  qual,
+		Sizing: TableSizing{Relpages: 500, Reltuples: 10_000, RelAllVisible: &visible},
+	}}
+	if ComputePlannerContentHash(&withVisible) == ComputePlannerContentHash(base) {
+		t.Error("relallvisible change did not affect planner content hash")
+	}
+
+	other := int64(300)
+	drifted := withVisible
+	drifted.Tables = []TableSizingEntry{{
+		Table:  qual,
+		Sizing: TableSizing{Relpages: 500, Reltuples: 10_000, RelAllVisible: &other},
+	}}
+	if ComputePlannerContentHash(&drifted) == ComputePlannerContentHash(&withVisible) {
+		t.Error("different relallvisible values hashed identically")
+	}
+}

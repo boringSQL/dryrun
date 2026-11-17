@@ -70,7 +70,7 @@ func TestInjectStats_DisablesAutovacuumAndFlagsMissingHook(t *testing.T) {
 			{Schema: "public", Name: "a0_plain", Columns: []Column{{Name: "id"}, {Name: "v"}}},
 		}},
 		Planner: &PlannerStatsSnapshot{Tables: []TableSizingEntry{
-			{Table: qn("public", "a0_plain"), Sizing: TableSizing{Reltuples: 1_000_000, Relpages: 8000}},
+			{Table: qn("public", "a0_plain"), Sizing: TableSizing{Reltuples: 1_000_000, Relpages: 8000, RelAllVisible: ptrInt64(6000)}},
 		}},
 	}
 
@@ -93,6 +93,18 @@ func TestInjectStats_DisablesAutovacuumAndFlagsMissingHook(t *testing.T) {
 	}
 	if !hasWarning(res.Warnings, "pg_regresql") {
 		t.Errorf("expected pg_regresql tripwire, warnings = %v", res.Warnings)
+	}
+
+	// relallvisible must reach pg_class on both paths: pg_restore_relation_stats
+	// on PG18, direct UPDATE below it. Without it the planner costs index-only
+	// scans as full heap fetches.
+	var visible int64
+	if err := pool.QueryRow(ctx,
+		`SELECT relallvisible FROM pg_class WHERE oid = 'public.a0_plain'::regclass`).Scan(&visible); err != nil {
+		t.Fatalf("query relallvisible: %v", err)
+	}
+	if visible != 6000 {
+		t.Errorf("injected relallvisible = %d, want 6000", visible)
 	}
 }
 
@@ -219,6 +231,18 @@ func TestInjectStats_WarnsOnNonPositiveReltuples(t *testing.T) {
 	if !hasWarning(res.Warnings, "reltuples") {
 		t.Errorf("expected non-positive reltuples warning, warnings = %v", res.Warnings)
 	}
+
+	// a snapshot predating relallvisible must not touch the target's value —
+	// NULL into pg_restore_relation_stats is a skip, and the legacy path's
+	// COALESCE keeps the existing 0
+	var visible int64
+	if err := pool.QueryRow(ctx,
+		`SELECT relallvisible FROM pg_class WHERE oid = 'public.a0_zero'::regclass`).Scan(&visible); err != nil {
+		t.Fatalf("query relallvisible: %v", err)
+	}
+	if visible != 0 {
+		t.Errorf("nil relallvisible overwrote target value: got %d, want 0", visible)
+	}
 }
 
 // A partitioned parent has only inherited=true pg_stats rows (see stats_test.go's
@@ -342,6 +366,8 @@ func TestInjectStats_PartitionedParentColumnStatsAreInherited_PG18(t *testing.T)
 }
 
 func qn(schema, name string) QualifiedName { return QualifiedName{Schema: schema, Name: name} }
+
+func ptrInt64(v int64) *int64 { return &v }
 
 func contains(ss []string, s string) bool {
 	for _, x := range ss {
