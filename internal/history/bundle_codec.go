@@ -64,9 +64,10 @@ type (
 	// shadowed fields are not decoded
 	leanPlanner struct {
 		schema.PlannerStatsSnapshot
-		Tables  skipped `json:"tables"`
-		Indexes skipped `json:"indexes"`
-		Columns skipped `json:"columns"`
+		Tables        skipped `json:"tables"`
+		Indexes       skipped `json:"indexes"`
+		Columns       skipped `json:"columns"`
+		ExtendedStats skipped `json:"extended_stats"`
 	}
 	leanQueryStats struct {
 		schema.QueryStatsSnapshot

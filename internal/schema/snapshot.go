@@ -43,6 +43,7 @@ type (
 	TableSizingEntry         = snapshot.TableSizingEntry
 	IndexSizingEntry         = snapshot.IndexSizingEntry
 	ColumnStatsEntry         = snapshot.ColumnStatsEntry
+	ExtendedStatsEntry       = snapshot.ExtendedStatsEntry
 	TableActivityEntry       = snapshot.TableActivityEntry
 	IndexActivityEntry       = snapshot.IndexActivityEntry
 	PlannerStatsSnapshot     = snapshot.PlannerStatsSnapshot

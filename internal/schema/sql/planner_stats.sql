@@ -34,6 +34,75 @@ SELECT n.nspname                                  AS schema_name,
    AND n.nspname NOT LIKE 'pg_temp_%'
  ORDER BY n.nspname, ct.relname, ci.relname
 
+-- name: fetch-planner-extended-stats
+-- n_distinct/dependencies: PG19 uses JSON arrays, older versions need trasnlation
+-- via pg_dump.
+WITH stats AS (
+    SELECT s.oid,
+           s.stxrelid,
+           cn.nspname AS table_schema,
+           c.relname  AS table_name,
+           sn.nspname AS stats_schema,
+           s.stxname  AS stats_name
+      FROM pg_catalog.pg_statistic_ext s
+      JOIN pg_catalog.pg_class c ON c.oid = s.stxrelid
+      JOIN pg_catalog.pg_namespace cn ON cn.oid = c.relnamespace
+      JOIN pg_catalog.pg_namespace sn ON sn.oid = s.stxnamespace
+     WHERE cn.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+       AND cn.nspname NOT LIKE 'pg_temp_%'
+), cols AS (
+    SELECT st.oid,
+           st.stxrelid,
+           st.table_schema,
+           st.table_name,
+           st.stats_schema,
+           st.stats_name,
+           (SELECT array_agg(x.attname ORDER BY x.attnum)
+              FROM (SELECT DISTINCT a.attnum, a.attname::text AS attname
+                      FROM pg_catalog.pg_depend d
+                      JOIN pg_catalog.pg_attribute a
+                        ON a.attrelid = st.stxrelid AND a.attnum = d.refobjsubid
+                     WHERE d.classid = 'pg_catalog.pg_statistic_ext'::regclass
+                       AND d.objid = st.oid
+                       AND d.refclassid = 'pg_catalog.pg_class'::regclass
+                       AND d.refobjid = st.stxrelid
+                       AND d.refobjsubid > 0) x) AS columns
+      FROM stats st
+), resolved AS (
+    SELECT c.*,
+           EXISTS (
+               SELECT 1
+                 FROM pg_catalog.pg_attribute a
+                 JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+                WHERE a.attrelid = c.stxrelid
+                  AND a.attname::text = ANY(c.columns)
+                  AND (t.typname = 'jsonb'
+                       OR t.typname = '_jsonb'
+                       OR (t.typtype = 'd' AND pg_catalog.format_type(t.typbasetype, NULL) LIKE '%jsonb%'))
+           ) AS has_jsonb
+      FROM cols c
+)
+SELECT r.table_schema,
+       r.table_name,
+       r.stats_schema,
+       r.stats_name,
+       r.columns,
+       sd.stxdinherit,
+       __NDISTINCT__ AS n_distinct,
+       __DEPENDENCIES__ AS dependencies,
+       CASE WHEN r.has_jsonb THEN NULL ELSE m.mcv_values END      AS mcv_values,
+       CASE WHEN r.has_jsonb THEN NULL ELSE m.mcv_freqs END       AS mcv_freqs,
+       CASE WHEN r.has_jsonb THEN NULL ELSE m.mcv_base_freqs END  AS mcv_base_freqs
+  FROM resolved r
+  JOIN pg_catalog.pg_statistic_ext_data sd ON sd.stxoid = r.oid
+  LEFT JOIN LATERAL (
+      SELECT array_agg(mcv.values ORDER BY mcv."index")::text          AS mcv_values,
+             array_agg(mcv.frequency ORDER BY mcv."index")::text       AS mcv_freqs,
+             array_agg(mcv.base_frequency ORDER BY mcv."index")::text  AS mcv_base_freqs
+        FROM pg_catalog.pg_mcv_list_items(sd.stxdmcv) AS mcv
+  ) m ON sd.stxdmcv IS NOT NULL
+ ORDER BY r.table_schema, r.table_name, r.stats_schema, r.stats_name, sd.stxdinherit
+
 -- name: fetch-planner-column-stats
 -- mcv/histogram as text to avoid type juggling; jsonb MCV stripped to keep row payloads out of the artifact
 -- inheritance parents have two rows per column (f/t); prefer the own-heap row

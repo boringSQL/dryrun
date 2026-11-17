@@ -2,9 +2,12 @@ package schema
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/boringsql/qshape"
@@ -680,4 +683,83 @@ func TestCapturePlannerStats_RelAllVisible(t *testing.T) {
 	if got := *afterAnalyze.Sizing.RelAllVisible; got >= afterAnalyze.Sizing.Relpages {
 		t.Errorf("after growth relallvisible = %d, want < relpages %d", got, afterAnalyze.Sizing.Relpages)
 	}
+}
+
+func TestCapturePlannerStats_ExtendedStatistics(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+	if major := serverMajor(t, ctx, pool); major < 15 {
+		t.Skipf("extended statistics capture is PostgreSQL 15+; server is %d", major)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS dr_extstats CASCADE;
+		DROP TABLE IF EXISTS dr_extstats_part CASCADE;
+		CREATE TABLE dr_extstats (a int, b text, payload jsonb);
+		INSERT INTO dr_extstats
+		SELECT (g % 2) + 1, CASE WHEN g % 2 = 0 THEN NULL ELSE 'x' END, '{}'::jsonb
+		  FROM generate_series(1, 400) g;
+		CREATE STATISTICS dr_extstats_all (ndistinct, dependencies, mcv) ON a, b FROM dr_extstats;
+		CREATE STATISTICS dr_extstats_jsonb (mcv) ON a, payload FROM dr_extstats;
+		CREATE STATISTICS dr_extstats_expr (ndistinct) ON (a + 1), b FROM dr_extstats;
+		ANALYZE dr_extstats;
+
+		CREATE TABLE dr_extstats_part (a int, b int) PARTITION BY RANGE (a);
+		CREATE TABLE dr_extstats_part_1 PARTITION OF dr_extstats_part FOR VALUES FROM (0) TO (100);
+		INSERT INTO dr_extstats_part SELECT g, g FROM generate_series(1, 50) g;
+		CREATE STATISTICS dr_extstats_part_s (ndistinct) ON a, b FROM dr_extstats_part;
+		ANALYZE dr_extstats_part;
+	`); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(ctx, "DROP TABLE IF EXISTS dr_extstats CASCADE; DROP TABLE IF EXISTS dr_extstats_part CASCADE")
+	})
+
+	planner, err := CapturePlannerStats(ctx, pool, "sref")
+	if err != nil {
+		t.Fatalf("planner capture: %v", err)
+	}
+	find := func(name string, inherited bool) *ExtendedStatsEntry {
+		t.Helper()
+		for i := range planner.ExtendedStats {
+			if e := &planner.ExtendedStats[i]; e.Statistics.Name == name && e.Inherited == inherited {
+				return e
+			}
+		}
+		t.Fatalf("%s (inherited=%v) missing from capture: %+v", name, inherited, planner.ExtendedStats)
+		return nil
+	}
+
+	all := find("dr_extstats_all", false)
+	if !slices.Equal(all.Columns, []string{"a", "b"}) {
+		t.Errorf("columns = %v, want [a b]", all.Columns)
+	}
+	// every source version must yield PG19's JSON-array format
+	for name, p := range map[string]*string{"n_distinct": all.NDistinct, "dependencies": all.Dependencies} {
+		if p == nil {
+			t.Errorf("%s missing", name)
+			continue
+		}
+		var parsed []map[string]any
+		if err := json.Unmarshal([]byte(*p), &parsed); err != nil || len(parsed) == 0 || parsed[0]["attributes"] == nil {
+			t.Errorf("%s is not the PG19 JSON array: %s", name, *p)
+		}
+	}
+	// half the rows have b = NULL, so an MCV combination must carry it
+	if all.MCVValues == nil || !strings.Contains(*all.MCVValues, "NULL") || all.MCVFreqs == nil || all.MCVBaseFreqs == nil {
+		t.Errorf("mcv incomplete: %v / %v / %v", all.MCVValues, all.MCVFreqs, all.MCVBaseFreqs)
+	}
+
+	jsonb := find("dr_extstats_jsonb", false)
+	if jsonb.MCVValues != nil || jsonb.MCVFreqs != nil || jsonb.MCVBaseFreqs != nil {
+		t.Errorf("jsonb MCV was not stripped: %v / %v / %v", jsonb.MCVValues, jsonb.MCVFreqs, jsonb.MCVBaseFreqs)
+	}
+
+	// a appears only inside (a + 1); masking relies on seeing it
+	if expr := find("dr_extstats_expr", false); !slices.Contains(expr.Columns, "a") {
+		t.Errorf("expression columns = %v, want a", expr.Columns)
+	}
+
+	find("dr_extstats_part_s", true)
 }

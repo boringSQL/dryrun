@@ -1402,6 +1402,33 @@ func TestContentHashV3_DetachedPartitionCountsAsAnOrdinaryTable(t *testing.T) {
 	}
 }
 
+// Compat pin: digest computed on the build before ExtendedStats existed. A
+// snapshot with no extended stats must still hash to it, or every stored
+// planner blob stops deduplicating on upgrade.
+func TestPlannerContentHash_ExtendedStatsEmptyKeepsPreFieldDigest(t *testing.T) {
+	const preExtendedStatsField = "bba78a98b4704065693e82a014f0715b9df5a9a2f1794f6d1a0a6e5675f7ce2f"
+	doc := &PlannerStatsSnapshot{SchemaRefHash: "ddl-hash"}
+	if got := ComputePlannerContentHash(doc); got != preExtendedStatsField {
+		t.Fatalf("empty ExtendedStats moved the planner digest:\n  got  %s\n  want %s", got, preExtendedStatsField)
+	}
+}
+
+func TestPlannerContentHash_TracksExtendedStats(t *testing.T) {
+	entry := func(mcv string) *PlannerStatsSnapshot {
+		return &PlannerStatsSnapshot{SchemaRefHash: "ddl-hash", ExtendedStats: []ExtendedStatsEntry{{
+			Table:      QualifiedName{Schema: "public", Name: "t"},
+			Statistics: QualifiedName{Schema: "public", Name: "s"},
+			Columns:    []string{"a", "b"},
+			MCVValues:  &mcv,
+		}}}
+	}
+	none := ComputePlannerContentHash(&PlannerStatsSnapshot{SchemaRefHash: "ddl-hash"})
+	one, other := ComputePlannerContentHash(entry("{{1,x}}")), ComputePlannerContentHash(entry("{{2,x}}"))
+	if one == none || one == other {
+		t.Errorf("extended stats do not move the planner digest: none=%s one=%s other=%s", none, one, other)
+	}
+}
+
 // Compat pin: digest computed on the build before Inherited existed. A plain
 // table's row must still hash to it, or every stored planner blob 422s on re-push.
 func TestPlannerContentHash_InheritedFalseKeepsPreFieldDigest(t *testing.T) {

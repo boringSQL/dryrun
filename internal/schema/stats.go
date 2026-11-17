@@ -52,6 +52,10 @@ func CapturePlannerStats(ctx context.Context, pool Querier, schemaRefHash string
 	if err != nil {
 		return nil, fmt.Errorf("fetch column stats: %w", err)
 	}
+	extendedStats, err := fetchPlannerExtendedStats(ctx, pool)
+	if err != nil {
+		return nil, fmt.Errorf("fetch extended stats: %w", err)
+	}
 	gucs, err := fetchGUCs(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("fetch gucs: %w", err)
@@ -67,6 +71,7 @@ func CapturePlannerStats(ctx context.Context, pool Querier, schemaRefHash string
 		Tables:        tables,
 		Indexes:       indexes,
 		Columns:       columns,
+		ExtendedStats: extendedStats,
 		GUCs:          gucs,
 	}
 	snap.ContentHash = ComputePlannerContentHash(snap)
@@ -348,6 +353,66 @@ func fetchPlannerColumnStats(ctx context.Context, pool Querier) ([]ColumnStatsEn
 			&e.Stats.MostCommonVals, &e.Stats.MostCommonFreqs,
 			&e.Stats.HistogramBounds, &e.Stats.Correlation,
 			&e.Stats.AvgWidth, &e.Inherited,
+		)
+		return e, err
+	})
+}
+
+// pg_dump's pre-19 pg dump value : {"1, 2": 11} to [{"attributes":[1,2],...}].
+const (
+	extStatsNDistinctPre19 = `(SELECT json_agg(json_build_object(
+		'attributes', string_to_array(kv.key, ', ')::integer[],
+		'ndistinct', kv.value::bigint))
+	  FROM json_each_text(sd.stxdndistinct::text::json) AS kv)::text`
+	extStatsDependenciesPre19 = `(SELECT json_agg(json_build_object(
+		'attributes', string_to_array(split_part(kv.key, ' => ', 1), ', ')::integer[],
+		'dependency', split_part(kv.key, ' => ', 2)::integer,
+		'degree', kv.value::double precision))
+	  FROM json_each_text(sd.stxddependencies::text::json) AS kv)::text`
+	extStatsNDistinctPG19    = `sd.stxdndistinct::text`
+	extStatsDependenciesPG19 = `sd.stxddependencies::text`
+)
+
+func fetchPlannerExtendedStats(ctx context.Context, pool Querier) ([]ExtendedStatsEntry, error) {
+	var (
+		serverVersionNum int
+		canRead          bool
+	)
+	if err := pool.QueryRow(ctx,
+		"SELECT current_setting('server_version_num')::int4, "+
+			"pg_catalog.has_table_privilege('pg_catalog.pg_statistic_ext_data', 'SELECT')",
+	).Scan(&serverVersionNum, &canRead); err != nil {
+		return nil, err
+	}
+	if serverVersionNum < 150000 {
+		slog.Debug("extended statistics unavailable below PostgreSQL 15", "server_version_num", serverVersionNum)
+		return nil, nil
+	}
+	if !canRead {
+		slog.Warn("extended statistics not captured: role cannot read pg_catalog.pg_statistic_ext_data; grant pg_read_all_data or SELECT on that catalog")
+		return nil, nil
+	}
+	ndistinct, dependencies := extStatsNDistinctPG19, extStatsDependenciesPG19
+	if serverVersionNum < 190000 {
+		ndistinct, dependencies = extStatsNDistinctPre19, extStatsDependenciesPre19
+	}
+	query := strings.NewReplacer(
+		"__NDISTINCT__", ndistinct,
+		"__DEPENDENCIES__", dependencies,
+	).Replace(q("fetch-planner-extended-stats"))
+
+	rows, err := pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return scanAll(rows, func(r pgx.Rows) (ExtendedStatsEntry, error) {
+		var e ExtendedStatsEntry
+		err := r.Scan(
+			&e.Table.Schema, &e.Table.Name,
+			&e.Statistics.Schema, &e.Statistics.Name,
+			&e.Columns, &e.Inherited,
+			&e.NDistinct, &e.Dependencies,
+			&e.MCVValues, &e.MCVFreqs, &e.MCVBaseFreqs,
 		)
 		return e, err
 	})

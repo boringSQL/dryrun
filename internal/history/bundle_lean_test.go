@@ -16,6 +16,11 @@ func TestDecodeLeanBundleSkipsOnlyThePayloads(t *testing.T) {
 	b := fullBundle()
 	b.Planner.Indexes = []schema.IndexSizingEntry{{Table: schema.QualifiedName{Schema: "public", Name: "users"}, Index: "users_pkey"}}
 	b.Planner.Columns = []schema.ColumnStatsEntry{{Table: schema.QualifiedName{Schema: "public", Name: "users"}, Column: "id"}}
+	b.Planner.ExtendedStats = []schema.ExtendedStatsEntry{{
+		Table:      schema.QualifiedName{Schema: "public", Name: "users"},
+		Statistics: schema.QualifiedName{Schema: "public", Name: "users_a_b"},
+		Columns:    []string{"a", "b"},
+	}}
 	b.Planner.GUCs = []schema.GucSetting{{Name: "work_mem", Setting: "4MB"}}
 	b.QueryMembers = map[string][]*schema.QueryStatsSnapshot{
 		"replica": {queryStatsFixture("schema-hash-abc123", "query-hash-member", "replica"), nil},
@@ -35,6 +40,7 @@ func TestDecodeLeanBundleSkipsOnlyThePayloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	want.Planner.Tables, want.Planner.Indexes, want.Planner.Columns = nil, nil, nil
+	want.Planner.ExtendedStats = nil
 	for _, q := range want.Query {
 		if q != nil {
 			q.Queries = nil

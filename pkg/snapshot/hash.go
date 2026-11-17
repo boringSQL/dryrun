@@ -266,6 +266,10 @@ func ComputePlannerContentHash(p *PlannerStatsSnapshot) string {
 		"indexes":         indexes,
 		"columns":         p.Columns,
 	}
+	// Omitted when empty so pre-feature planner docs keep their digest.
+	if len(p.ExtendedStats) > 0 {
+		canonical["extended_stats"] = p.ExtendedStats
+	}
 	// Omitted, not null, when absent: planner docs captured before GUCs moved here keep
 	// their digest.
 	if len(p.GUCs) > 0 {

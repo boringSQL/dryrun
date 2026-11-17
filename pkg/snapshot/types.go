@@ -555,24 +555,40 @@ type BloatEstimate struct {
 	Approximate   bool  `json:"approximate,omitempty"`
 }
 
-type ColumnStatsEntry struct {
-	Table  QualifiedName `json:"table"`
-	Column string        `json:"column"`
-	// set when only an inherited pg_stats row exists; omitempty keeps pre-fix hashes stable
-	Inherited bool        `json:"inherited,omitempty"`
-	Stats     ColumnStats `json:"stats"`
-}
+type (
+	ColumnStatsEntry struct {
+		Table  QualifiedName `json:"table"`
+		Column string        `json:"column"`
+		// set when only an inherited pg_stats row exists; omitempty keeps pre-fix hashes stable
+		Inherited bool        `json:"inherited,omitempty"`
+		Stats     ColumnStats `json:"stats"`
+	}
 
-type TableActivityEntry struct {
-	Table    QualifiedName `json:"table"`
-	Activity TableActivity `json:"activity"`
-}
+	// Extended statistics data, kept as text for pg_restore_extended_stats.
+	ExtendedStatsEntry struct {
+		Table      QualifiedName `json:"table"`
+		Statistics QualifiedName `json:"statistics"`
+		Inherited  bool          `json:"inherited,omitempty"`
+		// every column the object touches, expressions included
+		Columns      []string `json:"columns"`
+		NDistinct    *string  `json:"n_distinct,omitempty"`
+		Dependencies *string  `json:"dependencies,omitempty"`
+		MCVValues    *string  `json:"mcv_values,omitempty"`
+		MCVFreqs     *string  `json:"mcv_freqs,omitempty"`
+		MCVBaseFreqs *string  `json:"mcv_base_freqs,omitempty"`
+	}
 
-type IndexActivityEntry struct {
-	Table    QualifiedName `json:"table"`
-	Index    string        `json:"index"`
-	Activity IndexActivity `json:"activity"`
-}
+	TableActivityEntry struct {
+		Table    QualifiedName `json:"table"`
+		Activity TableActivity `json:"activity"`
+	}
+
+	IndexActivityEntry struct {
+		Table    QualifiedName `json:"table"`
+		Index    string        `json:"index"`
+		Activity IndexActivity `json:"activity"`
+	}
+)
 
 type (
 	// Persisted planner inputs; schema_ref_hash binds rows to a SchemaSnapshot
@@ -584,11 +600,12 @@ type (
 		Timestamp     time.Time `json:"timestamp"`
 		// next-xid/next-multixact at capture; reference points for deriving the per-table
 		// ages. volatile, so excluded from ComputePlannerContentHash to preserve dedup.
-		DatabaseXid  int64              `json:"database_xid,omitempty"`
-		DatabaseMxid int64              `json:"database_mxid,omitempty"`
-		Tables       []TableSizingEntry `json:"tables"`
-		Indexes      []IndexSizingEntry `json:"indexes"`
-		Columns      []ColumnStatsEntry `json:"columns"`
+		DatabaseXid   int64                `json:"database_xid,omitempty"`
+		DatabaseMxid  int64                `json:"database_mxid,omitempty"`
+		Tables        []TableSizingEntry   `json:"tables"`
+		Indexes       []IndexSizingEntry   `json:"indexes"`
+		Columns       []ColumnStatsEntry   `json:"columns"`
+		ExtendedStats []ExtendedStatsEntry `json:"extended_stats,omitempty"`
 		// Hashed here, not on the schema: the schema digest only moves on DDL, so a
 		// postgresql.conf change never reaches a reader through it. SchemaSnapshot keeps its
 		// own copy, the values as of the capture that wrote the row or a later pull's refresh.
@@ -626,9 +643,8 @@ type (
 		Checkpointer           *CheckpointerActivity     `json:"checkpointer,omitempty"`
 	}
 
-	// One queryid's counters, before qshape grouping; from v3 the per-role rows are folded. Hashed from these.
-	// Every field here must also appear in ComputeQueryStatsContentHash's comparator:
-	// the sort is unstable, so a field it doesn't order can move the digest.
+	// Before grouping, these are one queryid's counters. New fields must also go
+	// into ComputeQueryStatsContentHash's sort.
 	QueryStatsMember struct {
 		QueryID         int64   `json:"queryid"`
 		Calls           int64   `json:"calls"`
