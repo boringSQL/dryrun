@@ -9,7 +9,7 @@ dryrun merges statistics from every node in your cluster into one snapshot, then
 A snapshot is split into three rows in `~/.dryrun/history.db`:
 
 - **`schema`**: DDL (tables, columns, constraints, indexes, partitions, functions, enums, extensions, GUCs). **Not masked** — `data-masking-policy.yml` and `require_masks` cover planner stats only, so column names, `DEFAULT` expressions, `CHECK` literals and view/function bodies are stored and pushed as introspected. That hasn't changed, but note that schema now rides the same cron line as masked planner stats.
-- **`planner_stats`**: what the planner uses (`reltuples`, `relpages`, `pg_statistic`). Masked per `data-masking-policy.yml` at capture time; see [SECURITY.md](../SECURITY.md).
+- **`planner_stats`**: what the planner uses (`reltuples`, `relpages`, `pg_statistic`, extended statistics). Masked per `data-masking-policy.yml` at capture time; see [SECURITY.md](../SECURITY.md).
 - **`activity_stats`**: runtime counters (`seq_scan`, `idx_scan`, `n_dead_tup`, `last_vacuum`).
 
 `snapshot capture` on the primary writes all three rows, with the activity row under its `--label` (`primary` below). On a replica it writes one `activity_stats` row under that replica's label. Activity rows attach to the most recent matching schema by `schema_ref_hash`.
@@ -37,6 +37,15 @@ dryrun --profile primary snapshot capture --label primary
 ```
 
 On a standby (`pg_is_in_recovery()`), schema and planner are skipped. On the primary it writes one `schema` row, one `planner_stats` row (masked per policy), and one `activity_stats` row labeled `primary`.
+
+### Extended statistics
+
+`planner_stats` also carries `pg_statistic_ext_data`: `n_distinct`, dependencies and MCV lists per statistics object, including the inherited rows of a partitioned parent. They are masked with the rest of the planner stream.
+
+Two real limits:
+
+- comparison ignores column types and collations
+- expression statistics are cleared and not restored
 
 ### Activity stats per node
 
