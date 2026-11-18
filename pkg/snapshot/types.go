@@ -565,17 +565,24 @@ type (
 	}
 
 	// Extended statistics data, kept as text for pg_restore_extended_stats.
+	// Definition and StxKeys describe the source layout so injection can prove
+	// the target's key order before restoring positional payloads.
 	ExtendedStatsEntry struct {
 		Table      QualifiedName `json:"table"`
 		Statistics QualifiedName `json:"statistics"`
 		Inherited  bool          `json:"inherited,omitempty"`
 		// every column the object touches, expressions included
-		Columns      []string `json:"columns"`
-		NDistinct    *string  `json:"n_distinct,omitempty"`
-		Dependencies *string  `json:"dependencies,omitempty"`
-		MCVValues    *string  `json:"mcv_values,omitempty"`
-		MCVFreqs     *string  `json:"mcv_freqs,omitempty"`
-		MCVBaseFreqs *string  `json:"mcv_base_freqs,omitempty"`
+		Columns []string `json:"columns"`
+		// pg_get_statisticsobjdef_columns: key list in stxkeys order
+		Definition string `json:"definition,omitempty"`
+		// pg_statistic_ext.stxkeys: positive attnums only, in key order.
+		// Expressions follow as -1, -2, ... in Definition order.
+		StxKeys      []int16 `json:"stxkeys,omitempty"`
+		NDistinct    *string `json:"n_distinct,omitempty"`
+		Dependencies *string `json:"dependencies,omitempty"`
+		MCVValues    *string `json:"mcv_values,omitempty"`
+		MCVFreqs     *string `json:"mcv_freqs,omitempty"`
+		MCVBaseFreqs *string `json:"mcv_base_freqs,omitempty"`
 	}
 
 	TableActivityEntry struct {

@@ -735,6 +735,9 @@ func TestCapturePlannerStats_ExtendedStatistics(t *testing.T) {
 	if !slices.Equal(all.Columns, []string{"a", "b"}) {
 		t.Errorf("columns = %v, want [a b]", all.Columns)
 	}
+	if all.Definition != "a, b" || !slices.Equal(all.StxKeys, []int16{1, 2}) {
+		t.Errorf("layout = %q %v, want \"a, b\" [1 2]", all.Definition, all.StxKeys)
+	}
 	// every source version must yield PG19's JSON-array format
 	for name, p := range map[string]*string{"n_distinct": all.NDistinct, "dependencies": all.Dependencies} {
 		if p == nil {
@@ -759,6 +762,8 @@ func TestCapturePlannerStats_ExtendedStatistics(t *testing.T) {
 	// a appears only inside (a + 1); masking relies on seeing it
 	if expr := find("dr_extstats_expr", false); !slices.Contains(expr.Columns, "a") {
 		t.Errorf("expression columns = %v, want a", expr.Columns)
+	} else if expr.Definition != "b, (a + 1)" || !slices.Equal(expr.StxKeys, []int16{2}) {
+		t.Errorf("expression layout = %q %v, want \"b, (a + 1)\" [2]", expr.Definition, expr.StxKeys)
 	}
 
 	find("dr_extstats_part_s", true)

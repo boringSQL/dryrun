@@ -410,7 +410,7 @@ func fetchPlannerExtendedStats(ctx context.Context, pool Querier) ([]ExtendedSta
 		err := r.Scan(
 			&e.Table.Schema, &e.Table.Name,
 			&e.Statistics.Schema, &e.Statistics.Name,
-			&e.Columns, &e.Inherited,
+			&e.Columns, &e.Definition, &e.StxKeys, &e.Inherited,
 			&e.NDistinct, &e.Dependencies,
 			&e.MCVValues, &e.MCVFreqs, &e.MCVBaseFreqs,
 		)
