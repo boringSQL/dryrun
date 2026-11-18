@@ -449,8 +449,8 @@ func statsCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintf(os.Stderr, "Stats applied (%s): %d tables, %d indexes, %d columns updated\n",
-				result.Method, result.TablesUpdated, result.IndexesUpdated, result.ColumnsUpdated)
+			fmt.Fprintf(os.Stderr, "Stats applied (%s): %d tables, %d indexes, %d columns, %d extended stats updated\n",
+				result.Method, result.TablesUpdated, result.IndexesUpdated, result.ColumnsUpdated, result.ExtendedStatsUpdated)
 			for _, w := range result.Warnings {
 				fmt.Fprintf(os.Stderr, "  warning: %s\n", w)
 			}

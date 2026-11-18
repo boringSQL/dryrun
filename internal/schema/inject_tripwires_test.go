@@ -2,6 +2,7 @@ package schema
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -445,6 +446,112 @@ func TestInjectStats_InjectsColumnStats(t *testing.T) {
 	} {
 		if diff := c.got - c.want; diff > 1e-6 || diff < -1e-6 {
 			t.Errorf("%s = %v, want %v (method %s)", c.name, c.got, c.want, res.Method)
+		}
+	}
+}
+
+// Round-trips captured objects through pg_restore_extended_stats: clear the
+// target data, inject a normal and an inherited entry, and recapture. Also
+// pins the warning for a statistics object the target does not have.
+func TestInjectStats_ExtendedStatistics(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+	major := serverMajor(t, ctx, pool)
+	if major < 19 {
+		t.Skipf("pg_restore_extended_stats is PostgreSQL 19+; server is %d", major)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS a0_extstats CASCADE;
+		DROP TABLE IF EXISTS a0_extstats_part CASCADE;
+		CREATE TABLE a0_extstats (a int, b text);
+		INSERT INTO a0_extstats
+		SELECT (g % 2) + 1, CASE WHEN g % 2 = 0 THEN NULL ELSE 'x' END
+		  FROM generate_series(1, 400) g;
+		CREATE STATISTICS a0_extstats_all (ndistinct, dependencies, mcv) ON a, b FROM a0_extstats;
+		CREATE STATISTICS a0_extstats_masked (mcv) ON a, b FROM a0_extstats;
+		ANALYZE a0_extstats;
+
+		CREATE TABLE a0_extstats_part (a int, b int) PARTITION BY RANGE (a);
+		CREATE TABLE a0_extstats_part_1 PARTITION OF a0_extstats_part FOR VALUES FROM (0) TO (100);
+		INSERT INTO a0_extstats_part SELECT g, g FROM generate_series(1, 50) g;
+		CREATE STATISTICS a0_extstats_part_s (ndistinct) ON a, b FROM a0_extstats_part;
+		ANALYZE a0_extstats_part;
+	`); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(ctx, "DROP TABLE IF EXISTS a0_extstats CASCADE; DROP TABLE IF EXISTS a0_extstats_part CASCADE")
+	})
+
+	planner, err := CapturePlannerStats(ctx, pool, "sref")
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	find := func(p *PlannerStatsSnapshot, name string, inherited bool) *ExtendedStatsEntry {
+		t.Helper()
+		for i := range p.ExtendedStats {
+			if p.ExtendedStats[i].Statistics.Name == name && p.ExtendedStats[i].Inherited == inherited {
+				return &p.ExtendedStats[i]
+			}
+		}
+		t.Fatalf("%s (inherited=%v) missing from capture: %+v", name, inherited, p.ExtendedStats)
+		return nil
+	}
+	plain := find(planner, "a0_extstats_all", false)
+	if plain.Definition != "a, b" || plain.MCVValues == nil {
+		t.Fatalf("plain layout = %q, mcv = %v", plain.Definition, plain.MCVValues)
+	}
+	inherited := find(planner, "a0_extstats_part_s", true)
+	// as left by a masking policy; the target's own ANALYZE MCV must not survive
+	masked := *find(planner, "a0_extstats_masked", false)
+	masked.MCVValues, masked.MCVFreqs, masked.MCVBaseFreqs = nil, nil, nil
+
+	for _, stmt := range []string{
+		`SELECT pg_clear_extended_stats('public', 'a0_extstats', 'public', 'a0_extstats_all', false)`,
+		`SELECT pg_clear_extended_stats('public', 'a0_extstats_part', 'public', 'a0_extstats_part_s', true)`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("clear target stats: %v", err)
+		}
+	}
+
+	missing := *plain
+	missing.Statistics.Name = "a0_extstats_missing"
+	a := &AnnotatedSchema{
+		Schema: &SchemaSnapshot{Tables: []Table{
+			{Schema: "public", Name: "a0_extstats", Columns: []Column{{Name: "a"}, {Name: "b"}}},
+			{Schema: "public", Name: "a0_extstats_part", Columns: []Column{{Name: "a"}, {Name: "b"}},
+				PartitionInfo: &PartitionInfo{Strategy: PartitionRange, Key: "a"}},
+		}},
+		Planner: &PlannerStatsSnapshot{ExtendedStats: []ExtendedStatsEntry{*plain, *inherited, masked, missing}},
+	}
+
+	res, err := InjectStats(ctx, pool, a, major)
+	if err != nil {
+		t.Fatalf("InjectStats: %v", err)
+	}
+	if res.ExtendedStatsUpdated != 2 {
+		t.Fatalf("ExtendedStatsUpdated = %d, want 2; warnings %v", res.ExtendedStatsUpdated, res.Warnings)
+	}
+	if res.AutovacuumDisabled != 1 {
+		t.Errorf("AutovacuumDisabled = %d, want 1 (partitioned parent must be skipped)", res.AutovacuumDisabled)
+	}
+	if !hasWarning(res.Warnings, "a0_extstats_missing") {
+		t.Errorf("missing object produced no warning; warnings = %v", res.Warnings)
+	}
+
+	after, err := CapturePlannerStats(ctx, pool, "sref")
+	if err != nil {
+		t.Fatalf("recapture: %v", err)
+	}
+	if got := find(after, "a0_extstats_masked", false); got.MCVValues != nil {
+		t.Errorf("masked object kept the target's local MCV: %s", *got.MCVValues)
+	}
+	for _, want := range []*ExtendedStatsEntry{plain, inherited} {
+		got := find(after, want.Statistics.Name, want.Inherited)
+		if !reflect.DeepEqual(*got, *want) {
+			t.Errorf("%s round trip:\n got %+v\nwant %+v", want.Statistics.Name, *got, *want)
 		}
 	}
 }
