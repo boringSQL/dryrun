@@ -24,6 +24,8 @@ type InjectResult struct {
 	PgRegresqlLoaded     bool     `json:"pg_regresql_loaded"`
 	Warnings             []string `json:"warnings,omitempty"`
 	Method               string   `json:"method"`
+	// why no extended statistics were attempted; not a warning
+	ExtendedStatsSkipped string `json:"extended_stats_skipped,omitempty"`
 }
 
 func (r *InjectResult) warn(format string, args ...any) {
@@ -86,7 +88,8 @@ func InjectStats(ctx context.Context, pool *pgxpool.Pool, a *AnnotatedSchema, pg
 		} else {
 			// Not a warning: it would trip the MCP plan-degraded hint on every
 			// explain against a pre-19 target.
-			slog.Info("extended statistics not injected: target lacks pg_restore_extended_stats() (PostgreSQL 19+)",
+			result.ExtendedStatsSkipped = "target lacks pg_restore_extended_stats() (PostgreSQL 19+)"
+			slog.Info("extended statistics not injected: "+result.ExtendedStatsSkipped,
 				"objects", len(a.Planner.ExtendedStats))
 		}
 	}

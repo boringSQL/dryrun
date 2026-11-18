@@ -555,3 +555,29 @@ func TestInjectStats_ExtendedStatistics(t *testing.T) {
 		}
 	}
 }
+
+// Pre-19 targets skip extended statistics with a reason, not a warning: a
+// warning would mark every MCP explain as untrustworthy.
+func TestInjectStats_ExtendedStatisticsSkippedBefore19(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+	major := serverMajor(t, ctx, pool)
+	if major >= 19 {
+		t.Skipf("target has pg_restore_extended_stats; server is %d", major)
+	}
+	a := &AnnotatedSchema{
+		Schema: &SchemaSnapshot{},
+		Planner: &PlannerStatsSnapshot{ExtendedStats: []ExtendedStatsEntry{{
+			Table:      qn("public", "t"),
+			Statistics: qn("public", "s"),
+			Definition: "a, b",
+		}}},
+	}
+	res, err := InjectStats(ctx, pool, a, major)
+	if err != nil {
+		t.Fatalf("InjectStats: %v", err)
+	}
+	if res.ExtendedStatsSkipped == "" || res.ExtendedStatsUpdated != 0 || len(res.Warnings) != 0 {
+		t.Errorf("want a skip reason and no warnings, got %+v", res)
+	}
+}
