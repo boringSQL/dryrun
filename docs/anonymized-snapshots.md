@@ -143,7 +143,7 @@ Send `data-masking-policy.yml` alongside: it documents what was masked and is wh
 A snapshot contains:
 
 - **Schema** — table, column, index and constraint names, types, `DEFAULT` and `CHECK` expressions, enum labels, view definitions as full SQL, the extension list, non-default GUCs, PostgreSQL version and `system_identifier`
-- **Planner statistics** — per column `null_frac`, `n_distinct`, `correlation`, `avg_width`, and whatever survived masking
+- **Planner statistics** — per column `null_frac`, `n_distinct`, `correlation`, `avg_width`, and whatever survived masking: per-column MCVs and histograms, plus multi-column MCVs from `pg_statistic_ext_data`
 - **Activity counters** — per table and per index, numbers only
 
 It does not contain table rows, function bodies (signatures only), or credentials — the connection URL is stored as a hash. Query text appears only if you capture the `query` stream, and then only as normalized `pg_stat_statements` shapes.

@@ -614,9 +614,10 @@ type (
 	}
 
 	MaskingInfo struct {
-		Applied       bool `json:"applied"` // a policy was in effect
-		ColumnsMasked int  `json:"columns_masked,omitempty"`
-		JSONBStripped bool `json:"jsonb_mcv_stripped"` // always-on capture-time strip, policy-independent
+		Applied             bool `json:"applied"` // a policy was in effect
+		ColumnsMasked       int  `json:"columns_masked,omitempty"`
+		ExtendedStatsMasked int  `json:"extended_stats_masked,omitempty"`
+		JSONBStripped       bool `json:"jsonb_mcv_stripped"` // always-on capture-time strip, policy-independent
 	}
 )
 

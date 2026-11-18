@@ -76,6 +76,22 @@ func assertPreserved(t *testing.T, s schema.ColumnStats, label string) {
 	}
 }
 
+// extEntry builds a fully populated entry on public.<table>. The statistics
+// object lives in another schema, so every test also proves that sensitivity
+// follows the table's identity, not the statistics object's.
+func extEntry(table string, cols ...string) schema.ExtendedStatsEntry {
+	return schema.ExtendedStatsEntry{
+		Table:        schema.QualifiedName{Schema: "public", Name: table},
+		Statistics:   schema.QualifiedName{Schema: "stats", Name: table + "_stats"},
+		Columns:      cols,
+		NDistinct:    strptr(`[{"attributes":[1,2],"ndistinct":42}]`),
+		Dependencies: strptr(`[{"attributes":[1],"dependency":2,"degree":0.5}]`),
+		MCVValues:    strptr(`{{"sample-a","sample-b"}}`),
+		MCVFreqs:     strptr(`{0.6}`),
+		MCVBaseFreqs: strptr(`{0.3}`),
+	}
+}
+
 // TestApplyPlannerMasksOnlySensitiveColumns is the central behaviour check.
 // Given a snapshot with one sensitive column (users.email) and one ordinary
 // column (users.id), ApplyPlanner must clear all three stat fields on the
@@ -104,21 +120,69 @@ databases:
 		},
 	}
 
-	masked := MaskPlanner(p, snap)
-	if masked != 1 {
-		t.Errorf("matched count: got %d, want 1", masked)
+	MaskPlanner(p, snap)
+	if got := snap.Masking.ColumnsMasked; got != 1 {
+		t.Errorf("matched count: got %d, want 1", got)
 	}
 	assertMasked(t, statsOf(t, snap, "users", "email"), "users.email")
 	assertPreserved(t, statsOf(t, snap, "users", "id"), "users.id")
 }
 
-// TestApplyPlannerIdempotent confirms ApplyPlanner can be run twice with no
-// further change to the payload. This matters because masking is applied at
-// capture time and, defensively, again at export time — the same snapshot may
-// pass through ApplyPlanner more than once and the second pass must be a
-// no-op. We compare the JSON encoding of the snapshot before and after the
-// second run; PlannerStatsSnapshot carries json tags, so this is a faithful
-// structural diff of the persisted form.
+// One sensitive column drops the whole multi-column MCV list; n_distinct and
+// dependencies carry no literal values and stay. Each case starts from a stale
+// content hash so the rehash is checked too: masked cases must be rehashed,
+// untouched ones must not.
+func TestMaskPlannerExtendedStats(t *testing.T) {
+	path := writeMasks(t, `version: 1
+databases:
+  dev:
+    columns:
+      users.email: { expr: "x", tags: [pii] }
+`)
+	p, err := masking.Load(path, "dev", nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		entry  schema.ExtendedStatsEntry
+		masked int
+	}{
+		{"sensitive column", extEntry("users", "email", "country"), 1},
+		{"non-sensitive columns", extEntry("users", "id", "country"), 0},
+		{"no resolvable columns", extEntry("users"), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := &schema.PlannerStatsSnapshot{
+				ContentHash:   "stale",
+				ExtendedStats: []schema.ExtendedStatsEntry{tc.entry},
+			}
+			MaskPlanner(p, snap)
+			e := snap.ExtendedStats[0]
+			if got := snap.Masking.ExtendedStatsMasked; got != tc.masked {
+				t.Errorf("extended count = %d, want %d", got, tc.masked)
+			}
+			if hasMCV := e.MCVValues != nil || e.MCVFreqs != nil || e.MCVBaseFreqs != nil; hasMCV != (tc.masked == 0) {
+				t.Errorf("MCV present = %t after masking %d object(s)", hasMCV, tc.masked)
+			}
+			if e.NDistinct == nil || e.Dependencies == nil {
+				t.Error("n_distinct/dependencies must survive masking")
+			}
+			// rehashed exactly when something was masked
+			if rehashed := snap.ContentHash == schema.ComputePlannerContentHash(snap); rehashed != (tc.masked > 0) {
+				t.Errorf("rehashed = %t, want %t", rehashed, tc.masked > 0)
+			}
+		})
+	}
+}
+
+// TestApplyPlannerIdempotent confirms MaskPlanner can be run twice with no
+// further change to the payload. A snapshot may pass through masking more than
+// once, and the second pass must be a no-op. We compare the JSON encoding of
+// the snapshot before and after the second run; PlannerStatsSnapshot carries
+// json tags, so this is a faithful structural diff of the persisted form.
 func TestApplyPlannerIdempotent(t *testing.T) {
 	path := writeMasks(t, `version: 1
 databases:
@@ -134,6 +198,9 @@ databases:
 		Columns: []schema.ColumnStatsEntry{
 			colEntry("public", "users", "email"),
 			colEntry("public", "users", "id"),
+		},
+		ExtendedStats: []schema.ExtendedStatsEntry{
+			extEntry("users", "email", "country"),
 		},
 	}
 
@@ -190,15 +257,17 @@ databases:
 	}
 
 	snapA := newSnap()
-	if n := MaskPlanner(polA, snapA); n != 1 {
-		t.Errorf("db_a matched count: got %d, want 1", n)
+	MaskPlanner(polA, snapA)
+	if got := snapA.Masking.ColumnsMasked; got != 1 {
+		t.Errorf("db_a column count: got %d, want 1", got)
 	}
 	assertMasked(t, statsOf(t, snapA, "accounts", "ssn"), "db_a accounts.ssn")
 	assertPreserved(t, statsOf(t, snapA, "leads", "email"), "db_a leads.email (foreign block)")
 
 	snapB := newSnap()
-	if n := MaskPlanner(polB, snapB); n != 1 {
-		t.Errorf("db_b matched count: got %d, want 1", n)
+	MaskPlanner(polB, snapB)
+	if got := snapB.Masking.ColumnsMasked; got != 1 {
+		t.Errorf("db_b column count: got %d, want 1", got)
 	}
 	assertMasked(t, statsOf(t, snapB, "leads", "email"), "db_b leads.email")
 	assertPreserved(t, statsOf(t, snapB, "accounts", "ssn"), "db_b accounts.ssn (foreign block)")
@@ -206,14 +275,14 @@ databases:
 
 // TestApplyPlannerNilInputs guards the two no-op entry conditions. A nil
 // Policy means masking is disabled (no masks file resolved); a nil snapshot
-// should never happen but must not panic. Both must return a zero count and
-// touch nothing.
+// should never happen but must not panic. Neither may touch any stats.
 func TestApplyPlannerNilInputs(t *testing.T) {
 	snap := &schema.PlannerStatsSnapshot{
 		Columns: []schema.ColumnStatsEntry{colEntry("public", "users", "email")},
 	}
-	if n := MaskPlanner(nil, snap); n != 0 {
-		t.Errorf("nil Policy: got count %d, want 0", n)
+	MaskPlanner(nil, snap)
+	if snap.Masking == nil || *snap.Masking != (schema.MaskingInfo{JSONBStripped: true}) {
+		t.Errorf("nil Policy: unexpected masking info %+v", snap.Masking)
 	}
 	assertPreserved(t, statsOf(t, snap, "users", "email"), "nil-policy passthrough")
 
@@ -226,7 +295,5 @@ databases:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if n := MaskPlanner(p, nil); n != 0 {
-		t.Errorf("nil snapshot: got count %d, want 0", n)
-	}
+	MaskPlanner(p, nil)
 }

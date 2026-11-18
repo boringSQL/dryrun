@@ -93,6 +93,10 @@ Independent backstop, always on: `jsonb` `most_common_vals` and
 `histogram_bounds` is *not* auto-stripped. List sensitive jsonb columns
 in the policy explicitly.
 
+Multi-column MCV lists from extended statistics are dropped whole when
+any column they cover is sensitive. `n_distinct` and `dependencies` are
+kept because they contain no literal values.
+
 Full workflow and examples: see [`MASKING-TUTORIAL.md`](MASKING-TUTORIAL.md).
 
 ## Sharing snapshots

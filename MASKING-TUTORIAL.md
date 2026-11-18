@@ -95,7 +95,7 @@ The summary line names how many columns got blanked:
 Captured schema: 24 tables, 3 views, 8 functions
   Schema:   4f9c2a1b8e7d305c6a2f1e9b4d8c7a3f2e1d0c9b8a7f6e5d4c3b2a1908f7e6d5
   Planner:  24 tables, 41 indexes, 312 columns
-  Masked:   2 planner-stats columns
+  Masked:   2 planner-stats columns, 1 extended-statistics object
   Activity: node=db-primary, 24 tables, 41 indexes
 ```
 
@@ -110,13 +110,17 @@ sqlite3 -noheader .dryrun/history.db \
 ```
 
 ```
-{"applied":true,"columns_masked":2,"jsonb_mcv_stripped":true}
+{"applied":true,"columns_masked":2,"extended_stats_masked":1,"jsonb_mcv_stripped":true}
 {"c":"users.email","mcv":null}
 {"c":"users.phone","mcv":null}
 ```
 
 Masked columns show no `most_common_vals`. Non-sensitive columns keep
 their statistics, so plans on those columns stay realistic.
+
+Multi-column MCV lists from `pg_statistic_ext_data` are dropped whole
+when any column they cover is sensitive. Their `n_distinct` and
+`dependencies` stay: they hold numbers, not literal values.
 
 For a full pre-handover review, see
 [`docs/anonymized-snapshots.md`](docs/anonymized-snapshots.md).

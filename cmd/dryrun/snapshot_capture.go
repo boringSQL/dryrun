@@ -601,12 +601,7 @@ func persistStream(ctx context.Context, store captureStore, key history.Snapshot
 		// go through the same masking capture applies -- push ships
 		// whatever lands in history.db
 		bloat.Annotate(p, base)
-		masked := datamask.MaskPlanner(opts.MaskPolicy, p)
-		p.Masking = &schema.MaskingInfo{
-			Applied:       opts.MaskPolicy != nil,
-			ColumnsMasked: masked,
-			JSONBStripped: true,
-		}
+		datamask.MaskPlanner(opts.MaskPolicy, p)
 		out, err := store.PutPlanner(ctx, key, p)
 		if err != nil {
 			return 0, err

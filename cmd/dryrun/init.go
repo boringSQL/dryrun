@@ -374,7 +374,7 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 		return captureQueryStatsBestEffort(ctx, cap, store, key, schemaRef, source, opts.RowCap)
 	}
 
-	snap, planner, activity, masked, err := runPrimaryCapture(ctx, cap, store, key, source, opts.Policy, opts.Force)
+	snap, planner, activity, err := runPrimaryCapture(ctx, cap, store, key, source, opts.Policy, opts.Force)
 	if err != nil {
 		return err
 	}
@@ -384,8 +384,9 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 	fmt.Fprintf(os.Stderr, "  Schema:   %s\n", snap.ContentHash)
 	fmt.Fprintf(os.Stderr, "  Planner:  %d tables, %d indexes, %d columns\n",
 		len(planner.Tables), len(planner.Indexes), len(planner.Columns))
-	if masked > 0 {
-		fmt.Fprintf(os.Stderr, "  Masked:   %d planner-stats columns\n", masked)
+	if m := planner.Masking; m.ColumnsMasked > 0 || m.ExtendedStatsMasked > 0 {
+		fmt.Fprintf(os.Stderr, "  Masked:   %d planner-stats columns, %d extended-statistics objects\n",
+			m.ColumnsMasked, m.ExtendedStatsMasked)
 	}
 	fmt.Fprintf(os.Stderr, "  Activity: node=%s, %d tables, %d indexes\n",
 		source, len(activity.Tables), len(activity.Indexes))
@@ -393,41 +394,36 @@ func runInitCapture(ctx context.Context, cap initCapturer, store initWriter, key
 }
 
 // schema + planner + activity in one shot; reads all snapshots before store writes to avoid idle tx timeout
-func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string, policy *masking.Policy, force bool) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, int, error) {
+func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, key history.SnapshotKey, source string, policy *masking.Policy, force bool) (*schema.SchemaSnapshot, *schema.PlannerStatsSnapshot, *schema.ActivityStatsSnapshot, error) {
 	// prove identity before introspecting so a refusal costs nothing
 	systemID, database, err := cap.Identity(ctx)
 	if err != nil {
-		return nil, nil, nil, 0, err
+		return nil, nil, nil, err
 	}
 	if err := guardCaptureIdentity(ctx, store, key, systemID, database, force); err != nil {
-		return nil, nil, nil, 0, err
+		return nil, nil, nil, err
 	}
 
 	snap, err := cap.Introspect(ctx)
 	if err != nil {
-		return nil, nil, nil, 0, err
+		return nil, nil, nil, err
 	}
 	planner, err := cap.CapturePlanner(ctx, snap.ContentHash)
 	if err != nil {
 		releaseCaptureTx(ctx, cap)
-		return snap, nil, nil, 0, fmt.Errorf("capture planner stats: %w", err)
+		return snap, nil, nil, fmt.Errorf("capture planner stats: %w", err)
 	}
 	activity, err := cap.CaptureActivity(ctx, snap.ContentHash, source)
 	releaseCaptureTx(ctx, cap)
 	if err != nil {
-		return snap, planner, nil, 0, fmt.Errorf("capture activity stats: %w", err)
+		return snap, planner, nil, fmt.Errorf("capture activity stats: %w", err)
 	}
 
 	if _, err := store.PutSchema(ctx, key, snap); err != nil {
 		slog.Warn("could not save snapshot", "error", err)
 	}
 	bloat.Annotate(planner, snap)
-	masked := datamask.MaskPlanner(policy, planner)
-	planner.Masking = &schema.MaskingInfo{
-		Applied:       policy != nil,
-		ColumnsMasked: masked,
-		JSONBStripped: true,
-	}
+	datamask.MaskPlanner(policy, planner)
 	if _, err := store.PutPlanner(ctx, key, planner); err != nil {
 		slog.Warn("could not save planner stats", "error", err)
 	}
@@ -436,7 +432,7 @@ func runPrimaryCapture(ctx context.Context, cap initCapturer, store initWriter, 
 		slog.Warn("could not save activity stats", "error", err)
 	}
 
-	return snap, planner, activity, masked, nil
+	return snap, planner, activity, nil
 }
 
 // refuse a capture whose cluster/database contradicts this key's history: a stray
