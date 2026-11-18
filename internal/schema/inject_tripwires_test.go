@@ -2,7 +2,9 @@ package schema
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -580,4 +582,152 @@ func TestInjectStats_ExtendedStatisticsSkippedBefore19(t *testing.T) {
 	if res.ExtendedStatsSkipped == "" || res.ExtendedStatsUpdated != 0 || len(res.Warnings) != 0 {
 		t.Errorf("want a skip reason and no warnings, got %+v", res)
 	}
+}
+
+// The restore payloads carry no column names, so only the target's key layout
+// decides what is safe. A skipped object must leave autovacuum alone, and a
+// dropped column must remap attnums onto the right columns, not the reverse.
+func TestInjectStats_ExtendedStatisticsTargetLayout(t *testing.T) {
+	pool := livePool(t)
+	ctx := context.Background()
+	major := serverMajor(t, ctx, pool)
+	if major < 19 {
+		t.Skipf("pg_restore_extended_stats is PostgreSQL 19+; server is %d", major)
+	}
+
+	// a determines b, so the dependency degree is asymmetric and a swapped
+	// remap cannot pass by coincidence
+	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS a0_extlayout CASCADE;
+		CREATE TABLE a0_extlayout (a int, b text);
+		INSERT INTO a0_extlayout
+		SELECT g % 10, CASE WHEN g % 10 < 5 THEN 'lo' END FROM generate_series(1, 1000) g;
+		CREATE STATISTICS a0_extlayout_s (ndistinct, dependencies, mcv) ON a, b FROM a0_extlayout;
+		ANALYZE a0_extlayout;
+	`); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, "DROP TABLE IF EXISTS a0_extlayout CASCADE") })
+
+	capture := func() ExtendedStatsEntry {
+		t.Helper()
+		p, err := CapturePlannerStats(ctx, pool, "sref")
+		if err != nil {
+			t.Fatalf("capture: %v", err)
+		}
+		for _, e := range p.ExtendedStats {
+			if e.Statistics.Name == "a0_extlayout_s" {
+				return e
+			}
+		}
+		t.Fatalf("a0_extlayout_s missing from capture")
+		return ExtendedStatsEntry{}
+	}
+	build := func(table string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			DROP TABLE a0_extlayout CASCADE;
+			CREATE TABLE a0_extlayout `+table+`;
+			ALTER TABLE a0_extlayout DROP COLUMN IF EXISTS gone;
+			CREATE STATISTICS a0_extlayout_s (ndistinct, dependencies, mcv) ON a, b FROM a0_extlayout;
+		`); err != nil {
+			t.Fatalf("build target %s: %v", table, err)
+		}
+	}
+	// captured before any rebuild: a fresh statistics object has no data yet
+	src := capture()
+	if src.NDistinct == nil || src.Dependencies == nil || src.MCVValues == nil {
+		t.Fatalf("source capture incomplete: %+v", src)
+	}
+	inject := func() (*InjectResult, error) {
+		t.Helper()
+		a := &AnnotatedSchema{
+			Schema: &SchemaSnapshot{Tables: []Table{
+				{Schema: "public", Name: "a0_extlayout", Columns: []Column{{Name: "a"}, {Name: "b"}}},
+			}},
+			Planner: &PlannerStatsSnapshot{ExtendedStats: []ExtendedStatsEntry{src}},
+		}
+		return InjectStats(ctx, pool, a, major)
+	}
+
+	// same columns, different order: positional MCV would land under the wrong
+	// column, so the entry must be skipped and the table left to autovacuum
+	t.Run("column order swapped", func(t *testing.T) {
+		build("(b text, a int)")
+		res, err := inject()
+		if err != nil {
+			t.Fatalf("InjectStats: %v", err)
+		}
+		if res.ExtendedStatsUpdated != 0 || res.AutovacuumDisabled != 0 {
+			t.Errorf("skipped entry wrote stats or disabled autovacuum: %+v", res)
+		}
+		if !hasWarning(res.Warnings, "key layout differs") {
+			t.Errorf("no layout warning; warnings = %v", res.Warnings)
+		}
+	})
+
+	// a dropped column shifts a=2, b=3: the payload must follow the target's
+	// numbering or dependencies are rejected and MCV is mislabeled
+	t.Run("dropped column", func(t *testing.T) {
+		build("(gone int, a int, b text)")
+		res, err := inject()
+		if err != nil {
+			t.Fatalf("InjectStats: %v", err)
+		}
+		if res.ExtendedStatsUpdated != 1 {
+			t.Fatalf("ExtendedStatsUpdated = %d, want 1; warnings %v", res.ExtendedStatsUpdated, res.Warnings)
+		}
+		got := capture()
+		if got.MCVValues == nil || *got.MCVValues != *src.MCVValues {
+			t.Errorf("mcv = %v, want %v", got.MCVValues, *src.MCVValues)
+		}
+		if got.NDistinct == nil || got.Dependencies == nil {
+			t.Fatalf("kinds missing after injection: n_distinct %v, dependencies %v", got.NDistinct, got.Dependencies)
+		}
+
+		// one shift direction only: the source attnums go into the expected
+		// keys, the stored ones are used as they are
+		key := func(attrs []int16, shift int16) string {
+			parts := make([]string, len(attrs))
+			for i, a := range attrs {
+				parts[i] = strconv.Itoa(int(a + shift))
+			}
+			return strings.Join(parts, ",")
+		}
+		var gotND, srcND []ndistinctPayloadItem
+		if err := json.Unmarshal([]byte(*got.NDistinct), &gotND); err != nil {
+			t.Fatalf("parse stored n_distinct: %v", err)
+		}
+		if err := json.Unmarshal([]byte(*src.NDistinct), &srcND); err != nil {
+			t.Fatalf("parse source n_distinct: %v", err)
+		}
+		gotNDMap, srcNDMap := map[string]int64{}, map[string]int64{}
+		for _, it := range gotND {
+			gotNDMap[key(it.Attributes, 0)] = it.NDistinct
+		}
+		for _, it := range srcND {
+			srcNDMap[key(it.Attributes, 1)] = it.NDistinct
+		}
+		if !reflect.DeepEqual(gotNDMap, srcNDMap) {
+			t.Errorf("n_distinct = %v, want %v", gotNDMap, srcNDMap)
+		}
+
+		var gotDeps, srcDeps []dependencyPayloadItem
+		if err := json.Unmarshal([]byte(*got.Dependencies), &gotDeps); err != nil {
+			t.Fatalf("parse stored dependencies: %v", err)
+		}
+		if err := json.Unmarshal([]byte(*src.Dependencies), &srcDeps); err != nil {
+			t.Fatalf("parse source dependencies: %v", err)
+		}
+		gotDepMap, srcDepMap := map[string]float64{}, map[string]float64{}
+		for _, it := range gotDeps {
+			gotDepMap[key(it.Attributes, 0)+"=>"+key([]int16{it.Dependency}, 0)] = it.Degree
+		}
+		for _, it := range srcDeps {
+			srcDepMap[key(it.Attributes, 1)+"=>"+key([]int16{it.Dependency}, 1)] = it.Degree
+		}
+		if !reflect.DeepEqual(gotDepMap, srcDepMap) {
+			t.Errorf("dependencies = %v, want %v", gotDepMap, srcDepMap)
+		}
+	})
 }
