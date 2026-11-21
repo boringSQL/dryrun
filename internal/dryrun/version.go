@@ -24,19 +24,7 @@ func (v PgVersion) String() string {
 
 // Parses output of SELECT version(), e.g. "PostgreSQL 17.2 on x86_64-..."
 func ParsePgVersion(versionStr string) (PgVersion, error) {
-	fields := strings.Fields(versionStr)
-
-	var token string
-	for _, f := range fields {
-		t := strings.TrimRight(f, ",")
-		if t == "" {
-			continue
-		}
-		if unicode.IsDigit(rune(t[0])) && strings.Contains(t, ".") {
-			token = t
-			break
-		}
-	}
+	token := versionToken(versionStr)
 	if token == "" {
 		return PgVersion{}, NewError(ErrVersionParse,
 			fmt.Sprintf("no version token found in: %s", versionStr))
@@ -80,4 +68,27 @@ func ParsePgVersion(versionStr string) (PgVersion, error) {
 	}
 
 	return PgVersion{Major: major, Minor: minor, Patch: patch}, nil
+}
+
+// Token after "PostgreSQL": prereleases read "19rc2", later dots are the compiler's.
+func versionToken(versionStr string) string {
+	fields := strings.Fields(versionStr)
+	for i, f := range fields {
+		if !strings.EqualFold(strings.TrimRight(f, ","), "PostgreSQL") || i+1 >= len(fields) {
+			continue
+		}
+		if t := strings.TrimRight(fields[i+1], ","); t != "" && unicode.IsDigit(rune(t[0])) {
+			return t
+		}
+	}
+	for _, f := range fields {
+		t := strings.TrimRight(f, ",")
+		if t == "" {
+			continue
+		}
+		if unicode.IsDigit(rune(t[0])) && strings.Contains(t, ".") {
+			return t
+		}
+	}
+	return ""
 }

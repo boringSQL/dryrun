@@ -30,6 +30,21 @@ func TestParsePgVersion(t *testing.T) {
 			want:  PgVersion{Major: 12, Minor: 18, Patch: 0},
 		},
 		{
+			name:  "pg19 beta full banner",
+			input: "PostgreSQL 19beta1 on aarch64-apple-darwin24.4.0, compiled by Apple clang version 17.0.0 (clang-1700.0.13.3), 64-bit",
+			want:  PgVersion{Major: 19, Minor: 0, Patch: 0},
+		},
+		{
+			name:  "pg20 devel full banner",
+			input: "PostgreSQL 20devel on x86_64-pc-linux-gnu, compiled by gcc (GCC) 13.2.1 20231011, 64-bit",
+			want:  PgVersion{Major: 20, Minor: 0, Patch: 0},
+		},
+		{
+			name:  "pg19 rc debian banner",
+			input: "PostgreSQL 19rc2 (Debian 19~rc2-1.pgdg130+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+			want:  PgVersion{Major: 19, Minor: 0, Patch: 0},
+		},
+		{
 			name:    "garbage fails",
 			input:   "not a version string",
 			wantErr: true,
